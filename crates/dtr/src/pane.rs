@@ -848,6 +848,7 @@ fn publish(
     wake: &Arc<dyn Fn() + Send + Sync>,
     force: bool,
 ) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
     let snapshot = state.update(term)?;
 
     // A clean frame means the UI already has the current contents.
@@ -869,6 +870,13 @@ fn publish(
 
     // Dirty state is sticky by design; clearing it is the consumer's job.
     snapshot.set_dirty(Dirty::Clean)?;
+    // Per-frame cost on the pane thread: filling a frame allocates a `String`
+    // per cell, and this is the number that says whether that matters.
+    tracing::debug!(
+        cells = frame.cells.len(),
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "frame published"
+    );
 
     match out.lock() {
         Ok(mut slot) => *slot = Some(frame),
