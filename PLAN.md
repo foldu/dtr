@@ -364,7 +364,23 @@ assert DTR again, resetting the board you were trying to talk to. The fix is to 
 single owner task that receives `Write`/`Dtr`/`Rts`/`Break` commands, which means replacing the
 split-read design; that is its own piece of work.
 
-Still open in M1: port picker with USB VID/PID, reconnect-on-replug, timestamped log mode.
+**The picker is a palette, and its logic is `crates/dtr-complete`.** One input line that means
+different things by its first word — `connect /dev/ttyUSB0`, `ssh jupiter.home`, `shell fish` — so the
+engine answers two questions: `complete` (ranked list) and `inline` (the grey suffix Tab accepts).
+Inline is deliberately narrower: it only fires when the top candidate *starts with* what was typed.
+`ssh jptr` ranks jupiter first but shares no prefix, and ghost text that has nothing to do with the
+typed characters reads as a glitch, not a suggestion.
+
+Ranking uses `nucleo-matcher` (helix's matcher): 5.2M downloads, two small pure-Rust dependencies
+(`memchr`, `unicode-segmentation`), and much better scoring than a naive subsequence — word
+boundaries and consecutive runs. It is **MPL-2.0**, file-level copyleft, unmodified; the same stance
+we already take for `serialport`. The alternatives were `fuzzy-matcher` (MIT, SkimMatcherV2, last
+released 2020, fine but quieter) and `frizbee` (MIT, active, carries `serde`). Nushell's completion
+engine lives in `reedline`, which is a whole crossterm line editor — the right idea, the wrong shape
+for an egui widget, so the engine is ours and only the scoring is borrowed.
+
+Still open in M1: the palette UI itself, serial-port enumeration with USB VID/PID, reconnect-on-replug,
+timestamped log mode.
 
 ### M2 — real renderer
 
