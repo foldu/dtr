@@ -191,6 +191,7 @@ pub fn capture(
     let mut palette = crate::palette::Palette::new(show_palette);
     let mut full_output = ctx.run_ui(raw_input, |ui| {
         egui::Panel::bottom("dtr-status")
+            .exact_size(status_height)
             .frame(
                 egui::Frame::new()
                     .fill(crate::ui::Look::colour(look.surface))

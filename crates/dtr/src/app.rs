@@ -1514,6 +1514,11 @@ impl Gpu {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             egui::Panel::bottom("dtr-status")
+                // Exactly the height the grid reserves. Left to itself the panel
+                // sizes to its content and its margins, comes out a couple of
+                // pixels taller than STATUS_HEIGHT, and covers the bottom row —
+                // which is where a shell puts its prompt.
+                .exact_size(crate::ui::STATUS_HEIGHT * self.scale())
                 .frame(
                     egui::Frame::new()
                         .fill(crate::ui::Look::colour(look.surface))
