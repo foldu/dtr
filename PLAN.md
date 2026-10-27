@@ -531,6 +531,12 @@ silently vanished with no validation error. Solids now carry a negative uv and t
 the instance; the shader branches instead of sampling. The lesson is in the code as a comment, because
 "invisible rectangle, no error" is a failure mode with no trail to follow.
 
+**The Windows binary runs, and renders identically to the Linux build.** `scripts/wine-smoke.sh` runs the
+cross-built PE under Wine, renders a frame offscreen and compares it byte-for-byte with the Linux build's
+frame: same fonts, same layout, same colours out of a binary from a different compiler and target. That
+is the closest this machine gets to a Windows test — the console path (ConPTY) is still untested, and
+Wine cannot compile egui's shader through FXC, so the run forces the Vulkan backend.
+
 **Captures now use the window's colour format.** The offscreen path renders to `Bgra8Unorm` — what a
 swapchain actually prefers — and swaps to RGBA on readback, so the format the *window* uses is
 exercised by every screenshot instead of being the one path nobody can look at. That is as close as
