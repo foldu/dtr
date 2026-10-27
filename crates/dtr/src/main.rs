@@ -217,20 +217,33 @@ fn run_command(command: Command) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // `RUST_LOG` when it is set, `-v`/`-vv` otherwise, INFO by default. A
-    // hardcoded level is useless the moment something goes wrong in a window
-    // nobody can attach a debugger to.
+    // `-v`/`-vv` win when given, because a flag on the command line is the more
+    // deliberate request; otherwise `RUST_LOG`, otherwise INFO. A stale
+    // `RUST_LOG=warn` in the environment silently swallowing `-v` is exactly the
+    // kind of thing that makes someone conclude logging is broken.
     let level = match args.verbose {
         0 => "info",
         1 => "dtr=debug",
         _ => "dtr=trace",
     };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+    let filter = if args.verbose > 0 {
+        tracing_subscriber::EnvFilter::new(level)
+    } else {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level))
+    };
+    let effective = if args.verbose > 0 {
+        level.to_owned()
+    } else {
+        std::env::var("RUST_LOG").unwrap_or_else(|_| level.to_owned())
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+    // Said out loud so an empty log is never a mystery: if this line is missing
+    // from the log, the binary predates it and needs rebuilding.
+    tracing::info!(filter = %effective, version = env!("CARGO_PKG_VERSION"), "logging");
 
     tracing::debug!(?args, "starting");
 
