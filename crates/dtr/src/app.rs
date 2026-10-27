@@ -26,7 +26,7 @@ pub enum UserEvent {
 pub struct Startup {
     pub transport: Transport,
     pub send: Vec<u8>,
-    pub log: Option<PathBuf>,
+    pub log: Option<(PathBuf, crate::serial::LogFormat)>,
     pub store: Option<Arc<dtr_store::Store>>,
     /// Open the palette on start (also how it gets into screenshots).
     pub palette: bool,
@@ -41,6 +41,7 @@ pub fn capture_headless(
     delay: std::time::Duration,
 ) -> anyhow::Result<()> {
     let label = startup.transport.describe();
+    let serial = matches!(startup.transport, Transport::Serial(_));
     let pane = Pane::spawn(startup.transport, startup.log.clone(), || {})?;
     if !startup.send.is_empty() {
         pane.write(startup.send.clone());
@@ -74,6 +75,7 @@ pub fn capture_headless(
         &label,
         pane.stats(),
         startup.palette,
+        serial,
     )
 }
 
@@ -94,6 +96,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
     let label = startup.transport.describe();
+    let serial = matches!(startup.transport, Transport::Serial(_));
 
     let pane = Pane::spawn(startup.transport, startup.log.clone(), {
         let proxy = proxy.clone();
@@ -118,6 +121,8 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         proxy,
         store: startup.store,
         log: startup.log,
+        serial,
+        echo: false,
     };
     event_loop.run_app(&mut app)?;
     match app.fatal {
@@ -139,7 +144,10 @@ struct App {
     palette: Palette,
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
-    log: Option<PathBuf>,
+    log: Option<(PathBuf, crate::serial::LogFormat)>,
+    /// Whether this session has modem lines, for the status strip.
+    serial: bool,
+    echo: bool,
 }
 
 impl App {
@@ -153,6 +161,7 @@ impl App {
             Ok(pane) => {
                 self.pane = pane;
                 self.label = transport.describe();
+                self.serial = matches!(transport, Transport::Serial(_));
                 self.frame = None;
             }
             Err(err) => {
@@ -292,7 +301,27 @@ impl ApplicationHandler<UserEvent> for App {
                         event.logical_key,
                         winit::keyboard::Key::Character(ref character) if character.eq_ignore_ascii_case("p")
                     );
-                if palette_key && event.state == winit::event::ElementState::Pressed {
+                let chord = |character: &str| {
+                    self.modifiers.control_key()
+                        && self.modifiers.shift_key()
+                        && matches!(
+                            event.logical_key,
+                            winit::keyboard::Key::Character(ref typed) if typed.eq_ignore_ascii_case(character)
+                        )
+                        && event.state == winit::event::ElementState::Pressed
+                };
+                if chord("d") {
+                    let level = !self.pane.stats().dtr();
+                    self.pane.send(crate::pane::Command::Dtr(level));
+                } else if chord("r") {
+                    let level = !self.pane.stats().rts();
+                    self.pane.send(crate::pane::Command::Rts(level));
+                } else if chord("b") {
+                    self.pane.send(crate::pane::Command::Break);
+                } else if chord("e") {
+                    self.echo = !self.echo;
+                    self.pane.send(crate::pane::Command::Echo(self.echo));
+                } else if palette_key && event.state == winit::event::ElementState::Pressed {
                     self.palette.toggle();
                 } else if !self.palette.open {
                     // The palette owns the keyboard while it is open.
@@ -302,6 +331,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Resized(size) => gpu.resize(size),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    winit::event::MouseScrollDelta::PixelDelta(position) => position.y / 20.0,
+                };
+                if lines != 0.0 {
+                    // Wheel up shows older lines, which the terminal calls a
+                    // negative delta.
+                    self.pane
+                        .send(crate::pane::Command::Scroll(-lines.round() as isize));
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let stats = self.pane.stats().clone();
                 let (rx, tx) = (stats.rx(), stats.tx());
@@ -313,6 +354,9 @@ impl ApplicationHandler<UserEvent> for App {
                     rx_rate: self.meter.rx_rate,
                     tx_rate: self.meter.tx_rate,
                     connected: stats.connected(),
+                    modem: self
+                        .serial
+                        .then(|| (stats.dtr(), stats.rts())),
                 };
                 let mut action = None;
                 if let Err(err) = gpu.render(self.frame.as_ref(), &status, &mut self.palette, &mut action) {

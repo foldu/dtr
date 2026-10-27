@@ -18,6 +18,7 @@ pub fn capture(
     label: &str,
     stats: &crate::pane::Stats,
     show_palette: bool,
+    serial: bool,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -76,6 +77,7 @@ pub fn capture(
         rx_rate: 0.0,
         tx_rate: 0.0,
         connected: stats.connected(),
+        modem: serial.then(|| (stats.dtr(), stats.rts())),
     };
 
     let mut palette = crate::palette::Palette::new(show_palette);

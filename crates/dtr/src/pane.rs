@@ -52,6 +52,8 @@ pub struct Stats {
     rx: AtomicU64,
     tx: AtomicU64,
     connected: std::sync::atomic::AtomicBool,
+    dtr: std::sync::atomic::AtomicBool,
+    rts: std::sync::atomic::AtomicBool,
 }
 
 impl Stats {
@@ -79,6 +81,33 @@ impl Stats {
     fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::Relaxed);
     }
+
+    pub fn dtr(&self) -> bool {
+        self.dtr.load(Ordering::Relaxed)
+    }
+
+    pub fn rts(&self) -> bool {
+        self.rts.load(Ordering::Relaxed)
+    }
+
+    fn set_dtr(&self, level: bool) {
+        self.dtr.store(level, Ordering::Relaxed);
+    }
+
+    fn set_rts(&self, level: bool) {
+        self.rts.store(level, Ordering::Relaxed);
+    }
+}
+
+/// Something the UI asks the pane to do. Keystrokes are only one of these:
+/// the modem lines and the viewport live on the pane side too.
+pub enum Command {
+    Write(Vec<u8>),
+    Dtr(bool),
+    Rts(bool),
+    Break,
+    Scroll(isize),
+    Echo(bool),
 }
 
 /// What a pane is attached to.
@@ -130,7 +159,7 @@ impl Sink {
 
 pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
-    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tx: tokio::sync::mpsc::UnboundedSender<Command>,
     stats: Arc<Stats>,
     /// A fatal pane error. The pane thread owns the terminal, so a failure to
     /// open a port happens out of sight; this is how it reaches the UI.
@@ -144,7 +173,7 @@ impl Pane {
     /// the port and drives it.
     pub fn spawn(
         transport: Transport,
-        log: Option<PathBuf>,
+        log: Option<(PathBuf, serial::LogFormat)>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
@@ -154,7 +183,7 @@ impl Pane {
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let failure = Arc::clone(&error);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
         thread::Builder::new()
             .name("dtr-pane".into())
@@ -212,29 +241,40 @@ impl Pane {
         self.error.lock().ok().and_then(|slot| slot.clone())
     }
 
-    /// Queue bytes for the emulator. Non-blocking; safe from the UI thread.
+    /// Queue bytes for the session. Non-blocking; safe from the UI thread.
     pub fn write(&self, bytes: Vec<u8>) {
-        let _ = self.tx.send(bytes);
+        self.send(Command::Write(bytes));
+    }
+
+    /// Queue any command. Non-blocking; safe from the UI thread.
+    pub fn send(&self, command: Command) {
+        // A closed channel means the pane is gone; the app is already tearing
+        // down or replacing it, so there is nothing useful to say.
+        let _ = self.tx.send(command);
     }
 }
 
 async fn run(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
     out: Arc<Mutex<Option<Frame>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
     transport: Transport,
     stats: Arc<Stats>,
-    log_path: Option<PathBuf>,
+    log_path: Option<(PathBuf, serial::LogFormat)>,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
     // which is what you want when the point is to find out what the device did.
-    let log: Option<Arc<Mutex<std::fs::File>>> = match &log_path {
-        Some(path) => match std::fs::OpenOptions::new()
+    let log: Option<Arc<LogWriter>> = match &log_path {
+        Some((path, format)) => match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
         {
-            Ok(file) => Some(Arc::new(Mutex::new(file))),
+            Ok(file) => Some(Arc::new(LogWriter {
+                file: Mutex::new(file),
+                format: *format,
+                started: std::time::Instant::now(),
+            })),
             Err(err) => {
                 tracing::warn!(path = %path.display(), %err, "cannot open the session log");
                 None
@@ -265,6 +305,8 @@ async fn run(
     let mut source_alive = false;
     // What to reopen if the device disappears, and how to recognise it.
     let mut reconnect: Option<(serial::Config, Option<String>)> = None;
+    let mut modem: Option<crate::modem::Modem> = None;
+    let mut echo = false;
     let (reconnect_tx, mut reconnect_rx) =
         tokio::sync::mpsc::unbounded_channel::<tokio_serial::SerialStream>();
     // The pty master and child must outlive the pane: dropping the master
@@ -275,6 +317,13 @@ async fn run(
         Transport::Serial(cfg) => {
             let stream = cfg.open()?;
             tracing::info!(port = %cfg.port, baud = cfg.baud, "serial open");
+            // Before splitting: the duplicate has to come from the stream while
+            // it is still one object.
+            modem = crate::modem::Modem::new(&stream);
+            if modem.is_some() {
+                stats.set_dtr(true);
+                stats.set_rts(true);
+            }
             let (read_half, write_half) = tokio::io::split(stream);
             sink = Some(Sink::Serial(write_half));
             let mapper = cfg.cr_to_crlf.then(CrToCrlf::default);
@@ -418,12 +467,50 @@ async fn run(
                 }
             }
             cmd = rx.recv() => {
-                let Some(bytes) = cmd else { break };
-                if let Some(sink) = sink.as_mut() {
-                    match sink.write(&bytes).await {
-                        Ok(()) => stats.add_tx(bytes.len()),
-                        Err(err) => tracing::warn!(%err, "write to session"),
+                let Some(command) = cmd else { break };
+                match command {
+                    Command::Write(bytes) => {
+                        if let Some(sink) = sink.as_mut() {
+                            match sink.write(&bytes).await {
+                                Ok(()) => stats.add_tx(bytes.len()),
+                                Err(err) => tracing::warn!(%err, "write to session"),
+                            }
+                        }
+                        // Local echo is for devices that do not echo: the bytes
+                        // are shown without being sent anywhere else.
+                        if echo {
+                            term.vt_write(&bytes);
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                        }
                     }
+                    Command::Dtr(level) => {
+                        if let Some(modem) = modem.as_mut() {
+                            match modem.set_dtr(level) {
+                                Ok(()) => stats.set_dtr(level),
+                                Err(err) => tracing::warn!(%err, "set DTR"),
+                            }
+                        }
+                    }
+                    Command::Rts(level) => {
+                        if let Some(modem) = modem.as_mut() {
+                            match modem.set_rts(level) {
+                                Ok(()) => stats.set_rts(level),
+                                Err(err) => tracing::warn!(%err, "set RTS"),
+                            }
+                        }
+                    }
+                    Command::Break => {
+                        if let Some(modem) = modem.as_mut() {
+                            if let Err(err) = modem.pulse_break() {
+                                tracing::warn!(%err, "break");
+                            }
+                        }
+                    }
+                    Command::Scroll(lines) => {
+                        term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                    }
+                    Command::Echo(on) => echo = on,
                 }
             }
         }
@@ -433,12 +520,36 @@ async fn run(
     Ok(())
 }
 
-/// Append the raw bytes to the session log, if one is open.
-fn log_chunk(log: &Option<Arc<Mutex<std::fs::File>>>, bytes: &[u8]) {
+struct LogWriter {
+    file: Mutex<std::fs::File>,
+    format: serial::LogFormat,
+    started: std::time::Instant,
+}
+
+/// Append bytes to the session log, in whichever shape it was asked for.
+fn log_chunk(log: &Option<Arc<LogWriter>>, bytes: &[u8]) {
     let Some(log) = log else { return };
-    match log.lock() {
+    let mut line = Vec::with_capacity(bytes.len() + 24);
+    match log.format {
+        serial::LogFormat::Raw => line.extend_from_slice(bytes),
+        serial::LogFormat::Timestamped => {
+            let elapsed = log.started.elapsed().as_secs_f64();
+            line.extend_from_slice(format!("[+{elapsed:.3}s] ").as_bytes());
+            for byte in bytes {
+                match byte {
+                    b'\r' => line.extend_from_slice(b"\\r"),
+                    b'\n' => line.extend_from_slice(b"\\n"),
+                    b'\t' => line.extend_from_slice(b"\\t"),
+                    0x20..=0x7e => line.push(*byte),
+                    other => line.extend_from_slice(format!("\\x{other:02x}").as_bytes()),
+                }
+            }
+            line.push(b'\n');
+        }
+    }
+    match log.file.lock() {
         Ok(mut file) => {
-            if let Err(err) = file.write_all(bytes) {
+            if let Err(err) = file.write_all(&line) {
                 tracing::warn!(%err, "session log write");
             }
         }
@@ -465,7 +576,7 @@ async fn read_loop(
     mut reader: ReadHalf<tokio_serial::SerialStream>,
     mut mapper: Option<CrToCrlf>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    log: Option<Arc<Mutex<std::fs::File>>>,
+    log: Option<Arc<LogWriter>>,
 ) {
     let mut buf = [0u8; 8192];
     let mut out = Vec::with_capacity(8192);

@@ -170,7 +170,11 @@
     checks.${system}.single-exe = pkgs.runCommand "dtr-single-exe" {
       nativeBuildInputs = [pkgs.binutils];
     } ''
-      allowed='^(api-ms-win-.*|kernel32|user32|gdi32|advapi32|ole32|shell32|dxgi|d3d12|d3dcompiler_47|setupapi|ws2_32|bcrypt|bcryptprimitives|ntdll|msvcrt|userenv|uxtheme|dwmapi|imm32|comctl32|propsys|shcore)\.dll$'
+      # Every one of these ships with Windows. The list grows when a dependency
+      # reaches a new subsystem: serialport pulls cfgmgr32/combase/rpcrt4 for
+      # device enumeration, portable-pty pulls oleaut32/shlwapi, and wgpu's GL
+      # fallback pulls opengl32. A new entry here is worth a look, not a shrug.
+      allowed='^(api-ms-win-.*|kernel32|user32|gdi32|advapi32|ole32|oleaut32|shell32|shlwapi|dxgi|d3d12|d3dcompiler_47|setupapi|cfgmgr32|combase|rpcrt4|opengl32|ws2_32|bcrypt|bcryptprimitives|ntdll|msvcrt|userenv|uxtheme|dwmapi|imm32|comctl32|propsys|shcore)\.dll$'
       bad=$(objdump -p ${dtr-windows}/bin/dtr.exe \
         | awk '/DLL Name/ {print tolower($3)}' | sort -u | grep -vE "$allowed" || true)
       if [ -n "$bad" ]; then

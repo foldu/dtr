@@ -407,8 +407,21 @@ The bug worth remembering: the pane kept the byte-channel sender alive for recon
 `bytes_rx.recv()` never returned `None` and a disconnect went unnoticed — the reader needs its own
 "ended" signal, not the channel closing.
 
-Still open in M1: DTR/RTS/break (blocked on the port-ownership refactor), timestamped log mode,
-reconnect by USB serial verified only against a pty (no real adapter here).
+**Modem lines, echo, scrollback and the timestamped log are in.** DTR, RTS and break are ioctls on a
+*duplicated* descriptor — `tokio_serial` refuses `try_clone`, and reopening the device would assert
+DTR and reset the board, which is the whole thing we were trying to avoid. `Ctrl+Shift+D/R/B` toggle
+DTR, RTS and send a break; the status bar shows `DTR● RTS●`. `Ctrl+Shift+E` toggles local echo for
+devices that do not echo. The wheel scrolls the viewport (`ScrollViewport::Delta`, up is negative).
+
+`--log-format raw|timestamped`: raw is the wire's bytes and is replayable, timestamped is one escaped
+line per read and is readable. Verified: `[+0.005s] sensor ready\r` / `[+1.082s] temp=21.4C\r`.
+
+Modem control is **Unix only**. Windows needs `EscapeCommFunction` through a duplicated HANDLE, and
+blind unsafe FFI on the platform we cannot run is worse than a clear refusal; it logs and does
+nothing there.
+
+Still open in M1: selection and copy (needs a request/response on the pane, not just commands), paste
+pacing, and reconnect-by-USB-serial verified only against a pty.
 
 ### M2 — real renderer
 

@@ -3,6 +3,7 @@
 mod app;
 mod input;
 mod logbook;
+mod modem;
 mod palette;
 mod pane;
 mod pty;
@@ -62,9 +63,13 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     replay: Option<PathBuf>,
 
-    /// Append the raw bytes received to this file
+    /// Append received bytes to this file
     #[arg(long, value_name = "PATH")]
     log: Option<PathBuf>,
+
+    /// Session log shape: `raw` (replayable) or `timestamped` (readable)
+    #[arg(long, value_name = "FORMAT", default_value = "raw")]
+    log_format: String,
 
     /// Why this session happened; stored in the logbook
     #[arg(long, value_name = "TEXT")]
@@ -179,6 +184,18 @@ fn main() -> anyhow::Result<()> {
         return logbook::print(store);
     }
 
+    let log = match args.log.clone() {
+        Some(path) => {
+            let format = match args.log_format.as_str() {
+                "raw" => serial::LogFormat::Raw,
+                "timestamped" => serial::LogFormat::Timestamped,
+                other => anyhow::bail!("unknown log format {other:?}; expected `raw` or `timestamped`"),
+            };
+            Some((path, format))
+        }
+        None => None,
+    };
+
     let send = args.send.as_deref().map(input::unescape).unwrap_or_default();
 
     // A session is recorded when it starts, so a crash leaves a row with no
@@ -213,7 +230,7 @@ fn main() -> anyhow::Result<()> {
         let startup = app::Startup {
             transport,
             send,
-            log: args.log.clone(),
+            log: log.clone(),
             store: store.clone(),
             palette: args.palette,
         };
@@ -225,7 +242,7 @@ fn main() -> anyhow::Result<()> {
     let startup = app::Startup {
         transport,
         send,
-        log: args.log.clone(),
+        log: log.clone(),
         store: store.clone(),
         palette: args.palette,
     };

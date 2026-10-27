@@ -23,6 +23,8 @@ pub struct Status<'a> {
     pub tx_rate: f64,
     /// False while the transport is gone and something is trying to get it back.
     pub connected: bool,
+    /// DTR and RTS levels, when the transport has modem lines at all.
+    pub modem: Option<(bool, bool)>,
 }
 
 pub fn draw(ui: &mut Ui, frame: &Frame) {
@@ -89,6 +91,20 @@ pub fn status_bar(ui: &mut Ui, status: &Status) {
                 .size(12.0)
                 .color(Color32::from_rgb(0x9a, 0xa5, 0xa0)),
         );
+        if let Some((dtr, rts)) = status.modem {
+            for (label, level) in [("DTR", dtr), ("RTS", rts)] {
+                ui.label(
+                    RichText::new(format!("{label}{}", if level { "●" } else { "○" }))
+                        .monospace()
+                        .size(11.0)
+                        .color(if level {
+                            Color32::from_rgb(0xff, 0xb0, 0x00)
+                        } else {
+                            Color32::from_rgb(0x4c, 0x5a, 0x54)
+                        }),
+                );
+            }
+        }
         if !status.connected {
             ui.label(
                 RichText::new("reconnecting…")

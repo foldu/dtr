@@ -13,6 +13,16 @@ use std::time::Duration;
 /// long the last line of a burst can be held back.
 pub const IDLE_FLUSH: Duration = Duration::from_millis(25);
 
+/// How the session log is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogFormat {
+    /// Exactly the bytes the wire delivered: replayable, not readable.
+    Raw,
+    /// One line per read with a relative timestamp and escaped bytes: readable,
+    /// not replayable.
+    Timestamped,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: String,
