@@ -400,6 +400,17 @@ struct App {
 }
 
 impl App {
+    /// A self-inflicted close: the window manager's close button cannot be
+    /// pressed from a test, and shutdown bugs hide behind that.
+    fn check_exit_deadline(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(after) = self.exit_after {
+            if self.started.elapsed() >= std::time::Duration::from_millis(after) {
+                tracing::info!("closing after the test interval");
+                event_loop.exit();
+            }
+        }
+    }
+
     /// Ask for a frame, and say why: a terminal that redraws continuously while
     /// nothing moves is a battery bug, and the reason is the only way to find it.
     fn repaint(&self, why: &'static str) {
@@ -790,14 +801,22 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // A self-inflicted close: the window manager's close button cannot be
-        // pressed from a test, and shutdown bugs hide behind that.
+        self.check_exit_deadline(event_loop);
+        // Wake up when the deadline is due, rather than hoping some other
+        // event brings the loop back: an idle window that never wakes would
+        // never take its own exit.
         if let Some(after) = self.exit_after {
-            if self.started.elapsed() >= std::time::Duration::from_millis(after) {
-                tracing::info!("closing after the test interval");
-                event_loop.exit();
-            }
+            let deadline = self.started + std::time::Duration::from_millis(after);
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
         }
+    }
+
+    fn new_events(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _cause: winit::event::StartCause,
+    ) {
+        self.check_exit_deadline(event_loop);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: UserEvent) {
@@ -1176,6 +1195,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
+                    self.started,
                     &file_panes,
                     &status,
                     &mut palette,
@@ -1336,6 +1356,7 @@ impl Gpu {
         &mut self,
         panes: &[crate::render::PaneView<'_>],
         frames_drawn: u64,
+        started: std::time::Instant,
         files: &[FilePaneView<'_>],
         status: &Status,
         palette: &mut Palette,
@@ -1465,6 +1486,15 @@ impl Gpu {
             look,
             (self.config.width as f32, self.config.height as f32),
         );
+        if frames_drawn == 0 {
+            // Startup is the one cost a user feels directly: the window appears
+            // when this line is logged, and everything before it is what they
+            // stared at.
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis(),
+                "first frame"
+            );
+        }
         if loud {
             let with_content = panes.iter().filter(|pane| pane.frame.is_some()).count();
             tracing::debug!(
