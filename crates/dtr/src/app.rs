@@ -1094,11 +1094,7 @@ impl App {
         let status_height = (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale;
         // The tab strip takes the top, and only when there is more than one tab
         // to show: a lone tab is a title nobody needs.
-        let tabs_height = if self.tabs.len() > 1 {
-            (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
-        } else {
-            0.0
-        };
+        let tabs_height = self.top_inset(scale);
         let area = crate::layout::Rect::new(
             0.0,
             tabs_height,
@@ -1141,19 +1137,34 @@ impl App {
     /// changes: a terminal that keeps its 80×24 grid in a 1900 px window wastes
     /// two thirds of the screen, and one that keeps it in a 400 px window draws
     /// past its own edge.
+    /// How much of the top of the window the tab strip takes, in physical
+    /// pixels. One place, because the two users of it — the layout that sizes
+    /// the terminal and the layout that draws it — disagreeing is exactly how a
+    /// prompt ends up underneath the strip.
+    fn top_inset(&self, scale: f32) -> f32 {
+        if self.tabs.len() > 1 {
+            (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
+        } else {
+            0.0
+        }
+    }
+
     fn fit_panes(&mut self, metrics: crate::render::Metrics, screen: (f32, f32), scale: f32) {
         if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
             return;
         }
+        let inset = self.top_inset(scale);
         let tab = &mut self.tabs[self.active];
         let rects = tab
             .layout
             .rects(
                 crate::layout::Rect::new(
                     0.0,
-                    0.0,
+                    inset,
                     screen.0,
-                    (screen.1 - (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale)
+                    (screen.1
+                        - (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale
+                        - inset)
                         .max(0.0),
                 ),
                 crate::ui::SPLIT_GAP * scale,

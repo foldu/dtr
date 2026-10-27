@@ -170,6 +170,12 @@ without shift so both spellings work); and **a chord that starts a longer bindin
 waits**, which is why a pending sequence flushes after a second to the longest
 binding that is already complete.
 
+**Two layouts must agree on the top inset.** The terminal is sized by `fit_panes` and
+drawn by `pane_views`; when only one of them knew about the tab strip, the pty kept
+the rows of a taller area and the first prompt row was drawn underneath the strip.
+Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
+the same class of bug as the status bar covering the last row.
+
 **Tabs were invisible until the strip existed.** The top strip is reserved in the grid
 layout only when there is more than one tab, so a single session loses no rows;
 the active tab's title follows its focused session, the others keep the title they
