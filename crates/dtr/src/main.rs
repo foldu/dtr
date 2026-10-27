@@ -74,6 +74,10 @@ struct Args {
     #[arg(long, value_name = "PROGRAM")]
     shell: Option<String>,
 
+    /// Select cells START..=END (linear indices) in the screenshot
+    #[arg(long, value_name = "START:END")]
+    select: Option<String>,
+
     /// Show a canned screen instead of launching anything
     #[arg(long)]
     demo: bool,
@@ -259,6 +263,15 @@ fn main() -> anyhow::Result<()> {
         },
         None => None,
     };
+    let select = match args.select.as_deref() {
+        Some(spec) => {
+            let (start, end) = spec
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("expected START:END, got {spec:?}"))?;
+            Some((start.trim().parse::<usize>()?, end.trim().parse::<usize>()?))
+        }
+        None => None,
+    };
     let look = ui::Look::themed(config.font.size, config.font.path.clone(), theme.as_ref());
 
     // Never fatal: a broken or read-only state file must not stop a terminal
@@ -381,6 +394,7 @@ fn main() -> anyhow::Result<()> {
             palette: args.palette,
             look: look.clone(),
             theme: theme.clone(),
+            select,
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         finish(store.as_deref(), session, "screenshot", &result);
@@ -395,6 +409,7 @@ fn main() -> anyhow::Result<()> {
         palette: args.palette,
         look,
         theme,
+        select,
     };
     let result = app::run(startup);
     finish(store.as_deref(), session, "closed", &result);

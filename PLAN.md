@@ -512,6 +512,18 @@ texel (0,0) made every solid quad invisible with no validation error, and `queue
 one, and `font.path` still wins when set. Bold and italic are the next slice: the atlas is keyed by
 glyph id and size, not by face, so the face selection has to come first.
 
+**Selection is a drag and a wash, not a block.** A press anchors a cell, motion extends the range, and
+`Ctrl+Shift+C` copies *the selection* (falling back to the whole screen when there is none). The range
+is copied inclusively and cut at the selection's own edges, so a drag that starts mid-line does not
+drag in the padding. Hit-testing needs cell metrics, which is why this waited for the renderer.
+
+Drawing it exposed a bug that had been invisible for two commits: the cursor was **never drawn**. Both
+the cursor and the selection were solid quads sampling a single white texel written into the atlas at
+startup — and that one-byte `write_texture` did not do what it looked like, so every solid element
+silently vanished with no validation error. Solids now carry a negative uv and take their colour from
+the instance; the shader branches instead of sampling. The lesson is in the code as a comment, because
+"invisible rectangle, no error" is a failure mode with no trail to follow.
+
 **Importing themes from iTerm2** (`dtr theme import <FILE> [--name] [--force]`) is done: `plist` parses
 the XML, the P3 matrix and the alpha policy come from `docs/themes.md` §6.2, and the output is a
 Ghostty-format theme in `dtr`'s own themes directory, so an imported theme and a hand-written one are

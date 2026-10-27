@@ -124,6 +124,8 @@ pub enum Command {
     Scroll(isize),
     Echo(bool),
     Copy,
+    /// Copy a cell range: `(start, end)` as linear indices, in either order.
+    CopyRange(usize, usize),
     Paste(Vec<u8>),
     /// Apply a theme to the live terminal. Cells are re-read from the terminal,
     /// so existing text takes the new palette too.
@@ -603,6 +605,17 @@ async fn run(
                         }
                         wake();
                     }
+                    Command::CopyRange(start, end) => {
+                        let text = out
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.as_ref().map(|frame| frame_text_range(frame, start, end)))
+                            .unwrap_or_default();
+                        if let Ok(mut slot) = copied.lock() {
+                            *slot = Some(text);
+                        }
+                        wake();
+                    }
                     Command::Paste(bytes) => match paste_tick {
                         // No pacing: hand the whole thing over at once.
                         None => {
@@ -650,6 +663,42 @@ fn frame_text(frame: &Frame) -> String {
         .collect();
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Copy from `start` to `end`, inclusive, as text.
+///
+/// The range is two linear cell indices in either order; a partial first and
+/// last row is normal (a drag rarely starts at column zero), so rows are cut at
+/// the selection's own edges and only the trailing blanks are trimmed.
+fn frame_text_range(frame: &Frame, start: usize, end: usize) -> String {
+    let cols = usize::from(frame.cols).max(1);
+    let (first, last) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let last = last.min(frame.cells.len().saturating_sub(1));
+    let first = first.min(last);
+
+    let (start_row, start_col) = (first / cols, first % cols);
+    let (end_row, end_col) = (last / cols, last % cols);
+
+    let mut lines = Vec::new();
+    for row in start_row..=end_row {
+        let from = if row == start_row { start_col } else { 0 };
+        let to = if row == end_row { end_col } else { cols - 1 };
+        let base = row * cols;
+        if base + from >= frame.cells.len() {
+            break;
+        }
+        let to = to.min(cols - 1);
+        let line: String = frame.cells[base + from..=(base + to).min(frame.cells.len() - 1)]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect();
+        lines.push(line.trim_end().to_owned());
     }
     lines.join("\n")
 }
@@ -881,6 +930,34 @@ mod tests {
         }
         assert_eq!(per_cell[0], "O", "cells: {per_cell:?}");
         assert_eq!(per_cell[1], "K", "cells: {per_cell:?}");
+    }
+
+    #[test]
+    fn copying_a_range_cuts_at_the_selection_edges() {
+        // Two rows: "abcdefgh" and "ijklmnop".
+        let frame = frame(&["abcdefgh", "ijklmnop"]);
+        // From 'c' (index 2) to 'j' (index 9), both inclusive: the rest of the
+        // first row, then the first two cells of the next.
+        assert_eq!(super::frame_text_range(&frame, 2, 9), "cdefgh\nij");
+    }
+
+    #[test]
+    fn copying_a_range_works_backwards() {
+        // A drag can end before it starts; the range is the same either way.
+        let frame = frame(&["abcdefgh", "ijklmnop"]);
+        assert_eq!(super::frame_text_range(&frame, 9, 2), super::frame_text_range(&frame, 2, 9));
+    }
+
+    #[test]
+    fn copying_a_single_cell_gives_one_character() {
+        let frame = frame(&["abcdefgh"]);
+        assert_eq!(super::frame_text_range(&frame, 3, 3), "d");
+    }
+
+    #[test]
+    fn a_range_past_the_end_is_clamped() {
+        let frame = frame(&["ab"]);
+        assert_eq!(super::frame_text_range(&frame, 0, 9999), "ab");
     }
 
     #[test]

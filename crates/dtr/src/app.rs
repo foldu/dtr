@@ -33,6 +33,8 @@ pub struct Startup {
     pub palette: bool,
     pub look: Look,
     pub theme: Option<crate::theme::Theme>,
+    /// A cell range to show selected on the first frame (screenshots).
+    pub select: Option<(usize, usize)>,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -85,6 +87,7 @@ pub fn capture_headless(
         startup.palette,
         serial,
         &startup.look,
+        startup.select,
     )
 }
 
@@ -134,6 +137,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         log: startup.log,
         serial,
         echo: false,
+        selection: startup.select,
+        dragging: false,
+        cursor_position: None,
     };
     event_loop.run_app(&mut app)?;
     match app.fatal {
@@ -160,6 +166,10 @@ struct App {
     serial: bool,
     echo: bool,
     look: Look,
+    /// Cell indices of a mouse selection: `(anchor, head)`.
+    selection: Option<(usize, usize)>,
+    dragging: bool,
+    cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
 }
 
@@ -182,6 +192,29 @@ impl App {
                 self.fatal = Some(format!("{err}"));
             }
         }
+    }
+
+    /// Which cell is under a physical pixel position, if any.
+    ///
+    /// The grid starts at the window origin: the status bar is a separate panel
+    /// at the bottom, and the grid is not offset.
+    fn cell_at(&self, x: f64, y: f64) -> Option<usize> {
+        let gpu = self.gpu.as_ref()?;
+        let metrics = gpu.metrics();
+        if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
+            return None;
+        }
+        let cols = u32::from(self.frame.as_ref()?.cols);
+        let rows = u32::from(self.frame.as_ref()?.rows);
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        let col = (x as f32 / metrics.cell_width).floor().max(0.0) as u32;
+        let row = (y as f32 / metrics.cell_height).floor().max(0.0) as u32;
+        if col >= cols || row >= rows {
+            return None;
+        }
+        Some((row * cols + col) as usize)
     }
 
     fn apply(&mut self, action: Action) {
@@ -345,8 +378,14 @@ impl ApplicationHandler<UserEvent> for App {
                 } else if chord("b") {
                     self.pane.send(crate::pane::Command::Break);
                 } else if chord("c") {
-                    // No mouse selection yet: copy the visible screen.
-                    self.pane.send(crate::pane::Command::Copy);
+                    match self.selection {
+                        Some((start, end)) => {
+                            self.pane.send(crate::pane::Command::CopyRange(start, end))
+                        }
+                        // No selection: copy the visible screen, which is what a
+                        // terminal's "copy all" means.
+                        None => self.pane.send(crate::pane::Command::Copy),
+                    }
                 } else if chord("v") {
                     // The clipboard arrives as an egui paste event, which the
                     // render pass collects; nothing to do here.
@@ -363,6 +402,34 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Resized(size) => gpu.resize(size),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = Some((position.x, position.y));
+                if self.dragging {
+                    if let Some(cell) = self.cell_at(position.x, position.y) {
+                        if let Some((anchor, _)) = self.selection {
+                            self.selection = Some((anchor, cell));
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == winit::event::MouseButton::Left {
+                    match state {
+                        winit::event::ElementState::Pressed => {
+                            // A click without a drag is not a selection until
+                            // the pointer moves; the anchor waits here.
+                            self.selection = self
+                                .cursor_position
+                                .and_then(|(x, y)| self.cell_at(x, y))
+                                .map(|cell| (cell, cell));
+                            self.dragging = true;
+                        }
+                        winit::event::ElementState::Released => {
+                            self.dragging = false;
+                        }
+                    }
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
@@ -402,6 +469,7 @@ impl ApplicationHandler<UserEvent> for App {
                     palette_open,
                     &mut copied_text,
                     &self.look,
+                    self.selection,
                 ) {
                     tracing::error!(%err, "render");
                 }
@@ -486,7 +554,7 @@ impl Gpu {
             config.format,
             egui_wgpu::RendererOptions::default(),
         );
-        let grid = crate::render::GridRenderer::new(&device, &queue, config.format, look);
+        let grid = crate::render::GridRenderer::new(&device, config.format, look);
 
         Ok(Self {
             window,
@@ -499,6 +567,11 @@ impl Gpu {
             egui_renderer,
             grid,
         })
+    }
+
+    /// Cell size in physical pixels, for hit-testing.
+    fn metrics(&self) -> crate::render::Metrics {
+        self.grid.metrics()
     }
 
     fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -521,6 +594,7 @@ impl Gpu {
         palette_open: bool,
         copied_text: &mut Option<String>,
         look: &Look,
+        selection: Option<(usize, usize)>,
     ) -> anyhow::Result<()> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -616,6 +690,7 @@ impl Gpu {
             look,
             self.config.width as f32,
             self.config.height as f32,
+            selection,
         );
 
         {

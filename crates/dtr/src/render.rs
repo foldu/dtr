@@ -27,6 +27,8 @@ struct Glyph {
     height: f32,
 }
 
+// The fields are consumed by `bytemuck_cast`, which the compiler cannot see.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct Instance {
     /// x, y, width, height in physical pixels.
@@ -35,12 +37,20 @@ struct Instance {
     colour: [f32; 4],
 }
 
+/// A negative uv is the shader's "no texture, use the colour" flag. Sampling a
+/// white texel would work too, but it makes every solid element depend on one
+/// byte of the atlas being right — and when that byte is wrong the failure is
+/// silent: invisible rectangles, no validation error, nothing to grep for.
+const SOLID: [f32; 4] = [-1.0, -1.0, -1.0, -1.0];
+
 impl Instance {
-    fn solid(rect: [f32; 4], colour: [u8; 3], white: [f32; 4]) -> Self {
+    fn solid(rect: [f32; 4], colour: [u8; 3], alpha: f32) -> Self {
+        let mut colour = rgb(colour);
+        colour[3] = alpha;
         Self {
             rect,
-            uv: white,
-            colour: rgb(colour),
+            uv: SOLID,
+            colour,
         }
     }
 }
@@ -65,7 +75,11 @@ pub struct Metrics {
 pub struct GridRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    /// Kept alive: the bind group references these, and the atlas would need
+    /// rebuilding with them if it ever has to grow.
+    #[allow(dead_code)]
     bind_group_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
     sampler: wgpu::Sampler,
     atlas: wgpu::Texture,
     atlas_size: u32,
@@ -76,7 +90,6 @@ pub struct GridRenderer {
     /// Keyed by (face, glyph id, size×4): the same character is a different
     /// bitmap in the bold face, and a different size is a different raster.
     glyphs: HashMap<(u8, u16, u32), Glyph>,
-    white: [f32; 4],
     fonts: Fonts,
     instances: Vec<Instance>,
     instance_buffer: Option<wgpu::Buffer>,
@@ -89,12 +102,7 @@ const ATLAS_SIZE: u32 = 1024;
 const WHITE_PX: u32 = 1;
 
 impl GridRenderer {
-    pub fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-        look: &Look,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, look: &Look) -> Self {
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dtr glyph atlas"),
             size: wgpu::Extent3d {
@@ -221,7 +229,7 @@ impl GridRenderer {
             cache: None,
         });
 
-        let mut renderer = Self {
+        let renderer = Self {
             pipeline,
             bind_group,
             bind_group_layout,
@@ -232,7 +240,6 @@ impl GridRenderer {
             shelf_height: 0,
             shelf_x: WHITE_PX,
             glyphs: HashMap::new(),
-            white: [0.5, 0.5, 0.5, 0.5],
             fonts: Fonts::load(look),
             instances: Vec::new(),
             instance_buffer: None,
@@ -240,37 +247,7 @@ impl GridRenderer {
             uniform,
             screen: [1.0, 1.0],
         };
-        renderer.write_white_pixel(queue);
         renderer
-    }
-
-    /// The white pixel at the atlas origin: sampling it gives a solid colour,
-    /// which is how backgrounds and the cursor share the glyph pipeline.
-    fn write_white_pixel(&mut self, queue: &wgpu::Queue) {
-        // The centre of the texel stored at (0, 0), not the centre of the
-        // atlas: sampling anywhere else returns an empty glyph and the solid
-        // quads vanish.
-        let texel = 0.5 / ATLAS_SIZE as f32;
-        self.white = [texel, texel, 1.0, 1.0];
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.atlas,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[255u8],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(1),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -286,6 +263,7 @@ impl GridRenderer {
         look: &Look,
         width: f32,
         height: f32,
+        selection: Option<(usize, usize)>,
     ) {
         self.screen = [width, height];
         queue.write_buffer(
@@ -303,7 +281,6 @@ impl GridRenderer {
 
         let metrics = self.fonts.metrics;
         let (cell_w, cell_h) = (metrics.cell_width, metrics.cell_height);
-        let white = self.white;
 
         // Backgrounds first: a glyph must never sit under a later rectangle.
         for (index, cell) in frame.cells.iter().enumerate() {
@@ -312,7 +289,7 @@ impl GridRenderer {
             }
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
             self.instances
-                .push(Instance::solid([x, y, cell_w, cell_h], cell.bg, white));
+                .push(Instance::solid([x, y, cell_w, cell_h], cell.bg, 1.0));
         }
 
         // Then the glyphs.
@@ -339,6 +316,24 @@ impl GridRenderer {
             }
         }
 
+        // The selection sits above the text, as a wash rather than a solid
+        // block: you still have to be able to read what you selected.
+        if let Some((first, last)) = selection {
+            let (start, end) = if first <= last {
+                (first, last)
+            } else {
+                (last, first)
+            };
+            for index in start..=end.min(frame.cells.len().saturating_sub(1)) {
+                let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
+                self.instances.push(Instance::solid(
+                    [x, y, cell_w, cell_h],
+                    look.accent,
+                    0.35,
+                ));
+            }
+        }
+
         if let Some((cx, cy)) = frame.cursor {
             let (x, y) = cell_origin(
                 usize::from(cy) * usize::from(frame.cols) + usize::from(cx),
@@ -346,11 +341,8 @@ impl GridRenderer {
                 cell_w,
                 cell_h,
             );
-            self.instances.push(Instance::solid(
-                [x, y, cell_w, cell_h],
-                look.accent,
-                white,
-            ));
+            self.instances
+                .push(Instance::solid([x, y, cell_w, cell_h], look.accent, 1.0));
         }
 
         self.upload_instances(device, queue);
@@ -412,7 +404,7 @@ impl GridRenderer {
         let height = image.placement.height;
         if width == 0 || height == 0 {
             let glyph = Glyph {
-                uv: self.white,
+                uv: SOLID,
                 left: 0.0,
                 top: 0.0,
                 width: 0.0,
@@ -543,7 +535,12 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> VertexOut {
 
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
-    let alpha = textureSample(atlas, atlas_sampler, in.uv).r;
+    // Negative uv means a solid rectangle: backgrounds, the cursor, a
+    // selection. Nothing to sample, so alpha comes from the instance.
+    var alpha = 1.0;
+    if (in.uv.x >= 0.0) {
+        alpha = textureSample(atlas, atlas_sampler, in.uv).r;
+    }
     return vec4(in.colour.rgb, in.colour.a * alpha);
 }
 "#;
@@ -584,7 +581,7 @@ impl Fonts {
     fn load(look: &Look) -> Self {
         let faces = load_faces(look);
 
-        let mut context = swash::scale::ScaleContext::new();
+        let context = swash::scale::ScaleContext::new();
         let metrics = {
             let font = swash::FontRef::from_index(
                 &faces[Face::Regular as usize].bytes,

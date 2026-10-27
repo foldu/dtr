@@ -1,16 +1,13 @@
-//! Painting a pane frame with egui.
+//! The chrome around the grid: the status strip, and the colours both it and
+//! the renderer use.
 //!
-//! M0 uses egui's own text drawing: a monospace font, one rect per coloured
-//! cell, one text call per non-empty cell. That is fine at 80×24 and keeps the
-//! critical path short; the wgpu cell renderer replaces this behind the same
-//! call site later (PLAN §3, M2).
+//! The grid itself is drawn by `render.rs` with wgpu; this module is what is
+//! left of the M0 egui path — the parts that are genuinely small enough not to
+//! need a renderer of their own.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
-
-use crate::pane::Frame;
+use egui::{Color32, RichText, Ui};
 
 /// How the grid is drawn: the font size, and an optional font file to load in
 /// place of the embedded default.
@@ -113,9 +110,6 @@ impl Look {
         ctx.set_fonts(definitions);
     }
 
-    pub fn font(&self) -> FontId {
-        FontId::monospace(self.size)
-    }
 }
 
 /// What the status bar shows. Totals come from the pane; rates are the UI's own
@@ -130,61 +124,6 @@ pub struct Status<'a> {
     pub connected: bool,
     /// DTR and RTS levels, when the transport has modem lines at all.
     pub modem: Option<(bool, bool)>,
-}
-
-pub fn draw(ui: &mut Ui, frame: &Frame, look: &Look) {
-    let font = look.font();
-    let (cell_w, cell_h) = metrics(ui, &font);
-    let size = vec2(
-        f32::from(frame.cols) * cell_w,
-        f32::from(frame.rows) * cell_h,
-    );
-
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, colour(frame.default_bg));
-
-    // Backgrounds first, so a neighbouring cell's text never sits under a
-    // rectangle painted after it.
-    for (index, cell) in frame.cells.iter().enumerate() {
-        if !cell.has_bg {
-            continue;
-        }
-        let (x, y) = cell_origin(frame, index, rect, cell_w, cell_h);
-        painter.rect_filled(
-            Rect::from_min_size(pos2(x, y), vec2(cell_w, cell_h)),
-            0.0,
-            colour(cell.bg),
-        );
-    }
-
-    let mut fonts: HashMap<(bool, bool), FontId> = HashMap::new();
-    for (index, cell) in frame.cells.iter().enumerate() {
-        if cell.text.trim().is_empty() {
-            continue;
-        }
-        let (x, y) = cell_origin(frame, index, rect, cell_w, cell_h);
-        let font = fonts
-            .entry((cell.bold, cell.italic))
-            .or_insert_with(|| styled_font(cell.bold, cell.italic, look))
-            .clone();
-        painter.text(
-            pos2(x, y),
-            Align2::LEFT_TOP,
-            &cell.text,
-            font,
-            colour(cell.fg),
-        );
-    }
-
-    if let Some((x, y)) = frame.cursor {
-        let origin = pos2(
-            rect.min.x + f32::from(x) * cell_w,
-            rect.min.y + f32::from(y) * cell_h,
-        );
-        let cursor = Rect::from_min_size(origin, vec2(cell_w, cell_h));
-        painter.rect_filled(cursor, 0.0, colour(frame.default_fg).gamma_multiply(0.45));
-    }
 }
 
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
@@ -245,33 +184,4 @@ fn human_bytes(value: f64) -> String {
     } else {
         format!("{:.1} MB", value / (K * K))
     }
-}
-
-fn cell_origin(frame: &Frame, index: usize, rect: Rect, cell_w: f32, cell_h: f32) -> (f32, f32) {
-    let cols = usize::from(frame.cols).max(1);
-    let (row, col) = (index / cols, index % cols);
-    (
-        rect.min.x + col as f32 * cell_w,
-        rect.min.y + row as f32 * cell_h,
-    )
-}
-
-fn styled_font(bold: bool, italic: bool, look: &Look) -> FontId {
-    // egui's bundled fonts have no bold or italic face; the flags are carried
-    // through the frame so the real renderer (M2) can use them.
-    let _ = (bold, italic);
-    look.font()
-}
-
-fn colour(rgb: [u8; 3]) -> Color32 {
-    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-}
-
-fn metrics(ui: &Ui, font: &FontId) -> (f32, f32) {
-    // One layout for the reference glyph gives both the advance width and the
-    // line height, which is all a cell grid needs.
-    let galley = ui
-        .painter()
-        .layout_no_wrap("M".to_owned(), font.clone(), Color32::WHITE);
-    (galley.size().x.max(1.0), galley.size().y.max(1.0))
 }

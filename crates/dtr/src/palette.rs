@@ -5,7 +5,7 @@
 //! and cannot be driven from the keyboard.
 
 use dtr_complete::{Completion, Engine, Inline};
-use egui::{Align2, Color32, FontId, Key, Modifiers, RichText, Sense, TextEdit, vec2};
+use egui::{Align2, FontId, Key, Modifiers, RichText, Sense, TextEdit, vec2};
 
 use crate::ui::Look;
 

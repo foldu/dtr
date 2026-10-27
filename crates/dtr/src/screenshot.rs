@@ -20,6 +20,7 @@ pub fn capture(
     show_palette: bool,
     serial: bool,
     look: &crate::ui::Look,
+    selection: Option<(usize, usize)>,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -122,8 +123,8 @@ pub fn capture(
     device.on_uncaptured_error(std::sync::Arc::new(|err: wgpu::Error| {
         tracing::error!(%err, "wgpu validation");
     }));
-    let mut grid = crate::render::GridRenderer::new(&device, &queue, format, look);
-    grid.prepare(&device, &queue, frame, look, width as f32, height as f32);
+    let mut grid = crate::render::GridRenderer::new(&device, format, look);
+    grid.prepare(&device, &queue, frame, look, width as f32, height as f32, selection);
     {
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
