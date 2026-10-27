@@ -461,6 +461,15 @@ The status bar and palette are still hardcoded greys — that is the visible sea
 Colours in the config file itself are deliberately not supported: a theme is a document with a name,
 and pointing at one beats duplicating sixteen hex triplets inline.
 
+`docs/themes.md` is the research behind this and goes further than the implementation: it measured the
+corpora (819 Ghostty themes shipped, 463 already installed on this machine, 860 in the upstream hub),
+checked the licences (Ghostty is MIT, but the underlying iTerm2 corpus is only ~259/860
+redistributable — which is why dtr reads theme files instead of shipping them), and specifies an
+`.itermcolors` importer and a `[theme.overrides]` table. Two deliberate divergences: the config uses
+the owner's shape `theme = "kanagawa wave"` rather than a `[theme] name = ...` table, and the
+`[theme.overrides]` table is not implemented, so `dtr config set` never needs to walk a three-level
+dotted path.
+
 ### M2 — real renderer
 
 - wgpu cell renderer behind `GridRenderer`: instanced bg + glyph quads, glyph atlas,

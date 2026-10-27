@@ -85,6 +85,8 @@ impl Theme {
         let mut theme = Self::empty(name);
         for (number, line) in text.lines().enumerate() {
             let line = line.trim();
+            // `#` is a comment only at the start of a line: it is also the
+            // colour prefix, so a "strip from #" pass would corrupt every file.
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
