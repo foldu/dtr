@@ -190,6 +190,52 @@ pub struct Status<'a> {
     pub counters: bool,
 }
 
+/// A short-lived note in the corner: "copied 1.2 kB".
+///
+/// Deliberately small and out of the way. A toast is the answer to "did that
+/// work?", asked at the moment the answer is still useful; anything larger
+/// gets in the way of the thing you just copied from.
+#[allow(deprecated)] // one fixed overlay: the id is a name, not a hash of state
+pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
+    let corner = ui.ctx().content_rect().right_bottom();
+    let id = egui::Id::new("dtr-toast");
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(corner.x - 260.0, corner.y - 64.0),
+        egui::vec2(240.0, 26.0),
+    );
+    // A fresh Area spends its first frame measuring and paints nothing, which
+    // makes a one-frame capture of it blank. Prime the state with the rect.
+    prime_area(ui.ctx(), id, egui::Order::Foreground, rect, false);
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(corner.x - 260.0, corner.y - 64.0))
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgba_unmultiplied(
+                    look.surface[0],
+                    look.surface[1],
+                    look.surface[2],
+                    (235.0 * alpha) as u8,
+                ))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(text)
+                            .monospace()
+                            .size(12.0)
+                            .color(Color32::from_rgba_unmultiplied(
+                                look.foreground[0],
+                                look.foreground[1],
+                                look.foreground[2],
+                                (255.0 * alpha) as u8,
+                            )),
+                    );
+                });
+        });
+}
+
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;

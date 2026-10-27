@@ -134,6 +134,7 @@ pub fn capture_headless(
         startup.select,
         startup.split,
         files.as_ref(),
+        None,
     )
 }
 
@@ -239,6 +240,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         exit_after: startup.exit_after,
         started: std::time::Instant::now(),
         gpu_hint: startup.gpu.clone(),
+        toast: None,
     };
     // `--files` for screenshots and for starting next to a listing; the pane
     // gets focus, so the arrow keys work immediately.
@@ -425,6 +427,9 @@ struct App {
     started: std::time::Instant,
     /// Adapter name to prefer, from `--gpu` or `DTR_GPU`.
     gpu_hint: Option<String>,
+    /// A copy note and when it was made. Shown briefly, because "did that
+    /// work?" is asked at the moment the answer still matters.
+    toast: Option<(String, std::time::Instant)>,
 }
 
 impl App {
@@ -1224,9 +1229,27 @@ impl ApplicationHandler<UserEvent> for App {
                     counters,
                 };
                 let mut action = None;
+                let mut copied = None;
                 let mut copied_text = self
                     .session_mut()
                     .and_then(|session| session.pane.take_copied());
+                // A toast lives for 1.8 s and fades over its last 400 ms.
+                const TOAST: std::time::Duration = std::time::Duration::from_millis(1800);
+                // Owned, because the draw mutably borrows `self` further down.
+                let toast_text: Option<(String, f32)> =
+                    self.toast.as_ref().and_then(|(text, at)| {
+                        let age = at.elapsed();
+                        if age > TOAST {
+                            return None;
+                        }
+                        let fade = std::time::Duration::from_millis(400);
+                        let alpha = if age + fade > TOAST {
+                            (TOAST - age).as_secs_f32() / fade.as_secs_f32()
+                        } else {
+                            1.0
+                        };
+                        Some((text.clone(), alpha))
+                    });
                 let palette_open = self.palette.open;
                 // Split the borrows explicitly: the palette is `&mut` while the
                 // frame, pane and look are `&`, and taking them out one by one
@@ -1280,9 +1303,27 @@ impl ApplicationHandler<UserEvent> for App {
                     terminal_pane,
                     palette_open,
                     &mut copied_text,
+                    &mut copied,
+                    toast_text
+                        .as_ref()
+                        .map(|(text, alpha)| (text.as_str(), *alpha)),
                     &look,
                 );
                 self.palette = palette;
+                drop(toast_text);
+                if let Some(text) = copied {
+                    let chars = text.chars().count();
+                    let bytes = text.len();
+                    let note = if chars < 40 {
+                        format!("copied {chars} chars")
+                    } else {
+                        format!("copied {bytes} bytes")
+                    };
+                    self.toast = Some((note, std::time::Instant::now()));
+                }
+                if self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() > TOAST) {
+                    self.toast = None;
+                }
                 self.frames_drawn = self.frames_drawn.wrapping_add(1);
                 if let Err(err) = rendered {
                     tracing::error!(%err, "render");
@@ -1441,6 +1482,8 @@ impl Gpu {
         pane: Option<&TermPane>,
         palette_open: bool,
         copied_text: &mut Option<String>,
+        copied: &mut Option<String>,
+        toast: Option<(&str, f32)>,
         look: &Look,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
@@ -1517,7 +1560,11 @@ impl Gpu {
                     }
                 }
                 if let Some(text) = copied_text.take() {
-                    ui.ctx().copy_text(text);
+                    ui.ctx().copy_text(text.clone());
+                    *copied = Some(text);
+                }
+                if let Some((text, alpha)) = toast {
+                    crate::ui::toast(ui, look, text, alpha);
                 }
         });
 

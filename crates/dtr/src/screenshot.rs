@@ -52,6 +52,7 @@ pub fn capture(
     selection: Option<(usize, usize)>,
     split: Option<crate::layout::Axis>,
     files: Option<&crate::explorer::Explorer>,
+    toast: Option<(&str, f32)>,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     // Same preference as the window: a capture from a different adapter than
@@ -213,6 +214,9 @@ pub fn capture(
         if show_palette {
             crate::ui::overlay(ui, "dtr-screenshot-palette", |ui| {
                 palette.ui(ui, look);
+        if let Some((text, alpha)) = toast {
+            crate::ui::toast(ui, look, text, alpha);
+        }
             });
         }
     });
