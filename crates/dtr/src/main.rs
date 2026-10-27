@@ -63,6 +63,10 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Verbose logging to stderr: -v for debug, -vv for trace (RUST_LOG overrides)
+    #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
     /// Serial port path, e.g. /dev/ttyUSB0 or COM7
     #[arg(short, long)]
     port: Option<String>,
@@ -208,8 +212,19 @@ fn run_command(command: Command) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    // `RUST_LOG` when it is set, `-v`/`-vv` otherwise, INFO by default. A
+    // hardcoded level is useless the moment something goes wrong in a window
+    // nobody can attach a debugger to.
+    let level = match args.verbose {
+        0 => "info",
+        1 => "dtr=debug",
+        _ => "dtr=trace",
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
         .init();
 
     tracing::debug!(?args, "starting");

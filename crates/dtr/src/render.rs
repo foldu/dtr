@@ -259,6 +259,11 @@ impl GridRenderer {
         renderer
     }
 
+    /// How many instances the last `prepare` produced, for diagnostics.
+    pub fn instances(&self) -> usize {
+        self.instances.len()
+    }
+
     pub fn metrics(&self) -> Metrics {
         self.fonts.metrics
     }

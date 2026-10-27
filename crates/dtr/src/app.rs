@@ -158,6 +158,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         log: startup.log,
         dragging: false,
         cursor_position: None,
+        frames_drawn: 0,
     };
     event_loop.run_app(&mut app)?;
     match app.fatal {
@@ -250,6 +251,7 @@ struct App {
     dragging: bool,
     cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
+    frames_drawn: u64,
 }
 
 impl App {
@@ -374,27 +376,26 @@ impl App {
     ///
     /// The status strip is subtracted first: panes live above it, and a split
     /// that ran under the chrome would hide its own last row.
+    /// `screen`, `scale` and `metrics` come from the caller because the GPU is
+    /// taken out of `self` while it draws: reading them back through `self`
+    /// returned nothing, and the window rendered an empty screen with no error.
     fn pane_views<'a>(
         &self,
         tab: &'a Tab,
         metrics: crate::render::Metrics,
+        screen: (f32, f32),
+        scale: f32,
     ) -> Vec<(crate::layout::LeafId, crate::render::PaneView<'a>)> {
-        let gpu = match self.gpu.as_ref() {
-            Some(gpu) => gpu,
-            None => return Vec::new(),
-        };
-        let size = (gpu.config.width, gpu.config.height);
-        let (width, height) = (size.0 as f32, size.1 as f32);
-        let status_height = crate::ui::STATUS_HEIGHT * gpu.scale();
+        let status_height = crate::ui::STATUS_HEIGHT * scale;
         let area = crate::layout::Rect::new(
             0.0,
             0.0,
-            width,
-            (height - status_height).max(0.0),
+            screen.0,
+            (screen.1 - status_height).max(0.0),
         );
 
         tab.layout
-            .rects(area, crate::ui::SPLIT_GAP * gpu.scale())
+            .rects(area, crate::ui::SPLIT_GAP * scale)
             .into_iter()
             .filter_map(|(id, rect)| {
                 let session = tab.leaves.get(&id)?;
@@ -416,7 +417,8 @@ impl App {
     fn pane_at(&self, x: f64, y: f64) -> Option<crate::layout::LeafId> {
         let gpu = self.gpu.as_ref()?;
         let tab = &self.tabs[self.active];
-        self.pane_views(tab, gpu.metrics())
+        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        self.pane_views(tab, gpu.metrics(), screen, gpu.scale())
             .into_iter()
             .find(|(_, pane)| pane.rect.contains(x as f32, y as f32))
             .map(|(id, _)| id)
@@ -439,8 +441,10 @@ impl App {
         }
         // Relative to the focused pane: a split moves the grid's origin.
         let tab = &self.tabs[self.active];
+        let gpu = self.gpu.as_ref()?;
+        let screen = (gpu.config.width as f32, gpu.config.height as f32);
         let origin = self
-            .pane_views(tab, metrics)
+            .pane_views(tab, metrics, screen, gpu.scale())
             .into_iter()
             .find(|(id, _)| *id == tab.focus)
             .map(|(_, pane)| (pane.rect.x, pane.rect.y))?;
@@ -806,14 +810,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // is what makes that legal.
                 let mut palette = std::mem::replace(&mut self.palette, Palette::new(false));
                 let tab = &self.tabs[self.active];
+                let screen = (gpu.config.width as f32, gpu.config.height as f32);
+                let scale = gpu.scale();
                 let panes: Vec<_> = self
-                    .pane_views(tab, gpu.metrics())
+                    .pane_views(tab, gpu.metrics(), screen, scale)
                     .into_iter()
                     .map(|(_, pane)| pane)
                     .collect();
                 let look = self.look.clone();
                 let rendered = gpu.render(
                     &panes,
+                    self.frames_drawn,
                     &status,
                     &mut palette,
                     &mut action,
@@ -823,6 +830,7 @@ impl ApplicationHandler<UserEvent> for App {
                     &look,
                 );
                 self.palette = palette;
+                self.frames_drawn = self.frames_drawn.wrapping_add(1);
                 if let Err(err) = rendered {
                     tracing::error!(%err, "render");
                 }
@@ -910,6 +918,14 @@ impl Gpu {
             egui_wgpu::RendererOptions::default(),
         );
         let grid = crate::render::GridRenderer::new(&device, config.format, look);
+        tracing::info!(
+            format = ?config.format,
+            width = config.width,
+            height = config.height,
+            present_mode = ?config.present_mode,
+            adapter = %adapter.get_info().name,
+            "window surface"
+        );
 
         Ok(Self {
             window,
@@ -947,6 +963,7 @@ impl Gpu {
     fn render(
         &mut self,
         panes: &[crate::render::PaneView<'_>],
+        frames_drawn: u64,
         status: &Status,
         palette: &mut Palette,
         action: &mut Option<Action>,
@@ -955,10 +972,16 @@ impl Gpu {
         copied_text: &mut Option<String>,
         look: &Look,
     ) -> anyhow::Result<()> {
+        // The first few frames at debug, then every 120th: enough to see a
+        // wedged surface without drowning the log at 60 Hz.
+        let loud = frames_drawn < 3 || frames_drawn % 120 == 0;
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                if loud {
+                    tracing::warn!("surface outdated; reconfiguring");
+                }
                 self.surface.configure(&self.device, &self.config);
                 return Ok(());
             }
@@ -1049,6 +1072,16 @@ impl Gpu {
             look,
             (self.config.width as f32, self.config.height as f32),
         );
+        if loud {
+            let with_content = panes.iter().filter(|pane| pane.frame.is_some()).count();
+            tracing::debug!(
+                frames_drawn,
+                panes = panes.len(),
+                with_content,
+                instances = self.grid.instances(),
+                "frame"
+            );
+        }
 
         {
             let mut pass = encoder

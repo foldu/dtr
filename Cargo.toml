@@ -37,6 +37,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt", "time", "sync", "io-util", "macros"] }
 tokio-serial = "5"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wgpu = "30"
 winit = "0.30"
