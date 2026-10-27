@@ -79,6 +79,7 @@ pub fn capture(
     // Totals are real; a single frame has no rate to report.
     let status = crate::ui::Status {
         label,
+        tabs: (1, 1),
         rx: stats.rx(),
         tx: stats.tx(),
         rx_rate: 0.0,

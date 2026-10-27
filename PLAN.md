@@ -560,6 +560,19 @@ scrolling, selection, copy and the logbook all work over ssh with no further cod
 dependency on the platform's client (fine on Linux, present on Windows 10+, and something to check on
 a machine that has none).
 
+**Tabs.** Every palette action now opens a *new* session instead of replacing the one you were looking at:
+`connect`, `ssh`, `shell`, `replay`, `demo` all push a tab. `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle,
+`Ctrl+Shift+W` closes (the last tab closes the window), and the status bar shows `2/3` only once there
+is more than one. Only the active tab is drawn, but the others keep running — they keep their own
+scrollback, selection and byte counters, which is the whole point of a tab.
+
+The index rules are pure functions with tests, because that is where the off-by-ones live: cycling
+wraps both ways, a single tab goes nowhere, closing the last of several moves left, and closing the
+only tab ends the window.
+
+**SFTP is deliberately not here.** The owner's plan is a small file-explorer pane later on, not a
+transfer command; `docs/sftp.md` has the measurements for when that happens.
+
 ### M3 — the rest — the rest of a terminal
 
 - ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.

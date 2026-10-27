@@ -129,12 +129,18 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     }
 
     let mut app = App {
-        pane,
-        frame: None,
+        sessions: vec![Session {
+            pane,
+            frame: None,
+            label,
+            serial,
+            echo: false,
+            selection: startup.select,
+            meter: Meter::new(),
+        }],
+        active: 0,
         gpu: None,
         modifiers: ModifiersState::empty(),
-        label,
-        meter: Meter::new(),
         fatal: None,
         quit: false,
         palette: Palette::new(startup.palette),
@@ -143,9 +149,6 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         proxy,
         store: startup.store,
         log: startup.log,
-        serial,
-        echo: false,
-        selection: startup.select,
         dragging: false,
         cursor_position: None,
     };
@@ -156,13 +159,47 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     }
 }
 
-struct App {
+/// The next tab after wrapping; `count < 2` has nowhere to go.
+fn cycled(active: usize, count: usize, forward: bool) -> usize {
+    if count < 2 {
+        return active;
+    }
+    if forward {
+        (active + 1) % count
+    } else {
+        (active + count - 1) % count
+    }
+}
+
+/// Where the selection lands after closing the active tab, or `None` when that
+/// was the last one.
+fn closed(active: usize, count: usize) -> Option<usize> {
+    if count <= 1 {
+        return None;
+    }
+    Some(active.min(count - 2))
+}
+
+/// One open session. Tabs are just these, in order; only the active one is
+/// drawn, but the others keep running and keep their own scrollback, selection
+/// and statistics.
+struct Session {
     pane: Pane,
     frame: Option<Frame>,
+    label: String,
+    /// Whether this session has modem lines, for the status strip.
+    serial: bool,
+    echo: bool,
+    /// Cell indices of a mouse selection: `(anchor, head)`.
+    selection: Option<(usize, usize)>,
+    meter: Meter,
+}
+
+struct App {
+    sessions: Vec<Session>,
+    active: usize,
     gpu: Option<Gpu>,
     modifiers: ModifiersState,
-    label: String,
-    meter: Meter,
     /// Set when the pane fails; `run` returns it once the loop has stopped.
     fatal: Option<String>,
     quit: bool,
@@ -170,36 +207,70 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
     log: Option<(PathBuf, crate::serial::LogFormat)>,
-    /// Whether this session has modem lines, for the status strip.
-    serial: bool,
-    echo: bool,
     look: Look,
-    /// Cell indices of a mouse selection: `(anchor, head)`.
-    selection: Option<(usize, usize)>,
     dragging: bool,
     cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
 }
 
 impl App {
-    /// Swap the session under the window. Dropping the old pane closes its
-    /// channels, which ends its thread and takes a shell process with it.
-    fn start(&mut self, transport: Transport) {
+    fn session(&self) -> &Session {
+        &self.sessions[self.active]
+    }
+
+    fn session_mut(&mut self) -> &mut Session {
+        &mut self.sessions[self.active]
+    }
+
+    /// Open a session in a new tab and switch to it. The palette's actions all
+    /// come here: a terminal that replaced its session every time you connected
+    /// somewhere would lose the one you were looking at.
+    fn open(&mut self, transport: Transport) {
         let proxy = self.proxy.clone();
-        match Pane::spawn(transport.clone(), self.log.clone(), self.theme.clone(), move || {
-            let _ = proxy.send_event(UserEvent::Frame);
-        }) {
+        let spawned = Pane::spawn(
+            transport.clone(),
+            self.log.clone(),
+            self.theme.clone(),
+            move || {
+                let _ = proxy.send_event(UserEvent::Frame);
+            },
+        );
+        match spawned {
             Ok(pane) => {
-                self.pane = pane;
-                self.label = transport.describe();
-                self.serial = matches!(transport, Transport::Serial(_));
-                self.frame = None;
+                self.sessions.push(Session {
+                    pane,
+                    frame: None,
+                    label: transport.describe(),
+                    serial: matches!(transport, Transport::Serial(_)),
+                    echo: false,
+                    selection: None,
+                    meter: Meter::new(),
+                });
+                self.active = self.sessions.len() - 1;
             }
             Err(err) => {
                 tracing::error!(%err, "could not start the session");
                 self.fatal = Some(format!("{err}"));
             }
         }
+    }
+
+    /// Close the active tab. The last tab closes the window, because a terminal
+    /// with no sessions has nothing to show.
+    fn close_active(&mut self) {
+        match closed(self.active, self.sessions.len()) {
+            Some(active) => {
+                self.sessions.remove(self.active);
+                self.active = active;
+            }
+            // The last tab takes the window with it: a terminal with no
+            // sessions has nothing to show.
+            None => self.quit = true,
+        }
+    }
+
+    fn cycle(&mut self, forward: bool) {
+        self.active = cycled(self.active, self.sessions.len(), forward);
     }
 
     /// Which cell is under a physical pixel position, if any.
@@ -212,8 +283,8 @@ impl App {
         if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
             return None;
         }
-        let cols = u32::from(self.frame.as_ref()?.cols);
-        let rows = u32::from(self.frame.as_ref()?.rows);
+        let cols = u32::from(self.session().frame.as_ref()?.cols);
+        let rows = u32::from(self.session().frame.as_ref()?.rows);
         if cols == 0 || rows == 0 {
             return None;
         }
@@ -233,7 +304,7 @@ impl App {
                     .as_ref()
                     .and_then(|store| store.serial(&port).ok().flatten())
                     .unwrap_or_default();
-                self.start(Transport::Serial(crate::serial::Config {
+                self.open(Transport::Serial(crate::serial::Config {
                     port,
                     baud: remembered.baud,
                     cr_to_crlf: remembered.cr_to_crlf,
@@ -249,21 +320,21 @@ impl App {
                         self.look.path.clone(),
                         Some(&theme),
                     );
-                    self.pane.send(crate::pane::Command::SetTheme(Some(theme)));
+                    self.session().pane.send(crate::pane::Command::SetTheme(Some(theme)));
                 }
                 Err(err) => tracing::warn!(%err, "theme"),
             },
             Action::Shell(shell) => {
                 let program = (!shell.is_empty()).then_some(shell);
-                self.start(Transport::Shell(crate::pty::Config { program }));
+                self.open(Transport::Shell(crate::pty::Config { program }));
             }
-            Action::Replay(path) => self.start(Transport::Replay(PathBuf::from(path))),
-            Action::Demo => self.start(Transport::Demo),
+            Action::Replay(path) => self.open(Transport::Replay(PathBuf::from(path))),
+            Action::Demo => self.open(Transport::Demo),
             Action::Ssh(host) => {
                 // Delegating to the system's ssh client: it already knows about
                 // the config file, agent forwarding, jump hosts and known_hosts,
                 // and re-implementing those is a project, not a feature.
-                self.start(Transport::Shell(crate::pty::Config {
+                self.open(Transport::Shell(crate::pty::Config {
                     program: Some(format!("ssh -t {host}")),
                 }));
             }
@@ -337,14 +408,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: UserEvent) {
-        if let Some(err) = self.pane.error() {
+        if let Some(err) = self.session().pane.error() {
             tracing::error!(%err, "pane failed");
             self.fatal = Some(err);
             event_loop.exit();
             return;
         }
-        if let Some(frame) = self.pane.take_frame() {
-            self.frame = Some(frame);
+        if let Some(frame) = self.session_mut().pane.take_frame() {
+            self.session_mut().frame = Some(frame);
         }
         if let Some(gpu) = &self.gpu {
             gpu.window.request_redraw();
@@ -375,25 +446,48 @@ impl ApplicationHandler<UserEvent> for App {
                 // Scrollback: Shift+PageUp/Down a page at a time, Shift+Home/End
                 // to the ends. These are the terminal conventions, and they need
                 // the grid height, which the frame knows.
-                let page = self.frame.as_ref().map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
+                let page = self.session().frame.as_ref().map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
                 let scroll_key = self.modifiers.shift_key()
                     && event.state == winit::event::ElementState::Pressed
                     && match event.logical_key {
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp) => {
-                            self.pane.send(crate::pane::Command::Scroll(-page));
+                            self.session().pane.send(crate::pane::Command::Scroll(-page));
                             true
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown) => {
-                            self.pane.send(crate::pane::Command::Scroll(page));
+                            self.session().pane.send(crate::pane::Command::Scroll(page));
                             true
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home) => {
-                            self.pane.send(crate::pane::Command::ScrollEdge { top: true });
+                            self.session().pane.send(crate::pane::Command::ScrollEdge { top: true });
                             true
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::End) => {
-                            self.pane.send(crate::pane::Command::ScrollEdge { top: false });
+                            self.session().pane.send(crate::pane::Command::ScrollEdge { top: false });
                             true
+                        }
+                        _ => false,
+                    };
+
+                let tab_switch = self.modifiers.control_key()
+                    && event.state == winit::event::ElementState::Pressed
+                    && match &event.logical_key {
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab) => {
+                            self.cycle(!self.modifiers.shift_key());
+                            true
+                        }
+                        winit::keyboard::Key::Character(text) if self.modifiers.alt_key() => {
+                            match text.chars().next().and_then(|c| c.to_digit(10)) {
+                                Some(0) => {
+                                    self.active = self.sessions.len() - 1;
+                                    true
+                                }
+                                Some(digit) if digit as usize <= self.sessions.len() => {
+                                    self.active = digit as usize - 1;
+                                    true
+                                }
+                                _ => false,
+                            }
                         }
                         _ => false,
                     };
@@ -407,37 +501,39 @@ impl ApplicationHandler<UserEvent> for App {
                         )
                         && event.state == winit::event::ElementState::Pressed
                 };
-                if scroll_key {
-                    // Already handled.
+                if scroll_key || tab_switch {
+                    // Already handled above.
+                } else if chord("w") {
+                    self.close_active();
                 } else if chord("d") {
-                    let level = !self.pane.stats().dtr();
-                    self.pane.send(crate::pane::Command::Dtr(level));
+                    let level = !self.session().pane.stats().dtr();
+                    self.session().pane.send(crate::pane::Command::Dtr(level));
                 } else if chord("r") {
-                    let level = !self.pane.stats().rts();
-                    self.pane.send(crate::pane::Command::Rts(level));
+                    let level = !self.session().pane.stats().rts();
+                    self.session().pane.send(crate::pane::Command::Rts(level));
                 } else if chord("b") {
-                    self.pane.send(crate::pane::Command::Break);
+                    self.session().pane.send(crate::pane::Command::Break);
                 } else if chord("c") {
-                    match self.selection {
+                    match self.session().selection {
                         Some((start, end)) => {
-                            self.pane.send(crate::pane::Command::CopyRange(start, end))
+                            self.session().pane.send(crate::pane::Command::CopyRange(start, end))
                         }
                         // No selection: copy the visible screen, which is what a
                         // terminal's "copy all" means.
-                        None => self.pane.send(crate::pane::Command::Copy),
+                        None => self.session().pane.send(crate::pane::Command::Copy),
                     }
                 } else if chord("v") {
                     // The clipboard arrives as an egui paste event, which the
                     // render pass collects; nothing to do here.
                 } else if chord("e") {
-                    self.echo = !self.echo;
-                    self.pane.send(crate::pane::Command::Echo(self.echo));
+                    self.session_mut().echo = !self.session().echo;
+                    self.session().pane.send(crate::pane::Command::Echo(self.session().echo));
                 } else if palette_key && event.state == winit::event::ElementState::Pressed {
                     self.palette.toggle();
                 } else if !self.palette.open {
                     // The palette owns the keyboard while it is open.
                     if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
-                        self.pane.write(bytes);
+                        self.session().pane.write(bytes);
                     }
                 }
             }
@@ -446,8 +542,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_position = Some((position.x, position.y));
                 if self.dragging {
                     if let Some(cell) = self.cell_at(position.x, position.y) {
-                        if let Some((anchor, _)) = self.selection {
-                            self.selection = Some((anchor, cell));
+                        if let Some((anchor, _)) = self.session().selection {
+                            self.session_mut().selection = Some((anchor, cell));
                         }
                     }
                 }
@@ -458,7 +554,7 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::event::ElementState::Pressed => {
                             // A click without a drag is not a selection until
                             // the pointer moves; the anchor waits here.
-                            self.selection = self
+                            self.session_mut().selection = self
                                 .cursor_position
                                 .and_then(|(x, y)| self.cell_at(x, y))
                                 .map(|cell| (cell, cell));
@@ -478,40 +574,62 @@ impl ApplicationHandler<UserEvent> for App {
                 if lines != 0.0 {
                     // Wheel up shows older lines, which the terminal calls a
                     // negative delta.
-                    self.pane
+                    self.session()
+                        .pane
                         .send(crate::pane::Command::Scroll(-lines.round() as isize));
                 }
             }
             WindowEvent::RedrawRequested => {
-                let stats = self.pane.stats().clone();
+                // Taken out for the draw: the renderer needs `&mut gpu` while
+                // the frame needs `&self`, and one borrow cannot be split
+                // across a field and the whole struct.
+                let mut gpu = self.gpu.take();
+                if let Some(gpu) = gpu.as_mut() {
+                let stats = self.session().pane.stats().clone();
                 let (rx, tx) = (stats.rx(), stats.tx());
-                self.meter.sample(rx, tx);
+                self.session_mut().meter.sample(rx, tx);
+                let (rx_rate, tx_rate) = {
+                    let meter = &self.session().meter;
+                    (meter.rx_rate, meter.tx_rate)
+                };
+                let label = self.session().label.clone();
+                let tabs = (self.active + 1, self.sessions.len());
                 let status = Status {
-                    label: &self.label,
+                    label: &label,
+                    tabs,
                     rx,
                     tx,
-                    rx_rate: self.meter.rx_rate,
-                    tx_rate: self.meter.tx_rate,
+                    rx_rate,
+                    tx_rate,
                     connected: stats.connected(),
                     scrollback: stats.scrollback(),
                     modem: self
+                        .session()
                         .serial
                         .then(|| (stats.dtr(), stats.rts())),
                 };
                 let mut action = None;
-                let mut copied_text = self.pane.take_copied();
+                let mut copied_text = self.session_mut().pane.take_copied();
                 let palette_open = self.palette.open;
-                if let Err(err) = gpu.render(
-                    self.frame.as_ref(),
+                // Split the borrows explicitly: the palette is `&mut` while the
+                // frame, pane and look are `&`, and taking them out one by one
+                // is what makes that legal.
+                let mut palette = std::mem::replace(&mut self.palette, Palette::new(false));
+                let session = &self.sessions[self.active];
+                let look = self.look.clone();
+                let rendered = gpu.render(
+                    session.frame.as_ref(),
                     &status,
-                    &mut self.palette,
+                    &mut palette,
                     &mut action,
-                    &self.pane,
+                    &session.pane,
                     palette_open,
                     &mut copied_text,
-                    &self.look,
-                    self.selection,
-                ) {
+                    &look,
+                    session.selection,
+                );
+                self.palette = palette;
+                if let Err(err) = rendered {
                     tracing::error!(%err, "render");
                 }
                 if let Some(action) = action {
@@ -520,6 +638,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.quit {
                     event_loop.exit();
                 }
+                }
+                self.gpu = gpu;
             }
             _ => {}
         }
@@ -794,5 +914,40 @@ impl Gpu {
         // TexturesDelta panics if dropped with unapplied entries.
         full_output.textures_delta.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{closed, cycled};
+
+    #[test]
+    fn cycling_wraps_both_ways() {
+        assert_eq!(cycled(0, 3, true), 1);
+        assert_eq!(cycled(2, 3, true), 0);
+        assert_eq!(cycled(0, 3, false), 2);
+        assert_eq!(cycled(2, 3, false), 1);
+    }
+
+    #[test]
+    fn cycling_a_single_tab_stays_put() {
+        assert_eq!(cycled(0, 1, true), 0);
+        assert_eq!(cycled(0, 1, false), 0);
+    }
+
+    #[test]
+    fn closing_the_last_tab_closes_the_window() {
+        assert_eq!(closed(0, 1), None);
+    }
+
+    #[test]
+    fn closing_a_middle_tab_selects_its_right_neighbour() {
+        assert_eq!(closed(1, 3), Some(1));
+    }
+
+    #[test]
+    fn closing_the_last_of_several_moves_left() {
+        assert_eq!(closed(2, 3), Some(1));
+        assert_eq!(closed(1, 2), Some(0));
     }
 }

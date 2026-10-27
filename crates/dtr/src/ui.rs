@@ -116,6 +116,9 @@ impl Look {
 /// measurement, because it is the UI's clock that decides when to repaint.
 pub struct Status<'a> {
     pub label: &'a str,
+    /// `(index, count)` of the session tabs; `(1, 1)` is drawn without a tab
+    /// marker, because one session is not a tab bar.
+    pub tabs: (usize, usize),
     pub rx: u64,
     pub tx: u64,
     pub rx_rate: f64,
@@ -131,6 +134,14 @@ pub struct Status<'a> {
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
+        if status.tabs.1 > 1 {
+            ui.label(
+                RichText::new(format!("{}/{}", status.tabs.0, status.tabs.1))
+                    .monospace()
+                    .size(11.0)
+                    .color(Look::colour(look.accent)),
+            );
+        }
         ui.label(
             RichText::new(status.label)
                 .monospace()
