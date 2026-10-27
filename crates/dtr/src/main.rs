@@ -65,6 +65,10 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Prefer the GPU whose name contains TEXT, e.g. --gpu nvidia
+    #[arg(long, value_name = "TEXT")]
+    gpu: Option<String>,
+
     /// Close the window after MS milliseconds (shutdown smoke test)
     #[arg(long, value_name = "MS")]
     exit_after: Option<u64>,
@@ -324,6 +328,13 @@ fn main() -> anyhow::Result<()> {
         Some("v") => Some(crate::layout::Axis::Vertical),
         Some(other) => anyhow::bail!("expected h or v for --split, got {other:?}"),
     };
+    // `DTR_GPU` exists so the packaged binary can be pointed at a card without
+    // a rebuild; the flag wins when both are given.
+    let gpu = args
+        .gpu
+        .clone()
+        .or_else(|| std::env::var("DTR_GPU").ok())
+        .filter(|name| !name.trim().is_empty());
     let select = match args.select.as_deref() {
         Some(spec) => {
             let (start, end) = spec
@@ -480,6 +491,7 @@ fn main() -> anyhow::Result<()> {
             split,
             files,
             exit_after: args.exit_after,
+            gpu: gpu.clone(),
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         if let (Some(path), Some(profiler)) = (args.cpu_profile.clone(), profiler) {
@@ -507,6 +519,7 @@ fn main() -> anyhow::Result<()> {
         split,
         files,
         exit_after: args.exit_after,
+        gpu,
     };
     let result = app::run(startup);
     if let Some(profiler) = profiler {

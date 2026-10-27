@@ -120,6 +120,11 @@ a text self-time report; the `.svg` suffix adds the graph. `--exit-after MS`
 closes the window by itself, which is how shutdown gets exercised without a
 window manager.
 
+**The low-power adapter is the integrated GPU.** `PowerPreference::LowPower` hands
+you the iGPU on a machine with a discrete card, which is the wrong answer for a
+terminal someone stares at. `--gpu <substring>` (or `DTR_GPU`) picks by adapter
+name; `-v` logs the adapter and every adapter seen.
+
 ## Gotchas that are real
 
 | Symptom | Cause |

@@ -36,6 +36,8 @@ pub struct Startup {
     pub theme: Option<crate::theme::Theme>,
     /// Close the window after this many milliseconds, to exercise shutdown.
     pub exit_after: Option<u64>,
+    /// Adapter name to prefer, e.g. "nvidia".
+    pub gpu: Option<String>,
     /// A cell range to show selected on the first frame (screenshots).
     pub select: Option<(usize, usize)>,
     /// Lines to scroll into the scrollback before capturing (screenshots).
@@ -115,6 +117,45 @@ pub fn capture_headless(
     )
 }
 
+/// The adapter wgpu picks when nobody asked for one.
+fn request_default_adapter(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'static>,
+) -> anyhow::Result<wgpu::Adapter> {
+    Ok(pollster::block_on(instance.request_adapter(
+        &wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        },
+    ))?)
+}
+
+/// The adapter whose name contains `pattern`, case-insensitively.
+///
+/// Matching by name is crude, but it is the only handle wgpu offers that a
+/// person can type: "nvidia", "radeon", "arc". Every adapter that cannot
+/// present to this window is skipped, so a match cannot brick the window.
+fn pick_adapter(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'static>,
+    pattern: &str,
+) -> Option<wgpu::Adapter> {
+    let needle = pattern.to_lowercase();
+    let mut names = Vec::new();
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    for adapter in adapters {
+        let info = adapter.get_info();
+        names.push(info.name.clone());
+        if info.name.to_lowercase().contains(&needle) && adapter.is_surface_supported(surface) {
+            return Some(adapter);
+        }
+    }
+    tracing::debug!(?names, "adapters seen");
+    None
+}
+
 /// One place that decides which backends wgpu may use.
 ///
 /// `WGPU_BACKEND` overrides the set, which is how a broken driver stack (or
@@ -174,6 +215,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         frames_drawn: 0,
         exit_after: startup.exit_after,
         started: std::time::Instant::now(),
+        gpu_hint: startup.gpu.clone(),
     };
     // `--files` for screenshots and for starting next to a listing; the pane
     // gets focus, so the arrow keys work immediately.
@@ -353,6 +395,8 @@ struct App {
     frames_drawn: u64,
     exit_after: Option<u64>,
     started: std::time::Instant,
+    /// Adapter name to prefer, from `--gpu` or `DTR_GPU`.
+    gpu_hint: Option<String>,
 }
 
 impl App {
@@ -733,7 +777,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
 
-        match Gpu::new(window, &self.look) {
+        match Gpu::new(window, &self.look, self.gpu_hint.as_deref()) {
             Ok(gpu) => {
                 gpu.window.request_redraw();
                 self.gpu = Some(gpu);
@@ -1176,18 +1220,29 @@ struct Gpu {
 }
 
 impl Gpu {
-    fn new(window: Arc<Window>, look: &Look) -> anyhow::Result<Self> {
+    fn new(window: Arc<Window>, look: &Look, hint: Option<&str>) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = instance();
         let surface = instance.create_surface(Arc::clone(&window))?;
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))?;
-        tracing::info!(adapter = %adapter.get_info().name, "GPU adapter");
+        // HighPerformance, not LowPower: this is a terminal someone stares at,
+        // and asking for the low-power adapter hands it the integrated GPU of a
+        // machine that has a real one sitting there.
+        let adapter = match hint {
+            Some(pattern) => match pick_adapter(&instance, &surface, pattern) {
+                Some(adapter) => adapter,
+                None => {
+                    tracing::warn!(pattern, "no adapter matched; falling back");
+                    request_default_adapter(&instance, &surface)?
+                }
+            },
+            None => request_default_adapter(&instance, &surface)?,
+        };
+        tracing::info!(
+            adapter = %adapter.get_info().name,
+            backend = ?adapter.get_info().backend,
+            "GPU adapter"
+        );
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("dtr"),
