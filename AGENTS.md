@@ -83,6 +83,18 @@ overlay drawn into the same `Ui` for this reason, not by preference.
 **A widget's background painted after its text hides the text.** The palette's
 selected row was invisible until the highlight was drawn first.
 
+**A solid quad that samples the atlas can vanish silently.** Backgrounds, the
+cursor and the selection were solid rectangles sampling one white texel; the
+`write_texture` for that byte did not take effect, so all three were invisible
+with no validation error and no log line. Solids now carry a negative uv and
+take their colour from the instance, and the shader branches. If a rectangle
+disappears, suspect the texture path before the blend state.
+
+**Panes share one instance buffer, and queue writes land before submission.** A
+per-pane draw would rewrite the buffer between panes and the last pane would win;
+that is why `render::prepare` takes every visible pane at once. Cells outside a
+pane's rectangle are simply not emitted rather than scissored.
+
 ## Gotchas that are real
 
 | Symptom | Cause |
@@ -98,6 +110,8 @@ selected row was invisible until the highlight was drawn first.
 | `Terminal` cannot cross threads | it is `!Send`; each pane owns its own thread and `LocalSet` |
 | fish renders nothing, or writes nothing | it needs writable `XDG_*` dirs in the sandbox, and the terminal must reply on `on_pty_write` (a shell waits for its answer) |
 | `cargo test` does not refresh the binary | build first; `target/debug/dtr` is what you run, tests do not rebuild it |
+| A removed pane takes two panes with it | the recursive remove returned "delete me" and the grandparent deleted the collapsed subtree; only the direct parent may collapse |
+| Line height is far too small | swash reports `descent` as a *positive* distance below the baseline; negating it halves the cell |
 
 ## Where to look
 
@@ -107,3 +121,6 @@ selected row was invisible until the highlight was drawn first.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
 - `crates/dtr/src/app.rs` — the event loop, keys, and the palette glue.
+- `crates/dtr/src/layout.rs` — the split tree. It knows nothing about terminals;
+  a leaf is an id, and the tab's map decides what that id is.
+- `crates/dtr/src/render.rs` — glyph atlas and the instanced grid pass.
