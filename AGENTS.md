@@ -110,6 +110,12 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
+`Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler
+only parks the text in the pane's `copied` slot; the UI does the clipboard work
+and raises the toast. Replying `Err` for a non-text MIME is what tells the program
+the write was refused — returning without replying denies it silently.
+
 ## Profiling
 
 `./scripts/flamegraph.sh --demo` builds the `profiling` profile (release + debug

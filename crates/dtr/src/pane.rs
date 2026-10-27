@@ -349,6 +349,31 @@ async fn run(
     let reply_sink = Rc::clone(&replies);
 
     let mut term = Terminal::new(COLS, ROWS)?;
+
+    // OSC 52: a program (tmux, vim, an agent over ssh) asks the terminal to put
+    // something on the user's clipboard. The write arrives here; the UI does the
+    // actual clipboard work, because the pane has no window to ask.
+    {
+        let sink = Arc::clone(&copied);
+        term.on_clipboard_write(move |_term, write| {
+            // Every representation is the same value; text is what a terminal
+            // can carry, and the first text/plain wins.
+            let text = write
+                .contents()
+                .find(|content| content.mime.starts_with(b"text/"))
+                .map(|content| String::from_utf8_lossy(content.data).into_owned());
+            match text {
+                Some(text) => {
+                    tracing::debug!(bytes = text.len(), "clipboard write (osc 52)");
+                    if let Ok(mut slot) = sink.lock() {
+                        *slot = Some(text);
+                    }
+                    write.reply(Ok(()), false);
+                }
+                None => write.reply(Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported), false),
+            }
+        })?;
+    }
     if let Some(theme) = theme.as_ref() {
         if let Err(err) = theme.apply(&mut term) {
             tracing::warn!(theme = %theme.name, %err, "could not apply the theme");
