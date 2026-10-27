@@ -89,7 +89,7 @@ pub struct GridRenderer {
     shelf_x: u32,
     /// Keyed by (face, glyph id, size×4): the same character is a different
     /// bitmap in the bold face, and a different size is a different raster.
-    glyphs: HashMap<(u8, u16, u32), Glyph>,
+    glyphs: HashMap<(u32, u16, u32), Glyph>,
     fonts: Fonts,
     instances: Vec<Instance>,
     instance_buffer: Option<wgpu::Buffer>,
@@ -345,16 +345,31 @@ impl GridRenderer {
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
             let (x, y) = (x + origin_x, y + origin_y);
             let style = face_for(cell.bold, cell.italic);
+            // A wide character is drawn across the two cells it occupies.
+            // Without this the grid shows a one-cell glyph and a one-cell hole,
+            // which reads as broken spacing rather than as a wide character.
+            let wide = cell.wide;
             for ch in cell.text.chars() {
                 let Some(glyph) = self.glyph(device, queue, ch, style, look.size) else {
                     continue;
                 };
+                let (width, height, left, top) = if wide && glyph.width > 0.0 {
+                    let scale = (cell_w * 2.0 / glyph.width).min(cell_h / glyph.height.max(1.0));
+                    (
+                        glyph.width * scale,
+                        glyph.height * scale,
+                        glyph.left * scale,
+                        glyph.top * scale,
+                    )
+                } else {
+                    (glyph.width, glyph.height, glyph.left, glyph.top)
+                };
                 self.instances.push(Instance {
                     rect: [
-                        (x + glyph.left).round(),
-                        (y + glyph.top).round(),
-                        glyph.width,
-                        glyph.height,
+                        (x + left).round(),
+                        (y + top).round(),
+                        width,
+                        height,
                     ],
                     uv: glyph.uv,
                     colour: rgb(cell.fg),
@@ -438,13 +453,14 @@ impl GridRenderer {
         style: Face,
         size: f32,
     ) -> Option<Glyph> {
-        let glyph_id = self.fonts.glyph_id(style, ch)?;
-        let key = (style as u8, glyph_id, (size * 4.0) as u32);
+        let face = self.fonts.face_for(style, ch)?;
+        let glyph_id = self.fonts.glyph_id(face, ch)?;
+        let key = (face as u32, glyph_id, (size * 4.0) as u32);
         if let Some(glyph) = self.glyphs.get(&key) {
             return Some(*glyph);
         }
 
-        let image = self.fonts.rasterise(style, glyph_id, size)?;
+        let image = self.fonts.rasterise(face, glyph_id, size)?;
         let width = image.placement.width;
         let height = image.placement.height;
         if width == 0 || height == 0 {
@@ -509,7 +525,7 @@ impl GridRenderer {
             // bitmap's top edge; the cell origin is the top of the line, so the
             // glyph sits at ascent minus that.
             left: image.placement.left as f32,
-            top: self.fonts.metrics.ascent - image.placement.top as f32,
+            top: self.fonts.ascent(face, size) - image.placement.top as f32,
             width: width as f32,
             height: height as f32,
         };
@@ -617,9 +633,21 @@ struct Loaded {
 
 /// The font family: four faces, loaded once, with swash doing the rasterising.
 struct Fonts {
-    faces: [Loaded; 4],
+    /// Index 0..4 are the grid face in its four styles; anything above that is a
+    /// fallback loaded on demand, indexed by the order it was discovered.
+    faces: Vec<Loaded>,
     context: swash::scale::ScaleContext,
     metrics: Metrics,
+    /// Which face has each character in each style. `None` is cached too: a
+    /// character nobody covers must not be searched for twice.
+    resolved: HashMap<(u8, char), Option<usize>>,
+    /// Families to try, discovered on the first missing character.
+    candidates: Vec<fontique::FamilyId>,
+    /// Fallback faces already loaded, in the order they were found. A second
+    /// Han character is found here instead of walking every family again.
+    fallback_order: Vec<usize>,
+    collection: Option<fontique::Collection>,
+    source_cache: fontique::SourceCache,
 }
 
 impl Fonts {
@@ -666,32 +694,147 @@ impl Fonts {
         };
 
         Self {
-            faces,
+            faces: faces.into_iter().collect(),
             context,
             metrics,
+            resolved: HashMap::new(),
+            candidates: Vec::new(),
+            fallback_order: Vec::new(),
+            collection: None,
+            source_cache: fontique::SourceCache::default(),
         }
     }
 
-    fn font(&self, face: Face) -> Option<swash::FontRef<'_>> {
-        let loaded = &self.faces[face as usize];
+    /// The face index that has `ch` in `style`, loading a fallback if needed.
+    ///
+    /// A terminal that renders boxes for CJK is broken for half its users, and
+    /// the grid face is the wrong font to ask: the fallback is whichever
+    /// installed family covers the character. Loaded lazily and remembered, so
+    /// the search happens once per character, not once per cell.
+    fn face_for(&mut self, style: Face, ch: char) -> Option<usize> {
+        let primary = style as usize;
+        if self.glyph_id(primary, ch).is_some() {
+            return Some(primary);
+        }
+        if let Some(found) = self.resolved.get(&(style as u8, ch)) {
+            return *found;
+        }
+
+        // Already-loaded fallbacks first: one CJK family covers most CJK, and
+        // re-scanning every family per character would be a font load per cell.
+        for index in self.fallback_order.clone() {
+            if let Some(id) = self.glyph_id(index, ch) {
+                let _ = id;
+                self.resolved.insert((style as u8, ch), Some(index));
+                return Some(index);
+            }
+        }
+
+        if self.collection.is_none() {
+            self.collection = Some(fontique::Collection::new(
+                fontique::CollectionOptions::default(),
+            ));
+        }
+        if self.candidates.is_empty() {
+            if let Some(collection) = self.collection.as_mut() {
+                self.candidates = collection.family_ids().collect();
+            }
+        }
+
+        let mut found = None;
+        let weight = match style {
+            Face::Regular | Face::Italic => fontique::FontWeight::NORMAL,
+            Face::Bold | Face::BoldItalic => fontique::FontWeight::BOLD,
+        };
+        let slant = match style {
+            Face::Regular | Face::Bold => fontique::FontStyle::Normal,
+            Face::Italic | Face::BoldItalic => fontique::FontStyle::Italic,
+        };
+        // A fallback face is usually regular weight and upright even when the
+        // grid is bold or italic; asking for the exact style would miss it.
+        for (slant, weight) in [
+            (slant, weight),
+            (fontique::FontStyle::Normal, fontique::FontWeight::NORMAL),
+        ] {
+            for position in 0..self.candidates.len() {
+                let Some(collection) = self.collection.as_mut() else {
+                    break;
+                };
+                let Some(&id) = self.candidates.get(position) else {
+                    break;
+                };
+                let Some(family) = collection.family(id) else {
+                    continue;
+                };
+                let Some(font) = family.match_font(fontique::FontWidth::NORMAL, slant, weight, false)
+                else {
+                    continue;
+                };
+                let Some(bytes) = font.load(Some(&mut self.source_cache)) else {
+                    continue;
+                };
+                let index = font.index() as usize;
+                let Some(reference) = swash::FontRef::from_index(bytes.data(), index) else {
+                    continue;
+                };
+                if reference.charmap().map(ch) == 0 {
+                    continue;
+                }
+                drop(bytes);
+                // Reload to own the bytes: `font.load` borrows from the cache.
+                let Some(bytes) = font.load(None) else {
+                    continue;
+                };
+                self.faces.push(Loaded {
+                    bytes: bytes.data().to_vec(),
+                    index,
+                });
+                found = Some(self.faces.len() - 1);
+                self.fallback_order.push(self.faces.len() - 1);
+                tracing::debug!(character = %ch, family = family.name(), "fallback face");
+                break;
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+
+        self.resolved.insert((style as u8, ch), found);
+        found
+    }
+
+    fn font(&self, face: usize) -> Option<swash::FontRef<'_>> {
+        let loaded = self.faces.get(face)?;
         swash::FontRef::from_index(&loaded.bytes, loaded.index)
     }
 
-    fn glyph_id(&self, face: Face, ch: char) -> Option<u16> {
+    fn glyph_id(&self, face: usize, ch: char) -> Option<u16> {
         let font = self.font(face)?;
         let id = font.charmap().map(ch);
         (id != 0).then_some(id)
     }
 
+    /// The scaled ascent of one face, for placing its glyphs on the same
+    /// baseline as the grid. A fallback face rarely shares the grid's ascent,
+    /// and using the grid's would float its glyphs.
+    fn ascent(&self, face: usize, size: f32) -> f32 {
+        let Some(font) = self.font(face) else {
+            return self.metrics.ascent;
+        };
+        let metrics = font.metrics(&[]);
+        let units = f32::from(metrics.units_per_em).max(1.0);
+        metrics.ascent * size / units
+    }
+
     fn rasterise(
         &mut self,
-        face: Face,
+        face: usize,
         glyph_id: u16,
         size: f32,
     ) -> Option<swash::scale::image::Image> {
         // The font borrows the face's bytes, the context is a separate field:
         // split the borrow so both can be used at once.
-        let loaded = &self.faces[face as usize];
+        let loaded = self.faces.get(face)?;
         let font = swash::FontRef::from_index(&loaded.bytes, loaded.index)?;
         let context = &mut self.context;
         let mut scaler = context
@@ -821,5 +964,32 @@ impl Loaded {
             bytes: self.bytes.clone(),
             index: self.index,
         }
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    /// A CJK character must come from another family, and finding it must be
+    /// remembered rather than repeated for every cell.
+    #[test]
+    fn a_han_character_falls_back_to_a_face_that_has_it() {
+        let mut fonts = Fonts::load(&Look::default());
+        let Some(first) = fonts.face_for(Face::Regular, '日') else {
+            // No CJK font installed here; nothing to prove.
+            return;
+        };
+        assert!(first >= 4, "a fallback must not be one of the grid faces");
+        let second = fonts.face_for(Face::Regular, '本');
+        assert_eq!(second, Some(first), "the next character reuses the face");
+        assert_eq!(fonts.fallback_order.len(), 1, "one fallback was enough");
+    }
+
+    #[test]
+    fn latin_text_never_leaves_the_grid_face() {
+        let mut fonts = Fonts::load(&Look::default());
+        assert_eq!(fonts.face_for(Face::Regular, 'M'), Some(0));
+        assert_eq!(fonts.faces.len(), 4, "no fallback for plain text");
     }
 }

@@ -729,6 +729,7 @@ dependencies = [
  "tokio-serial",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "wgpu",
  "winit",
 ]

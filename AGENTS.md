@@ -110,6 +110,22 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**A missing glyph is not a missing character.** The grid face covers Latin; CJK,
+emoji and the rest come from another installed family. `Fonts::face_for` asks the
+grid face first, then the fallback faces it has already loaded (one Han family
+covers most Han), and only then walks every installed family, loading a face and
+testing its charmap. The result is cached per character, so a screen of 2000
+distinct Han characters costs one extra font load, not 2000.
+
+Two things that follow from it: the glyph atlas key includes the *face index*,
+because glyph ids collide between fonts; and a glyph is placed by the ascent of
+the face that produced it, because a fallback rarely shares the grid's ascent.
+
+**A wide character is two cells, not one.** The render iterator does not report
+cell width, so width comes from `unicode-width`: a character two cells wide is
+drawn across both cells, scaled to fit. Without that, the grid shows a one-cell
+glyph followed by a one-cell hole, which reads as broken spacing.
+
 **A modal must ignore key releases.** The release of the keystroke that opened a
 modal arrives while it is open, so handling releases as well as presses closed
 the settings menu the instant `Ctrl+,` was let go — it flashed and vanished and

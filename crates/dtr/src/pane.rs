@@ -27,6 +27,9 @@ pub const ROWS: u16 = 24;
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
     pub text: String,
+    /// A wide character occupies two cells; its glyph is drawn across both, or
+    /// the grid shows a one-cell glyph and a one-cell hole.
+    pub wide: bool,
     pub fg: [u8; 3],
     pub bg: [u8; 3],
     pub has_bg: bool,
@@ -1024,6 +1027,12 @@ fn fill_cells(
             };
             cell.graphemes_utf8(&mut text)?;
             out.text.push_str(&text);
+            // The render iterator does not report cell width, so measure the
+            // character: on a wcwidth grid, two cells means a wide glyph.
+            out.wide = text
+                .chars()
+                .next()
+                .is_some_and(|ch| unicode_width::UnicodeWidthChar::width(ch) == Some(2));
 
             if let Some(fg) = cell.fg_color()? {
                 out.fg = rgb(fg);
@@ -1070,6 +1079,7 @@ mod tests {
             for ch in chars {
                 cells.push(Cell {
                     text: ch.to_string(),
+                    wide: unicode_width::UnicodeWidthChar::width(ch) == Some(2),
                     fg: [255, 255, 255],
                     bg: [0, 0, 0],
                     has_bg: false,
