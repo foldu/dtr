@@ -4,6 +4,7 @@
 //! as well as for egui, and we want to redraw on bytes rather than on egui's
 //! animation clock.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -13,6 +14,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane, Transport};
 use crate::ui::Status;
 
@@ -20,20 +22,28 @@ pub enum UserEvent {
     Frame,
 }
 
+/// Everything a fresh window needs that is decided on the command line.
+pub struct Startup {
+    pub transport: Transport,
+    pub send: Vec<u8>,
+    pub log: Option<PathBuf>,
+    pub store: Option<Arc<dtr_store::Store>>,
+    /// Open the palette on start (also how it gets into screenshots).
+    pub palette: bool,
+}
+
 /// Render one frame offscreen and write it to `path`, without a window.
 pub fn capture_headless(
+    startup: Startup,
     path: &std::path::Path,
     width: u32,
     height: u32,
-    transport: Transport,
     delay: std::time::Duration,
-    send: Vec<u8>,
-    log: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    let label = transport.describe();
-    let pane = Pane::spawn(transport, log, || {})?;
-    if !send.is_empty() {
-        pane.write(send);
+    let label = startup.transport.describe();
+    let pane = Pane::spawn(startup.transport, startup.log.clone(), || {})?;
+    if !startup.send.is_empty() {
+        pane.write(startup.send.clone());
     }
 
     // Give the session a moment to produce output (a serial device's prompt),
@@ -56,7 +66,15 @@ pub fn capture_headless(
         }
     }
 
-    crate::screenshot::capture(frame.as_ref(), path, width, height, &label, pane.stats())
+    crate::screenshot::capture(
+        frame.as_ref(),
+        path,
+        width,
+        height,
+        &label,
+        pane.stats(),
+        startup.palette,
+    )
 }
 
 /// One place that decides which backends wgpu may use.
@@ -72,21 +90,19 @@ pub(crate) fn instance() -> wgpu::Instance {
     wgpu::Instance::new(descriptor)
 }
 
-pub fn run(
-    transport: Transport,
-    send: Vec<u8>,
-    log: Option<std::path::PathBuf>,
-) -> anyhow::Result<()> {
+pub fn run(startup: Startup) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
-    let label = transport.describe();
+    let label = startup.transport.describe();
 
-    let pane = Pane::spawn(transport, log, move || {
-        let _ = proxy.send_event(UserEvent::Frame);
+    let pane = Pane::spawn(startup.transport, startup.log.clone(), {
+        let proxy = proxy.clone();
+        move || {
+            let _ = proxy.send_event(UserEvent::Frame);
+        }
     })?;
-
-    if !send.is_empty() {
-        pane.write(send);
+    if !startup.send.is_empty() {
+        pane.write(startup.send.clone());
     }
 
     let mut app = App {
@@ -97,6 +113,11 @@ pub fn run(
         label,
         meter: Meter::new(),
         fatal: None,
+        quit: false,
+        palette: Palette::new(startup.palette),
+        proxy,
+        store: startup.store,
+        log: startup.log,
     };
     event_loop.run_app(&mut app)?;
     match app.fatal {
@@ -114,6 +135,60 @@ struct App {
     meter: Meter,
     /// Set when the pane fails; `run` returns it once the loop has stopped.
     fatal: Option<String>,
+    quit: bool,
+    palette: Palette,
+    proxy: EventLoopProxy<UserEvent>,
+    store: Option<Arc<dtr_store::Store>>,
+    log: Option<PathBuf>,
+}
+
+impl App {
+    /// Swap the session under the window. Dropping the old pane closes its
+    /// channels, which ends its thread and takes a shell process with it.
+    fn start(&mut self, transport: Transport) {
+        let proxy = self.proxy.clone();
+        match Pane::spawn(transport.clone(), self.log.clone(), move || {
+            let _ = proxy.send_event(UserEvent::Frame);
+        }) {
+            Ok(pane) => {
+                self.pane = pane;
+                self.label = transport.describe();
+                self.frame = None;
+            }
+            Err(err) => {
+                tracing::error!(%err, "could not start the session");
+                self.fatal = Some(format!("{err}"));
+            }
+        }
+    }
+
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Connect(port) => {
+                let remembered = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.serial(&port).ok().flatten())
+                    .unwrap_or_default();
+                self.start(Transport::Serial(crate::serial::Config {
+                    port,
+                    baud: remembered.baud,
+                    cr_to_crlf: remembered.cr_to_crlf,
+                }));
+            }
+            Action::Shell(shell) => {
+                let program = (!shell.is_empty()).then_some(shell);
+                self.start(Transport::Shell(crate::pty::Config { program }));
+            }
+            Action::Replay(path) => self.start(Transport::Replay(PathBuf::from(path))),
+            Action::Demo => self.start(Transport::Demo),
+            Action::Ssh(host) => {
+                // No SSH transport yet; saying so is better than doing nothing.
+                tracing::warn!(%host, "ssh sessions are not implemented yet");
+            }
+            Action::Quit => self.quit = true,
+        }
+    }
 }
 
 /// Byte rate over a short window. Cheap, and it would look wrong if it updated
@@ -210,8 +285,19 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
-                    self.pane.write(bytes);
+                let palette_key = self.modifiers.control_key()
+                    && self.modifiers.shift_key()
+                    && matches!(
+                        event.logical_key,
+                        winit::keyboard::Key::Character(ref character) if character.eq_ignore_ascii_case("p")
+                    );
+                if palette_key && event.state == winit::event::ElementState::Pressed {
+                    self.palette.toggle();
+                } else if !self.palette.open {
+                    // The palette owns the keyboard while it is open.
+                    if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
+                        self.pane.write(bytes);
+                    }
                 }
             }
             WindowEvent::Resized(size) => gpu.resize(size),
@@ -226,8 +312,15 @@ impl ApplicationHandler<UserEvent> for App {
                     rx_rate: self.meter.rx_rate,
                     tx_rate: self.meter.tx_rate,
                 };
-                if let Err(err) = gpu.render(self.frame.as_ref(), &status) {
+                let mut action = None;
+                if let Err(err) = gpu.render(self.frame.as_ref(), &status, &mut self.palette, &mut action) {
                     tracing::error!(%err, "render");
+                }
+                if let Some(action) = action {
+                    self.apply(action);
+                }
+                if self.quit {
+                    event_loop.exit();
                 }
             }
             _ => {}
@@ -325,7 +418,13 @@ impl Gpu {
         self.window.request_redraw();
     }
 
-    fn render(&mut self, frame: Option<&Frame>, status: &Status) -> anyhow::Result<()> {
+    fn render(
+        &mut self,
+        frame: Option<&Frame>,
+        status: &Status,
+        palette: &mut Palette,
+        action: &mut Option<Action>,
+    ) -> anyhow::Result<()> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -356,6 +455,9 @@ impl Gpu {
                         ui.label("waiting for the pane…");
                     }
                 });
+                if let Some(chosen) = palette.ui(ui) {
+                    *action = Some(chosen);
+                }
         });
 
         self.egui_state

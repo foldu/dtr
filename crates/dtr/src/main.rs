@@ -3,10 +3,12 @@
 mod app;
 mod input;
 mod logbook;
+mod palette;
 mod pane;
 mod pty;
 mod screenshot;
 mod serial;
+mod sources;
 mod ui;
 
 use pane::Transport;
@@ -39,6 +41,10 @@ struct Args {
     /// Show a canned screen instead of launching anything
     #[arg(long)]
     demo: bool,
+
+    /// Open the command palette on start
+    #[arg(long)]
+    palette: bool,
 
     /// Serial byte mapping: `cr=crlf` (default) or `none` (remembered per port)
     #[arg(long, value_name = "MAP")]
@@ -111,13 +117,13 @@ fn main() -> anyhow::Result<()> {
 
     // Never fatal: a broken or read-only state file must not stop a terminal
     // from opening a port.
-    let store = if args.no_remember {
+    let store: Option<std::sync::Arc<dtr_store::Store>> = if args.no_remember {
         None
     } else {
         let path = args.db.clone().or_else(dtr_store::Store::default_path);
         match path {
             Some(path) => match dtr_store::Store::open(&path) {
-                Ok(store) => Some(store),
+                Ok(store) => Some(std::sync::Arc::new(store)),
                 Err(err) => {
                     tracing::warn!(path = %path.display(), %err, "no remembered settings");
                     None
@@ -176,7 +182,7 @@ fn main() -> anyhow::Result<()> {
 
     // A session is recorded when it starts, so a crash leaves a row with no
     // end — which is exactly what `unfinished` in the listing means.
-    let session = match (store.as_ref(), &transport) {
+    let session = match (store.as_deref(), &transport) {
         (_, Transport::Demo) | (None, _) => None,
         (Some(store), transport) => {
             let mut record = dtr_store::SessionRecord {
@@ -203,14 +209,27 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = args.screenshot.as_deref() {
         let (width, height) = parse_size(&args.size)?;
         let delay = std::time::Duration::from_millis(args.screenshot_delay);
-        let result =
-            app::capture_headless(path, width, height, transport, delay, send, args.log.clone());
-        finish(store.as_ref(), session, "screenshot", &result);
+        let startup = app::Startup {
+            transport,
+            send,
+            log: args.log.clone(),
+            store: store.clone(),
+            palette: args.palette,
+        };
+        let result = app::capture_headless(startup, path, width, height, delay);
+        finish(store.as_deref(), session, "screenshot", &result);
         return result;
     }
 
-    let result = app::run(transport, send, args.log.clone());
-    finish(store.as_ref(), session, "closed", &result);
+    let startup = app::Startup {
+        transport,
+        send,
+        log: args.log.clone(),
+        store: store.clone(),
+        palette: args.palette,
+    };
+    let result = app::run(startup);
+    finish(store.as_deref(), session, "closed", &result);
     result
 }
 

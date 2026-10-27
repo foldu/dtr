@@ -70,6 +70,7 @@
         };
       };
       buildInputs = [
+        pkgs.udev
         libghostty-vt.dev
         pkgs.vulkan-loader
         pkgs.libxkbcommon
@@ -81,7 +82,8 @@
         pkgs.libXrandr
       ];
       preBuild = ''
-        export PKG_CONFIG_PATH=${libghostty-vt.dev}/share/pkgconfig
+        # serialport enumerates through libudev, whose .pc lives in its dev output.
+        export PKG_CONFIG_PATH=${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig
       '';
       nativeBuildInputs = [pkgs.pkg-config pkgs.makeWrapper];
 
@@ -185,12 +187,13 @@
         pkgs.cargo-zigbuild
         pkgs.zig_0_17
         pkgs.pkg-config
+        pkgs.udev
         pkgs.socat
         pkgs.just
       ];
 
       shellHook = ''
-        export PKG_CONFIG_PATH="${libghostty-vt.dev}/share/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export PKG_CONFIG_PATH="${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
       '';
 
       # winit resolves these with dlopen; make them visible to `cargo run`.
@@ -204,6 +207,7 @@
         libXcursor
         libXi
         libXrandr
+        udev
       ]);
     };
   };

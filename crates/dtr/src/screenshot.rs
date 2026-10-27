@@ -17,6 +17,7 @@ pub fn capture(
     height: u32,
     label: &str,
     stats: &crate::pane::Stats,
+    show_palette: bool,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -76,6 +77,7 @@ pub fn capture(
         tx_rate: 0.0,
     };
 
+    let mut palette = crate::palette::Palette::new(show_palette);
     let mut full_output = ctx.run_ui(raw_input, |ui| {
         egui::Panel::bottom("dtr-status")
             .frame(
@@ -92,6 +94,7 @@ pub fn capture(
                     ui.label("no frame yet");
                 }
             });
+        palette.ui(ui);
     });
 
     let pixels_per_point = full_output.pixels_per_point;

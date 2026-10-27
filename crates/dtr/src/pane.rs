@@ -72,6 +72,7 @@ impl Stats {
 }
 
 /// What a pane is attached to.
+#[derive(Clone)]
 pub enum Transport {
     Serial(serial::Config),
     Shell(pty::Config),

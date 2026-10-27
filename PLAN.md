@@ -379,8 +379,24 @@ released 2020, fine but quieter) and `frizbee` (MIT, active, carries `serde`). N
 engine lives in `reedline`, which is a whole crossterm line editor — the right idea, the wrong shape
 for an egui widget, so the engine is ours and only the scoring is borrowed.
 
-Still open in M1: the palette UI itself, serial-port enumeration with USB VID/PID, reconnect-on-replug,
-timestamped log mode.
+**The palette is drawn and it starts sessions.** Ctrl+Shift+P (or `--palette`) opens an overlay in
+the same `Ui`, not an `egui::Window`: a palette is a fixed thing at a fixed place, and a floating
+window would invite dragging it around a terminal that has no room for it. It owns the keyboard while
+open, so arrow keys move the selection instead of the caret, and it swaps the session underneath the
+window when you accept a line — `connect /dev/ttyUSB0` replaces the pane, using the baud remembered
+for that port.
+
+Sources are read when the palette opens, not at startup: the device you want is usually the one you
+just plugged in. Ports carry USB VID:PID and product strings, which is what tells two identical
+adapters apart and what reconnect-by-device will match on. SSH hosts come from `dtr-sshconfig` as
+aliases only — a wildcard pattern is not something you can connect to — and `ssh` currently reports
+that it is not implemented rather than silently doing nothing.
+
+Two things this cost: `egui::Window` produced nothing inside a `run_ui` pass (the palette drew no
+shapes at all), and painting the selected row's highlight *after* its labels hid the selected row's
+own text. Both are the kind of thing only a screenshot catches.
+
+Still open in M1: reconnect-on-replug, DTR/RTS/break, timestamped log mode.
 
 ### M2 — real renderer
 
