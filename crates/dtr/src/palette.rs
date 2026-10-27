@@ -33,26 +33,48 @@ pub struct Palette {
     inline: Option<Inline>,
 }
 
+impl Default for Palette {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
 impl Palette {
+    /// An empty palette. Deliberately *not* reading the machine: this is
+    /// constructed on every frame (the render path takes it out of the app to
+    /// satisfy the borrow checker), and `engine()` walks all of sysfs through
+    /// serialport. That walk was 38% of a profile of somebody scrolling.
     pub fn new(open: bool) -> Self {
         let mut palette = Self {
-            engine: sources::engine(),
+            engine: dtr_complete::Engine::new(),
             open,
             input: String::new(),
             selected: 0,
             completions: Vec::new(),
             inline: None,
         };
+        if open {
+            palette.refresh();
+        }
         palette.recompute();
         palette
+    }
+
+    /// Re-read ports and hosts: the device you want is probably the one you
+    /// just plugged in.
+    fn refresh(&mut self) {
+        let started = std::time::Instant::now();
+        self.engine = sources::engine();
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "completion sources refreshed"
+        );
     }
 
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if self.open {
-            // Re-read ports and hosts: the device you want is probably the one
-            // you just plugged in.
-            self.engine = sources::engine();
+            self.refresh();
             self.recompute();
         }
     }

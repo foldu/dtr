@@ -1136,7 +1136,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // Split the borrows explicitly: the palette is `&mut` while the
                 // frame, pane and look are `&`, and taking them out one by one
                 // is what makes that legal.
-                let mut palette = std::mem::replace(&mut self.palette, Palette::new(false));
+                // `take` rather than building a placeholder: `Palette::new`
+                // reads the machine, and this runs every frame.
+                let mut palette = std::mem::take(&mut self.palette);
                 let tab = &self.tabs[self.active];
                 let screen = (gpu.config.width as f32, gpu.config.height as f32);
                 let scale = gpu.scale();
