@@ -15,6 +15,9 @@ use toml_edit::{DocumentMut, Item, Table, value};
 pub struct Config {
     pub serial: Serial,
     pub font: Font,
+    /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
+    /// terminal's built-in colours.
+    pub theme: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +51,7 @@ impl Default for Config {
                 size: 14.0,
                 path: None,
             },
+            theme: None,
         }
     }
 }
@@ -107,6 +111,13 @@ impl Config {
             }
         }
 
+        if let Some(theme) = document.get("theme") {
+            let name = theme
+                .as_str()
+                .ok_or_else(|| Error::Value("theme must be a string".into()))?;
+            config.theme = Some(name.to_owned());
+        }
+
         if let Some(font) = document.get("font").and_then(Item::as_table) {
             if let Some(size) = font.get("size") {
                 let size = size
@@ -154,9 +165,6 @@ pub fn set_value(path: &Path, key: &str, raw: &str) -> Result<(), Error> {
 /// The pure half of [`set_value`], so it can be tested without a file.
 pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
     let mut document: DocumentMut = text.parse().map_err(|err| Error::Syntax(format!("{err}")))?;
-    let (section, name) = key
-        .split_once('.')
-        .ok_or_else(|| Error::Value(format!("{key:?} is not section.key")))?;
 
     let item: Item = match raw {
         "true" => value(true),
@@ -170,20 +178,31 @@ pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
         },
     };
 
-    if document.get(section).is_none() {
-        let mut table = Table::new();
-        table.insert(name, item);
-        document.insert(section, Item::Table(table));
-    } else {
-        let table = document[section]
-            .as_table_mut()
-            .ok_or_else(|| Error::Value(format!("{section} is not a table")))?;
-        match table.get_mut(name) {
-            // Replacing the value in place keeps the key and the comments
-            // written above it; only the value's own text changes.
+    match key.split_once('.') {
+        // A bare key is top level, like `theme = "kanagawa wave"`.
+        None => match document.get_mut(key) {
             Some(existing) => *existing = item,
             None => {
+                document.insert(key, item);
+            }
+        },
+        Some((section, name)) => {
+            if document.get(section).is_none() {
+                let mut table = Table::new();
                 table.insert(name, item);
+                document.insert(section, Item::Table(table));
+            } else {
+                let table = document[section]
+                    .as_table_mut()
+                    .ok_or_else(|| Error::Value(format!("{section} is not a table")))?;
+                match table.get_mut(name) {
+                    // Replacing the value in place keeps the key and the
+                    // comments written above it; only the value's text changes.
+                    Some(existing) => *existing = item,
+                    None => {
+                        table.insert(name, item);
+                    }
+                }
             }
         }
     }
@@ -204,6 +223,9 @@ baud = 115200
 cr_to_crlf = true
 # Follow the device if it is unplugged and replugged under a new name.
 auto_reconnect = true
+
+# Name of a theme file to apply; see `dtr --themes`.
+# theme = "kanagawa wave"
 
 [font]
 # Grid font size in points.
@@ -306,7 +328,17 @@ path = "/tmp/mono.ttf"
     }
 
     #[test]
-    fn a_key_without_a_section_is_an_error() {
-        assert!(set_in_text("", "baud", "9600").is_err());
+    fn a_top_level_key_is_set_in_place() {
+        let after = set_in_text("# my config\ntheme = \"old\"\n\n[font]\nsize = 14\n", "theme", "kanagawa wave").unwrap();
+        assert!(after.contains("# my config"), "{after}");
+        assert!(after.contains("theme = \"kanagawa wave\""), "{after}");
+        assert!(after.contains("size = 14"), "{after}");
+    }
+
+    #[test]
+    fn a_top_level_key_is_created_when_missing() {
+        let after = set_in_text("[font]\nsize = 14\n", "theme", "kanagawa wave").unwrap();
+        assert!(after.contains("theme = \"kanagawa wave\""), "{after}");
+        assert!(after.contains("size = 14"), "{after}");
     }
 }

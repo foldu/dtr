@@ -193,6 +193,7 @@ impl Pane {
     pub fn spawn(
         transport: Transport,
         log: Option<(PathBuf, serial::LogFormat)>,
+        theme: Option<crate::theme::Theme>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
@@ -229,6 +230,7 @@ impl Pane {
                         counted,
                         log,
                         copy_sink,
+                        theme,
                     )
                     .await
                     {
@@ -290,6 +292,7 @@ async fn run(
     stats: Arc<Stats>,
     log_path: Option<(PathBuf, serial::LogFormat)>,
     copied: Arc<Mutex<Option<String>>>,
+    theme: Option<crate::theme::Theme>,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
     // which is what you want when the point is to find out what the device did.
@@ -318,6 +321,13 @@ async fn run(
     let reply_sink = Rc::clone(&replies);
 
     let mut term = Terminal::new(COLS, ROWS)?;
+    if let Some(theme) = theme.as_ref() {
+        if let Err(err) = theme.apply(&mut term) {
+            tracing::warn!(theme = %theme.name, %err, "could not apply the theme");
+        } else {
+            tracing::info!(theme = %theme.name, "theme applied");
+        }
+    }
     term.on_pty_write(move |_term, data| {
         reply_sink.borrow_mut().extend_from_slice(data);
     })?;

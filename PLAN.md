@@ -444,8 +444,22 @@ Precedence is command line, then config file, then the remembered port settings,
 of the last session.
 
 `font.size` and `font.path` are honoured: a `.ttf`/`.otf` is loaded into egui's monospace family at
-context creation (loading per frame would rebuild the glyph atlas on every repaint). Colours are not
-configurable yet — that waits on `docs/themes.md`.
+context creation (loading per frame would rebuild the glyph atlas on every repaint).
+
+**Themes are one file per theme, referenced by name**: `theme = "kanagawa wave"` in the config, and
+the file lives in `<config>/dtr/themes/`, falling back to `<config>/ghostty/themes/` so the themes a
+user already collected work unchanged. The format is Ghostty's `key = value` — `background`,
+`foreground`, `cursor-color`, and `palette = N=#rrggbb` for the sixteen ANSI colours — parsed with the
+VT core's own colour parser, so `#rgb`, `#rrggbb` and X11 names all work. Unknown keys (fonts, window
+chrome) are ignored rather than treated as errors, which is what makes reading someone else's theme
+files possible. `dtr --themes` lists what it can see.
+
+The theme is applied to the *terminal*, not to the renderer: `set_default_color_palette` plus the
+default fg/bg/cursor means the whole 256-colour cube follows, not just the sixteen named colours.
+The status bar and palette are still hardcoded greys — that is the visible seam.
+
+Colours in the config file itself are deliberately not supported: a theme is a document with a name,
+and pointing at one beats duplicating sixteen hex triplets inline.
 
 ### M2 — real renderer
 

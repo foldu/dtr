@@ -10,6 +10,7 @@ mod pty;
 mod screenshot;
 mod serial;
 mod sources;
+mod theme;
 mod ui;
 
 use pane::Transport;
@@ -54,6 +55,10 @@ struct Args {
     /// Print the config file path and exit
     #[arg(long)]
     config_path: bool,
+
+    /// List the themes found in the search paths and exit
+    #[arg(long)]
+    themes: bool,
 
     /// Write a commented default config file, if there is none
     #[arg(long)]
@@ -146,6 +151,20 @@ fn main() -> anyhow::Result<()> {
         println!("{}: {} = {}", config_path.display(), pair[0], pair[1]);
         return Ok(());
     }
+    if args.themes {
+        let names = theme::names();
+        if names.is_empty() {
+            println!("no themes found; looked in:");
+            for path in theme::search_paths() {
+                println!("  {}", path.display());
+            }
+        } else {
+            for name in names {
+                println!("{name}");
+            }
+        }
+        return Ok(());
+    }
     if args.config_init {
         if config_path.exists() {
             println!("{} already exists", config_path.display());
@@ -167,6 +186,18 @@ fn main() -> anyhow::Result<()> {
             tracing::warn!(path = %config_path.display(), %err, "config file");
             dtr_config::Config::default()
         }
+    };
+    // A theme that cannot be found is worth saying loudly once, then carrying
+    // on with the built-in colours: a wrong name must not stop a session.
+    let theme = match config.theme.as_deref() {
+        Some(name) => match theme::load(name) {
+            Ok(theme) => Some(theme),
+            Err(err) => {
+                tracing::warn!(%err, "theme");
+                None
+            }
+        },
+        None => None,
     };
     let look = ui::Look {
         size: config.font.size,
@@ -292,6 +323,7 @@ fn main() -> anyhow::Result<()> {
             store: store.clone(),
             palette: args.palette,
             look: look.clone(),
+            theme: theme.clone(),
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         finish(store.as_deref(), session, "screenshot", &result);
@@ -305,6 +337,7 @@ fn main() -> anyhow::Result<()> {
         store: store.clone(),
         palette: args.palette,
         look,
+        theme,
     };
     let result = app::run(startup);
     finish(store.as_deref(), session, "closed", &result);

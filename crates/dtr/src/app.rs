@@ -32,6 +32,7 @@ pub struct Startup {
     /// Open the palette on start (also how it gets into screenshots).
     pub palette: bool,
     pub look: Look,
+    pub theme: Option<crate::theme::Theme>,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -44,7 +45,12 @@ pub fn capture_headless(
 ) -> anyhow::Result<()> {
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
-    let pane = Pane::spawn(startup.transport, startup.log.clone(), || {})?;
+    let pane = Pane::spawn(
+        startup.transport,
+        startup.log.clone(),
+        startup.theme.clone(),
+        || {},
+    )?;
     if !startup.send.is_empty() {
         pane.write(startup.send.clone());
     }
@@ -101,7 +107,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
 
-    let pane = Pane::spawn(startup.transport, startup.log.clone(), {
+    let pane = Pane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
         let proxy = proxy.clone();
         move || {
             let _ = proxy.send_event(UserEvent::Frame);
@@ -122,6 +128,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         quit: false,
         palette: Palette::new(startup.palette),
         look: startup.look.clone(),
+        theme: startup.theme.clone(),
         proxy,
         store: startup.store,
         log: startup.log,
@@ -153,6 +160,7 @@ struct App {
     serial: bool,
     echo: bool,
     look: Look,
+    theme: Option<crate::theme::Theme>,
 }
 
 impl App {
@@ -160,7 +168,7 @@ impl App {
     /// channels, which ends its thread and takes a shell process with it.
     fn start(&mut self, transport: Transport) {
         let proxy = self.proxy.clone();
-        match Pane::spawn(transport.clone(), self.log.clone(), move || {
+        match Pane::spawn(transport.clone(), self.log.clone(), self.theme.clone(), move || {
             let _ = proxy.send_event(UserEvent::Frame);
         }) {
             Ok(pane) => {
