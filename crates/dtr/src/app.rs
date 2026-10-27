@@ -14,9 +14,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+use crate::explorer::{Explorer, PaneView as FilePaneView};
 use crate::palette::{Action, Palette};
+use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
-use crate::pane::{Frame, Pane, Transport};
 use crate::ui::Status;
 
 pub enum UserEvent {
@@ -39,6 +40,8 @@ pub struct Startup {
     pub scroll: i64,
     /// Draw the capture as a split, to review the layout (screenshots).
     pub split: Option<crate::layout::Axis>,
+    /// Open a file pane beside the initial session, at this directory.
+    pub files: Option<PathBuf>,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -51,7 +54,7 @@ pub fn capture_headless(
 ) -> anyhow::Result<()> {
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
-    let pane = Pane::spawn(
+    let pane = TermPane::spawn(
         startup.transport,
         startup.log.clone(),
         startup.theme.clone(),
@@ -87,6 +90,13 @@ pub fn capture_headless(
         }
     }
 
+    // The file pane is static for a capture: open it next to the session and
+    // let the screenshot path lay the two out side by side.
+    let files = startup
+        .files
+        .as_ref()
+        .map(|path| Explorer::new(Some(path.clone())));
+
     crate::screenshot::capture(
         frame.as_ref(),
         path,
@@ -99,6 +109,7 @@ pub fn capture_headless(
         &startup.look,
         startup.select,
         startup.split,
+        files.as_ref(),
     )
 }
 
@@ -121,7 +132,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
 
-    let pane = Pane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
+    let pane = TermPane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
         let proxy = proxy.clone();
         move || {
             let _ = proxy.send_event(UserEvent::Frame);
@@ -134,7 +145,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let mut app = App {
         tabs: vec![Tab::new(
             1,
-            Session {
+            Pane::Terminal(Session {
                 pane,
                 frame: None,
                 label,
@@ -142,7 +153,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 echo: false,
                 selection: startup.select,
                 meter: Meter::new(),
-            },
+            }),
         )],
         active: 0,
         next_leaf: 2,
@@ -160,6 +171,11 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         cursor_position: None,
         frames_drawn: 0,
     };
+    // `--files` for screenshots and for starting next to a listing; the pane
+    // gets focus, so the arrow keys work immediately.
+    if let Some(path) = startup.files.clone() {
+        app.split_files(Some(path));
+    }
     event_loop.run_app(&mut app)?;
     match app.fatal {
         Some(err) => anyhow::bail!("{err}"),
@@ -188,11 +204,37 @@ fn closed(active: usize, count: usize) -> Option<usize> {
     Some(active.min(count - 2))
 }
 
+/// Translate the keys a file pane understands. Named arrows are
+/// keyboard-layout independent; `h`, `r`, `g` and `G` are the vim-ish ones the
+/// brief asks for. Modifiers are filtered by the caller.
+fn explorer_key(event: &winit::event::KeyEvent) -> Option<crate::explorer::Key> {
+    use winit::keyboard::{Key, NamedKey};
+
+    if event.state != winit::event::ElementState::Pressed {
+        return None;
+    }
+    match &event.logical_key {
+        Key::Named(NamedKey::ArrowUp) => Some(crate::explorer::Key::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(crate::explorer::Key::Down),
+        Key::Named(NamedKey::ArrowLeft) => Some(crate::explorer::Key::Left),
+        Key::Named(NamedKey::Enter) => Some(crate::explorer::Key::Enter),
+        Key::Named(NamedKey::Backspace) => Some(crate::explorer::Key::Left),
+        Key::Character(text) => match text.as_str() {
+            "h" => Some(crate::explorer::Key::Left),
+            "r" => Some(crate::explorer::Key::Reload),
+            "g" => Some(crate::explorer::Key::Top),
+            "G" => Some(crate::explorer::Key::Bottom),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// One open session. Tabs are just these, in order; only the active one is
 /// drawn, but the others keep running and keep their own scrollback, selection
 /// and statistics.
 struct Session {
-    pane: Pane,
+    pane: TermPane,
     frame: Option<Frame>,
     label: String,
     /// Whether this session has modem lines, for the status strip.
@@ -203,6 +245,37 @@ struct Session {
     meter: Meter,
 }
 
+/// What a leaf contains. The layout only knows leaf ids; this is the map entry
+/// that says what the id *is*, which is why a widget pane is a new variant here
+/// rather than a change to the split tree.
+enum Pane {
+    Terminal(Session),
+    Files(Explorer),
+}
+
+impl Pane {
+    fn terminal(&self) -> Option<&Session> {
+        match self {
+            Pane::Terminal(session) => Some(session),
+            Pane::Files(_) => None,
+        }
+    }
+
+    fn terminal_mut(&mut self) -> Option<&mut Session> {
+        match self {
+            Pane::Terminal(session) => Some(session),
+            Pane::Files(_) => None,
+        }
+    }
+
+    fn explorer(&self) -> Option<&Explorer> {
+        match self {
+            Pane::Files(explorer) => Some(explorer),
+            Pane::Terminal(_) => None,
+        }
+    }
+}
+
 /// One tab: a layout of panes, the panes themselves, and which one has focus.
 ///
 /// The layout knows nothing about what a pane *is*; `leaves` is the map that
@@ -210,14 +283,14 @@ struct Session {
 /// rather than a change to the geometry.
 struct Tab {
     layout: crate::layout::Layout,
-    leaves: std::collections::BTreeMap<crate::layout::LeafId, Session>,
+    leaves: std::collections::BTreeMap<crate::layout::LeafId, Pane>,
     focus: crate::layout::LeafId,
 }
 
 impl Tab {
-    fn new(id: crate::layout::LeafId, session: Session) -> Self {
+    fn new(id: crate::layout::LeafId, pane: Pane) -> Self {
         let mut leaves = std::collections::BTreeMap::new();
-        leaves.insert(id, session);
+        leaves.insert(id, pane);
         Self {
             layout: crate::layout::Layout::leaf(id),
             leaves,
@@ -225,12 +298,34 @@ impl Tab {
         }
     }
 
-    fn focused(&self) -> &Session {
-        &self.leaves[&self.focus]
+    fn focused_terminal(&self) -> Option<&Session> {
+        self.leaves.get(&self.focus).and_then(Pane::terminal)
     }
 
-    fn focused_mut(&mut self) -> &mut Session {
-        self.leaves.get_mut(&self.focus).expect("focus is a leaf")
+    fn focused_terminal_mut(&mut self) -> Option<&mut Session> {
+        let focus = self.focus;
+        self.leaves.get_mut(&focus).and_then(Pane::terminal_mut)
+    }
+
+    fn focused_explorer(&self) -> Option<&Explorer> {
+        self.leaves.get(&self.focus).and_then(Pane::explorer)
+    }
+
+    fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
+        let focus = self.focus;
+        match self.leaves.get_mut(&focus) {
+            Some(Pane::Files(explorer)) => Some(explorer),
+            _ => None,
+        }
+    }
+
+    /// The first terminal leaf in tree order, which is where a file pane puts
+    /// the path the user picked. `None` when the tab is all files.
+    fn first_terminal(&self) -> Option<crate::layout::LeafId> {
+        self.layout
+            .leaves()
+            .into_iter()
+            .find(|id| matches!(self.leaves.get(id), Some(Pane::Terminal(_))))
     }
 }
 
@@ -255,12 +350,22 @@ struct App {
 }
 
 impl App {
-    fn session(&self) -> &Session {
-        self.tabs[self.active].focused()
+    /// The focused terminal, when the focused pane is one. A file pane makes
+    /// this `None`; callers that are terminal-only must handle that.
+    fn session(&self) -> Option<&Session> {
+        self.tabs[self.active].focused_terminal()
     }
 
-    fn session_mut(&mut self) -> &mut Session {
-        self.tabs[self.active].focused_mut()
+    fn session_mut(&mut self) -> Option<&mut Session> {
+        self.tabs[self.active].focused_terminal_mut()
+    }
+
+    fn focused_explorer(&self) -> Option<&Explorer> {
+        self.tabs[self.active].focused_explorer()
+    }
+
+    fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
+        self.tabs[self.active].focused_explorer_mut()
     }
 
     /// Open a session in a new tab and switch to it. The palette's actions all
@@ -268,7 +373,7 @@ impl App {
     /// somewhere would lose the one you were looking at.
     fn open(&mut self, transport: Transport) {
         let proxy = self.proxy.clone();
-        let spawned = Pane::spawn(
+        let spawned = TermPane::spawn(
             transport.clone(),
             self.log.clone(),
             self.theme.clone(),
@@ -289,7 +394,7 @@ impl App {
                 };
                 let id = self.next_leaf;
                 self.next_leaf += 1;
-                self.tabs.push(Tab::new(id, session));
+                self.tabs.push(Tab::new(id, Pane::Terminal(session)));
                 self.active = self.tabs.len() - 1;
             }
             Err(err) => {
@@ -330,7 +435,7 @@ impl App {
     /// Split the focused pane and give the new one its own session.
     fn split(&mut self, axis: crate::layout::Axis, transport: Transport) {
         let proxy = self.proxy.clone();
-        let spawned = Pane::spawn(
+        let spawned = TermPane::spawn(
             transport.clone(),
             self.log.clone(),
             self.theme.clone(),
@@ -355,7 +460,7 @@ impl App {
         }
         tab.leaves.insert(
             id,
-            Session {
+            Pane::Terminal(Session {
                 pane,
                 frame: None,
                 label: transport.describe(),
@@ -363,9 +468,42 @@ impl App {
                 echo: false,
                 selection: None,
                 meter: Meter::new(),
-            },
+            }),
         );
         tab.focus = id;
+    }
+
+    /// Split the focused pane and put a file manager in the new half. Side by
+    /// side is the useful default: a listing next to the command line it feeds.
+    fn split_files(&mut self, path: Option<PathBuf>) {
+        let id = self.next_leaf;
+        self.next_leaf += 1;
+        let tab = &mut self.tabs[self.active];
+        let target = tab.focus;
+        if !tab
+            .layout
+            .split(target, crate::layout::Axis::Horizontal, id, false)
+        {
+            return;
+        }
+        tab.leaves
+            .insert(id, Pane::Files(Explorer::new(path)));
+        tab.focus = id;
+    }
+
+    /// Put a file path on the first terminal in this tab's command line. With
+    /// no terminal in the tab there is nowhere to put it, so the pane is inert
+    /// rather than destructive.
+    fn insert_path_into_terminal(&mut self, path: PathBuf) {
+        let tab = &self.tabs[self.active];
+        let Some(id) = tab.first_terminal() else {
+            return;
+        };
+        if let Some(Pane::Terminal(session)) = self.tabs[self.active].leaves.get(&id) {
+            session
+                .pane
+                .write(path.to_string_lossy().into_owned().into_bytes());
+        }
     }
 
     fn cycle(&mut self, forward: bool) {
@@ -397,18 +535,28 @@ impl App {
         tab.layout
             .rects(area, crate::ui::SPLIT_GAP * scale)
             .into_iter()
-            .filter_map(|(id, rect)| {
-                let session = tab.leaves.get(&id)?;
+            .map(|(id, rect)| {
                 let _ = metrics;
-                Some((
+                let (frame, selection, cursor) = match tab.leaves.get(&id) {
+                    Some(Pane::Terminal(session)) => (
+                        session.frame.as_ref(),
+                        session.selection,
+                        id == tab.focus,
+                    ),
+                    // A widget pane occupies its rectangle in the grid pass
+                    // with nothing to draw; egui paints it afterwards.
+                    Some(Pane::Files(_)) => (None, None, false),
+                    None => (None, None, false),
+                };
+                (
                     id,
                     crate::render::PaneView {
                         rect,
-                        frame: session.frame.as_ref(),
-                        selection: session.selection,
-                        cursor: id == tab.focus,
+                        frame,
+                        selection,
+                        cursor,
                     },
-                ))
+                )
             })
             .collect()
     }
@@ -434,8 +582,10 @@ impl App {
         if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
             return None;
         }
-        let cols = u32::from(self.session().frame.as_ref()?.cols);
-        let rows = u32::from(self.session().frame.as_ref()?.rows);
+        let session = self.session()?;
+        let frame = session.frame.as_ref()?;
+        let cols = u32::from(frame.cols);
+        let rows = u32::from(frame.rows);
         if cols == 0 || rows == 0 {
             return None;
         }
@@ -473,17 +623,30 @@ impl App {
             }
             Action::Theme(name) => match crate::theme::load(&name) {
                 Ok(theme) => {
-                    // The chrome and the terminal have to move together, or the
-                    // window shows one theme's text on another theme's surface.
+                    // The chrome and the terminals have to move together, or
+                    // the window shows one theme's text on another theme's
+                    // surface. Every terminal in the tab gets it, including the
+                    // ones a file pane pushed out of focus.
                     self.look = crate::ui::Look::themed(
                         self.look.size,
                         self.look.path.clone(),
                         Some(&theme),
                     );
-                    self.session().pane.send(crate::pane::Command::SetTheme(Some(theme)));
+                    let tab = &mut self.tabs[self.active];
+                    for pane in tab.leaves.values_mut() {
+                        if let Pane::Terminal(session) = pane {
+                            session
+                                .pane
+                                .send(crate::pane::Command::SetTheme(Some(theme.clone())));
+                        }
+                    }
                 }
                 Err(err) => tracing::warn!(%err, "theme"),
             },
+            Action::Files(path) => {
+                let path = path.filter(|path| !path.is_empty()).map(PathBuf::from);
+                self.split_files(path);
+            }
             Action::Shell(shell) => {
                 let program = (!shell.is_empty()).then_some(shell);
                 self.open(Transport::Shell(crate::pty::Config { program }));
@@ -568,14 +731,22 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: UserEvent) {
-        if let Some(err) = self.session().pane.error() {
+        // Every terminal pane publishes frames, not only the focused one: a
+        // file pane can have focus while the terminal beside it is still live.
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                if let Pane::Terminal(session) = pane {
+                    if let Some(frame) = session.pane.take_frame() {
+                        session.frame = Some(frame);
+                    }
+                }
+            }
+        }
+        if let Some(err) = self.session().and_then(|session| session.pane.error()) {
             tracing::error!(%err, "pane failed");
             self.fatal = Some(err);
             event_loop.exit();
             return;
-        }
-        if let Some(frame) = self.session_mut().pane.take_frame() {
-            self.session_mut().frame = Some(frame);
         }
         if let Some(gpu) = &self.gpu {
             gpu.window.request_redraw();
@@ -614,25 +785,41 @@ impl ApplicationHandler<UserEvent> for App {
                     );
                 // Scrollback: Shift+PageUp/Down a page at a time, Shift+Home/End
                 // to the ends. These are the terminal conventions, and they need
-                // the grid height, which the frame knows.
-                let page = self.session().frame.as_ref().map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
+                // the grid height, which the frame knows. With a file pane
+                // focused there is no terminal to scroll.
+                let page = self
+                    .session()
+                    .and_then(|session| session.frame.as_ref())
+                    .map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
                 let scroll_key = self.modifiers.shift_key()
                     && event.state == winit::event::ElementState::Pressed
                     && match event.logical_key {
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp) => {
-                            self.session().pane.send(crate::pane::Command::Scroll(-page));
+                            if let Some(session) = self.session() {
+                                session.pane.send(crate::pane::Command::Scroll(-page));
+                            }
                             true
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown) => {
-                            self.session().pane.send(crate::pane::Command::Scroll(page));
+                            if let Some(session) = self.session() {
+                                session.pane.send(crate::pane::Command::Scroll(page));
+                            }
                             true
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home) => {
-                            self.session().pane.send(crate::pane::Command::ScrollEdge { top: true });
+                            if let Some(session) = self.session() {
+                                session
+                                    .pane
+                                    .send(crate::pane::Command::ScrollEdge { top: true });
+                            }
                             true
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::End) => {
-                            self.session().pane.send(crate::pane::Command::ScrollEdge { top: false });
+                            if let Some(session) = self.session() {
+                                session
+                                    .pane
+                                    .send(crate::pane::Command::ScrollEdge { top: false });
+                            }
                             true
                         }
                         _ => false,
@@ -699,36 +886,73 @@ impl ApplicationHandler<UserEvent> for App {
                 if scroll_key || tab_switch || split_key {
                     // Already handled above.
                 } else if chord("w") {
+                    // Closing a pane is layout, not terminal work: it works
+                    // whichever kind of pane has focus.
                     self.close_active();
-                } else if chord("d") {
-                    let level = !self.session().pane.stats().dtr();
-                    self.session().pane.send(crate::pane::Command::Dtr(level));
-                } else if chord("r") {
-                    let level = !self.session().pane.stats().rts();
-                    self.session().pane.send(crate::pane::Command::Rts(level));
-                } else if chord("b") {
-                    self.session().pane.send(crate::pane::Command::Break);
-                } else if chord("c") {
-                    match self.session().selection {
-                        Some((start, end)) => {
-                            self.session().pane.send(crate::pane::Command::CopyRange(start, end))
+                } else if self.session().is_none() {
+                    // A file pane has focus. It gets navigation keys and the
+                    // palette chord; everything terminal-only is ignored.
+                    if palette_key && event.state == winit::event::ElementState::Pressed {
+                        self.palette.toggle();
+                    } else if !self.palette.open
+                        && !self.modifiers.control_key()
+                        && !self.modifiers.alt_key()
+                    {
+                        if let Some(key) = explorer_key(&event) {
+                            let chosen = self
+                                .focused_explorer_mut()
+                                .and_then(|explorer| explorer.handle(key));
+                            if let Some(path) = chosen {
+                                self.insert_path_into_terminal(path);
+                            }
                         }
-                        // No selection: copy the visible screen, which is what a
-                        // terminal's "copy all" means.
-                        None => self.session().pane.send(crate::pane::Command::Copy),
+                    }
+                    // File navigation changes what egui paints, not what the
+                    // terminal emits, so ask for the frame explicitly.
+                    if let Some(gpu) = self.gpu.as_ref() {
+                        gpu.window.request_redraw();
+                    }
+                } else if chord("d") {
+                    if let Some(session) = self.session() {
+                        let level = !session.pane.stats().dtr();
+                        session.pane.send(crate::pane::Command::Dtr(level));
+                    }
+                } else if chord("r") {
+                    if let Some(session) = self.session() {
+                        let level = !session.pane.stats().rts();
+                        session.pane.send(crate::pane::Command::Rts(level));
+                    }
+                } else if chord("b") {
+                    if let Some(session) = self.session() {
+                        session.pane.send(crate::pane::Command::Break);
+                    }
+                } else if chord("c") {
+                    if let Some(session) = self.session() {
+                        match session.selection {
+                            Some((start, end)) => session
+                                .pane
+                                .send(crate::pane::Command::CopyRange(start, end)),
+                            // No selection: copy the visible screen, which is what a
+                            // terminal's "copy all" means.
+                            None => session.pane.send(crate::pane::Command::Copy),
+                        }
                     }
                 } else if chord("v") {
                     // The clipboard arrives as an egui paste event, which the
                     // render pass collects; nothing to do here.
                 } else if chord("e") {
-                    self.session_mut().echo = !self.session().echo;
-                    self.session().pane.send(crate::pane::Command::Echo(self.session().echo));
+                    if let Some(session) = self.session_mut() {
+                        session.echo = !session.echo;
+                        session.pane.send(crate::pane::Command::Echo(session.echo));
+                    }
                 } else if palette_key && event.state == winit::event::ElementState::Pressed {
                     self.palette.toggle();
                 } else if !self.palette.open {
                     // The palette owns the keyboard while it is open.
                     if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
-                        self.session().pane.write(bytes);
+                        if let Some(session) = self.session() {
+                            session.pane.write(bytes);
+                        }
                     }
                 }
             }
@@ -737,8 +961,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_position = Some((position.x, position.y));
                 if self.dragging {
                     if let Some(cell) = self.cell_at(position.x, position.y) {
-                        if let Some((anchor, _)) = self.session().selection {
-                            self.session_mut().selection = Some((anchor, cell));
+                        if let Some(session) = self.session_mut() {
+                            if let Some((anchor, _)) = session.selection {
+                                session.selection = Some((anchor, cell));
+                            }
                         }
                     }
                 }
@@ -755,13 +981,16 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                             // A click without a drag is not a selection until
-                            // the pointer moves; the anchor waits here.
+                            // the pointer moves; the anchor waits here. A file
+                            // pane has no cells to select.
                             let anchor = self
                                 .cursor_position
                                 .and_then(|(x, y)| self.cell_at(x, y))
                                 .map(|cell| (cell, cell));
-                            self.session_mut().selection = anchor;
-                            self.dragging = true;
+                            if let Some(session) = self.session_mut() {
+                                session.selection = anchor;
+                            }
+                            self.dragging = self.session().is_some();
                         }
                         winit::event::ElementState::Released => {
                             self.dragging = false;
@@ -776,10 +1005,12 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 if lines != 0.0 {
                     // Wheel up shows older lines, which the terminal calls a
-                    // negative delta.
-                    self.session()
-                        .pane
-                        .send(crate::pane::Command::Scroll(-lines.round() as isize));
+                    // negative delta. Only a focused terminal scrolls.
+                    if let Some(session) = self.session() {
+                        session
+                            .pane
+                            .send(crate::pane::Command::Scroll(-lines.round() as isize));
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -788,14 +1019,32 @@ impl ApplicationHandler<UserEvent> for App {
                 // across a field and the whole struct.
                 let mut gpu = self.gpu.take();
                 if let Some(gpu) = gpu.as_mut() {
-                let stats = self.session().pane.stats().clone();
-                let (rx, tx) = (stats.rx(), stats.tx());
-                self.session_mut().meter.sample(rx, tx);
-                let (rx_rate, tx_rate) = {
-                    let meter = &self.session().meter;
-                    (meter.rx_rate, meter.tx_rate)
-                };
-                let label = self.session().label.clone();
+                // The status strip follows the focused pane. A file pane has
+                // no byte counters, and saying so is more honest than showing
+                // the terminal beside it as if it were focused.
+                let mut label = String::from("files");
+                let (mut rx, mut tx) = (0u64, 0u64);
+                let (mut rx_rate, mut tx_rate) = (0.0f64, 0.0f64);
+                let mut connected = true;
+                let mut scrollback = 0u64;
+                let mut modem = None;
+                if let Some(session) = self.session() {
+                    let stats = session.pane.stats().clone();
+                    label = session.label.clone();
+                    (rx, tx) = (stats.rx(), stats.tx());
+                    connected = stats.connected();
+                    scrollback = stats.scrollback();
+                    modem = session.serial.then(|| (stats.dtr(), stats.rts()));
+                    if let Some(session) = self.session_mut() {
+                        session.meter.sample(rx, tx);
+                    }
+                    if let Some(session) = self.session() {
+                        rx_rate = session.meter.rx_rate;
+                        tx_rate = session.meter.tx_rate;
+                    }
+                } else if let Some(explorer) = self.focused_explorer() {
+                    label = explorer.title();
+                }
                 let tabs = (self.active + 1, self.tabs.len());
                 let status = Status {
                     label: &label,
@@ -804,15 +1053,14 @@ impl ApplicationHandler<UserEvent> for App {
                     tx,
                     rx_rate,
                     tx_rate,
-                    connected: stats.connected(),
-                    scrollback: stats.scrollback(),
-                    modem: self
-                        .session()
-                        .serial
-                        .then(|| (stats.dtr(), stats.rts())),
+                    connected,
+                    scrollback,
+                    modem,
                 };
                 let mut action = None;
-                let mut copied_text = self.session_mut().pane.take_copied();
+                let mut copied_text = self
+                    .session_mut()
+                    .and_then(|session| session.pane.take_copied());
                 let palette_open = self.palette.open;
                 // Split the borrows explicitly: the palette is `&mut` while the
                 // frame, pane and look are `&`, and taking them out one by one
@@ -826,14 +1074,40 @@ impl ApplicationHandler<UserEvent> for App {
                     .into_iter()
                     .map(|(_, pane)| pane)
                     .collect();
+                // File panes have no cells: they are painted with egui over
+                // the rectangle the grid pass reserved for them.
+                let (width, height) = (gpu.config.width as f32, gpu.config.height as f32);
+                let status_height = crate::ui::STATUS_HEIGHT * gpu.scale();
+                let area = crate::layout::Rect::new(
+                    0.0,
+                    0.0,
+                    width,
+                    (height - status_height).max(0.0),
+                );
+                let file_panes: Vec<FilePaneView<'_>> = tab
+                    .layout
+                    .rects(area, crate::ui::SPLIT_GAP * gpu.scale())
+                    .into_iter()
+                    .filter_map(|(id, rect)| match tab.leaves.get(&id) {
+                        Some(Pane::Files(explorer)) => Some(FilePaneView {
+                            id,
+                            rect,
+                            explorer,
+                            focused: id == tab.focus,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
                 let look = self.look.clone();
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
+                    &file_panes,
                     &status,
                     &mut palette,
                     &mut action,
-                    &tab.focused().pane,
+                    terminal_pane,
                     palette_open,
                     &mut copied_text,
                     &look,
@@ -973,10 +1247,11 @@ impl Gpu {
         &mut self,
         panes: &[crate::render::PaneView<'_>],
         frames_drawn: u64,
+        files: &[FilePaneView<'_>],
         status: &Status,
         palette: &mut Palette,
         action: &mut Option<Action>,
-        pane: &Pane,
+        pane: Option<&TermPane>,
         palette_open: bool,
         copied_text: &mut Option<String>,
         look: &Look,
@@ -1012,8 +1287,26 @@ impl Gpu {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ui, |_ui| {});
-                if let Some(chosen) = palette.ui(ui, look) {
-                    *action = Some(chosen);
+                // File panes sit over the grid rectangle their leaf owns. They
+                // are areas rather than windows: fixed position, no dragging.
+                for file in files {
+                    crate::explorer::pane_ui(
+                        ui,
+                        egui::Id::unique(("dtr-files", file.id)),
+                        file.rect,
+                        file.explorer,
+                        look,
+                        file.focused,
+                    );
+                }
+                // The palette is an overlay above the panes: a file listing
+                // must not cover the command line it sits beside.
+                if palette_open {
+                    crate::ui::overlay(ui, "dtr-palette", |ui| {
+                        if let Some(chosen) = palette.ui(ui, look) {
+                            *action = Some(chosen);
+                        }
+                    });
                 }
                 // Clipboard in and out. egui hands paste over as an event; the
                 // pane hands copied text back through a slot it fills itself.
@@ -1031,7 +1324,9 @@ impl Gpu {
                     });
                 for text in pasted {
                     if !palette_open {
-                        pane.send(crate::pane::Command::Paste(text.into_bytes()));
+                        if let Some(pane) = pane {
+                            pane.send(crate::pane::Command::Paste(text.into_bytes()));
+                        }
                     }
                 }
                 if let Some(text) = copied_text.take() {

@@ -591,6 +591,19 @@ Click focuses the pane under the pointer, `Ctrl+Shift+\` splits side by side and
 stacked, `Ctrl+Shift+W` closes the focused pane and collapses its parent. Closing the last pane closes
 the tab. A split opens a *shell*, never a copy of the pane: a serial port cannot be opened twice.
 
+**The file pane is the first non-terminal leaf.** A leaf now maps to
+`Pane::Terminal(Session) | Pane::Files(Explorer)`; a file pane owns its rectangle but no session, so
+keys, selection, copy/paste, the status strip, splits and closing all have to say what they do when
+there is no terminal. The palette's `files` command (and `--files [PATH]` for captures) opens one by
+splitting the focused pane side by side. Only the focused leaf gets keys: in a file pane the arrows
+move and clamp, `Enter` descends or writes the file's path to the tab's first terminal, `←`/`h`/
+Backspace go to the parent, `r` reloads, and `g`/`G` jump to the ends; `Ctrl+Shift+W`, tab switching
+and the split chords still work. The listing puts directories first, then case-insensitive names, hides
+dotfiles, and inserts `..` at every non-root. A filesystem error is a message in the pane, not a panic
+and not a blank rectangle. The egui pane is clipped to its leaf, and the palette is a foreground
+overlay so it cannot be covered by a listing. Ordering, selection clamping, parent resolution and
+`~` display are pure functions with tests that never touch a disk.
+
 **SFTP is deliberately not here.** The owner's plan is a small file-explorer pane later on, not a
 transfer command; `docs/sftp.md` has the measurements for when that happens.
 

@@ -18,6 +18,8 @@ pub enum Action {
     Ssh(String),
     Shell(String),
     Replay(String),
+    /// Open a file pane in the current tab, at this path when one was given.
+    Files(Option<String>),
     Demo,
     Quit,
 }
@@ -129,7 +131,7 @@ impl Palette {
                 }
 
                 let response = TextEdit::singleline(&mut self.input)
-                    .hint_text("connect, ssh, shell, replay, demo…")
+                    .hint_text("connect, ssh, shell, replay, files, demo…")
                     .font(FontId::monospace(15.0))
                     .desired_width(f32::INFINITY)
                     .show(ui);
@@ -253,6 +255,7 @@ fn action_for(line: &str) -> Option<Action> {
         "ssh" if !rest.is_empty() => Some(Action::Ssh(rest.to_owned())),
         "shell" => Some(Action::Shell(rest.to_owned())),
         "replay" if !rest.is_empty() => Some(Action::Replay(rest.to_owned())),
+        "files" => Some(Action::Files((!rest.is_empty()).then(|| rest.to_owned()))),
         "demo" => Some(Action::Demo),
         "quit" => Some(Action::Quit),
         _ => None,
@@ -290,6 +293,15 @@ mod tests {
         match action_for("replay /tmp/my capture.bin") {
             Some(Action::Replay(path)) => assert_eq!(path, "/tmp/my capture.bin"),
             _ => panic!("expected a replay action"),
+        }
+    }
+
+    #[test]
+    fn files_opens_a_pane_and_takes_an_optional_path() {
+        assert!(matches!(action_for("files"), Some(Action::Files(None))));
+        match action_for("files /tmp/some dir") {
+            Some(Action::Files(Some(path))) => assert_eq!(path, "/tmp/some dir"),
+            _ => panic!("expected a files action with a path"),
         }
     }
 

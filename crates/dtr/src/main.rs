@@ -1,6 +1,7 @@
 //! dtr — a serial-first terminal.
 
 mod app;
+mod explorer;
 mod input;
 mod layout;
 mod logbook;
@@ -102,6 +103,10 @@ struct Args {
     /// Open the command palette on start
     #[arg(long)]
     palette: bool,
+
+    /// Open a file-browser pane next to the initial session, at PATH if given
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+    files: Option<String>,
 
     /// Config file (default: the platform's config dir, `dtr/config.toml`)
     #[arg(long, value_name = "PATH")]
@@ -396,6 +401,13 @@ fn main() -> anyhow::Result<()> {
     };
 
     let send = args.send.as_deref().map(input::unescape).unwrap_or_default();
+    let files = args.files.as_deref().map(|path| {
+        if path.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            PathBuf::from(path)
+        }
+    });
 
     // A session is recorded when it starts, so a crash leaves a row with no
     // end — which is exactly what `unfinished` in the listing means.
@@ -437,6 +449,7 @@ fn main() -> anyhow::Result<()> {
             select,
             scroll: args.scroll,
             split,
+            files,
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         finish(store.as_deref(), session, "screenshot", &result);
@@ -454,6 +467,7 @@ fn main() -> anyhow::Result<()> {
         select,
         scroll: args.scroll,
         split,
+        files,
     };
     let result = app::run(startup);
     finish(store.as_deref(), session, "closed", &result);
