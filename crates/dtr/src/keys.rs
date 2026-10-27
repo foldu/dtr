@@ -187,6 +187,16 @@ impl KeyStroke {
             mods: winit::keyboard::ModifiersState::empty(),
         }
     }
+
+    /// The release of a typed character. A real keyboard sends both, and the
+    /// handler must send bytes for one of them only: encoding the release as
+    /// well is exactly the "lsls" bug.
+    pub fn typed_release(ch: char) -> Self {
+        Self {
+            state: winit::event::ElementState::Released,
+            ..Self::typed(ch)
+        }
+    }
 }
 
 /// Parse a `--keys` script into strokes.
@@ -207,7 +217,10 @@ pub fn parse_script(script: &str) -> Vec<KeyStroke> {
         }
         if let Some(text) = token.strip_prefix("text:") {
             for ch in text.chars() {
+                // Press and release, like a keyboard: a script that only
+                // pressed would fail to catch the doubled-keystroke bug.
                 strokes.push(KeyStroke::typed(ch));
+                strokes.push(KeyStroke::typed_release(ch));
             }
             continue;
         }

@@ -647,7 +647,15 @@ impl App {
                     } else if !self.palette.open && !self.settings.open {
                         // The palette and the menu own the keyboard while they
                         // are open; otherwise the key belongs to the shell.
-                        if let Some(bytes) = crate::input::encode_key(&stroke.key, stroke.text.as_deref(), self.modifiers) {
+                        //
+                        // Press only: a release carries the same key and the
+                        // same text, so encoding both sends every keystroke
+                        // twice — "ls" arrives as "lsls". `encode_key` is the
+                        // state-free half, so the guard has to live here.
+                        if stroke.state != winit::event::ElementState::Pressed {
+                            return;
+                        }
+                        if let Some(bytes) = crate::input::encode_key(&stroke.key, stroke.text.as_deref(), stroke.mods) {
                             if let Some(session) = self.session() {
                                 session.pane.write(bytes);
                             }

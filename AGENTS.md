@@ -98,7 +98,11 @@ disappears, suspect the texture path before the blend state.
 **A key release carries the same `logical_key` as its press.** Only `text` differs,
 and `encode` falls back to the character when `text` is empty — so encoding every
 `KeyboardInput` sends each keystroke twice ("typing `ls` shows `lsls`"). `input::encode`
-drops anything whose state is not `Pressed`; do not move that check out.
+drops anything whose state is not `Pressed`, and after the key handler moved into
+`App::on_key` the guard lives there instead — the send-to-shell branch returns
+early on any release. This regressed once already during that move: "ls" typed as
+"lsls". A scripted keystroke now sends press *and* release, so the harness can
+catch it.
 
 **Feeding `RedrawRequested` to egui creates an infinite redraw loop.** egui replies
 "yes, repaint" to that event, we ask winit for another frame, and the app spins at
