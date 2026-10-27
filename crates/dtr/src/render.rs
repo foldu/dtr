@@ -643,6 +643,9 @@ struct Fonts {
     resolved: HashMap<(u8, char), Option<usize>>,
     /// Families to try, discovered on the first missing character.
     candidates: Vec<fontique::FamilyId>,
+    /// Family name of every face in `faces`, for logging and for tests that need
+    /// to know *which* family answered.
+    names: Vec<String>,
     /// Fallback faces already loaded, in the order they were found. A second
     /// Han character is found here instead of walking every family again.
     fallback_order: Vec<usize>,
@@ -699,6 +702,7 @@ impl Fonts {
             metrics,
             resolved: HashMap::new(),
             candidates: Vec::new(),
+            names: Vec::new(),
             fallback_order: Vec::new(),
             collection: None,
             source_cache: fontique::SourceCache::default(),
@@ -737,7 +741,22 @@ impl Fonts {
         }
         if self.candidates.is_empty() {
             if let Some(collection) = self.collection.as_mut() {
-                self.candidates = collection.family_ids().collect();
+                // The preference list first, then everything else: a terminal
+                // wants a monospaced CJK face, so the wide characters line up
+                // with the Latin grid instead of carrying their own advance.
+                let mut ordered: Vec<fontique::FamilyId> = Vec::new();
+                for name in crate::fonts::FALLBACK {
+                    if let Some(id) = collection.family_id(name) {
+                        ordered.push(id);
+                    }
+                }
+                ordered.extend(
+                    collection
+                        .family_ids()
+                        .filter(|id| !ordered.contains(id))
+                        .collect::<Vec<_>>(),
+                );
+                self.candidates = ordered;
             }
         }
 
@@ -785,13 +804,15 @@ impl Fonts {
                 let Some(bytes) = font.load(None) else {
                     continue;
                 };
+                let family_name = family.name().to_owned();
+                self.names.push(family_name);
                 self.faces.push(Loaded {
                     bytes: bytes.data().to_vec(),
                     index,
                 });
                 found = Some(self.faces.len() - 1);
                 self.fallback_order.push(self.faces.len() - 1);
-                tracing::debug!(character = %ch, family = family.name(), "fallback face");
+                tracing::debug!(character = %ch, family = self.names.last().map(String::as_str), "fallback face");
                 break;
             }
             if found.is_some() {
@@ -984,6 +1005,38 @@ mod font_tests {
         let second = fonts.face_for(Face::Regular, '本');
         assert_eq!(second, Some(first), "the next character reuses the face");
         assert_eq!(fonts.fallback_order.len(), 1, "one fallback was enough");
+    }
+
+    /// The preference list decides which family answers for CJK, not the order
+    /// fontconfig happens to report.
+    #[test]
+    fn a_preferred_fallback_family_is_chosen_over_an_arbitrary_one() {
+        let mut fonts = Fonts::load(&Look::default());
+        let Some(index) = fonts.face_for(Face::Regular, '日') else {
+            return; // no CJK font installed here
+        };
+        let name = fonts
+            .names
+            .get(index - 4)
+            .cloned()
+            .unwrap_or_default();
+        // Only assert when a preferred family is actually installed: on a
+        // machine without Sarasa or Noto, any family that has the glyph is
+        // correct behaviour and there is nothing to check.
+        let mut collection =
+            fontique::Collection::new(fontique::CollectionOptions::default());
+        let preferred: Vec<&str> = crate::fonts::FALLBACK
+            .iter()
+            .copied()
+            .filter(|family| collection.family_by_name(family).is_some())
+            .collect();
+        if preferred.is_empty() {
+            return;
+        }
+        assert!(
+            preferred.contains(&name.as_str()),
+            "picked {name}, but {preferred:?} is installed and preferred"
+        );
     }
 
     #[test]

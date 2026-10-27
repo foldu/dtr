@@ -97,6 +97,47 @@ pub const PREFERRED: &[&str] = &[
     "Consolas",
 ];
 
+/// Fallback families in the order they should be tried when the grid face lacks
+/// a glyph.
+///
+/// Sarasa first, then Noto CJK: a terminal wants a *monospaced* CJK face, so the
+/// wide characters line up with the Latin grid instead of each carrying its own
+/// advance. Everything else on the machine comes after these, in the order
+/// fontconfig lists it.
+pub const FALLBACK: &[&str] = &[
+    // Sarasa ships one family per region; any of them covers the Han block.
+    "Sarasa Mono SC",
+    "Sarasa Mono TC",
+    "Sarasa Mono J",
+    "Sarasa Mono K",
+    "Sarasa Mono Slab SC",
+    "Sarasa Mono Slab TC",
+    "Sarasa Mono Slab J",
+    "Sarasa Mono Slab K",
+    "Sarasa Fixed SC",
+    "Sarasa Fixed TC",
+    "Sarasa Gothic SC",
+    "Sarasa Gothic TC",
+    "Sarasa Gothic J",
+    "Sarasa Gothic K",
+    "Sarasa Mono",
+    "Sarasa Gothic",
+    // Then the Noto CJK families, monospaced variants first.
+    "Noto Sans Mono CJK SC",
+    "Noto Sans Mono CJK TC",
+    "Noto Sans Mono CJK JP",
+    "Noto Sans Mono CJK KR",
+    "Noto Sans Mono CJK",
+    "Noto Serif CJK SC",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK TC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+    "Noto Sans CJK",
+    "Noto Sans Mono",
+    "Noto Sans",
+];
+
 /// The family to use when nothing is configured: the first preferred one that
 /// is installed, else the first usable family at all.
 pub fn default_family(usable: &[String]) -> Option<String> {

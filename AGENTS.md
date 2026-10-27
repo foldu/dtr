@@ -117,6 +117,13 @@ covers most Han), and only then walks every installed family, loading a face and
 testing its charmap. The result is cached per character, so a screen of 2000
 distinct Han characters costs one extra font load, not 2000.
 
+Which family answers is decided by `fonts::FALLBACK`, not by the order fontconfig
+reports: Sarasa Mono first, then the Noto CJK families, monospaced variants ahead
+of proportional ones. A terminal wants a monospaced CJK face, or the wide
+characters each carry their own advance and the grid stops lining up. A logged
+`fallback face` line names the family that won, which is how to tell whether the
+preference list is doing anything on a given machine.
+
 Two things that follow from it: the glyph atlas key includes the *face index*,
 because glyph ids collide between fonts; and a glyph is placed by the ascent of
 the face that produced it, because a fallback rarely shares the grid's ascent.
