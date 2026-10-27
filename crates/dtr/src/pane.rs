@@ -51,6 +51,7 @@ pub struct Frame {
 pub struct Stats {
     rx: AtomicU64,
     tx: AtomicU64,
+    connected: std::sync::atomic::AtomicBool,
 }
 
 impl Stats {
@@ -68,6 +69,15 @@ impl Stats {
 
     fn add_tx(&self, bytes: usize) {
         self.tx.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// False while the transport is gone and we are trying to get it back.
+    pub fn connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    fn set_connected(&self, connected: bool) {
+        self.connected.store(connected, Ordering::Relaxed);
     }
 }
 
@@ -247,8 +257,16 @@ async fn run(
     let mut cells = CellIterator::new()?;
 
     let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    // Separate from `bytes_rx`: the pane keeps `bytes_tx` alive for reconnects,
+    // so the byte channel never closes, and "the reader ended" needs its own
+    // signal or a disconnect goes unnoticed.
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let mut sink: Option<Sink> = None;
     let mut source_alive = false;
+    // What to reopen if the device disappears, and how to recognise it.
+    let mut reconnect: Option<(serial::Config, Option<String>)> = None;
+    let (reconnect_tx, mut reconnect_rx) =
+        tokio::sync::mpsc::unbounded_channel::<tokio_serial::SerialStream>();
     // The pty master and child must outlive the pane: dropping the master
     // closes the terminal and takes the shell with it.
     let mut pty_keep: Option<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> = None;
@@ -261,7 +279,21 @@ async fn run(
             sink = Some(Sink::Serial(write_half));
             let mapper = cfg.cr_to_crlf.then(CrToCrlf::default);
             source_alive = true;
-            tokio::task::spawn_local(read_loop(read_half, mapper, bytes_tx, log.clone()));
+            stats.set_connected(true);
+            let closed = closed_tx.clone();
+            let tx = bytes_tx.clone();
+            let reader_log = log.clone();
+            tokio::task::spawn_local(async move {
+                read_loop(read_half, mapper, tx, reader_log).await;
+                let _ = closed.send(());
+            });
+            if cfg.auto_reconnect {
+                let identity = serial::identity(&cfg.port);
+                if identity.is_some() {
+                    tracing::info!(port = %cfg.port, serial = ?identity, "will follow this device across replugs");
+                }
+                reconnect = Some((cfg.clone(), identity));
+            }
         }
         Transport::Shell(cfg) => {
             let shell = cfg.open()?;
@@ -275,6 +307,7 @@ async fn run(
             sink = Some(Sink::Pty(writer));
             source_alive = true;
             let pty_log = log.clone();
+            let pty_tx = bytes_tx.clone();
             std::thread::Builder::new()
                 .name("dtr-pty".into())
                 .spawn(move || {
@@ -284,7 +317,7 @@ async fn run(
                             Ok(0) => break,
                             Ok(n) => {
                                 log_chunk(&pty_log, &buf[..n]);
-                                if bytes_tx.send(buf[..n].to_vec()).is_err() {
+                                if pty_tx.send(buf[..n].to_vec()).is_err() {
                                     break;
                                 }
                             }
@@ -300,7 +333,7 @@ async fn run(
             let bytes = std::fs::read(&path)?;
             tracing::info!(path = %path.display(), bytes = bytes.len(), "replay");
             source_alive = true;
-            let tx = bytes_tx;
+            let tx = bytes_tx.clone();
             let replay_log = log.clone();
             tokio::task::spawn_local(async move {
                 for chunk in bytes.chunks(256) {
@@ -329,7 +362,59 @@ async fn run(
                         flush_replies(&replies, &mut sink).await;
                         publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
                     }
-                    None => source_alive = false,
+                    None => {}
+                }
+            }
+            _ = closed_rx.recv(), if source_alive => {
+                source_alive = false;
+                stats.set_connected(false);
+                if let Some((cfg, identity)) = reconnect.clone() {
+                    tracing::warn!(port = %cfg.port, "device gone; watching for it");
+                    let tx = reconnect_tx.clone();
+                    let stats = Arc::clone(&stats);
+                    tokio::task::spawn_local(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            if tx.is_closed() {
+                                return;
+                            }
+                            let path = match &identity {
+                                Some(serial) => serial::find_by_serial(serial),
+                                None => Some(cfg.port.clone()),
+                            };
+                            let Some(path) = path else { continue };
+                            match cfg.open_at(&path) {
+                                Ok(stream) => {
+                                    tracing::info!(port = %path, "device is back");
+                                    let _ = tx.send(stream);
+                                    return;
+                                }
+                                Err(err) => {
+                                    tracing::debug!(port = %path, %err, "still gone");
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            stream = reconnect_rx.recv(), if !source_alive && reconnect.is_some() => {
+                if let Some(stream) = stream {
+                    let (read_half, write_half) = tokio::io::split(stream);
+                    sink = Some(Sink::Serial(write_half));
+                    let mapper = reconnect
+                        .as_ref()
+                        .map(|(cfg, _)| cfg.cr_to_crlf)
+                        .unwrap_or(false)
+                        .then(CrToCrlf::default);
+                    source_alive = true;
+                    stats.set_connected(true);
+                    let closed = closed_tx.clone();
+                    let tx = bytes_tx.clone();
+                    let reader_log = log.clone();
+                    tokio::task::spawn_local(async move {
+                        read_loop(read_half, mapper, tx, reader_log).await;
+                        let _ = closed.send(());
+                    });
                 }
             }
             cmd = rx.recv() => {

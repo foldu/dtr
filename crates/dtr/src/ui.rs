@@ -21,6 +21,8 @@ pub struct Status<'a> {
     pub tx: u64,
     pub rx_rate: f64,
     pub tx_rate: f64,
+    /// False while the transport is gone and something is trying to get it back.
+    pub connected: bool,
 }
 
 pub fn draw(ui: &mut Ui, frame: &Frame) {
@@ -87,6 +89,14 @@ pub fn status_bar(ui: &mut Ui, status: &Status) {
                 .size(12.0)
                 .color(Color32::from_rgb(0x9a, 0xa5, 0xa0)),
         );
+        if !status.connected {
+            ui.label(
+                RichText::new("reconnecting…")
+                    .monospace()
+                    .size(12.0)
+                    .color(Color32::from_rgb(0xff, 0xb0, 0x00)),
+            );
+        }
         ui.label(
             RichText::new(format!(
                 "RX {} ({}/s)   TX {} ({}/s)",

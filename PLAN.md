@@ -396,7 +396,19 @@ Two things this cost: `egui::Window` produced nothing inside a `run_ui` pass (th
 shapes at all), and painting the selected row's highlight *after* its labels hid the selected row's
 own text. Both are the kind of thing only a screenshot catches.
 
-Still open in M1: reconnect-on-replug, DTR/RTS/break, timestamped log mode.
+**Reconnect follows the device, not the path.** When the reader ends, the pane goes back to
+watching: every 500 ms it tries to reopen, and if it knows the adapter's USB serial number it looks
+the device up by that rather than by path — a replug usually renames `/dev/ttyUSB0` to
+`ttyUSB1`, and a terminal that gives up on the first read error is not a console. The status bar
+says `reconnecting…` while it waits. Verified by killing a socat pty mid-session and bringing it
+back: `first`, then `second`, with `device gone; watching for it` and `device is back` 2.5 s apart.
+
+The bug worth remembering: the pane kept the byte-channel sender alive for reconnects, so
+`bytes_rx.recv()` never returned `None` and a disconnect went unnoticed — the reader needs its own
+"ended" signal, not the channel closing.
+
+Still open in M1: DTR/RTS/break (blocked on the port-ownership refactor), timestamped log mode,
+reconnect by USB serial verified only against a pty (no real adapter here).
 
 ### M2 — real renderer
 

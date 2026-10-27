@@ -174,6 +174,7 @@ impl App {
                     port,
                     baud: remembered.baud,
                     cr_to_crlf: remembered.cr_to_crlf,
+                    auto_reconnect: true,
                 }));
             }
             Action::Shell(shell) => {
@@ -311,6 +312,7 @@ impl ApplicationHandler<UserEvent> for App {
                     tx,
                     rx_rate: self.meter.rx_rate,
                     tx_rate: self.meter.tx_rate,
+                    connected: stats.connected(),
                 };
                 let mut action = None;
                 if let Err(err) = gpu.render(self.frame.as_ref(), &status, &mut self.palette, &mut action) {

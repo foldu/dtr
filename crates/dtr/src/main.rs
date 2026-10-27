@@ -164,6 +164,7 @@ fn main() -> anyhow::Result<()> {
             port,
             baud: settings.baud,
             cr_to_crlf: settings.cr_to_crlf,
+            auto_reconnect: true,
         })
     } else {
         Transport::Shell(pty::Config {
