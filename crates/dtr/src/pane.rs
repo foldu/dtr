@@ -321,8 +321,12 @@ async fn run(
     let mut reconnect: Option<(serial::Config, Option<String>)> = None;
     let mut modem: Option<crate::modem::Modem> = None;
     let mut echo = false;
-    // Pasting is paced: a device with a tiny input buffer drops bytes when the
-    // whole clipboard arrives at once.
+    // Pasting is paced only on a serial line: a device with a tiny input buffer
+    // drops bytes when the whole clipboard arrives at once. A shell in a pty
+    // has a proper buffer and wants the paste immediately — pacing there just
+    // makes it feel broken.
+    let paste_tick = matches!(transport, Transport::Serial(_))
+        .then(|| std::time::Duration::from_millis(20));
     let mut paste: Vec<u8> = Vec::new();
     let mut paste_at: Option<tokio::time::Instant> = None;
     let (reconnect_tx, mut reconnect_rx) =
@@ -468,6 +472,7 @@ async fn run(
                 if paste_at.is_some() && !paste.is_empty() =>
             {
                 const CHUNK: usize = 128;
+                let tick = paste_tick.unwrap_or_default();
                 let take = CHUNK.min(paste.len());
                 let chunk: Vec<u8> = paste.drain(..take).collect();
                 if let Some(sink) = sink.as_mut() {
@@ -481,7 +486,7 @@ async fn run(
                 paste_at = if paste.is_empty() {
                     None
                 } else {
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(20))
+                    Some(tokio::time::Instant::now() + tick)
                 };
             }
             stream = reconnect_rx.recv(), if !source_alive && reconnect.is_some() => {
@@ -560,10 +565,21 @@ async fn run(
                         }
                         wake();
                     }
-                    Command::Paste(bytes) => {
-                        paste = bytes;
-                        paste_at = Some(tokio::time::Instant::now());
-                    }
+                    Command::Paste(bytes) => match paste_tick {
+                        // No pacing: hand the whole thing over at once.
+                        None => {
+                            if let Some(sink) = sink.as_mut() {
+                                match sink.write(&bytes).await {
+                                    Ok(()) => stats.add_tx(bytes.len()),
+                                    Err(err) => tracing::warn!(%err, "paste write"),
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            paste = bytes;
+                            paste_at = Some(tokio::time::Instant::now());
+                        }
+                    },
                 }
             }
         }

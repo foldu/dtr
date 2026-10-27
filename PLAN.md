@@ -422,9 +422,10 @@ nothing there.
 
 **Clipboard in and out.** `Ctrl+Shift+C` copies the visible screen — rows trimmed of trailing blanks,
 no empty tail — which is what copy means in a terminal; scrollback and mouse selection wait for the M2
-renderer, where hit-testing lives. Paste comes in as an egui `Event::Paste` and the pane writes it
-128 bytes at a time, 20 ms apart, because a device with a small input buffer drops bytes when the
-whole clipboard arrives at once.
+renderer, where hit-testing lives. Paste comes in as an egui `Event::Paste`; on a **serial** transport the pane writes it 128 bytes at a
+time, 20 ms apart, because a device with a small input buffer drops bytes when the whole clipboard
+arrives at once. On a shell in a pty the paste is handed over in one write — that buffer is the
+kernel's, pacing it only makes the terminal feel broken.
 
 That closes M1 except two honest gaps: **mouse selection** (needs the M2 renderer's grid hit-testing)
 and **reconnect by USB serial number** (only exercised against a pty here — no adapter to unplug).
