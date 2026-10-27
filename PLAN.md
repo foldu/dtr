@@ -531,6 +531,11 @@ silently vanished with no validation error. Solids now carry a negative uv and t
 the instance; the shader branches instead of sampling. The lesson is in the code as a comment, because
 "invisible rectangle, no error" is a failure mode with no trail to follow.
 
+**Captures now use the window's colour format.** The offscreen path renders to `Bgra8Unorm` — what a
+swapchain actually prefers — and swaps to RGBA on readback, so the format the *window* uses is
+exercised by every screenshot instead of being the one path nobody can look at. That is as close as
+this machine gets: there is no display to open a window on.
+
 **Importing themes from iTerm2** (`dtr theme import <FILE> [--name] [--force]`) is done: `plist` parses
 the XML, the P3 matrix and the alpha policy come from `docs/themes.md` §6.2, and the output is a
 Ghostty-format theme in `dtr`'s own themes directory, so an imported theme and a hand-written one are
@@ -545,7 +550,17 @@ existing file is only overwritten with `--force`.
   `swash` (raster, incl. COLR/CBDT emoji); cell metrics from the font, integer-snapped.
 - Subpixel/grayscale AA decision; cursor shapes; underline styles.
 
-### M3 — the rest of a terminal
+### M3 — in progress
+
+**SSH is a pty running the system's `ssh -t <host>`.** Not a transport of our own, on purpose: the client
+already knows about the config file, the agent, jump hosts, `known_hosts`, host-key prompts and
+ControlMaster, and re-implementing that is a project rather than a feature. The palette's `ssh <host>`
+and `--ssh <host>` both do it, and the session is a normal shell pane from then on — which means
+scrolling, selection, copy and the logbook all work over ssh with no further code. The cost is a
+dependency on the platform's client (fine on Linux, present on Windows 10+, and something to check on
+a machine that has none).
+
+### M3 — the rest — the rest of a terminal
 
 - ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.
 - Tabs/splits, torn-off windows (`egui::ViewportBuilder`), session restore.

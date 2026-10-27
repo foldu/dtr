@@ -86,6 +86,10 @@ struct Args {
     #[arg(long)]
     demo: bool,
 
+    /// Open an ssh session on HOST, using the system's ssh client
+    #[arg(long, value_name = "HOST")]
+    ssh: Option<String>,
+
     /// Open the command palette on start
     #[arg(long)]
     palette: bool,
@@ -298,6 +302,12 @@ fn main() -> anyhow::Result<()> {
 
     let transport = if args.demo {
         Transport::Demo
+    } else if let Some(host) = args.ssh.clone() {
+        // The system client, in a pty: it already speaks the config file, the
+        // agent, jump hosts and known_hosts.
+        Transport::Shell(pty::Config {
+            program: Some(format!("ssh -t {host}")),
+        })
     } else if let Some(path) = args.replay.clone() {
         Transport::Replay(path)
     } else if let Some(port) = args.port.clone() {

@@ -260,8 +260,12 @@ impl App {
             Action::Replay(path) => self.start(Transport::Replay(PathBuf::from(path))),
             Action::Demo => self.start(Transport::Demo),
             Action::Ssh(host) => {
-                // No SSH transport yet; saying so is better than doing nothing.
-                tracing::warn!(%host, "ssh sessions are not implemented yet");
+                // Delegating to the system's ssh client: it already knows about
+                // the config file, agent forwarding, jump hosts and known_hosts,
+                // and re-implementing those is a project, not a feature.
+                self.start(Transport::Shell(crate::pty::Config {
+                    program: Some(format!("ssh -t {host}")),
+                }));
             }
             Action::Quit => self.quit = true,
         }

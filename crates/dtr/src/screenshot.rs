@@ -40,10 +40,11 @@ pub fn capture(
         trace: wgpu::Trace::Off,
     }))?;
 
-    // The window renders to a non-sRGB target with the theme's bytes going
-    // straight through; capturing to an sRGB target would gamma-shift every
-    // colour and make the screenshot lie.
-    let format = wgpu::TextureFormat::Rgba8Unorm;
+    // Deliberately the format the *window* gets on this platform: Bgra8Unorm
+    // is what a swapchain prefers, and capturing in a different format would
+    // leave the one path nobody can screenshot untested. The bytes are swapped
+    // back to RGBA on readback.
+    let format = wgpu::TextureFormat::Bgra8Unorm;
     let extent = wgpu::Extent3d {
         width,
         height,
@@ -213,7 +214,11 @@ pub fn capture(
     let mut pixels = Vec::with_capacity((unpadded * height) as usize);
     for row in 0..height {
         let start = (row * padded) as usize;
-        pixels.extend_from_slice(&data[start..start + unpadded as usize]);
+        let row = &data[start..start + unpadded as usize];
+        // BGRA on the GPU, RGBA in the file.
+        for texel in row.chunks_exact(4) {
+            pixels.extend_from_slice(&[texel[2], texel[1], texel[0], texel[3]]);
+        }
     }
     drop(data);
     buffer.unmap();
