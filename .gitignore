@@ -1,3 +1,13 @@
 /target
 /result
 /result-*
+
+# Screenshots are outputs, not sources: `dtr --screenshot out.png` run in the
+# repo must never end up in a commit. Logo renders are the deliberate exception
+# (and they still go through LFS).
+*.png
+!assets/**/*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
