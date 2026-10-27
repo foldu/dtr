@@ -104,12 +104,18 @@ would add `Send` bounds and break the LocalSet.
 A virtual workspace at the root; every crate lives under `crates/`.
 
 ```
-Cargo.toml           // [workspace] + shared dependencies and metadata
+Cargo.toml            // [workspace] + shared dependencies and metadata
 crates/
-  dtr/               // the binary: CLI, wiring, window
+  dtr/                // the binary: CLI, wiring, window
     Cargo.toml
     src/…
+  dtr-sshconfig/      // ~/.ssh/config parser, for the future host picker
 ```
+
+`dtr-sshconfig` exists already (landed ahead of its feature): OpenSSH config grammar, `Include`
+with globs and cycle/depth limits, `*`/`?`/negation host patterns, and first-value-wins
+resolution. It is pure parsing with no network or async, so it can be tested and reviewed
+independently of the terminal.
 
 One crate for now is deliberate. The split below is where it should go as boundaries earn it, not
 a target to hit up front:
@@ -325,6 +331,14 @@ Three paths, all thin wrappers over one function:
 
 Everything here is `main.rs` plumbing: the pane and renderer don't know they're being captured.
 This is what makes UI work reviewable without a Windows machine.
+
+**Implemented (M0):** `dtr --screenshot out.png --size 900x620`, wrapped by `scripts/shot.sh`. It
+renders the real egui frame into an offscreen `Rgba8UnormSrgb` texture, reads it back with a
+256-byte-padded copy, and writes PNG.
+
+Lesson worth keeping: a compositor screenshot is not a substitute. The first attempt used an
+external capture tool and photographed the **lock screen** — the window was up, the desktop was
+locked, and the image was worthless. In-app capture has no such dependency.
 
 ---
 

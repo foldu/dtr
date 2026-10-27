@@ -17,12 +17,14 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 dirs = "6"
-egui = "0.37"
+egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 egui-winit = "0.37"
+glob = "0.3"
 png = "0.18"
 pollster = "0.4"
 redb = "4"
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "time", "sync", "io-util", "macros"] }
 tokio-serial = "5"
 tracing = "0.1"

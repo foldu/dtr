@@ -1,6 +1,14 @@
+//! dtr — a serial-first terminal.
+
+mod app;
+mod pane;
+mod screenshot;
+mod ui;
+
+use std::path::PathBuf;
+
 use clap::Parser;
 
-/// dtr — a serial-first terminal.
 #[derive(Debug, Parser)]
 #[command(name = "dtr", version, about = "A serial-first terminal")]
 struct Args {
@@ -11,15 +19,36 @@ struct Args {
     /// Baud rate
     #[arg(short, long, default_value_t = 115_200)]
     baud: u32,
+
+    /// Render one frame offscreen to a PNG and exit, without opening a window
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<PathBuf>,
+
+    /// Frame size for --screenshot, in pixels
+    #[arg(long, default_value = "900x620", value_name = "WxH")]
+    size: String,
+}
+
+fn parse_size(size: &str) -> anyhow::Result<(u32, u32)> {
+    let (w, h) = size
+        .split_once('x')
+        .ok_or_else(|| anyhow::anyhow!("expected WxH, got {size:?}"))?;
+    Ok((w.trim().parse()?, h.trim().parse()?))
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // Prove the pinned wrapper links against the nix-built libghostty-vt.
-    let mut term = libghostty_vt::Terminal::new(80, 24).expect("create terminal");
-    let _ = term.vt_write(b"\x1b[32mdtr\x1b[0m 80x24\r\n");
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
-    println!("{args:?}");
-    Ok(())
+    tracing::debug!(?args, "starting");
+
+    if let Some(path) = args.screenshot.as_deref() {
+        let (width, height) = parse_size(&args.size)?;
+        return app::capture_headless(path, width, height);
+    }
+
+    app::run()
 }

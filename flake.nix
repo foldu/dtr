@@ -69,7 +69,6 @@
           "libghostty-vt-sys-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
         };
       };
-      nativeBuildInputs = [pkgs.pkg-config];
       buildInputs = [
         libghostty-vt.dev
         pkgs.vulkan-loader
@@ -83,6 +82,27 @@
       ];
       preBuild = ''
         export PKG_CONFIG_PATH=${libghostty-vt.dev}/share/pkgconfig
+      '';
+      nativeBuildInputs = [pkgs.pkg-config pkgs.makeWrapper];
+
+      # winit and wgpu-hal resolve these with dlopen, so they never appear as
+      # DT_NEEDED entries and no rpath can reach them. A wrapper is the only
+      # thing that works for dlopened libraries.
+      postInstall = ''
+        mv $out/bin/dtr $out/bin/.dtr-unwrapped
+        makeWrapper $out/bin/.dtr-unwrapped $out/bin/dtr \
+          --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath (with pkgs; [
+          wayland
+          libxkbcommon
+          vulkan-loader
+          libGL
+          libX11
+          libxcb
+          libXcursor
+          libXi
+          libXrandr
+        ])} \
+          --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib
       '';
     };
 
@@ -161,6 +181,19 @@
       shellHook = ''
         export PKG_CONFIG_PATH="${libghostty-vt.dev}/share/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
       '';
+
+      # winit resolves these with dlopen; make them visible to `cargo run`.
+      LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
+        wayland
+        libxkbcommon
+        vulkan-loader
+        libGL
+        libX11
+        libxcb
+        libXcursor
+        libXi
+        libXrandr
+      ]);
     };
   };
 }
