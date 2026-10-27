@@ -318,6 +318,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.pane.send(crate::pane::Command::Rts(level));
                 } else if chord("b") {
                     self.pane.send(crate::pane::Command::Break);
+                } else if chord("c") {
+                    // No mouse selection yet: copy the visible screen.
+                    self.pane.send(crate::pane::Command::Copy);
+                } else if chord("v") {
+                    // The clipboard arrives as an egui paste event, which the
+                    // render pass collects; nothing to do here.
                 } else if chord("e") {
                     self.echo = !self.echo;
                     self.pane.send(crate::pane::Command::Echo(self.echo));
@@ -359,7 +365,17 @@ impl ApplicationHandler<UserEvent> for App {
                         .then(|| (stats.dtr(), stats.rts())),
                 };
                 let mut action = None;
-                if let Err(err) = gpu.render(self.frame.as_ref(), &status, &mut self.palette, &mut action) {
+                let mut copied_text = self.pane.take_copied();
+                let palette_open = self.palette.open;
+                if let Err(err) = gpu.render(
+                    self.frame.as_ref(),
+                    &status,
+                    &mut self.palette,
+                    &mut action,
+                    &self.pane,
+                    palette_open,
+                    &mut copied_text,
+                ) {
                     tracing::error!(%err, "render");
                 }
                 if let Some(action) = action {
@@ -470,6 +486,9 @@ impl Gpu {
         status: &Status,
         palette: &mut Palette,
         action: &mut Option<Action>,
+        pane: &Pane,
+        palette_open: bool,
+        copied_text: &mut Option<String>,
     ) -> anyhow::Result<()> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -503,6 +522,28 @@ impl Gpu {
                 });
                 if let Some(chosen) = palette.ui(ui) {
                     *action = Some(chosen);
+                }
+                // Clipboard in and out. egui hands paste over as an event; the
+                // pane hands copied text back through a slot it fills itself.
+                let pasted: Vec<String> = ui
+                    .ctx()
+                    .input(|input| {
+                        input
+                            .events
+                            .iter()
+                            .filter_map(|event| match event {
+                                egui::Event::Paste(text) => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    });
+                for text in pasted {
+                    if !palette_open {
+                        pane.send(crate::pane::Command::Paste(text.into_bytes()));
+                    }
+                }
+                if let Some(text) = copied_text.take() {
+                    ui.ctx().copy_text(text);
                 }
         });
 

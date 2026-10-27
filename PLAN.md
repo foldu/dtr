@@ -420,8 +420,15 @@ Modem control is **Unix only**. Windows needs `EscapeCommFunction` through a dup
 blind unsafe FFI on the platform we cannot run is worse than a clear refusal; it logs and does
 nothing there.
 
-Still open in M1: selection and copy (needs a request/response on the pane, not just commands), paste
-pacing, and reconnect-by-USB-serial verified only against a pty.
+**Clipboard in and out.** `Ctrl+Shift+C` copies the visible screen — rows trimmed of trailing blanks,
+no empty tail — which is what copy means in a terminal; scrollback and mouse selection wait for the M2
+renderer, where hit-testing lives. Paste comes in as an egui `Event::Paste` and the pane writes it
+128 bytes at a time, 20 ms apart, because a device with a small input buffer drops bytes when the
+whole clipboard arrives at once.
+
+That closes M1 except two honest gaps: **mouse selection** (needs the M2 renderer's grid hit-testing)
+and **reconnect by USB serial number** (only exercised against a pty here — no adapter to unplug).
+M1's own line item "selection" is therefore half done: copy exists, choosing what to copy does not.
 
 ### M2 — real renderer
 

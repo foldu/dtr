@@ -108,6 +108,8 @@ pub enum Command {
     Break,
     Scroll(isize),
     Echo(bool),
+    Copy,
+    Paste(Vec<u8>),
 }
 
 /// What a pane is attached to.
@@ -161,6 +163,8 @@ pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
     tx: tokio::sync::mpsc::UnboundedSender<Command>,
     stats: Arc<Stats>,
+    /// The last thing the pane copied, for the UI to put on the clipboard.
+    copied: Arc<Mutex<Option<String>>>,
     /// A fatal pane error. The pane thread owns the terminal, so a failure to
     /// open a port happens out of sight; this is how it reaches the UI.
     error: Arc<Mutex<Option<String>>>,
@@ -180,6 +184,8 @@ impl Pane {
         let published = Arc::clone(&latest);
         let stats = Arc::new(Stats::default());
         let counted = Arc::clone(&stats);
+        let copied: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let copy_sink = Arc::clone(&copied);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let failure = Arc::clone(&error);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
@@ -207,6 +213,7 @@ impl Pane {
                         transport,
                         counted,
                         log,
+                        copy_sink,
                     )
                     .await
                     {
@@ -224,6 +231,7 @@ impl Pane {
             tx,
             stats,
             error,
+            copied,
         })
     }
 
@@ -234,6 +242,11 @@ impl Pane {
 
     pub fn stats(&self) -> &Arc<Stats> {
         &self.stats
+    }
+
+    /// Text the pane copied, if it has produced any since the last call.
+    pub fn take_copied(&self) -> Option<String> {
+        self.copied.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// The pane's fatal error, if it hit one.
@@ -261,6 +274,7 @@ async fn run(
     transport: Transport,
     stats: Arc<Stats>,
     log_path: Option<(PathBuf, serial::LogFormat)>,
+    copied: Arc<Mutex<Option<String>>>,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
     // which is what you want when the point is to find out what the device did.
@@ -307,6 +321,10 @@ async fn run(
     let mut reconnect: Option<(serial::Config, Option<String>)> = None;
     let mut modem: Option<crate::modem::Modem> = None;
     let mut echo = false;
+    // Pasting is paced: a device with a tiny input buffer drops bytes when the
+    // whole clipboard arrives at once.
+    let mut paste: Vec<u8> = Vec::new();
+    let mut paste_at: Option<tokio::time::Instant> = None;
     let (reconnect_tx, mut reconnect_rx) =
         tokio::sync::mpsc::unbounded_channel::<tokio_serial::SerialStream>();
     // The pty master and child must outlive the pane: dropping the master
@@ -446,6 +464,26 @@ async fn run(
                     });
                 }
             }
+            _ = tokio::time::sleep_until(paste_at.unwrap_or_else(tokio::time::Instant::now)),
+                if paste_at.is_some() && !paste.is_empty() =>
+            {
+                const CHUNK: usize = 128;
+                let take = CHUNK.min(paste.len());
+                let chunk: Vec<u8> = paste.drain(..take).collect();
+                if let Some(sink) = sink.as_mut() {
+                    if let Err(err) = sink.write(&chunk).await {
+                        tracing::warn!(%err, "paste write");
+                        paste.clear();
+                    } else {
+                        stats.add_tx(chunk.len());
+                    }
+                }
+                paste_at = if paste.is_empty() {
+                    None
+                } else {
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(20))
+                };
+            }
             stream = reconnect_rx.recv(), if !source_alive && reconnect.is_some() => {
                 if let Some(stream) = stream {
                     let (read_half, write_half) = tokio::io::split(stream);
@@ -511,6 +549,21 @@ async fn run(
                         publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
                     }
                     Command::Echo(on) => echo = on,
+                    Command::Copy => {
+                        let text = out
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.as_ref().map(frame_text))
+                            .unwrap_or_default();
+                        if let Ok(mut slot) = copied.lock() {
+                            *slot = Some(text);
+                        }
+                        wake();
+                    }
+                    Command::Paste(bytes) => {
+                        paste = bytes;
+                        paste_at = Some(tokio::time::Instant::now());
+                    }
                 }
             }
         }
@@ -524,6 +577,27 @@ struct LogWriter {
     file: Mutex<std::fs::File>,
     format: serial::LogFormat,
     started: std::time::Instant,
+}
+
+/// The visible screen as text: rows trimmed of trailing blanks, and no empty
+/// lines off the bottom. This is what "copy" means in a terminal — what you can
+/// see, not the whole scrollback.
+fn frame_text(frame: &Frame) -> String {
+    let cols = frame.cols as usize;
+    let mut lines: Vec<String> = frame
+        .cells
+        .chunks(cols.max(1))
+        .map(|row| {
+            let mut line: String = row.iter().map(|cell| cell.text.as_str()).collect();
+            let trimmed = line.trim_end().len();
+            line.truncate(trimmed);
+            line
+        })
+        .collect();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 /// Append bytes to the session log, in whichever shape it was asked for.
@@ -699,3 +773,46 @@ const DEMO: &[u8] = b"\x1b[32mdtr\x1b[0m \xe2\x80\x94 a serial-first terminal\r\
  1  \xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x90\r\n\
  2  \xe2\x94\x82 box     \xe2\x94\x82\r\n\
  3  \xe2\x94\x94\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x98\r\n";
+
+#[cfg(test)]
+mod tests {
+    use super::{Cell, Frame, frame_text};
+
+    fn frame(rows: &[&str]) -> Frame {
+        let cols = 8u16;
+        let mut cells = Vec::new();
+        for row in rows {
+            let mut chars: Vec<char> = row.chars().collect();
+            chars.resize(cols as usize, ' ');
+            for ch in chars {
+                cells.push(Cell {
+                    text: ch.to_string(),
+                    fg: [255, 255, 255],
+                    bg: [0, 0, 0],
+                    has_bg: false,
+                    bold: false,
+                    italic: false,
+                });
+            }
+        }
+        Frame {
+            cols,
+            rows: rows.len() as u16,
+            default_fg: [255, 255, 255],
+            default_bg: [0, 0, 0],
+            cursor: None,
+            cells,
+        }
+    }
+
+    #[test]
+    fn copying_a_screen_drops_padding_and_blank_tail() {
+        let text = frame_text(&frame(&["hello", "", "  two"]));
+        assert_eq!(text, "hello\n\n  two");
+    }
+
+    #[test]
+    fn copying_an_empty_screen_gives_nothing() {
+        assert_eq!(frame_text(&frame(&["", ""])), "");
+    }
+}
