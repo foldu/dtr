@@ -184,6 +184,10 @@ pub struct Status<'a> {
     pub modem: Option<(bool, bool)>,
     /// Rows of scrollback below the viewport; 0 is the live screen.
     pub scrollback: u64,
+    /// Whether byte counters mean anything for this transport. A shell in a pty
+    /// is not a serial line: its byte totals are noise, and the strip is scarce
+    /// space next to a filename or a path.
+    pub counters: bool,
 }
 
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
@@ -232,6 +236,9 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
                     .size(12.0)
                     .color(Look::colour(look.accent)),
             );
+        }
+        if !status.counters {
+            return;
         }
         ui.label(
             RichText::new(format!(

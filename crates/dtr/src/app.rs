@@ -58,6 +58,7 @@ pub fn capture_headless(
 ) -> anyhow::Result<()> {
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
+    let counters = !matches!(startup.transport, Transport::Shell(_));
     let pane = TermPane::spawn(
         startup.transport,
         startup.log.clone(),
@@ -128,6 +129,7 @@ pub fn capture_headless(
         pane.stats(),
         startup.palette,
         serial,
+        counters,
         &startup.look,
         startup.select,
         startup.split,
@@ -192,6 +194,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
+    let counters = !matches!(startup.transport, Transport::Shell(_));
 
     let pane = TermPane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
         let proxy = proxy.clone();
@@ -211,6 +214,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 frame: None,
                 label,
                 serial,
+                counters,
                 echo: false,
                 selection: startup.select,
                 meter: Meter::new(),
@@ -307,6 +311,8 @@ struct Session {
     label: String,
     /// Whether this session has modem lines, for the status strip.
     serial: bool,
+    /// Whether byte counters belong on the status strip.
+    counters: bool,
     echo: bool,
     /// Cell indices of a mouse selection: `(anchor, head)`.
     selection: Option<(usize, usize)>,
@@ -480,6 +486,7 @@ impl App {
                     frame: None,
                     label: transport.describe(),
                     serial: matches!(transport, Transport::Serial(_)),
+                    counters: !matches!(transport, Transport::Shell(_)),
                     echo: false,
                     selection: None,
                     meter: Meter::new(),
@@ -558,6 +565,7 @@ impl App {
                 frame: None,
                 label: transport.describe(),
                 serial: matches!(transport, Transport::Serial(_)),
+                counters: !matches!(transport, Transport::Shell(_)),
                 echo: false,
                 selection: None,
                 meter: Meter::new(),
@@ -1183,6 +1191,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut connected = true;
                 let mut scrollback = 0u64;
                 let mut modem = None;
+                let mut counters = false;
                 if let Some(session) = self.session() {
                     let stats = session.pane.stats().clone();
                     label = session.label.clone();
@@ -1190,6 +1199,7 @@ impl ApplicationHandler<UserEvent> for App {
                     connected = stats.connected();
                     scrollback = stats.scrollback();
                     modem = session.serial.then(|| (stats.dtr(), stats.rts()));
+                    counters = session.counters;
                     if let Some(session) = self.session_mut() {
                         session.meter.sample(rx, tx);
                     }
@@ -1211,6 +1221,7 @@ impl ApplicationHandler<UserEvent> for App {
                     connected,
                     scrollback,
                     modem,
+                    counters,
                 };
                 let mut action = None;
                 let mut copied_text = self

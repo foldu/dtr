@@ -47,6 +47,7 @@ pub fn capture(
     stats: &crate::pane::Stats,
     show_palette: bool,
     serial: bool,
+    counters: bool,
     look: &crate::ui::Look,
     selection: Option<(usize, usize)>,
     split: Option<crate::layout::Axis>,
@@ -114,6 +115,7 @@ pub fn capture(
     let status = crate::ui::Status {
         label,
         tabs: (1, 1),
+        counters,
         rx: stats.rx(),
         tx: stats.tx(),
         rx_rate: 0.0,
