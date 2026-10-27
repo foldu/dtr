@@ -39,6 +39,8 @@ pub struct Startup {
     /// offscreen capture path draws.
     pub capture: Option<PathBuf>,
     pub capture_after: u64,
+    /// A script of keys to type once the window opens, one per frame.
+    pub keys: Option<String>,
     /// Close the window after this many milliseconds, to exercise shutdown.
     pub exit_after: Option<u64>,
     /// Adapter name to prefer, e.g. "nvidia".
@@ -272,6 +274,12 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         keymap: crate::keys::Keymap::new(&startup.config.keys),
         pending: Vec::new(),
         pending_since: None,
+        script: startup
+            .keys
+            .as_deref()
+            .map(crate::keys::parse_script)
+            .unwrap_or_default()
+            .into(),
         capture: startup
             .capture
             .clone()
@@ -323,13 +331,10 @@ fn closed(active: usize, count: usize) -> Option<usize> {
 /// Translate the keys a file pane understands. Named arrows are
 /// keyboard-layout independent; `h`, `r`, `g` and `G` are the vim-ish ones the
 /// brief asks for. Modifiers are filtered by the caller.
-fn explorer_key(event: &winit::event::KeyEvent) -> Option<crate::explorer::Key> {
+fn explorer_key(key: &winit::keyboard::Key) -> Option<crate::explorer::Key> {
     use winit::keyboard::{Key, NamedKey};
 
-    if event.state != winit::event::ElementState::Pressed {
-        return None;
-    }
-    match &event.logical_key {
+    match key {
         Key::Named(NamedKey::ArrowUp) => Some(crate::explorer::Key::Up),
         Key::Named(NamedKey::ArrowDown) => Some(crate::explorer::Key::Down),
         Key::Named(NamedKey::ArrowLeft) => Some(crate::explorer::Key::Left),
@@ -485,6 +490,8 @@ struct App {
     /// When the first chord of a pending binding was typed: Zed waits a second
     /// for the rest, then fires the longest binding that is already complete.
     pending_since: Option<std::time::Instant>,
+    /// The keys still to type, from `--keys`.
+    script: std::collections::VecDeque<crate::keys::KeyStroke>,
     /// Where to write a PNG of the live window, and when. Set by `--capture`.
     capture: Option<(std::path::PathBuf, std::time::Instant)>,
     /// The key the menu thinks is down. A second press for the same key without
@@ -511,6 +518,138 @@ impl App {
             }
         }
     }
+
+    /// Handle one key event. Both the window and `--keys` come through here, so
+    /// a scripted run exercises the same decisions a person's hands would.
+    fn on_key(&mut self, stroke: &crate::keys::KeyStroke) {
+                // Every key event, before any decision: if a character arrives
+                // twice this is where you see it.
+                tracing::debug!(
+                    key = ?stroke.key,
+                    state = ?stroke.state,
+                    text = ?stroke.text,
+                    repeat = stroke.repeat,
+                    "key"
+                );
+                // Alt+digit selects a tab by number: the only binding that
+                // cannot be written as one chord, because it is "any digit".
+                let alt_digit = stroke.mods.alt_key()
+                    && stroke.state == winit::event::ElementState::Pressed
+                    && match &stroke.key {
+                        winit::keyboard::Key::Character(text) if stroke.mods.alt_key() => {
+                            match text.chars().next().and_then(|c| c.to_digit(10)) {
+                                Some(0) => {
+                                    self.active = self.tabs.len() - 1;
+                                    true
+                                }
+                                Some(digit) if digit as usize <= self.tabs.len() => {
+                                    self.active = digit as usize - 1;
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    };
+
+                // Everything else comes from the keymap, which the config file
+                // can rewrite. `pending` holds the chords of a binding that is
+                // not finished yet (`ctrl-k ctrl-s`).
+                let pressed = stroke.state == winit::event::ElementState::Pressed;
+
+                // The menu owns the keyboard while it is open. Releases only
+                // clear the held key; duplicates are compositor noise.
+                if self.settings.open {
+                    if !pressed {
+                        self.held = None;
+                        return;
+                    }
+                    if !stroke.repeat && self.held.as_ref() == Some(&stroke.key) {
+                        tracing::debug!(key = ?stroke.key, "ignoring a duplicate press");
+                        return;
+                    }
+                    self.held = Some(stroke.key.clone());
+                    let closes = crate::keys::chord_from_event(&stroke.key, stroke.mods)
+                        .is_some_and(|chord| {
+                            matches!(
+                                self.keymap.resolve(&[], chord),
+                                crate::keys::Matched::Action(crate::keys::Action::Settings)
+                            )
+                        });
+                    if closes {
+                        self.settings.open = false;
+                        self.repaint("settings closed");
+                        return;
+                    }
+                    match self.settings.handle(&stroke.key) {
+                        Some(crate::settings::Effect::Apply) => self.apply_settings(),
+                        Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
+                        Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
+                        None => {}
+                    }
+                    return;
+                }
+
+                let mut consumed = alt_digit;
+                let action = if pressed && !consumed {
+                    crate::keys::chord_from_event(&stroke.key, stroke.mods).and_then(
+                        |chord| match self.keymap.resolve(&self.pending, chord) {
+                            crate::keys::Matched::Action(action) => {
+                                self.pending.clear();
+                                self.pending_since = None;
+                                Some(action)
+                            }
+                            crate::keys::Matched::Prefix => {
+                                self.pending.push(chord);
+                                self.pending_since = Some(std::time::Instant::now());
+                                self.repaint("prefix");
+                                consumed = true;
+                                None
+                            }
+                            crate::keys::Matched::Nothing => {
+                                self.pending.clear();
+                                self.pending_since = None;
+                                None
+                            }
+                        },
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(action) = action {
+                    consumed = self.dispatch(action);
+                }
+
+                if !consumed {
+                    if self.session().is_none() {
+                        // A file pane has focus: it gets navigation keys, and
+                        // everything terminal-only is ignored.
+                        if !self.palette.open
+                            && !stroke.mods.control_key()
+                            && !stroke.mods.alt_key()
+                        {
+                            if let Some(key) = explorer_key(&stroke.key) {
+                                let chosen = self
+                                    .focused_explorer_mut()
+                                    .and_then(|explorer| explorer.handle(key));
+                                if let Some(path) = chosen {
+                                    self.insert_path_into_terminal(path);
+                                }
+                            }
+                        }
+                        self.repaint("file navigation");
+                    } else if !self.palette.open && !self.settings.open {
+                        // The palette and the menu own the keyboard while they
+                        // are open; otherwise the key belongs to the shell.
+                        if let Some(bytes) = crate::input::encode_key(&stroke.key, stroke.text.as_deref(), self.modifiers) {
+                            if let Some(session) = self.session() {
+                                session.pane.write(bytes);
+                            }
+                        }
+                    }
+                }
+                }
 
     /// Do what a binding asks for. Returns whether it acted, so a terminal-only
     /// action with a file pane focused falls through to the pane's own keys.
@@ -1190,6 +1329,25 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.check_exit_deadline(event_loop);
+        // `--keys`: one stroke per wake-up, so the frame that follows each one
+        // exists before the next arrives. This is the harness the user asked
+        // for: a scripted run goes through the same handler a keyboard does.
+        if let Some(stroke) = self.script.pop_front() {
+            self.on_key(&stroke);
+            self.repaint("scripted key");
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(16),
+            ));
+        }
+
+        // A pending capture needs a frame at its deadline. Without this the
+        // window goes idle after the last redraw and the capture never
+        // happens: the deadline passes with nothing drawing.
+        if let Some((_, when)) = self.capture.as_ref().map(|(_, when)| ((), *when)) {
+            self.repaint("capture pending");
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(when));
+        }
+
         // A half-typed binding must not wait forever. One second, like Zed,
         // then whatever is already complete fires.
         const PENDING: std::time::Duration = std::time::Duration::from_secs(1);
@@ -1267,133 +1425,14 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
-                // Every key event, before any decision: if a character arrives
-                // twice this is where you see it.
-                tracing::debug!(
-                    key = ?event.logical_key,
-                    state = ?event.state,
-                    text = ?event.text,
-                    repeat = event.repeat,
-                    "key"
-                );
-                // Alt+digit selects a tab by number: the only binding that
-                // cannot be written as one chord, because it is "any digit".
-                let alt_digit = self.modifiers.alt_key()
-                    && event.state == winit::event::ElementState::Pressed
-                    && match &event.logical_key {
-                        winit::keyboard::Key::Character(text) if self.modifiers.alt_key() => {
-                            match text.chars().next().and_then(|c| c.to_digit(10)) {
-                                Some(0) => {
-                                    self.active = self.tabs.len() - 1;
-                                    true
-                                }
-                                Some(digit) if digit as usize <= self.tabs.len() => {
-                                    self.active = digit as usize - 1;
-                                    true
-                                }
-                                _ => false,
-                            }
-                        }
-                        _ => false,
-                    };
-
-                // Everything else comes from the keymap, which the config file
-                // can rewrite. `pending` holds the chords of a binding that is
-                // not finished yet (`ctrl-k ctrl-s`).
-                let pressed = event.state == winit::event::ElementState::Pressed;
-
-                // The menu owns the keyboard while it is open. Releases only
-                // clear the held key; duplicates are compositor noise.
-                if self.settings.open {
-                    if !pressed {
-                        self.held = None;
-                        return;
-                    }
-                    if !event.repeat && self.held.as_ref() == Some(&event.logical_key) {
-                        tracing::debug!(key = ?event.logical_key, "ignoring a duplicate press");
-                        return;
-                    }
-                    self.held = Some(event.logical_key.clone());
-                    let closes = crate::keys::chord_from_event(&event.logical_key, &self.modifiers)
-                        .is_some_and(|chord| {
-                            matches!(
-                                self.keymap.resolve(&[], chord),
-                                crate::keys::Matched::Action(crate::keys::Action::Settings)
-                            )
-                        });
-                    if closes {
-                        self.settings.open = false;
-                        self.repaint("settings closed");
-                        return;
-                    }
-                    match self.settings.handle(&event.logical_key) {
-                        Some(crate::settings::Effect::Apply) => self.apply_settings(),
-                        Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
-                        Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
-                        None => {}
-                    }
-                    return;
-                }
-
-                let mut consumed = alt_digit;
-                let action = if pressed && !consumed {
-                    crate::keys::chord_from_event(&event.logical_key, &self.modifiers).and_then(
-                        |chord| match self.keymap.resolve(&self.pending, chord) {
-                            crate::keys::Matched::Action(action) => {
-                                self.pending.clear();
-                                self.pending_since = None;
-                                Some(action)
-                            }
-                            crate::keys::Matched::Prefix => {
-                                self.pending.push(chord);
-                                self.pending_since = Some(std::time::Instant::now());
-                                self.repaint("prefix");
-                                consumed = true;
-                                None
-                            }
-                            crate::keys::Matched::Nothing => {
-                                self.pending.clear();
-                                self.pending_since = None;
-                                None
-                            }
-                        },
-                    )
-                } else {
-                    None
+                let stroke = crate::keys::KeyStroke {
+                    key: event.logical_key.clone(),
+                    text: event.text.as_ref().map(|text| text.to_string()),
+                    state: event.state,
+                    repeat: event.repeat,
+                    mods: self.modifiers,
                 };
-
-                if let Some(action) = action {
-                    consumed = self.dispatch(action);
-                }
-
-                if !consumed {
-                    if self.session().is_none() {
-                        // A file pane has focus: it gets navigation keys, and
-                        // everything terminal-only is ignored.
-                        if !self.palette.open
-                            && !self.modifiers.control_key()
-                            && !self.modifiers.alt_key()
-                        {
-                            if let Some(key) = explorer_key(&event) {
-                                let chosen = self
-                                    .focused_explorer_mut()
-                                    .and_then(|explorer| explorer.handle(key));
-                                if let Some(path) = chosen {
-                                    self.insert_path_into_terminal(path);
-                                }
-                            }
-                        }
-                        self.repaint("file navigation");
-                    } else if !self.palette.open && !self.settings.open {
-                        // The palette and the menu own the keyboard while they
-                        // are open; otherwise the key belongs to the shell.
-                        if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
-                            if let Some(session) = self.session() {
-                                session.pane.write(bytes);
-                            }
-                        }
-                    }
-                }
+                self.on_key(&stroke);
             }
             WindowEvent::Resized(size) => gpu.resize(size),
             WindowEvent::CursorMoved { position, .. } => {

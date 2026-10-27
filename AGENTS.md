@@ -115,6 +115,14 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**Keys can be typed at the window from a script.** `--keys "ctrl-shift-p;down;down"` applies one
+stroke per frame through the same handler a keyboard uses (`App::on_key`), and
+`--capture PATH --capture-after MS` photographs the window afterwards. `;`
+separates tokens because a chord may be a comma; `+` joins the chords of one
+binding; `text:` types characters (only meaningful with a real shell, not
+`--demo`). Together those two flags are how a human-free run checks that a menu
+opens, that a chord is wired, or that a font renders in the window.
+
 **A missing glyph is not a missing character.** The grid face covers Latin; CJK,
 emoji and the rest come from another installed family. `Fonts::face_for` asks the
 grid face first, then the fallback faces it has already loaded (one Han family

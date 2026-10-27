@@ -90,6 +90,16 @@ struct Args {
     #[arg(long, value_name = "MS", default_value_t = 1200)]
     capture_after: u64,
 
+    /// Type a script of keys once the window opens, then carry on as usual.
+    ///
+    /// Tokens are separated by `;`: a chord such as `ctrl-shift-t`, a named key
+    /// such as `enter` or `down`, `+` between the chords of one binding, or
+    /// `text:` followed by characters to type. One token is applied per frame,
+    /// so a following `--capture` photographs the result. Example:
+    /// `--keys "ctrl-,;down;down" --capture /tmp/menu.png`.
+    #[arg(long, value_name = "SCRIPT")]
+    keys: Option<String>,
+
     /// Close the window after MS milliseconds (shutdown smoke test)
     #[arg(long, value_name = "MS")]
     exit_after: Option<u64>,
@@ -597,6 +607,7 @@ fn main() -> anyhow::Result<()> {
             exit_after: args.exit_after,
             capture: args.capture.clone(),
             capture_after: args.capture_after,
+            keys: args.keys.clone(),
             gpu: gpu.clone(),
             settings: args.settings,
             config: config.clone(),
@@ -630,6 +641,7 @@ fn main() -> anyhow::Result<()> {
         exit_after: args.exit_after,
         capture: args.capture.clone(),
         capture_after: args.capture_after,
+        keys: args.keys.clone(),
         gpu,
         settings: args.settings,
         config,

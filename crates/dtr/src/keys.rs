@@ -125,6 +125,170 @@ pub enum Matched {
     Prefix,
 }
 
+/// One key event, in the shape the handler needs.
+///
+/// winit's `KeyEvent` cannot be constructed outside the window library (its
+/// platform-specific payload is private), so the handler takes this instead.
+/// The window fills it from a real event; `--keys` fills it from a script, and
+/// both run the same code.
+#[derive(Clone, Debug)]
+pub struct KeyStroke {
+    pub key: winit::keyboard::Key,
+    pub text: Option<String>,
+    pub state: winit::event::ElementState,
+    pub repeat: bool,
+    /// The modifiers that were down. A real event takes them from the window;
+    /// a scripted one from the chord, because a script has no keyboard.
+    pub mods: winit::keyboard::ModifiersState,
+}
+
+impl KeyStroke {
+    /// A press of `chord`, as a key event would have reported it.
+    pub fn press(chord: Chord) -> Self {
+        let (key, text) = match chord.key {
+            dtr_config::keys::Key::Char(ch) => {
+                // Shift shows up in the character a keyboard produces: the
+                // event says `|`, not shift and backslash.
+                let produced = if chord.mods.shift {
+                    shifted(ch)
+                } else {
+                    ch
+                };
+                (
+                    winit::keyboard::Key::Character(produced.to_string().into()),
+                    Some(produced.to_string()),
+                )
+            }
+            dtr_config::keys::Key::Named(named) => (named_key(named), None),
+        };
+        // `ModifiersState` is bitflags: build the bits rather than pretend a
+        // keyboard is down.
+        let mut mods = winit::keyboard::ModifiersState::empty();
+        mods.set(winit::keyboard::ModifiersState::CONTROL, chord.mods.ctrl);
+        mods.set(winit::keyboard::ModifiersState::ALT, chord.mods.alt);
+        mods.set(winit::keyboard::ModifiersState::SHIFT, chord.mods.shift);
+        mods.set(winit::keyboard::ModifiersState::SUPER, chord.mods.sup);
+        Self {
+            key,
+            text,
+            state: winit::event::ElementState::Pressed,
+            repeat: false,
+            mods,
+        }
+    }
+
+    /// A typed character, as the shell should receive it.
+    pub fn typed(ch: char) -> Self {
+        Self {
+            key: winit::keyboard::Key::Character(ch.to_string().into()),
+            text: Some(ch.to_string()),
+            state: winit::event::ElementState::Pressed,
+            repeat: false,
+            mods: winit::keyboard::ModifiersState::empty(),
+        }
+    }
+}
+
+/// Parse a `--keys` script into strokes.
+///
+/// `;` separates tokens, not `,`: a chord is allowed to be a comma
+/// (`ctrl-,` opens the menu), so the separator cannot be one.
+///
+/// A token is a chord (`ctrl-shift-t`), a named key (`enter`, `down`), `+`
+/// between the chords of one binding (`ctrl-k+ctrl-s`), or `text:` followed by
+/// characters to type. The tokens exist so a test can say "open the menu, move
+/// down twice, save" in one argument.
+pub fn parse_script(script: &str) -> Vec<KeyStroke> {
+    let mut strokes = Vec::new();
+    for token in script.split(';') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(text) = token.strip_prefix("text:") {
+            for ch in text.chars() {
+                strokes.push(KeyStroke::typed(ch));
+            }
+            continue;
+        }
+        // `ctrl-k+ctrl-s`: `+` joins the chords of one binding, because `;`
+        // already separates tokens.
+        let chords: Vec<&str> = token.split('+').collect();
+        if chords.len() > 1 {
+            for part in chords {
+                if let Ok(sequence) = dtr_config::keys::parse_sequence(part) {
+                    for chord in sequence.chords {
+                        strokes.push(KeyStroke::press(chord));
+                    }
+                }
+            }
+            continue;
+        }
+        match dtr_config::keys::parse_sequence(token) {
+            Ok(sequence) => {
+                for chord in sequence.chords {
+                    strokes.push(KeyStroke::press(chord));
+                }
+            }
+            Err(err) => tracing::warn!(token, %err, "keys: cannot parse script token"),
+        }
+    }
+    strokes
+}
+
+/// The character a shifted key produces on a US layout, for the few keys a
+/// terminal binding is likely to use.
+fn shifted(ch: char) -> char {
+    match ch {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        other => other,
+    }
+}
+
+fn named_key(named: dtr_config::keys::Named) -> winit::keyboard::Key {
+    use dtr_config::keys::Named as N;
+    use winit::keyboard::{Key, NamedKey};
+    let named = match named {
+        N::Tab => NamedKey::Tab,
+        N::Enter => NamedKey::Enter,
+        N::Escape => NamedKey::Escape,
+        N::Space => NamedKey::Space,
+        N::Backspace => NamedKey::Backspace,
+        N::Delete => NamedKey::Delete,
+        N::Insert => NamedKey::Insert,
+        N::Up => NamedKey::ArrowUp,
+        N::Down => NamedKey::ArrowDown,
+        N::Left => NamedKey::ArrowLeft,
+        N::Right => NamedKey::ArrowRight,
+        N::Home => NamedKey::Home,
+        N::End => NamedKey::End,
+        N::PageUp => NamedKey::PageUp,
+        N::PageDown => NamedKey::PageDown,
+        N::Function(_) => NamedKey::F1,
+    };
+    Key::Named(named)
+}
+
 /// Turn a real key event into a chord, or `None` for keys that stay with the
 /// terminal.
 ///
@@ -132,7 +296,7 @@ pub enum Matched {
 /// chords with a modifier (or a named key that is not text) are matched.
 pub fn chord_from_event(
     key: &winit::keyboard::Key,
-    modifiers: &winit::keyboard::ModifiersState,
+    modifiers: winit::keyboard::ModifiersState,
 ) -> Option<Chord> {
     use dtr_config::keys::{Key as Spec, Mods, Named};
     use winit::keyboard::{Key, NamedKey};

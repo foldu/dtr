@@ -14,6 +14,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 /// carries the same `logical_key` as its press (only `text` differs, and it
 /// falls back to the character), so encoding both sends every keystroke twice.
 /// That is exactly what "typing `ls` shows `lsls`" was.
+#[allow(dead_code)]
 pub fn encode(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
     if event.state != winit::event::ElementState::Pressed {
         return None;
