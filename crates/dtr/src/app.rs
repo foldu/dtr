@@ -1091,7 +1091,11 @@ impl App {
         screen: (f32, f32),
         scale: f32,
     ) -> Vec<(crate::layout::LeafId, crate::render::PaneView<'a>)> {
-        let status_height = (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale;
+        let status_height = if self.status_visible() {
+            (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale
+        } else {
+            0.0
+        };
         // The tab strip takes the top, and only when there is more than one tab
         // to show: a lone tab is a title nobody needs.
         let tabs_height = self.top_inset(scale);
@@ -1141,12 +1145,22 @@ impl App {
     /// pixels. One place, because the two users of it — the layout that sizes
     /// the terminal and the layout that draws it — disagreeing is exactly how a
     /// prompt ends up underneath the strip.
+    /// Whether the status bar is drawn at all.
+    ///
+    /// It exists to show a serial port's counters and modem lines. A shell has
+    /// nothing to put there that the tab strip is not already saying, so the
+    /// bar is not drawn and its height is not reserved — otherwise a shell
+    /// carries an empty strip of dead pixels along the bottom.
+    fn status_visible(&self) -> bool {
+        self.session().is_some_and(|session| session.counters)
+    }
+
     fn top_inset(&self, scale: f32) -> f32 {
-        if self.tabs.len() > 1 {
-            (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
-        } else {
-            0.0
-        }
+        // Always, not only when there are several tabs: the strip is drawn even
+        // for one tab (it is where the session is named, now that a shell has no
+        // status bar), and reserving space only sometimes is how the prompt ended
+        // up underneath it.
+        (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
     }
 
     fn fit_panes(&mut self, metrics: crate::render::Metrics, screen: (f32, f32), scale: f32) {
@@ -1154,6 +1168,11 @@ impl App {
             return;
         }
         let inset = self.top_inset(scale);
+        let status = if self.status_visible() {
+            (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale
+        } else {
+            0.0
+        };
         let tab = &mut self.tabs[self.active];
         let rects = tab
             .layout
@@ -1162,10 +1181,7 @@ impl App {
                     0.0,
                     inset,
                     screen.0,
-                    (screen.1
-                        - (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale
-                        - inset)
-                        .max(0.0),
+                    (screen.1 - status - inset).max(0.0),
                 ),
                 crate::ui::SPLIT_GAP * scale,
             );
@@ -1642,12 +1658,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // File panes have no cells: they are painted with egui over
                 // the rectangle the grid pass reserved for them.
                 let (width, height) = (gpu.config.width as f32, gpu.config.height as f32);
-                let status_height = crate::ui::STATUS_HEIGHT * gpu.scale();
+                let status_height = if self.status_visible() {
+                    (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * gpu.scale()
+                } else {
+                    0.0
+                };
                 let area = crate::layout::Rect::new(
                     0.0,
-                    0.0,
+                    self.top_inset(gpu.scale()),
                     width,
-                    (height - status_height).max(0.0),
+                    (height - status_height - self.top_inset(gpu.scale())).max(0.0),
                 );
                 let file_panes: Vec<FilePaneView<'_>> = tab
                     .layout
@@ -1684,6 +1704,7 @@ impl ApplicationHandler<UserEvent> for App {
                     &tabs,
                     self.active,
                     &mut tab_click,
+                    self.status_visible(),
                     capture_path.as_deref(),
                     &look,
                 );
@@ -1969,6 +1990,7 @@ impl Gpu {
         tabs: &[String],
         active_tab: usize,
         tab_click: &mut Option<usize>,
+        status_visible: bool,
         capture: Option<&std::path::Path>,
         look: &Look,
     ) -> anyhow::Result<()> {
@@ -2009,6 +2031,7 @@ impl Gpu {
                         }
                     });
             }
+            if status_visible {
             egui::Panel::bottom("dtr-status")
                 // Exactly the height the grid reserves. Left to itself the panel
                 // sizes to its content and its margins, comes out a couple of
@@ -2021,6 +2044,7 @@ impl Gpu {
                         .inner_margin(egui::Margin::symmetric(8, 4)),
                 )
                 .show(ui, |ui| crate::ui::status_bar(ui, status, look));
+            }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ui, |_ui| {});

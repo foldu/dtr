@@ -170,6 +170,15 @@ without shift so both spellings work); and **a chord that starts a longer bindin
 waits**, which is why a pending sequence flushes after a second to the longest
 binding that is already complete.
 
+**A shell has no status bar.** It exists for a serial port's counters and modem lines;
+a shell's status is its tab title. The bar is not drawn and its height is not
+reserved when the focused session has no counters, so a shell gets the rows the
+empty strip used to take.
+
+**The strip is reserved even for one tab.** It is where a shell is named now, so it
+is always drawn — and reserving space only when several tabs exist is exactly how
+the prompt ended up underneath it on a single-tab window.
+
 **Two layouts must agree on the top inset.** The terminal is sized by `fit_panes` and
 drawn by `pane_views`; when only one of them knew about the tab strip, the pty kept
 the rows of a taller area and the first prompt row was drawn underneath the strip.
