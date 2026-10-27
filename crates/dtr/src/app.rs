@@ -207,6 +207,10 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
     let counters = !matches!(startup.transport, Transport::Shell(_));
+    let port = match &startup.transport {
+        Transport::Serial(cfg) => Some(cfg.port.clone()),
+        _ => None,
+    };
 
     let pane = TermPane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
         let proxy = proxy.clone();
@@ -223,6 +227,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             1,
             Pane::Terminal(Session {
                 pane,
+                port,
                 frame: None,
                 label,
                 serial,
@@ -327,6 +332,9 @@ fn explorer_key(event: &winit::event::KeyEvent) -> Option<crate::explorer::Key> 
 /// and statistics.
 struct Session {
     pane: TermPane,
+    /// The serial port this session opened, when it is one. Per-port settings
+    /// are remembered against it.
+    port: Option<String>,
     /// The grid size we last asked for, so a resize is sent when it changes
     /// rather than on every frame.
     grid: (u16, u16),
@@ -518,16 +526,45 @@ impl App {
             }
         }
 
-        if serial_changed {
-            let serial = self.config.serial.clone();
+        // The port's rate and CR translation are remembered per device, so they
+        // go to the store and straight to the open session; `auto_reconnect` is
+        // the one serial setting that is a policy of the terminal, so it goes to
+        // every session.
+        if let Some((port, record)) = self.settings.serial_write() {
+            if let Some(store) = self.store.as_ref() {
+                if let Err(err) = store.remember_serial(&port, &record) {
+                    tracing::warn!(%port, %err, "could not remember the port settings");
+                }
+            }
             for tab in &mut self.tabs {
                 for pane in tab.leaves.values_mut() {
                     if let Pane::Terminal(session) = pane {
-                        session.pane.send(crate::pane::Command::SetSerial {
-                            baud: serial.baud,
-                            cr_to_crlf: serial.cr_to_crlf,
-                            auto_reconnect: serial.auto_reconnect,
-                        });
+                        if session.port.as_deref() == Some(port.as_str()) {
+                            session.pane.send(crate::pane::Command::SetSerial {
+                                baud: record.baud,
+                                cr_to_crlf: record.cr_to_crlf,
+                                auto_reconnect: self.config.serial.auto_reconnect,
+                            });
+                        }
+                    }
+                }
+            }
+        } else if serial_changed {
+            for tab in &mut self.tabs {
+                for pane in tab.leaves.values_mut() {
+                    if let Pane::Terminal(session) = pane {
+                        if let Some(port) = session.port.clone() {
+                            let record = self
+                                .store
+                                .as_ref()
+                                .and_then(|store| store.serial(&port).ok().flatten())
+                                .unwrap_or_default();
+                            session.pane.send(crate::pane::Command::SetSerial {
+                                baud: record.baud,
+                                cr_to_crlf: record.cr_to_crlf,
+                                auto_reconnect: self.config.serial.auto_reconnect,
+                            });
+                        }
                     }
                 }
             }
@@ -586,6 +623,7 @@ impl App {
             Ok(pane) => {
                 let session = Session {
                     pane,
+                    port: None,
                     frame: None,
                     label: transport.describe(),
                     serial: matches!(transport, Transport::Serial(_)),
@@ -665,6 +703,10 @@ impl App {
             id,
             Pane::Terminal(Session {
                 pane,
+                port: match &transport {
+                    Transport::Serial(cfg) => Some(cfg.port.clone()),
+                    _ => None,
+                },
                 frame: None,
                 label: transport.describe(),
                 serial: matches!(transport, Transport::Serial(_)),
@@ -1223,7 +1265,16 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings.open = false;
                     } else {
                         let config = self.config.clone();
-                        self.settings.show(&config);
+                        // The focused session's port, and what the store
+                        // remembers for it: baud and CR translation are facts
+                        // about that device, not about the terminal.
+                        let port = self.session().and_then(|session| session.port.clone());
+                        let record = port.as_ref().and_then(|port| {
+                            self.store
+                                .as_ref()
+                                .and_then(|store| store.serial(port).ok().flatten())
+                        });
+                        self.settings.show_port(&config, port, record);
                     }
                     self.repaint("settings");
                 } else if chord("c") {

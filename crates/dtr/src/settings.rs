@@ -78,6 +78,11 @@ pub struct Settings {
     pub open: bool,
     row: usize,
     draft: Config,
+    /// The focused port's remembered settings, when a serial session has focus.
+    /// Baud and CR translation are per-device facts, so the menu edits the
+    /// store's record for this port — or nothing, if there is no port.
+    serial: Option<dtr_store::SerialSettings>,
+    port: Option<String>,
     /// Families that passed the probe, loaded once when the menu opens.
     families: Vec<String>,
     themes: Vec<String>,
@@ -91,6 +96,8 @@ impl Settings {
             open: false,
             row: 0,
             draft: Config::default(),
+            serial: None,
+            port: None,
             families: Vec::new(),
             themes: Vec::new(),
             original: Config::default(),
@@ -100,6 +107,19 @@ impl Settings {
     /// Open on `config`. The font list is probed here rather than at startup:
     /// most runs never open this menu, and probing parses every installed face.
     pub fn show(&mut self, config: &Config) {
+        self.show_port(config, None, None);
+    }
+
+    /// Open on `config`, editing `port`'s remembered settings as well when a
+    /// serial session has focus.
+    pub fn show_port(
+        &mut self,
+        config: &Config,
+        port: Option<String>,
+        serial: Option<dtr_store::SerialSettings>,
+    ) {
+        self.port = port;
+        self.serial = serial;
         self.open = true;
         self.row = 0;
         self.draft = config.clone();
@@ -165,12 +185,22 @@ impl Settings {
             Row::FontFamily => self.cycle_family(step),
             Row::Theme => self.cycle_theme(step),
             Row::Baud => {
-                let current = self.draft.serial.baud;
-                let index = BAUDS.iter().position(|rate| *rate >= current).unwrap_or(0) as i32;
+                let Some(serial) = self.serial.as_mut() else {
+                    return;
+                };
+                let index = BAUDS
+                    .iter()
+                    .position(|rate| *rate >= serial.baud)
+                    .unwrap_or(0) as i32;
                 let index = (index + step).clamp(0, BAUDS.len() as i32 - 1) as usize;
-                self.draft.serial.baud = BAUDS[index];
+                serial.baud = BAUDS[index];
             }
-            Row::CrToCrlf => self.draft.serial.cr_to_crlf = !self.draft.serial.cr_to_crlf,
+            Row::CrToCrlf => {
+                let Some(serial) = self.serial.as_mut() else {
+                    return;
+                };
+                serial.cr_to_crlf = !serial.cr_to_crlf;
+            }
             Row::AutoReconnect => {
                 self.draft.serial.auto_reconnect = !self.draft.serial.auto_reconnect;
             }
@@ -224,8 +254,16 @@ impl Settings {
                 .or_else(|| crate::fonts::default_family(&self.families))
                 .unwrap_or_else(|| "—".to_owned()),
             Row::Theme => self.draft.theme.clone().unwrap_or_else(|| "built-in".to_owned()),
-            Row::Baud => self.draft.serial.baud.to_string(),
-            Row::CrToCrlf => on_off(self.draft.serial.cr_to_crlf),
+            // No port, no value: the row says so rather than showing a rate that
+            // belongs to nothing.
+            Row::Baud => match &self.serial {
+                Some(serial) => serial.baud.to_string(),
+                None => "no port".to_owned(),
+            },
+            Row::CrToCrlf => match &self.serial {
+                Some(serial) => on_off(serial.cr_to_crlf),
+                None => "no port".to_owned(),
+            },
             Row::AutoReconnect => on_off(self.draft.serial.auto_reconnect),
         }
     }
@@ -234,14 +272,6 @@ impl Settings {
     pub fn writes(&self) -> Vec<(String, String)> {
         let mut writes = vec![
             ("font.size".to_owned(), format!("{:.0}", self.draft.font.size)),
-            (
-                "serial.baud".to_owned(),
-                self.draft.serial.baud.to_string(),
-            ),
-            (
-                "serial.cr_to_crlf".to_owned(),
-                self.draft.serial.cr_to_crlf.to_string(),
-            ),
             (
                 "serial.auto_reconnect".to_owned(),
                 self.draft.serial.auto_reconnect.to_string(),
@@ -355,6 +385,20 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// The port record to store, when a serial port is focused and its settings
+    /// were edited.
+    pub fn serial_write(&self) -> Option<(String, dtr_store::SerialSettings)> {
+        Some((self.port.clone()?, self.serial?))
+    }
+
+    /// The settings the menu would apply to a live port.
+    #[cfg(test)]
+    fn serial(&self) -> Option<dtr_store::SerialSettings> {
+        self.serial
+    }
+}
+
 fn on_off(value: bool) -> String {
     if value { "on" } else { "off" }.to_owned()
 }
@@ -382,14 +426,31 @@ mod tests {
     }
 
     #[test]
-    fn baud_cycles_through_the_standard_rates() {
+    fn baud_cycles_through_the_standard_rates_on_the_port_record() {
         let mut settings = Settings::new();
-        settings.show(&Config::default());
+        settings.show_port(
+            &Config::default(),
+            Some("/dev/ttyUSB0".to_owned()),
+            Some(dtr_store::SerialSettings {
+                baud: 115_200,
+                cr_to_crlf: true,
+            }),
+        );
         settings.row = Row::ALL.iter().position(|row| *row == Row::Baud).unwrap();
         settings.nudge(1);
-        assert_eq!(settings.draft().serial.baud, 230_400);
+        assert_eq!(settings.serial().unwrap().baud, 230_400);
         settings.nudge(-1);
-        assert_eq!(settings.draft().serial.baud, 115_200);
+        assert_eq!(settings.serial().unwrap().baud, 115_200);
+    }
+
+    #[test]
+    fn without_a_port_the_serial_rows_are_inert_and_say_so() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.row = Row::ALL.iter().position(|row| *row == Row::Baud).unwrap_or(3);
+        settings.nudge(1);
+        assert!(settings.serial_write().is_none());
+        assert_eq!(settings.value(Row::Baud), "no port");
     }
 
     #[test]
@@ -404,8 +465,10 @@ mod tests {
         settings.draft.font.size = 17.0;
         settings.draft.font.family = Some("Hack".to_owned());
         settings.draft.theme = Some("kanagawa wave".to_owned());
-        settings.draft.serial.baud = 230_400;
-        settings.draft.serial.cr_to_crlf = false;
+        settings.serial = Some(dtr_store::SerialSettings {
+            baud: 230_400,
+            cr_to_crlf: false,
+        });
         settings.draft.serial.auto_reconnect = false;
 
         let mut text = String::from(
@@ -422,8 +485,6 @@ mod tests {
         assert_eq!(parsed.font.size, 17.0);
         assert_eq!(parsed.font.family.as_deref(), Some("Hack"));
         assert_eq!(parsed.theme.as_deref(), Some("kanagawa wave"));
-        assert_eq!(parsed.serial.baud, 230_400);
-        assert!(!parsed.serial.cr_to_crlf);
         assert!(!parsed.serial.auto_reconnect);
     }
 
@@ -448,10 +509,13 @@ mod tests {
         assert!(keys.contains(&"font.size"));
         assert!(keys.contains(&"font.family"));
         assert!(keys.contains(&"theme"));
-        assert!(keys.contains(&"serial.baud"));
-        assert!(keys.contains(&"serial.cr_to_crlf"));
         assert!(keys.contains(&"serial.auto_reconnect"));
+        // Every row that lives in the file must have a writer; the serial rate
+        // rows live in the store and are covered by `serial_write`.
         for row in Row::ALL {
+            if matches!(row, Row::Baud | Row::CrToCrlf) {
+                continue;
+            }
             assert!(keys.contains(&row.key().as_str()), "{} is not written", row.key());
         }
     }

@@ -200,6 +200,65 @@ struct Args {
     screenshot_delay: u64,
 }
 
+/// Pick the settings a serial port is opened with.
+///
+/// The config file is not consulted: baud and CR translation describe a device,
+/// so they are remembered per port in the store. Precedence is the command line,
+/// then what this port was last opened with, then 8N1 at 115200 with CR→CRLF —
+/// the setting every serial console has assumed since forever.
+fn resolve_serial(
+    cli_baud: Option<u32>,
+    cli_imap: Option<&str>,
+    remembered: Option<&dtr_store::SerialSettings>,
+) -> anyhow::Result<dtr_store::SerialSettings> {
+    let default = dtr_store::SerialSettings::default();
+    Ok(dtr_store::SerialSettings {
+        baud: cli_baud
+            .or(remembered.map(|settings| settings.baud))
+            .unwrap_or(default.baud),
+        cr_to_crlf: match cli_imap {
+            Some(spec) => parse_imap(spec)?,
+            None => remembered
+                .map(|settings| settings.cr_to_crlf)
+                .unwrap_or(default.cr_to_crlf),
+        },
+    })
+}
+
+#[cfg(test)]
+mod serial_precedence {
+    use super::*;
+
+    #[test]
+    fn a_remembered_port_is_reopened_the_way_it_was_left() {
+        let remembered = dtr_store::SerialSettings {
+            baud: 9600,
+            cr_to_crlf: false,
+        };
+        let picked = resolve_serial(None, None, Some(&remembered)).unwrap();
+        assert_eq!(picked.baud, 9600);
+        assert!(!picked.cr_to_crlf);
+    }
+
+    #[test]
+    fn a_port_never_opened_gets_8n1_at_115200() {
+        let picked = resolve_serial(None, None, None).unwrap();
+        assert_eq!(picked.baud, 115_200);
+        assert!(picked.cr_to_crlf);
+    }
+
+    #[test]
+    fn the_command_line_beats_memory() {
+        let remembered = dtr_store::SerialSettings {
+            baud: 9600,
+            cr_to_crlf: false,
+        };
+        let picked = resolve_serial(Some(57_600), Some("none"), Some(&remembered)).unwrap();
+        assert_eq!(picked.baud, 57_600);
+        assert!(!picked.cr_to_crlf, "the command line asked for no translation");
+    }
+}
+
 fn parse_imap(spec: &str) -> anyhow::Result<bool> {
     match spec {
         "none" => Ok(false),
@@ -320,6 +379,12 @@ fn main() -> anyhow::Result<()> {
             dtr_config::Config::default()
         }
     };
+    // Settings that moved out of the file (a serial rate, now per port) are
+    // reported once, by name: silently ignoring a key the user wrote is how they
+    // end up debugging the wrong thing.
+    for warning in &config.warnings {
+        tracing::warn!(%warning, "config file");
+    }
     // A theme that cannot be found is worth saying loudly once, then carrying
     // on with the built-in colours: a wrong name must not stop a session.
     let theme = match config.theme.as_deref() {
@@ -399,23 +464,17 @@ fn main() -> anyhow::Result<()> {
     } else if let Some(port) = args.port.clone() {
         let remembered = store
             .as_ref()
-            .and_then(|store| store.serial(&port).ok().flatten())
-            .unwrap_or_default();
+            .and_then(|store| store.serial(&port).ok().flatten());
 
-        // Precedence: the command line, then the config file, then what was
-        // remembered for this port, then the built-in 115200 8N1 with CR→CRLF.
-        // The config file outranks memory because it is a declaration, not a
-        // side effect of the last session.
-        let settings = dtr_store::SerialSettings {
-            baud: args
-                .baud
-                .or(config.serial.baud.into())
-                .unwrap_or(remembered.baud),
-            cr_to_crlf: match args.imap.as_deref() {
-                Some(spec) => parse_imap(spec)?,
-                None => config.serial.cr_to_crlf,
-            },
-        };
+        // Precedence: the command line, then what this port was last opened
+        // with, then the config file, then 115200 8N1 with CR→CRLF.
+        //
+        // Memory outranks the config because the config describes *ports in
+        // general* — the default a port you have never opened should get — while
+        // the remembered rate is a fact about this device. The old order had the
+        // config first, which made the remembered value unreachable: `baud` was
+        // not optional, so it was always present and always won.
+        let settings = resolve_serial(args.baud, args.imap.as_deref(), remembered.as_ref())?;
 
         if let Some(store) = store.as_ref() {
             if let Err(err) = store.remember_serial(&port, &settings) {

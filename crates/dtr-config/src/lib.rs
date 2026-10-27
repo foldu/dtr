@@ -13,6 +13,8 @@ use toml_edit::{DocumentMut, Item, Table, value};
 /// Everything configurable. Defaults are what a fresh install gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
+    /// Things the file said that no longer mean anything, for the caller to log.
+    pub warnings: Vec<String>,
     pub serial: Serial,
     pub font: Font,
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
@@ -22,11 +24,13 @@ pub struct Config {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Serial {
-    /// Baud rate for ports that were never opened before.
-    pub baud: u32,
-    /// Map a lone CR to CRLF on receive. Serial consoles send bare CR.
-    pub cr_to_crlf: bool,
     /// Follow a device across a replug.
+    ///
+    /// This is the one serial setting that is a *policy of the terminal* rather
+    /// than a fact about a device: it says whether dtr watches for the port
+    /// coming back. Baud and CR translation describe the board on the other end
+    /// of the cable, so they live in the store as per-port memory (see
+    /// `dtr-store`), not here.
     pub auto_reconnect: bool,
 }
 
@@ -46,9 +50,8 @@ pub struct Font {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            warnings: Vec::new(),
             serial: Serial {
-                baud: 115_200,
-                cr_to_crlf: true,
                 auto_reconnect: true,
             },
             font: Font {
@@ -98,16 +101,16 @@ impl Config {
         let mut config = Self::default();
 
         if let Some(serial) = document.get("serial").and_then(Item::as_table) {
-            if let Some(baud) = serial.get("baud") {
-                config.serial.baud = baud
-                    .as_integer()
-                    .and_then(|value| u32::try_from(value).ok())
-                    .ok_or_else(|| Error::Value("serial.baud must be a positive integer".into()))?;
-            }
-            if let Some(map) = serial.get("cr_to_crlf") {
-                config.serial.cr_to_crlf = map
-                    .as_bool()
-                    .ok_or_else(|| Error::Value("serial.cr_to_crlf must be true or false".into()))?;
+            // `baud` and `cr_to_crlf` used to live here and are now remembered
+            // per port. Refusing to start would be hostile for a value that no
+            // longer has a meaning; ignoring it silently would leave the user
+            // wondering why nothing changed.
+            for moved in ["baud", "cr_to_crlf"] {
+                if serial.get(moved).is_some() {
+                    config.warnings.push(format!(
+                        "serial.{moved} is remembered per port now, not in the config file;                          set it with the settings menu or `dtr --baud`"
+                    ));
+                }
             }
             if let Some(reconnect) = serial.get("auto_reconnect") {
                 config.serial.auto_reconnect = reconnect.as_bool().ok_or_else(|| {
@@ -248,12 +251,12 @@ pub const TEMPLATE: &str = r#"# dtr configuration.
 # or with `dtr config set <section.key> <value>`, which keeps your comments.
 
 [serial]
-# Baud rate for ports that have never been opened before.
-baud = 115200
-# Serial consoles send a bare CR for a newline; map it to CRLF.
-cr_to_crlf = true
 # Follow the device if it is unplugged and replugged under a new name.
 auto_reconnect = true
+#
+# Baud rate and CR translation are not here: they describe the board on the
+# other end of the cable, so dtr remembers them per port and the settings menu
+# edits them while a port is open.
 
 # Name of a theme file to apply; see `dtr --themes`.
 # theme = "kanagawa wave"
@@ -293,7 +296,7 @@ mod tests {
     #[test]
     fn a_missing_file_is_the_defaults() {
         let config = Config::load(std::path::Path::new("/nonexistent/dtr/config.toml")).unwrap();
-        assert_eq!(config.serial.baud, 115_200);
+        assert!(config.serial.auto_reconnect);
         assert_eq!(config.font.size, 14.0);
     }
 
@@ -302,8 +305,7 @@ mod tests {
         let config = Config::parse(
             r#"
 [serial]
-baud = 9600
-cr_to_crlf = false
+auto_reconnect = false
 
 [font]
 size = 18.5
@@ -311,8 +313,8 @@ path = "/tmp/mono.ttf"
 "#,
         )
         .unwrap();
-        assert_eq!(config.serial.baud, 9600);
-        assert!(!config.serial.cr_to_crlf);
+        assert!(!config.serial.auto_reconnect);
+        assert!(config.warnings.is_empty());
         assert_eq!(config.font.size, 18.5);
         assert_eq!(config.font.path.as_deref(), Some(std::path::Path::new("/tmp/mono.ttf")));
     }
@@ -330,19 +332,26 @@ path = "/tmp/mono.ttf"
     }
 
     #[test]
+    fn a_moved_key_is_reported_rather_than_refused() {
+        let config = Config::parse("[serial]\nbaud = 9600\ncr_to_crlf = false\n").unwrap();
+        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
+        assert!(config.warnings[0].contains("serial.baud"));
+    }
+
+    #[test]
     fn a_wrong_type_names_the_key() {
-        let error = Config::parse("[serial]\nbaud = \"fast\"\n").unwrap_err().to_string();
-        assert!(error.contains("serial.baud"), "{error}");
+        let error = Config::parse("[serial]\nauto_reconnect = \"soon\"\n").unwrap_err().to_string();
+        assert!(error.contains("serial.auto_reconnect"), "{error}");
     }
 
     #[test]
     fn editing_keeps_comments_and_formatting() {
-        let before = "# my settings\n[font]\n# size in points\nsize = 14\n\n[serial]\nbaud = 115200\n";
+        let before = "# my settings\n[font]\n# size in points\nsize = 14\n\n[serial]\nauto_reconnect = true\n";
         let after = set_in_text(before, "font.size", "16").unwrap();
         assert!(after.contains("# my settings"));
         assert!(after.contains("# size in points"));
         assert!(after.contains("size = 16"));
-        assert!(after.contains("baud = 115200"));
+        assert!(after.contains("auto_reconnect = true"));
     }
 
     #[test]
