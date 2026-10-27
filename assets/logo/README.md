@@ -48,13 +48,13 @@ gets sharper; the 16×16 mark is excellent at 16, 32 and 64.
 logos in one frame — a smooth `$` sitting beside pixel text is a visible dialect change. I would
 not ship that combination.
 
-**My pick.** Keep the geometric set as the primary brand, because the primary use is a README
-banner, a window icon and a slide at 512 px and up, and that is where it is stronger. Use the
-16×16 bitmap mark as the favicon / 16–32 px icon if you want the pixel treatment (that is the
-inverse hybrid: pixel icon, geometric lockup — the two are rarely seen together at one size).
-If the bitmap screen is the identity you want everywhere, ship the bitmap set and accept the
-coarser display lockup; to make a bitmap face that holds up at 1024, the next round should double
-the cell (16×32) instead of stretching the 8×16 one.
+**Owner decision (2026-10-27): the bitmap set is the identity.** The analysis above is kept
+because it is right about the trade — the bitmap lockup is coarser at 1024 — but the pixel
+treatment is what was wanted, so it is what ships. The geometric set stays in the tree as the
+alternative, and the two are never mixed: no bitmap lockup beside a geometric mark.
+
+The known weak point is the display lockup at large sizes. The fix, if it is ever worth doing, is
+a doubled cell (16×32) drawn for that size, not a stretched 8×16.
 
 ## Files
 
