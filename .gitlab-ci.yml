@@ -1,0 +1,31 @@
+# Linux CI. The Windows dtr.exe is built by GitHub Actions
+# (.github/workflows/ci.yml); this pipeline builds the Linux package only.
+#
+# It runs on the lab `nix` runner, which provides the host Nix daemon and
+# store: there is nothing to install and no cache action to configure — the
+# daemon's store (plus cache.nixos.org) is the cache.
+#
+# Deliberately not `nix flake check`: checks.single-exe asserts the *Windows*
+# exe's imports, which this pipeline does not build, so there it would be a
+# spin-up for nothing. GitHub Actions runs it next to the Windows build.
+workflow:
+  rules:
+    # The usual pair: run for a merge request, and for a branch with no merge request open.
+    # Without the middle rule a branch with an open MR runs the pipeline twice.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - build
+
+linux:
+  stage: build
+  tags: [nix]
+  script:
+    - nix --version
+    - nix build .#dtr --print-build-logs
+    - nix path-info -Sh ./result
+    # Proves the wrapper and its store closure actually start, headlessly.
+    - ./result/bin/dtr --version

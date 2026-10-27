@@ -1,0 +1,178 @@
+# CI for dtr.
+#
+# The deliverable is one statically linked Windows `dtr.exe`, cross-built on a
+# Linux runner by the flake (`.#windows`; PLAN.md §5 and §7). The Linux package
+# is deliberately not built here.
+#
+# Caching: Magic Nix Cache (see the comment on the step for why, and what the
+# alternatives are). It caches individual store paths in the GitHub Actions
+# cache, so the from-source libghostty-vt (Zig) and the Rust build are uploaded
+# once and reused by later commits, while paths already available from
+# cache.nixos.org are skipped rather than duplicated. No secrets are needed, so
+# pull requests (including from forks) get the same treatment.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Tag pushes build too, and the optional `release` job attaches the exe.
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows dtr.exe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          # Upstream Nix: nothing here needs Determinate Nix or FlakeHub.
+          determinate: false
+          diagnostic-endpoint: ""
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Why Magic Nix Cache:
+      #  * It is not the 2025-deprecated thing it is often remembered as. It was
+      #    revived in June 2025 on GitHub's cache v2 API and is maintained again
+      #    (v15, 2026-09).
+      #  * It caches paths selectively, keyed by store path. A new commit that
+      #    only touches crates/dtr reuses the expensive libghostty-vt, Zig and
+      #    Rust toolchain paths instead of re-uploading one giant store tarball
+      #    (which is what cache-nix-action does; this build's dependency closure
+      #    is tens of GB, a poor fit for GitHub's 10 GB limit).
+      #  * No secrets: fork PRs can restore the base branch's cache.
+      # The trade-off is GitHub's 10 GB per-repo cache and its rate limits; both
+      # fail soft (a miss means a slower run, not a broken one). If the cache
+      # starts thrashing, the upgrade path is a real binary cache — Cachix
+      # (free tier for OSS, needs CACHIX_AUTH_TOKEN) or self-hosted Attic —
+      # which also lets local devs pull the same paths.
+      - name: Enable the Nix binary cache
+        uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-gha-cache: enabled
+          use-flakehub: "false"
+          diagnostic-endpoint: ""
+
+      - name: Build .#windows
+        run: |
+          set -euo pipefail
+          out="$(nix build .#windows --no-link --print-out-paths)"
+          # The Nix output is read-only; start clean so a retried step works.
+          rm -rf dist
+          mkdir -p dist
+          cp "$out/bin/dtr.exe" dist/dtr.exe
+          # Cheap sanity check: a PE image, not an ELF or an empty file.
+          test "$(head -c 2 dist/dtr.exe)" = "MZ"
+          file dist/dtr.exe
+          sha256sum dist/dtr.exe > dist/dtr.exe.sha256
+          cat dist/dtr.exe.sha256
+
+      # The one-file property: the exe may import only DLLs that ship with
+      # Windows, so no vcruntime/msys/GTK-style runtime has crept in. It reuses
+      # the derivation just built, so this costs a fixup, not a rebuild.
+      - name: Assert the single-executable property
+        run: nix build .#checks.x86_64-linux.single-exe
+
+      - name: Upload dtr.exe
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: dtr-windows-${{ github.sha }}
+          path: |
+            dist/dtr.exe
+            dist/dtr.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-24.04
+    # `nix develop --command cargo test` is trivial to invoke but it is a full
+    # Rust compile of the workspace (dtr pulls in wgpu/egui), not a second *Nix*
+    # build: the devShell's store paths come from the cache above. Without the
+    # cargo cache below that compile would happen cold on every run, which is
+    # why the target directory is cached separately (debuginfo is disabled to
+    # keep it small). It runs in parallel with `windows`, so it adds no time to
+    # the critical path, and the unit tests in crates/dtr cover
+    # pane/transport/key-mapping logic the artifact alone cannot check. Drop
+    # this job if CI minutes or the 10 GB cache budget matter more.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@v6.1.0
+        with:
+          path: target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-test-${{ runner.os }}-
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          determinate: false
+          diagnostic-endpoint: ""
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable the Nix binary cache
+        uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-gha-cache: enabled
+          use-flakehub: "false"
+          diagnostic-endpoint: ""
+
+      - name: cargo test
+        env:
+          # Tests do not need debug symbols; this roughly halves the cache.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: nix develop --command cargo test --locked --workspace
+
+  # Optional and deliberately isolated: a release upload failure must never
+  # turn a green build red. Tag pushes only; `continue-on-error` keeps the
+  # workflow conclusion successful even if the tag/release API is unhappy.
+  release:
+    name: Attach dtr.exe to release (optional)
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: dtr-windows-${{ github.sha }}
+          path: dist
+
+      - name: Attach asset to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, and gh does not read GITHUB_REPOSITORY.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          asset="dtr-${GITHUB_REF_NAME}-windows-x86_64.exe"
+          cp dist/dtr.exe "$asset"
+          sha256sum "$asset" > "${asset}.sha256"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$asset" "${asset}.sha256" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$asset" "${asset}.sha256" \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
