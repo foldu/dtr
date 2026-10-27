@@ -379,12 +379,6 @@ fn main() -> anyhow::Result<()> {
             dtr_config::Config::default()
         }
     };
-    // Settings that moved out of the file (a serial rate, now per port) are
-    // reported once, by name: silently ignoring a key the user wrote is how they
-    // end up debugging the wrong thing.
-    for warning in &config.warnings {
-        tracing::warn!(%warning, "config file");
-    }
     // A theme that cannot be found is worth saying loudly once, then carrying
     // on with the built-in colours: a wrong name must not stop a session.
     let theme = match config.theme.as_deref() {

@@ -13,8 +13,6 @@ use toml_edit::{DocumentMut, Item, Table, value};
 /// Everything configurable. Defaults are what a fresh install gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// Things the file said that no longer mean anything, for the caller to log.
-    pub warnings: Vec<String>,
     pub serial: Serial,
     pub font: Font,
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
@@ -50,7 +48,6 @@ pub struct Font {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            warnings: Vec::new(),
             serial: Serial {
                 auto_reconnect: true,
             },
@@ -101,17 +98,10 @@ impl Config {
         let mut config = Self::default();
 
         if let Some(serial) = document.get("serial").and_then(Item::as_table) {
-            // `baud` and `cr_to_crlf` used to live here and are now remembered
-            // per port. Refusing to start would be hostile for a value that no
-            // longer has a meaning; ignoring it silently would leave the user
-            // wondering why nothing changed.
-            for moved in ["baud", "cr_to_crlf"] {
-                if serial.get(moved).is_some() {
-                    config.warnings.push(format!(
-                        "serial.{moved} is remembered per port now, not in the config file;                          set it with the settings menu or `dtr --baud`"
-                    ));
-                }
-            }
+            // `serial.baud` and `serial.cr_to_crlf` used to live here. They are
+            // remembered per port now, no released version ever wrote them, so
+            // there is nothing to migrate and nothing worth a warning. A file
+            // that still has them reads the rest and carries on.
             if let Some(reconnect) = serial.get("auto_reconnect") {
                 config.serial.auto_reconnect = reconnect.as_bool().ok_or_else(|| {
                     Error::Value("serial.auto_reconnect must be true or false".into())
@@ -314,7 +304,6 @@ path = "/tmp/mono.ttf"
         )
         .unwrap();
         assert!(!config.serial.auto_reconnect);
-        assert!(config.warnings.is_empty());
         assert_eq!(config.font.size, 18.5);
         assert_eq!(config.font.path.as_deref(), Some(std::path::Path::new("/tmp/mono.ttf")));
     }
@@ -332,10 +321,12 @@ path = "/tmp/mono.ttf"
     }
 
     #[test]
-    fn a_moved_key_is_reported_rather_than_refused() {
+    fn a_moved_key_is_ignored_rather_than_refused() {
+        // Nobody shipped with these keys, so a file that has them is either
+        // hand-written from the old template or not ours at all: read the rest
+        // and carry on.
         let config = Config::parse("[serial]\nbaud = 9600\ncr_to_crlf = false\n").unwrap();
-        assert_eq!(config.warnings.len(), 2, "{:?}", config.warnings);
-        assert!(config.warnings[0].contains("serial.baud"));
+        assert!(config.serial.auto_reconnect);
     }
 
     #[test]
