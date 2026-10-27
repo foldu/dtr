@@ -61,6 +61,7 @@ enum Argument {
     Hosts,
     Ports,
     Shells,
+    Themes,
 }
 
 struct Command {
@@ -101,6 +102,11 @@ const COMMANDS: &[Command] = &[
         argument: Argument::None,
     },
     Command {
+        name: "theme",
+        summary: "apply a colour theme",
+        argument: Argument::Themes,
+    },
+    Command {
         name: "demo",
         summary: "show the canned demo screen",
         argument: Argument::None,
@@ -127,6 +133,7 @@ pub struct Engine {
     hosts: Vec<(String, String)>,
     ports: Vec<PortInfo>,
     shells: Vec<String>,
+    themes: Vec<String>,
 }
 
 impl Engine {
@@ -147,6 +154,11 @@ impl Engine {
     pub fn set_shells(&mut self, shells: impl IntoIterator<Item = String>) {
         self.shells = shells.into_iter().collect();
         self.shells.sort();
+    }
+
+    pub fn set_themes(&mut self, themes: impl IntoIterator<Item = String>) {
+        self.themes = themes.into_iter().collect();
+        self.themes.sort();
     }
 
     /// Ranked candidates for the whole input line.
@@ -229,6 +241,11 @@ impl Engine {
                 .iter()
                 .map(|shell| (shell.clone(), "local shell".to_owned()))
                 .collect(),
+            Argument::Themes => self
+                .themes
+                .iter()
+                .map(|theme| (theme.clone(), "theme".to_owned()))
+                .collect(),
         }
     }
 }
@@ -238,6 +255,7 @@ fn kind_of(argument: &Argument) -> Kind {
         Argument::Hosts => Kind::Host,
         Argument::Ports => Kind::Port,
         Argument::Shells => Kind::Shell,
+        Argument::Themes => Kind::Command,
         Argument::None => Kind::Command,
     }
 }
@@ -325,6 +343,7 @@ mod tests {
             },
         ]);
         engine.set_shells(["fish".to_owned(), "bash".to_owned()]);
+        engine.set_themes(["kanagawa wave".to_owned(), "dracula".to_owned()]);
         engine
     }
 
@@ -383,6 +402,19 @@ mod tests {
         let completions = engine().complete("ssh 5kw.li");
         assert!(completions.len() >= 3);
         assert!(completions.iter().all(|c| c.item.kind == Kind::Host));
+    }
+
+    #[test]
+    fn themes_complete_after_the_theme_command() {
+        let completions = engine().complete("theme kan");
+        assert_eq!(completions[0].item.label, "kanagawa wave");
+        assert_eq!(completions[0].item.insert, "theme kanagawa wave");
+    }
+
+    #[test]
+    fn a_theme_name_completes_inline() {
+        let inline = engine().inline("theme kanagawa").expect("a suffix");
+        assert_eq!(inline.suffix, " wave");
     }
 
     #[test]

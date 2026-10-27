@@ -199,6 +199,19 @@ impl App {
                     auto_reconnect: true,
                 }));
             }
+            Action::Theme(name) => match crate::theme::load(&name) {
+                Ok(theme) => {
+                    // The chrome and the terminal have to move together, or the
+                    // window shows one theme's text on another theme's surface.
+                    self.look = crate::ui::Look::themed(
+                        self.look.size,
+                        self.look.path.clone(),
+                        Some(&theme),
+                    );
+                    self.pane.send(crate::pane::Command::SetTheme(Some(theme)));
+                }
+                Err(err) => tracing::warn!(%err, "theme"),
+            },
             Action::Shell(shell) => {
                 let program = (!shell.is_empty()).then_some(shell);
                 self.start(Transport::Shell(crate::pty::Config { program }));

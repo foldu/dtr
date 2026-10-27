@@ -125,6 +125,9 @@ pub enum Command {
     Echo(bool),
     Copy,
     Paste(Vec<u8>),
+    /// Apply a theme to the live terminal. Cells are re-read from the terminal,
+    /// so existing text takes the new palette too.
+    SetTheme(Option<crate::theme::Theme>),
 }
 
 /// What a pane is attached to.
@@ -578,6 +581,17 @@ async fn run(
                         publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
                     }
                     Command::Echo(on) => echo = on,
+                    Command::SetTheme(next) => {
+                        if let Some(next) = next.as_ref() {
+                            match next.apply(&mut term) {
+                                Ok(()) => {
+                                    tracing::info!(theme = %next.name, "theme switched");
+                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                                }
+                                Err(err) => tracing::warn!(%err, "could not switch theme"),
+                            }
+                        }
+                    }
                     Command::Copy => {
                         let text = out
                             .lock()

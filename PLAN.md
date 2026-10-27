@@ -452,7 +452,13 @@ user already collected work unchanged. The format is Ghostty's `key = value` —
 `foreground`, `cursor-color`, and `palette = N=#rrggbb` for the sixteen ANSI colours — parsed with the
 VT core's own colour parser, so `#rgb`, `#rrggbb` and X11 names all work. Unknown keys (fonts, window
 chrome) are ignored rather than treated as errors, which is what makes reading someone else's theme
-files possible. `dtr --themes` lists what it can see.
+files possible. `dtr --themes` lists what it can see, and the palette offers them: `theme kanagawa wave` switches the
+live terminal — cells are re-read from the terminal, so existing text takes the palette too — and the
+chrome is rebuilt in the same action, because a window showing one theme's text on another theme's
+surface is worse than no theme at all.
+
+The argument after a palette command is taken as the rest of the line, not the next word: most of the
+819 shipped theme names contain a space, and a path handed to `replay` can too.
 
 The theme is applied to the *terminal*, not to the renderer: `set_default_color_palette` plus the
 default fg/bg/cursor means the whole 256-colour cube follows, not just the sixteen named colours.

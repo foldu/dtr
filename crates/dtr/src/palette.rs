@@ -14,6 +14,7 @@ use crate::sources;
 /// What accepting a line asks the app to do.
 pub enum Action {
     Connect(String),
+    Theme(String),
     Ssh(String),
     Shell(String),
     Replay(String),
@@ -235,20 +236,25 @@ impl Palette {
     }
 }
 
-/// Turn a completed line into an action. Unknown lines do nothing: the palette
-/// is not a shell, and guessing would be worse than ignoring.
+/// Turn a completed line into an action.
+///
+/// The argument is everything after the first word, not the second word: theme
+/// names and replay paths contain spaces (most of the shipped theme names do).
+/// Unknown lines do nothing — the palette is not a shell, and guessing would be
+/// worse than ignoring.
 fn action_for(line: &str) -> Option<Action> {
-    let mut words = line.split_whitespace();
-    let command = words.next()?;
-    let argument = words.next();
-    match (command, argument) {
-        ("connect", Some(port)) => Some(Action::Connect(port.to_owned())),
-        ("ssh", Some(host)) => Some(Action::Ssh(host.to_owned())),
-        ("shell", Some(shell)) => Some(Action::Shell(shell.to_owned())),
-        ("shell", None) => Some(Action::Shell(String::new())),
-        ("replay", Some(path)) => Some(Action::Replay(path.to_owned())),
-        ("demo", _) => Some(Action::Demo),
-        ("quit", _) => Some(Action::Quit),
+    let (command, rest) = match line.split_once(char::is_whitespace) {
+        Some((command, rest)) => (command, rest.trim()),
+        None => (line, ""),
+    };
+    match command {
+        "connect" if !rest.is_empty() => Some(Action::Connect(rest.to_owned())),
+        "theme" if !rest.is_empty() => Some(Action::Theme(rest.to_owned())),
+        "ssh" if !rest.is_empty() => Some(Action::Ssh(rest.to_owned())),
+        "shell" => Some(Action::Shell(rest.to_owned())),
+        "replay" if !rest.is_empty() => Some(Action::Replay(rest.to_owned())),
+        "demo" => Some(Action::Demo),
+        "quit" => Some(Action::Quit),
         _ => None,
     }
 }
@@ -266,8 +272,25 @@ mod tests {
     }
 
     #[test]
+    fn theme_lines_become_theme_actions() {
+        match action_for("theme kanagawa wave") {
+            // The whole argument, spaces included: most theme names have them.
+            Some(Action::Theme(name)) => assert_eq!(name, "kanagawa wave"),
+            _ => panic!("expected a theme action"),
+        }
+    }
+
+    #[test]
     fn bare_shell_is_allowed() {
         assert!(matches!(action_for("shell"), Some(Action::Shell(s)) if s.is_empty()));
+    }
+
+    #[test]
+    fn a_replay_path_with_a_space_survives() {
+        match action_for("replay /tmp/my capture.bin") {
+            Some(Action::Replay(path)) => assert_eq!(path, "/tmp/my capture.bin"),
+            _ => panic!("expected a replay action"),
+        }
     }
 
     #[test]

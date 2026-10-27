@@ -15,6 +15,7 @@ pub fn engine() -> Engine {
     engine.set_ports(serial_ports());
     engine.set_hosts(ssh_hosts(&ssh_config_path()));
     engine.set_shells(shells());
+    engine.set_themes(crate::theme::names());
     engine
 }
 

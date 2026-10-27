@@ -168,6 +168,14 @@ pub fn search_paths() -> Vec<PathBuf> {
     if let Some(data) = dirs::data_dir() {
         paths.push(data.join("dtr").join("themes"));
     }
+    // Ghostty's own resources, last: a package install lags the upstream
+    // corpus (463 themes here against 819 released), so a user's copy wins.
+    if let Some(data) = dirs::data_dir() {
+        paths.push(data.join("ghostty").join("themes"));
+    }
+    for root in ["/usr/local/share", "/usr/share"] {
+        paths.push(PathBuf::from(root).join("ghostty").join("themes"));
+    }
     paths
 }
 
@@ -188,8 +196,27 @@ pub fn find(name: &str) -> Result<PathBuf, Error> {
 /// Load a theme by name.
 pub fn load(name: &str) -> Result<Theme, Error> {
     let path = find(name)?;
-    let text = std::fs::read_to_string(&path).map_err(|err| Error::Io(path.clone(), err.to_string()))?;
-    Theme::parse(name, &text)
+    let text =
+        std::fs::read_to_string(&path).map_err(|err| Error::Io(path.clone(), err.to_string()))?;
+    let theme = Theme::parse(name, &text)?;
+
+    // A theme missing some of the sixteen is broken, but it is still more use
+    // than none: say exactly which slots fall back, then apply what is there.
+    let missing: Vec<String> = theme
+        .palette
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.is_none())
+        .map(|(index, _)| index.to_string())
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            theme = %name,
+            missing = %missing.join(", "),
+            "theme does not set every ANSI colour; those slots keep the default"
+        );
+    }
+    Ok(theme)
 }
 
 /// Theme names available in the search paths, for the palette.
