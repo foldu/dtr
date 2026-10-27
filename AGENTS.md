@@ -140,6 +140,19 @@ cell width, so width comes from `unicode-width`: a character two cells wide is
 drawn across both cells, scaled to fit. Without that, the grid shows a one-cell
 glyph followed by a one-cell hole, which reads as broken spacing.
 
+**Key bindings are config, and the format is Zed's.** `[keys]` maps an action
+name to a chord (`ctrl-shift-t`), a named key (`tab`, `pageup`), or several
+chords in a row (`ctrl-k ctrl-s`). `false` hands a chord back to the shell. The
+action vocabulary lives in `crates/dtr/src/keys.rs`; the chords live in the
+config, so the config crate parses them and the app matches them.
+
+Two rules borrowed from Zed, both of which bite: **shifted punctuation is written
+as the character it produces** — pressing ctrl+shift+backslash reports `|`, so
+the binding is `ctrl-|`, and `ctrl-shift-\\` would never match (the lookup retries
+without shift so both spellings work); and **a chord that starts a longer binding
+waits**, which is why a pending sequence flushes after a second to the longest
+binding that is already complete.
+
 **There was no new-tab key.** `Ctrl+Tab` cycled tabs that only the palette could
 create, so a terminal had one tab and no discoverable way to get a second — the
 cycling looked broken rather than unused. `Ctrl+Shift+T` opens a tab, and the

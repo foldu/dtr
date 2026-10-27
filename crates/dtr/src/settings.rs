@@ -34,7 +34,6 @@ impl Row {
     ];
     /// Rows that describe one port, shown only while a serial session has focus:
     /// a rate for a port that is not open is a number belonging to nothing.
-    #[cfg(test)]
     const PORT: [Row; 2] = [Row::Baud, Row::CrToCrlf];
 
     fn label(self) -> &'static str {
@@ -145,8 +144,9 @@ impl Settings {
         if self.serial.is_some() {
             // Between the terminal settings and the reconnect policy, which is
             // where they read as a group.
-            rows.insert(2 + 1, Row::Baud);
-            rows.insert(2 + 2, Row::CrToCrlf);
+            for (offset, row) in Row::PORT.iter().enumerate() {
+                rows.insert(3 + offset, *row);
+            }
         }
         rows
     }

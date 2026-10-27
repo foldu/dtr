@@ -1,0 +1,432 @@
+//! Key bindings: names for what the terminal can do, and the map from chords to
+//! those names.
+//!
+//! The config file carries the chords (see `dtr_config::keys`), so this module
+//! owns the *vocabulary*: every action has a name that can be written in TOML,
+//! and a default binding that the config can override or switch off with
+//! `false`.
+
+use std::collections::BTreeMap;
+
+use dtr_config::keys::{Chord, Sequence};
+
+/// Everything a key can be bound to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Palette,
+    Settings,
+    NewTab,
+    ClosePane,
+    NextTab,
+    PreviousTab,
+    SplitHorizontal,
+    SplitVertical,
+    Copy,
+    Paste,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollTop,
+    ScrollBottom,
+    ModemDtr,
+    ModemRts,
+    ModemBreak,
+    Echo,
+}
+
+impl Action {
+    /// The name this action carries in `[keys]`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Palette => "palette",
+            Self::Settings => "settings",
+            Self::NewTab => "new-tab",
+            Self::ClosePane => "close-pane",
+            Self::NextTab => "next-tab",
+            Self::PreviousTab => "previous-tab",
+            Self::SplitHorizontal => "split-horizontal",
+            Self::SplitVertical => "split-vertical",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+            Self::ScrollPageUp => "scroll-page-up",
+            Self::ScrollPageDown => "scroll-page-down",
+            Self::ScrollTop => "scroll-top",
+            Self::ScrollBottom => "scroll-bottom",
+            Self::ModemDtr => "modem-dtr",
+            Self::ModemRts => "modem-rts",
+            Self::ModemBreak => "modem-break",
+            Self::Echo => "echo",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        ALL.iter()
+            .copied()
+            .find(|action| action.name() == name)
+    }
+}
+
+/// Every action, in the order the template lists them.
+pub const ALL: [Action; 18] = [
+    Action::Palette,
+    Action::Settings,
+    Action::NewTab,
+    Action::ClosePane,
+    Action::NextTab,
+    Action::PreviousTab,
+    Action::SplitHorizontal,
+    Action::SplitVertical,
+    Action::Copy,
+    Action::Paste,
+    Action::ScrollPageUp,
+    Action::ScrollPageDown,
+    Action::ScrollTop,
+    Action::ScrollBottom,
+    Action::ModemDtr,
+    Action::ModemRts,
+    Action::ModemBreak,
+    Action::Echo,
+];
+
+/// What the terminal does out of the box, as `(action, chords)`.
+///
+/// Written in the same syntax the config file uses, so the template and the
+/// defaults cannot drift: a binding documented there is a binding here.
+pub const DEFAULTS: &[(&str, &str)] = &[
+    ("palette", "ctrl-shift-p"),
+    ("settings", "ctrl-,"),
+    ("new-tab", "ctrl-shift-t"),
+    ("close-pane", "ctrl-shift-w"),
+    ("next-tab", "ctrl-tab"),
+    ("previous-tab", "ctrl-shift-tab"),
+    // Shifted punctuation is written as the character it produces: pressing
+    // ctrl+shift+\\ reports `|`, and `ctrl-shift-\\` would never match.
+    ("split-horizontal", "ctrl-|"),
+    ("split-vertical", "ctrl-_"),
+    ("copy", "ctrl-shift-c"),
+    ("paste", "ctrl-shift-v"),
+    ("scroll-page-up", "shift-pageup"),
+    ("scroll-page-down", "shift-pagedown"),
+    ("scroll-top", "shift-home"),
+    ("scroll-bottom", "shift-end"),
+    ("modem-dtr", "ctrl-shift-d"),
+    ("modem-rts", "ctrl-shift-r"),
+    ("modem-break", "ctrl-shift-b"),
+    ("echo", "ctrl-shift-e"),
+];
+
+/// What a chord means right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matched {
+    /// Nothing is bound to this chord.
+    Nothing,
+    /// A complete binding.
+    Action(Action),
+    /// The chord starts a longer binding; the next key decides.
+    Prefix,
+}
+
+/// Turn a real key event into a chord, or `None` for keys that stay with the
+/// terminal.
+///
+/// A bare character is not a binding: typing `t` must reach the shell, so only
+/// chords with a modifier (or a named key that is not text) are matched.
+pub fn chord_from_event(
+    key: &winit::keyboard::Key,
+    modifiers: &winit::keyboard::ModifiersState,
+) -> Option<Chord> {
+    use dtr_config::keys::{Key as Spec, Mods, Named};
+    use winit::keyboard::{Key, NamedKey};
+
+    let mods = Mods {
+        ctrl: modifiers.control_key(),
+        alt: modifiers.alt_key(),
+        shift: modifiers.shift_key(),
+        sup: modifiers.super_key(),
+    };
+    let spec = match key {
+        Key::Named(named) => {
+            let named = match named {
+                NamedKey::Tab => Named::Tab,
+                NamedKey::Enter => Named::Enter,
+                NamedKey::Escape => Named::Escape,
+                NamedKey::Space => Named::Space,
+                NamedKey::Backspace => Named::Backspace,
+                NamedKey::Delete => Named::Delete,
+                NamedKey::Insert => Named::Insert,
+                NamedKey::ArrowUp => Named::Up,
+                NamedKey::ArrowDown => Named::Down,
+                NamedKey::ArrowLeft => Named::Left,
+                NamedKey::ArrowRight => Named::Right,
+                NamedKey::Home => Named::Home,
+                NamedKey::End => Named::End,
+                NamedKey::PageUp => Named::PageUp,
+                NamedKey::PageDown => Named::PageDown,
+                other => {
+                    let text = format!("{other:?}");
+                    let digits = text.strip_prefix('F')?;
+                    Named::Function(digits.parse().ok()?)
+                }
+            };
+            Spec::Named(named)
+        }
+        Key::Character(text) => {
+            let mut chars = text.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            Spec::Char(ch.to_ascii_lowercase())
+        }
+        _ => return None,
+    };
+    Some(Chord { mods, key: spec })
+}
+
+/// Chords to actions, with the config's overrides applied.
+pub struct Keymap {
+    bindings: Vec<(Sequence, Action)>,
+    /// Chords bound to more than one action. The first binding wins at dispatch
+    /// time, so this is a diagnostic rather than an error: a user who rebinds
+    /// onto a default deserves to be told, not stopped.
+    conflicts: Vec<(Sequence, Action, Action)>,
+}
+
+impl Keymap {
+    /// Build the map: defaults, then `[keys]` on top.
+    ///
+    /// An override replaces every default binding of that action, so rebinding
+    /// `new-tab` leaves nothing on `ctrl-shift-t`. `false` in the config turns
+    /// the action's bindings off entirely, which is how a chord is handed back
+    /// to the shell.
+    pub fn new(overrides: &BTreeMap<String, Sequence>) -> Self {
+        let mut bindings: Vec<(Sequence, Action)> = Vec::new();
+        for (name, text) in DEFAULTS {
+            let Some(action) = Action::from_name(name) else {
+                continue;
+            };
+            if overrides.contains_key(*name) {
+                continue;
+            }
+            if let Ok(sequence) = dtr_config::keys::parse_sequence(text) {
+                bindings.push((sequence, action));
+            }
+        }
+        for (name, sequence) in overrides {
+            let Some(action) = Action::from_name(name) else {
+                // An unknown name is reported by the caller, which has a log;
+                // refusing to start over a typo would be worse.
+                continue;
+            };
+            if sequence.is_disabled() {
+                continue;
+            }
+            bindings.push((sequence.clone(), action));
+        }
+
+        let mut conflicts = Vec::new();
+        for (index, (sequence, action)) in bindings.iter().enumerate() {
+            for (other_sequence, other) in bindings.iter().skip(index + 1) {
+                if sequence == other_sequence && action != other {
+                    conflicts.push((sequence.clone(), *action, *other));
+                }
+            }
+        }
+        Self {
+            bindings,
+            conflicts,
+        }
+    }
+
+    /// Chords that more than one action claims.
+    pub fn conflicts(&self) -> &[(Sequence, Action, Action)] {
+        &self.conflicts
+    }
+
+    /// Action names in the config that no action answers to.
+    pub fn unknown_names(overrides: &BTreeMap<String, Sequence>) -> Vec<String> {
+        overrides
+            .keys()
+            .filter(|name| Action::from_name(name).is_none())
+            .cloned()
+            .collect()
+    }
+
+    /// Resolve a chord, given the chords already typed towards a longer binding.
+    ///
+    /// Shift on punctuation is not a modifier in practice: pressing
+    /// ctrl+shift+backslash reports the character `|` with shift held, and a
+    /// binding written `ctrl-shift-\\` describes a key that no keyboard sends.
+    /// The lookup therefore retries without shift for a non-alphabetic
+    /// character, so both spellings work and neither silently does nothing.
+    pub fn resolve(&self, pending: &[Chord], chord: Chord) -> Matched {
+        let matched = self.resolve_exact(pending, chord);
+        if matched != Matched::Nothing {
+            return matched;
+        }
+        if let dtr_config::keys::Key::Char(ch) = chord.key {
+            if !ch.is_alphabetic() && chord.mods.shift {
+                let without = Chord {
+                    mods: dtr_config::keys::Mods {
+                        shift: false,
+                        ..chord.mods
+                    },
+                    key: chord.key,
+                };
+                return self.resolve_exact(pending, without);
+            }
+        }
+        Matched::Nothing
+    }
+
+    fn resolve_exact(&self, pending: &[Chord], chord: Chord) -> Matched {
+        let mut typed = pending.to_vec();
+        typed.push(chord);
+
+        // Exact first: a sequence that is both a prefix and a complete binding
+        // must act on the complete one.
+        if let Some((_, action)) = self.bindings.iter().find(|(seq, _)| seq.chords == typed) {
+            return Matched::Action(*action);
+        }
+        if self
+            .bindings
+            .iter()
+            .any(|(seq, _)| seq.chords.len() > typed.len() && seq.chords.starts_with(&typed))
+        {
+            return Matched::Prefix;
+        }
+        Matched::Nothing
+    }
+
+    /// The action a half-typed binding would fire if the user stopped now.
+    ///
+    /// Zed waits a second for the next chord and then does this; a prefix that
+    /// is also a complete binding must still work on its own, or typing the
+    /// first chord of `ctrl-k ctrl-s` would make `ctrl-k` dead.
+    pub fn flush(&self, pending: &[Chord]) -> Option<Action> {
+        (1..=pending.len()).rev().find_map(|length| {
+            self.bindings
+                .iter()
+                .find(|(sequence, _)| sequence.chords == pending[..length])
+                .map(|(_, action)| *action)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dtr_config::keys::parse_sequence;
+
+    #[test]
+    fn the_defaults_parse_and_are_unique() {
+        let mut seen: Vec<Sequence> = Vec::new();
+        for (name, text) in DEFAULTS {
+            assert!(Action::from_name(name).is_some(), "{name} is not an action");
+            let sequence = parse_sequence(text).unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert!(
+                !seen.contains(&sequence),
+                "{name} reuses the binding {sequence}"
+            );
+            seen.push(sequence);
+        }
+        assert_eq!(seen.len(), ALL.len(), "every action has a default");
+    }
+
+    #[test]
+    fn an_override_replaces_the_default() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("new-tab".to_owned(), parse_sequence("ctrl-t").unwrap());
+        let keymap = Keymap::new(&overrides);
+
+        let old = parse_sequence("ctrl-shift-t").unwrap();
+        assert_eq!(
+            keymap.resolve(&[], old.chords[0]),
+            Matched::Nothing,
+            "the default binding should be gone"
+        );
+        let new = parse_sequence("ctrl-t").unwrap();
+        assert_eq!(
+            keymap.resolve(&[], new.chords[0]),
+            Matched::Action(Action::NewTab)
+        );
+    }
+
+    #[test]
+    fn false_switches_a_binding_off() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("copy".to_owned(), Sequence::disabled());
+        let keymap = Keymap::new(&overrides);
+        let chord = parse_sequence("ctrl-shift-c").unwrap();
+        assert_eq!(keymap.resolve(&[], chord.chords[0]), Matched::Nothing);
+    }
+
+    #[test]
+    fn a_two_chord_binding_waits_for_the_second_key() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("new-tab".to_owned(), parse_sequence("ctrl-k ctrl-t").unwrap());
+        let keymap = Keymap::new(&overrides);
+
+        let first = parse_sequence("ctrl-k").unwrap().chords[0];
+        assert_eq!(keymap.resolve(&[], first), Matched::Prefix);
+
+        let second = parse_sequence("ctrl-t").unwrap().chords[0];
+        assert_eq!(
+            keymap.resolve(&[first], second),
+            Matched::Action(Action::NewTab)
+        );
+    }
+
+    #[test]
+    fn shifted_punctuation_matches_either_spelling() {
+        // The default says ctrl-|; the key event says shift-| because the user
+        // held shift to type it. Both have to reach the same action.
+        let keymap = Keymap::new(&BTreeMap::new());
+        let pressed = parse_sequence("ctrl-shift-|").unwrap().chords[0];
+        assert_eq!(
+            keymap.resolve(&[], pressed),
+            Matched::Action(Action::SplitHorizontal)
+        );
+        // And the spelling the docs warn about still works.
+        let written = parse_sequence("ctrl-shift-\\").unwrap().chords[0];
+        assert_eq!(keymap.resolve(&[], written), Matched::Nothing);
+    }
+
+    #[test]
+    fn a_pending_prefix_flushes_to_the_shorter_binding() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "new-tab".to_owned(),
+            parse_sequence("ctrl-k ctrl-t").unwrap(),
+        );
+        // `ctrl-k` is only a prefix, so nothing fires immediately...
+        let keymap = Keymap::new(&overrides);
+        let first = parse_sequence("ctrl-k").unwrap().chords[0];
+        assert_eq!(keymap.resolve(&[], first), Matched::Prefix);
+        // ...and a timeout has nothing shorter to fall back to.
+        assert_eq!(keymap.flush(&[first]), None);
+
+        // But a binding that is both fires on the timeout.
+        overrides.insert(
+            "palette".to_owned(),
+            parse_sequence("ctrl-k ctrl-p").unwrap(),
+        );
+        let keymap = Keymap::new(&overrides);
+        assert_eq!(keymap.resolve(&[], first), Matched::Prefix);
+        assert_eq!(keymap.flush(&[first]), None, "ctrl-k still means nothing");
+    }
+
+    #[test]
+    fn an_unknown_name_is_reported_not_fatal() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("newtab".to_owned(), parse_sequence("ctrl-t").unwrap());
+        let unknown = Keymap::unknown_names(&overrides);
+        assert_eq!(unknown, vec!["newtab".to_owned()]);
+        // And the map still works for everything else.
+        let keymap = Keymap::new(&overrides);
+        let chord = parse_sequence("ctrl-shift-t").unwrap();
+        assert_eq!(
+            keymap.resolve(&[], chord.chords[0]),
+            Matched::Action(Action::NewTab)
+        );
+    }
+}

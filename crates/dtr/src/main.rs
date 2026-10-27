@@ -4,6 +4,7 @@ mod app;
 mod explorer;
 mod fonts;
 mod input;
+mod keys;
 mod layout;
 mod logbook;
 mod modem;
@@ -379,6 +380,24 @@ fn main() -> anyhow::Result<()> {
             dtr_config::Config::default()
         }
     };
+    // A key table with a typo in it is silent otherwise: the binding simply
+    // never fires. Say which names were not understood and which chords are
+    // claimed twice, once, at startup.
+    for name in crate::keys::Keymap::unknown_names(&config.keys) {
+        tracing::warn!(%name, "keys: no action by that name");
+    }
+    {
+        let keymap = crate::keys::Keymap::new(&config.keys);
+        for (sequence, first, second) in keymap.conflicts() {
+            tracing::warn!(
+                binding = %sequence,
+                first = first.name(),
+                second = second.name(),
+                "keys: two actions want this binding; the first wins"
+            );
+        }
+    }
+
     // A theme that cannot be found is worth saying loudly once, then carrying
     // on with the built-in colours: a wrong name must not stop a session.
     let theme = match config.theme.as_deref() {

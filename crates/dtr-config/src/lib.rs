@@ -10,9 +10,14 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table, value};
 
+pub mod keys;
+
 /// Everything configurable. Defaults are what a fresh install gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
+    /// Key bindings from `[keys]`, action name to chord text. Kept as text here
+    /// and matched by the app, so the config crate needs no window library.
+    pub keys: std::collections::BTreeMap<String, keys::Sequence>,
     pub serial: Serial,
     pub font: Font,
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
@@ -48,6 +53,7 @@ pub struct Font {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            keys: std::collections::BTreeMap::new(),
             serial: Serial {
                 auto_reconnect: true,
             },
@@ -106,6 +112,23 @@ impl Config {
                 config.serial.auto_reconnect = reconnect.as_bool().ok_or_else(|| {
                     Error::Value("serial.auto_reconnect must be true or false".into())
                 })?;
+            }
+        }
+
+        if let Some(table) = document.get("keys").and_then(Item::as_table) {
+            for (action, item) in table.iter() {
+                // `new-tab = false` turns a default binding off, which is how a
+                // key you want for the shell gets handed back to the shell.
+                if item.as_bool() == Some(false) {
+                    config.keys.insert(action.to_owned(), keys::Sequence::disabled());
+                    continue;
+                }
+                let text = item.as_str().ok_or_else(|| {
+                    Error::Value(format!("keys.{action} must be a string or false"))
+                })?;
+                let sequence = keys::parse_sequence(text)
+                    .map_err(|err| Error::Value(format!("keys.{action}: {}", err.reason)))?;
+                config.keys.insert(action.to_owned(), sequence);
             }
         }
 
@@ -254,6 +277,17 @@ auto_reconnect = true
 [font]
 # Grid font size in points.
 size = 14
+# Key bindings. Action names are listed in `dtr --keys`; a chord is
+# `ctrl-shift-t`, a named key is `tab`, `escape`, `pageup`, and several keys in
+# a row are separated by spaces (`ctrl-k ctrl-s`). Shifted punctuation is the
+# character it produces: ctrl+| is ctrl and shift and backslash, so write `|`.
+# Setting an action to `false` hands its chord back to the shell.
+#
+# [keys]
+# "new-tab" = "ctrl-shift-t"
+# "palette" = "ctrl-shift-p"
+# "split-horizontal" = "ctrl-|"
+
 # Installed family to use; `dtr --fonts` lists the ones that work here.
 # family = "JetBrains Mono"
 # Path to a .ttf/.otf to use instead of the embedded font.
@@ -333,6 +367,24 @@ path = "/tmp/mono.ttf"
     fn a_wrong_type_names_the_key() {
         let error = Config::parse("[serial]\nauto_reconnect = \"soon\"\n").unwrap_err().to_string();
         assert!(error.contains("serial.auto_reconnect"), "{error}");
+    }
+
+    #[test]
+    fn key_bindings_are_parsed_and_bad_ones_name_the_action() {
+        let config = Config::parse("[keys]\nnew-tab = \"ctrl-shift-t\"\n").unwrap();
+        assert_eq!(
+            config.keys.get("new-tab").map(|s| s.to_string()),
+            Some("ctrl-shift-t".to_owned())
+        );
+
+        let config = Config::parse("[keys]\nnew-tab = false\n").unwrap();
+        assert!(config.keys.get("new-tab").unwrap().is_disabled());
+
+        let error = Config::parse("[keys]\nnew-tab = \"hyper-t\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("keys.new-tab"), "{error}");
+        assert!(error.contains("not a modifier"), "{error}");
     }
 
     #[test]

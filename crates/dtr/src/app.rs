@@ -264,6 +264,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             settings
         },
         fonts_dirty: false,
+        keymap: crate::keys::Keymap::new(&startup.config.keys),
+        pending: Vec::new(),
+        pending_since: None,
         held: None,
         config: startup.config.clone(),
         config_path: startup.config_path.clone(),
@@ -460,6 +463,13 @@ struct App {
     /// Set when the grid must be rebuilt against a new face; the redraw has the
     /// device, and the settings menu does not.
     fonts_dirty: bool,
+    /// What the config file says each chord means.
+    keymap: crate::keys::Keymap,
+    /// Chords typed towards a binding that takes more than one.
+    pending: Vec<dtr_config::keys::Chord>,
+    /// When the first chord of a pending binding was typed: Zed waits a second
+    /// for the rest, then fires the longest binding that is already complete.
+    pending_since: Option<std::time::Instant>,
     /// The key the menu thinks is down. A second press for the same key without
     /// a release in between is a duplicate the compositor sent, not a second
     /// keystroke, and acting on it moves the selection two rows.
@@ -481,6 +491,139 @@ impl App {
             if self.started.elapsed() >= std::time::Duration::from_millis(after) {
                 tracing::info!("closing after the test interval");
                 event_loop.exit();
+            }
+        }
+    }
+
+    /// Do what a binding asks for. Returns whether it acted, so a terminal-only
+    /// action with a file pane focused falls through to the pane's own keys.
+    fn dispatch(&mut self, action: crate::keys::Action) -> bool {
+        use crate::keys::Action;
+        match action {
+            Action::Palette => {
+                self.palette.toggle();
+                self.repaint("palette");
+                true
+            }
+            Action::Settings => {
+                if self.settings.open {
+                    self.settings.open = false;
+                } else {
+                    let config = self.config.clone();
+                    // The focused session's port, and what the store remembers
+                    // for it: baud and CR translation are facts about that
+                    // device, not about the terminal.
+                    let port = self.session().and_then(|session| session.port.clone());
+                    let record = port.as_ref().and_then(|port| {
+                        self.store
+                            .as_ref()
+                            .and_then(|store| store.serial(port).ok().flatten())
+                    });
+                    self.settings.show_port(&config, port, record);
+                }
+                self.repaint("settings");
+                true
+            }
+            Action::NewTab => {
+                self.open(Transport::Shell(crate::pty::Config::default()));
+                self.repaint("new tab");
+                true
+            }
+            Action::ClosePane => {
+                self.close_active();
+                true
+            }
+            Action::NextTab => {
+                self.cycle(true);
+                self.repaint("next tab");
+                true
+            }
+            Action::PreviousTab => {
+                self.cycle(false);
+                self.repaint("previous tab");
+                true
+            }
+            Action::SplitHorizontal => {
+                self.split(
+                    crate::layout::Axis::Horizontal,
+                    Transport::Shell(crate::pty::Config::default()),
+                );
+                true
+            }
+            Action::SplitVertical => {
+                self.split(
+                    crate::layout::Axis::Vertical,
+                    Transport::Shell(crate::pty::Config::default()),
+                );
+                true
+            }
+            Action::Copy => {
+                // The pane rebuilds the text from the terminal when asked; it
+                // cannot reuse a frame, because drawing the frame is what
+                // empties the pane's copy of it.
+                let Some(session) = self.session() else {
+                    return false;
+                };
+                match session.selection {
+                    Some((start, end)) => session
+                        .pane
+                        .send(crate::pane::Command::CopyRange(start, end)),
+                    None => session.pane.send(crate::pane::Command::Copy),
+                }
+                true
+            }
+            // The clipboard arrives as an egui paste event, which the render
+            // pass collects; there is nothing to do on the key itself.
+            Action::Paste => self.session().is_some(),
+            Action::ScrollPageUp | Action::ScrollPageDown => {
+                let page = self
+                    .session()
+                    .and_then(|session| session.frame.as_ref())
+                    .map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
+                let Some(session) = self.session() else {
+                    return false;
+                };
+                let delta = if matches!(action, Action::ScrollPageUp) {
+                    -page
+                } else {
+                    page
+                };
+                session.pane.send(crate::pane::Command::Scroll(delta));
+                true
+            }
+            Action::ScrollTop | Action::ScrollBottom => {
+                let Some(session) = self.session() else {
+                    return false;
+                };
+                session.pane.send(crate::pane::Command::ScrollEdge {
+                    top: matches!(action, Action::ScrollTop),
+                });
+                true
+            }
+            Action::ModemDtr | Action::ModemRts | Action::ModemBreak => {
+                let Some(session) = self.session() else {
+                    return false;
+                };
+                match action {
+                    Action::ModemDtr => {
+                        let level = !session.pane.stats().dtr();
+                        session.pane.send(crate::pane::Command::Dtr(level));
+                    }
+                    Action::ModemRts => {
+                        let level = !session.pane.stats().rts();
+                        session.pane.send(crate::pane::Command::Rts(level));
+                    }
+                    _ => session.pane.send(crate::pane::Command::Break),
+                }
+                true
+            }
+            Action::Echo => {
+                let Some(session) = self.session_mut() else {
+                    return false;
+                };
+                session.echo = !session.echo;
+                session.pane.send(crate::pane::Command::Echo(session.echo));
+                true
             }
         }
     }
@@ -1030,6 +1173,25 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.check_exit_deadline(event_loop);
+        // A half-typed binding must not wait forever. One second, like Zed,
+        // then whatever is already complete fires.
+        const PENDING: std::time::Duration = std::time::Duration::from_secs(1);
+        if let Some(since) = self.pending_since {
+            let deadline = since + PENDING;
+            if std::time::Instant::now() >= deadline {
+                let pending = std::mem::take(&mut self.pending);
+                self.pending_since = None;
+                match self.keymap.flush(&pending) {
+                    Some(action) => {
+                        self.dispatch(action);
+                    }
+                    None => tracing::debug!(?pending, "no binding completed"),
+                }
+                self.repaint("pending flushed");
+            } else {
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
+            }
+        }
         // Wake up when the deadline is due, rather than hoping some other
         // event brings the loop back: an idle window that never wakes would
         // never take its own exit.
@@ -1097,135 +1259,11 @@ impl ApplicationHandler<UserEvent> for App {
                     repeat = event.repeat,
                     "key"
                 );
-                let palette_key = self.modifiers.control_key()
-                    && self.modifiers.shift_key()
-                    && matches!(
-                        event.logical_key,
-                        winit::keyboard::Key::Character(ref character) if character.eq_ignore_ascii_case("p")
-                    );
-                // Scrollback: Shift+PageUp/Down a page at a time, Shift+Home/End
-                // to the ends. These are the terminal conventions, and they need
-                // the grid height, which the frame knows. With a file pane
-                // focused there is no terminal to scroll.
-                let page = self
-                    .session()
-                    .and_then(|session| session.frame.as_ref())
-                    .map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
-                let scroll_key = self.modifiers.shift_key()
-                    && event.state == winit::event::ElementState::Pressed
-                    && match event.logical_key {
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp) => {
-                            if let Some(session) = self.session() {
-                                session.pane.send(crate::pane::Command::Scroll(-page));
-                            }
-                            true
-                        }
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown) => {
-                            if let Some(session) = self.session() {
-                                session.pane.send(crate::pane::Command::Scroll(page));
-                            }
-                            true
-                        }
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home) => {
-                            if let Some(session) = self.session() {
-                                session
-                                    .pane
-                                    .send(crate::pane::Command::ScrollEdge { top: true });
-                            }
-                            true
-                        }
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::End) => {
-                            if let Some(session) = self.session() {
-                                session
-                                    .pane
-                                    .send(crate::pane::Command::ScrollEdge { top: false });
-                            }
-                            true
-                        }
-                        _ => false,
-                    };
-
-                // Splits: the new pane gets a shell, because a serial port
-                // cannot be opened twice and "split this port" is meaningless.
-                let split_key = self.modifiers.control_key()
-                    && self.modifiers.shift_key()
+                // Alt+digit selects a tab by number: the only binding that
+                // cannot be written as one chord, because it is "any digit".
+                let alt_digit = self.modifiers.alt_key()
                     && event.state == winit::event::ElementState::Pressed
                     && match &event.logical_key {
-                        winit::keyboard::Key::Character(text) => match text.as_str() {
-                            "\\" => {
-                                self.split(
-                                    crate::layout::Axis::Horizontal,
-                                    Transport::Shell(crate::pty::Config::default()),
-                                );
-                                true
-                            }
-                            "-" | "_" => {
-                                self.split(
-                                    crate::layout::Axis::Vertical,
-                                    Transport::Shell(crate::pty::Config::default()),
-                                );
-                                true
-                            }
-                            _ => false,
-                        },
-                        _ => false,
-                    };
-
-                // The menu owns the keyboard while it is open: a settings field
-                // that leaks "j" into the shell is worse than a modal.
-                //
-                // Everything here runs on *press* only. The release of the very
-                // keystroke that opened the menu arrives while it is open, and
-                // acted on that it closed the menu again — the menu flashed and
-                // vanished, which reads as "it does not open".
-                let pressed = event.state == winit::event::ElementState::Pressed;
-                if self.settings.open && !pressed {
-                    // A release is how we learn the key is up again; it must
-                    // never act on its own.
-                    self.held = None;
-                    return;
-                }
-                if self.settings.open && pressed {
-                    // Duplicate presses for a key that is already down are
-                    // compositor noise (and the reason navigation jumped two
-                    // rows). A genuine auto-repeat says so in `repeat`.
-                    if !event.repeat && self.held.as_ref() == Some(&event.logical_key) {
-                        tracing::debug!(key = ?event.logical_key, "ignoring a duplicate press");
-                        return;
-                    }
-                    self.held = Some(event.logical_key.clone());
-                    tracing::debug!(
-                        key = ?event.logical_key,
-                        repeat = event.repeat,
-                        row = self.settings.current_row() as u8,
-                        "settings key"
-                    );
-                    // Ctrl+, closes it, like it opened it. Everything else is
-                    // the menu's: a modal that leaks keystrokes into the shell
-                    // is worse than no modal.
-                    let closes = self.modifiers.control_key()
-                        && matches!(&event.logical_key, winit::keyboard::Key::Character(text) if text == ",");
-                    if closes {
-                        self.settings.open = false;
-                        self.repaint("settings closed");
-                        return;
-                    }
-                    match self.settings.handle(&event.logical_key) {
-                        Some(crate::settings::Effect::Apply) => self.apply_settings(),
-                        Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
-                        Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
-                        None => {}
-                    }
-                    return;
-                }
-
-                let tab_switch = self.modifiers.control_key()
-                    && event.state == winit::event::ElementState::Pressed
-                    && match &event.logical_key {
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab) => {
-                            self.cycle(!self.modifiers.shift_key());
-                            true
-                        }
                         winit::keyboard::Key::Character(text) if self.modifiers.alt_key() => {
                             match text.chars().next().and_then(|c| c.to_digit(10)) {
                                 Some(0) => {
@@ -1242,108 +1280,100 @@ impl ApplicationHandler<UserEvent> for App {
                         _ => false,
                     };
 
-                let chord = |character: &str| {
-                    self.modifiers.control_key()
-                        && self.modifiers.shift_key()
-                        && matches!(
-                            event.logical_key,
-                            winit::keyboard::Key::Character(ref typed) if typed.eq_ignore_ascii_case(character)
-                        )
-                        && event.state == winit::event::ElementState::Pressed
+                // Everything else comes from the keymap, which the config file
+                // can rewrite. `pending` holds the chords of a binding that is
+                // not finished yet (`ctrl-k ctrl-s`).
+                let pressed = event.state == winit::event::ElementState::Pressed;
+
+                // The menu owns the keyboard while it is open. Releases only
+                // clear the held key; duplicates are compositor noise.
+                if self.settings.open {
+                    if !pressed {
+                        self.held = None;
+                        return;
+                    }
+                    if !event.repeat && self.held.as_ref() == Some(&event.logical_key) {
+                        tracing::debug!(key = ?event.logical_key, "ignoring a duplicate press");
+                        return;
+                    }
+                    self.held = Some(event.logical_key.clone());
+                    let closes = crate::keys::chord_from_event(&event.logical_key, &self.modifiers)
+                        .is_some_and(|chord| {
+                            matches!(
+                                self.keymap.resolve(&[], chord),
+                                crate::keys::Matched::Action(crate::keys::Action::Settings)
+                            )
+                        });
+                    if closes {
+                        self.settings.open = false;
+                        self.repaint("settings closed");
+                        return;
+                    }
+                    match self.settings.handle(&event.logical_key) {
+                        Some(crate::settings::Effect::Apply) => self.apply_settings(),
+                        Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
+                        Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
+                        None => {}
+                    }
+                    return;
+                }
+
+                let mut consumed = alt_digit;
+                let action = if pressed && !consumed {
+                    crate::keys::chord_from_event(&event.logical_key, &self.modifiers).and_then(
+                        |chord| match self.keymap.resolve(&self.pending, chord) {
+                            crate::keys::Matched::Action(action) => {
+                                self.pending.clear();
+                                self.pending_since = None;
+                                Some(action)
+                            }
+                            crate::keys::Matched::Prefix => {
+                                self.pending.push(chord);
+                                self.pending_since = Some(std::time::Instant::now());
+                                self.repaint("prefix");
+                                consumed = true;
+                                None
+                            }
+                            crate::keys::Matched::Nothing => {
+                                self.pending.clear();
+                                self.pending_since = None;
+                                None
+                            }
+                        },
+                    )
+                } else {
+                    None
                 };
-                if scroll_key || tab_switch || split_key {
-                    // Already handled above.
-                } else if chord("w") {
-                    // Closing a pane is layout, not terminal work: it works
-                    // whichever kind of pane has focus.
-                    self.close_active();
-                } else if self.session().is_none() {
-                    // A file pane has focus. It gets navigation keys and the
-                    // palette chord; everything terminal-only is ignored.
-                    if palette_key && event.state == winit::event::ElementState::Pressed {
-                        self.palette.toggle();
-                    } else if !self.palette.open
-                        && !self.modifiers.control_key()
-                        && !self.modifiers.alt_key()
-                    {
-                        if let Some(key) = explorer_key(&event) {
-                            let chosen = self
-                                .focused_explorer_mut()
-                                .and_then(|explorer| explorer.handle(key));
-                            if let Some(path) = chosen {
-                                self.insert_path_into_terminal(path);
+
+                if let Some(action) = action {
+                    consumed = self.dispatch(action);
+                }
+
+                if !consumed {
+                    if self.session().is_none() {
+                        // A file pane has focus: it gets navigation keys, and
+                        // everything terminal-only is ignored.
+                        if !self.palette.open
+                            && !self.modifiers.control_key()
+                            && !self.modifiers.alt_key()
+                        {
+                            if let Some(key) = explorer_key(&event) {
+                                let chosen = self
+                                    .focused_explorer_mut()
+                                    .and_then(|explorer| explorer.handle(key));
+                                if let Some(path) = chosen {
+                                    self.insert_path_into_terminal(path);
+                                }
                             }
                         }
-                    }
-                    // File navigation changes what egui paints, not what the
-                    // terminal emits, so ask for the frame explicitly.
-                    self.repaint("file navigation");
-                } else if chord("d") {
-                    if let Some(session) = self.session() {
-                        let level = !session.pane.stats().dtr();
-                        session.pane.send(crate::pane::Command::Dtr(level));
-                    }
-                } else if chord("r") {
-                    if let Some(session) = self.session() {
-                        let level = !session.pane.stats().rts();
-                        session.pane.send(crate::pane::Command::Rts(level));
-                    }
-                } else if chord("b") {
-                    if let Some(session) = self.session() {
-                        session.pane.send(crate::pane::Command::Break);
-                    }
-                } else if pressed
-                    && self.modifiers.control_key()
-                    && matches!(&event.logical_key, winit::keyboard::Key::Character(text) if text == ",")
-                {
-                    if self.settings.open {
-                        self.settings.open = false;
-                    } else {
-                        let config = self.config.clone();
-                        // The focused session's port, and what the store
-                        // remembers for it: baud and CR translation are facts
-                        // about that device, not about the terminal.
-                        let port = self.session().and_then(|session| session.port.clone());
-                        let record = port.as_ref().and_then(|port| {
-                            self.store
-                                .as_ref()
-                                .and_then(|store| store.serial(port).ok().flatten())
-                        });
-                        self.settings.show_port(&config, port, record);
-                    }
-                    self.repaint("settings");
-                } else if chord("t") {
-                    // A new tab. The palette can open a shell too, but a
-                    // terminal with no new-tab key has one tab forever, and
-                    // `Ctrl+Tab` with nothing to switch to looks broken.
-                    self.open(Transport::Shell(crate::pty::Config::default()));
-                } else if chord("c") {
-                    // The pane rebuilds the text from the terminal when asked;
-                    // it cannot reuse a frame, because drawing the frame is what
-                    // empties the pane's copy of it.
-                    if let Some(session) = self.session() {
-                        match session.selection {
-                            Some((start, end)) => session
-                                .pane
-                                .send(crate::pane::Command::CopyRange(start, end)),
-                            None => session.pane.send(crate::pane::Command::Copy),
-                        }
-                    }
-                } else if chord("v") {
-                    // The clipboard arrives as an egui paste event, which the
-                    // render pass collects; nothing to do here.
-                } else if chord("e") {
-                    if let Some(session) = self.session_mut() {
-                        session.echo = !session.echo;
-                        session.pane.send(crate::pane::Command::Echo(session.echo));
-                    }
-                } else if palette_key && event.state == winit::event::ElementState::Pressed {
-                    self.palette.toggle();
-                } else if !self.palette.open {
-                    // The palette owns the keyboard while it is open.
-                    if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
-                        if let Some(session) = self.session() {
-                            session.pane.write(bytes);
+                        self.repaint("file navigation");
+                    } else if !self.palette.open && !self.settings.open {
+                        // The palette and the menu own the keyboard while they
+                        // are open; otherwise the key belongs to the shell.
+                        if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
+                            if let Some(session) = self.session() {
+                                session.pane.write(bytes);
+                            }
                         }
                     }
                 }
