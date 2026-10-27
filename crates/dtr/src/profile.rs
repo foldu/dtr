@@ -18,13 +18,18 @@ pub struct Guard {
     /// How long we sampled, so the report can say how busy the process was
     /// rather than only where the samples landed.
     started: std::time::Instant,
+    /// Written on drop as well as explicitly: an empty profile file is worse
+    /// than no file, because it looks like success.
+    path: std::path::PathBuf,
+    written: std::cell::Cell<bool>,
     #[cfg(not(target_os = "linux"))]
     _never: std::marker::PhantomData<()>,
 }
 
 impl Guard {
-    /// Start sampling, or return `None` where profiling is not available.
-    pub fn start() -> Option<Self> {
+    /// Start sampling into `path`, or return `None` where profiling is not
+    /// available.
+    pub fn start(path: &Path) -> Option<Self> {
         #[cfg(target_os = "linux")]
         {
             // 997 Hz: prime, so samples do not line up with frame or poll
@@ -35,10 +40,12 @@ impl Guard {
                 .build()
             {
                 Ok(guard) => {
-                    tracing::info!("cpu profiler started");
+                    tracing::info!(path = %path.display(), "cpu profiler started");
                     Some(Self {
                         inner: Some(guard),
                         started: std::time::Instant::now(),
+                        path: path.to_path_buf(),
+                        written: std::cell::Cell::new(false),
                     })
                 }
                 Err(err) => {
@@ -59,28 +66,41 @@ impl Guard {
     /// Errors are logged, never fatal: failing to write a profile must not fail
     /// the run that was being profiled.
     pub fn finish(self, path: &Path) {
-        #[cfg(target_os = "linux")]
-        {
-            let Some(guard) = self.inner else { return };
-            let started = self.started;
-            match guard.report().build() {
-                Ok(report) => {
-                    report_text(&report, started.elapsed());
-                    if path.extension().and_then(|ext| ext.to_str()) == Some("svg") {
-                        write_flamegraph(&report, path);
-                    } else {
-                        tracing::info!(
-                            "text report only; pass a .svg path for a flamegraph as well"
-                        );
-                    }
+        let _ = path;
+        self.write();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write(&self) {
+        if self.written.replace(true) {
+            return;
+        }
+        let Some(guard) = self.inner.as_ref() else { return };
+        let started = self.started;
+        match guard.report().build() {
+            Ok(report) => {
+                if report.data.is_empty() {
+                    tracing::warn!(
+                        "no samples were collected; nothing written (was the run shorter than a sampling tick?)"
+                    );
+                    return;
                 }
-                Err(err) => tracing::warn!(%err, "build profile report"),
+                report_text(&report, started.elapsed());
+                write_flamegraph(&report, &self.path);
             }
+            Err(err) => tracing::warn!(%err, "build profile report"),
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = path;
-        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn write(&self) {}
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Guard {
+    fn drop(&mut self) {
+        // Every orderly exit, including an unwinding panic, writes the profile.
+        self.write();
     }
 }
 

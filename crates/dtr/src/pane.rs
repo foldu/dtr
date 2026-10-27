@@ -134,6 +134,13 @@ pub enum Command {
     Rts(bool),
     Break,
     Scroll(isize),
+    /// Resize the grid to the window, in cells and in pixels.
+    Resize {
+        cols: u16,
+        rows: u16,
+        width_px: u32,
+        height_px: u32,
+    },
     /// Jump to the top or the bottom of the scrollback.
     ScrollEdge {
         top: bool,
@@ -605,6 +612,34 @@ async fn run(
                                 tracing::warn!(%err, "break");
                             }
                         }
+                    }
+                    Command::Resize {
+                        cols: new_cols,
+                        rows: new_rows,
+                        width_px,
+                        height_px,
+                    } => {
+                        if new_cols == 0 || new_rows == 0 {
+                            continue;
+                        }
+                        if let Err(err) = term.resize(new_cols, new_rows, width_px, height_px) {
+                            tracing::warn!(%err, "resize the grid");
+                        }
+                        // The shell needs the size too, or it wraps for the old
+                        // width and the terminal shows a staircase.
+                        if let Some((pty, _)) = pty_keep.as_mut() {
+                            let size = portable_pty::PtySize {
+                                rows: new_rows,
+                                cols: new_cols,
+                                pixel_width: u16::try_from(width_px).unwrap_or(u16::MAX),
+                                pixel_height: u16::try_from(height_px).unwrap_or(u16::MAX),
+                            };
+                            if let Err(err) = pty.resize(size) {
+                                tracing::warn!(%err, "resize the pty");
+                            }
+                        }
+                        tracing::debug!(cols = new_cols, rows = new_rows, "resized");
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
                     }
                     Command::Scroll(lines) => {
                         term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));

@@ -74,6 +74,24 @@ pub fn capture_headless(
         pane.send(crate::pane::Command::Scroll(-startup.scroll as isize));
     }
 
+    // Size the grid to the captured window before looking at it: a capture at
+    // 80x24 in a 900 px window is a picture of a different program than the one
+    // the window would show.
+    {
+        let metrics = crate::screenshot::cell_metrics(width, height)?;
+        let cols = (f64::from(width) / f64::from(metrics.cell_width)).floor().max(1.0) as u16;
+        let rows = ((f64::from(height) - f64::from(crate::ui::STATUS_HEIGHT)).max(1.0)
+            / f64::from(metrics.cell_height))
+        .floor()
+        .max(1.0) as u16;
+        pane.send(crate::pane::Command::Resize {
+            cols,
+            rows,
+            width_px: width,
+            height_px: height,
+        });
+    }
+
     // Give the session a moment to produce output (a serial device's prompt),
     // then take the newest frame rather than the first one.
     std::thread::sleep(delay);
@@ -196,6 +214,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 echo: false,
                 selection: startup.select,
                 meter: Meter::new(),
+                grid: (0, 0),
             }),
         )],
         active: 0,
@@ -281,6 +300,9 @@ fn explorer_key(event: &winit::event::KeyEvent) -> Option<crate::explorer::Key> 
 /// and statistics.
 struct Session {
     pane: TermPane,
+    /// The grid size we last asked for, so a resize is sent when it changes
+    /// rather than on every frame.
+    grid: (u16, u16),
     frame: Option<Frame>,
     label: String,
     /// Whether this session has modem lines, for the status strip.
@@ -461,6 +483,7 @@ impl App {
                     echo: false,
                     selection: None,
                     meter: Meter::new(),
+                    grid: (0, 0),
                 };
                 let id = self.next_leaf;
                 self.next_leaf += 1;
@@ -538,6 +561,7 @@ impl App {
                 echo: false,
                 selection: None,
                 meter: Meter::new(),
+                grid: (0, 0),
             }),
         );
         tab.focus = id;
@@ -629,6 +653,47 @@ impl App {
                 )
             })
             .collect()
+    }
+
+    /// Ask every terminal pane for the grid that fits its rectangle.
+    ///
+    /// Called after the first frame and whenever the window or the layout
+    /// changes: a terminal that keeps its 80×24 grid in a 1900 px window wastes
+    /// two thirds of the screen, and one that keeps it in a 400 px window draws
+    /// past its own edge.
+    fn fit_panes(&mut self, metrics: crate::render::Metrics, screen: (f32, f32), scale: f32) {
+        if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
+        let rects = tab
+            .layout
+            .rects(
+                crate::layout::Rect::new(
+                    0.0,
+                    0.0,
+                    screen.0,
+                    (screen.1 - crate::ui::STATUS_HEIGHT * scale).max(0.0),
+                ),
+                crate::ui::SPLIT_GAP * scale,
+            );
+        for (id, rect) in rects {
+            let Some(session) = tab.leaves.get_mut(&id).and_then(Pane::terminal_mut) else {
+                continue;
+            };
+            let cols = (rect.width / metrics.cell_width).floor().max(1.0) as u16;
+            let rows = (rect.height / metrics.cell_height).floor().max(1.0) as u16;
+            if session.grid == (cols, rows) {
+                continue;
+            }
+            session.grid = (cols, rows);
+            session.pane.send(crate::pane::Command::Resize {
+                cols,
+                rows,
+                width_px: rect.width as u32,
+                height_px: rect.height as u32,
+            });
+        }
     }
 
     /// Which pane is under a physical pixel position, if any.
@@ -1158,9 +1223,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // `take` rather than building a placeholder: `Palette::new`
                 // reads the machine, and this runs every frame.
                 let mut palette = std::mem::take(&mut self.palette);
-                let tab = &self.tabs[self.active];
                 let screen = (gpu.config.width as f32, gpu.config.height as f32);
                 let scale = gpu.scale();
+                self.fit_panes(gpu.metrics(), screen, scale);
+                let tab = &self.tabs[self.active];
                 let panes: Vec<_> = self
                     .pane_views(tab, gpu.metrics(), screen, scale)
                     .into_iter()

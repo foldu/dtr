@@ -476,7 +476,7 @@ fn main() -> anyhow::Result<()> {
         let profiler = args
             .cpu_profile
             .as_ref()
-            .and_then(|_| crate::profile::Guard::start());
+            .and_then(|path| crate::profile::Guard::start(path));
 
         let startup = app::Startup {
             transport,
@@ -504,7 +504,7 @@ fn main() -> anyhow::Result<()> {
     let profiler = args
         .cpu_profile
         .as_ref()
-        .and_then(|_| crate::profile::Guard::start());
+        .and_then(|path| crate::profile::Guard::start(path));
 
     let startup = app::Startup {
         transport,

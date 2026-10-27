@@ -10,6 +10,34 @@ use std::path::Path;
 
 use crate::pane::Frame;
 
+/// Cell size in physical pixels, for callers that need to size a grid before
+/// capturing one. Creates an adapter and a probe `GridRenderer`, so it is a
+/// screenshot-only cost.
+pub fn cell_metrics(width: u32, height: u32) -> anyhow::Result<crate::render::Metrics> {
+    let instance = crate::app::instance();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))?;
+    let (device, _queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("dtr-metrics"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::default(),
+        trace: wgpu::Trace::Off,
+    }))?;
+    let _ = (width, height);
+    let grid = crate::render::GridRenderer::new(
+        &device,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &crate::ui::Look::default(),
+    );
+    Ok(grid.metrics())
+}
+
 pub fn capture(
     frame: Option<&Frame>,
     path: &Path,
