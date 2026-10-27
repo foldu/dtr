@@ -13,6 +13,8 @@ use egui::{Color32, RichText, Ui};
 /// place of the embedded default.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Look {
+    /// Installed family the grid should use, before the preferred list.
+    pub family: Option<String>,
     pub size: f32,
     pub path: Option<PathBuf>,
     /// The terminal's own background, used behind the grid and as the base from
@@ -31,6 +33,7 @@ pub struct Look {
 impl Default for Look {
     fn default() -> Self {
         Self {
+            family: None,
             size: 14.0,
             path: None,
             background: [0x0b, 0x0f, 0x0e],
@@ -48,9 +51,15 @@ impl Look {
     /// The chrome is not themed by any format in the wild, so it is derived:
     /// a surface slightly lighter than the background, secondary text between
     /// background and foreground, and the theme's cursor colour as the accent.
-    pub fn themed(size: f32, path: Option<PathBuf>, theme: Option<&crate::theme::Theme>) -> Self {
+    pub fn themed(
+        size: f32,
+        family: Option<String>,
+        path: Option<PathBuf>,
+        theme: Option<&crate::theme::Theme>,
+    ) -> Self {
         let mut look = Self {
             size,
+            family,
             path,
             ..Self::default()
         };

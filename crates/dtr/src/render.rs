@@ -733,16 +733,18 @@ fn load_faces(look: &Look) -> [Loaded; 4] {
     }
 
     let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
-    for family in [
-        "JetBrains Mono",
-        "Hack",
-        "DejaVu Sans Mono",
-        "Liberation Mono",
-        "Fira Code",
-        "Ubuntu Mono",
-        "Noto Sans Mono",
-        "monospace",
-    ] {
+    // The configured family is tried first; the rest are only fallbacks, so a
+    // family that has been uninstalled degrades instead of failing.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(family) = look.family.clone() {
+        candidates.push(family);
+    }
+    candidates.extend(
+        ["JetBrains Mono", "Hack", "DejaVu Sans Mono", "Liberation Mono", "Fira Code", "Ubuntu Mono", "Noto Sans Mono", "monospace"]
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    for family in candidates.iter().map(String::as_str) {
         let Some(info) = collection.family_by_name(family) else {
             continue;
         };

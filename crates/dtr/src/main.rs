@@ -2,6 +2,7 @@
 
 mod app;
 mod explorer;
+mod fonts;
 mod input;
 mod layout;
 mod logbook;
@@ -13,6 +14,7 @@ mod pane;
 mod pty;
 mod screenshot;
 mod serial;
+mod settings;
 mod sources;
 mod theme;
 mod ui;
@@ -64,6 +66,14 @@ enum ThemeAction {
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Open the settings menu on start (also how it gets into screenshots)
+    #[arg(long)]
+    settings: bool,
+
+    /// List the installed families that can be a terminal grid, then exit
+    #[arg(long)]
+    fonts: bool,
 
     /// Prefer the GPU whose name contains TEXT, e.g. --gpu nvidia
     #[arg(long, value_name = "TEXT")]
@@ -335,6 +345,13 @@ fn main() -> anyhow::Result<()> {
         .clone()
         .or_else(|| std::env::var("DTR_GPU").ok())
         .filter(|name| !name.trim().is_empty());
+    if args.fonts {
+        for family in crate::fonts::usable_families() {
+            println!("{family}");
+        }
+        return Ok(());
+    }
+
     let select = match args.select.as_deref() {
         Some(spec) => {
             let (start, end) = spec
@@ -344,7 +361,12 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let look = ui::Look::themed(config.font.size, config.font.path.clone(), theme.as_ref());
+    let look = ui::Look::themed(
+        config.font.size,
+        config.font.family.clone(),
+        config.font.path.clone(),
+        theme.as_ref(),
+    );
 
     // Never fatal: a broken or read-only state file must not stop a terminal
     // from opening a port.
@@ -492,6 +514,9 @@ fn main() -> anyhow::Result<()> {
             files,
             exit_after: args.exit_after,
             gpu: gpu.clone(),
+            settings: args.settings,
+            config: config.clone(),
+            config_path: config_path.clone(),
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         if let (Some(path), Some(profiler)) = (args.cpu_profile.clone(), profiler) {
@@ -520,6 +545,9 @@ fn main() -> anyhow::Result<()> {
         files,
         exit_after: args.exit_after,
         gpu,
+        settings: args.settings,
+        config,
+        config_path,
     };
     let result = app::run(startup);
     if let Some(profiler) = profiler {

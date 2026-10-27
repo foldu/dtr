@@ -42,6 +42,11 @@ pub struct Startup {
     pub select: Option<(usize, usize)>,
     /// Lines to scroll into the scrollback before capturing (screenshots).
     pub scroll: i64,
+    /// Open the settings menu on start (also how it gets into screenshots).
+    pub settings: bool,
+    /// The config the menu edits, and where it came from.
+    pub config: dtr_config::Config,
+    pub config_path: PathBuf,
     /// Draw the capture as a split, to review the layout (screenshots).
     pub split: Option<crate::layout::Axis>,
     /// Open a file pane beside the initial session, at this directory.
@@ -120,6 +125,11 @@ pub fn capture_headless(
         .as_ref()
         .map(|path| Explorer::new(Some(path.clone())));
 
+    let settings = startup.settings.then(|| {
+        let mut settings = crate::settings::Settings::new();
+        settings.show(&startup.config);
+        settings
+    });
     crate::screenshot::capture(
         frame.as_ref(),
         path,
@@ -135,6 +145,7 @@ pub fn capture_headless(
         startup.split,
         files.as_ref(),
         None,
+        settings.as_ref(),
     )
 }
 
@@ -240,6 +251,16 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         exit_after: startup.exit_after,
         started: std::time::Instant::now(),
         gpu_hint: startup.gpu.clone(),
+        settings: {
+            let mut settings = crate::settings::Settings::new();
+            if startup.settings {
+                settings.show(&startup.config);
+            }
+            settings
+        },
+        fonts_dirty: false,
+        config: startup.config.clone(),
+        config_path: startup.config_path.clone(),
         toast: None,
     };
     // `--files` for screenshots and for starting next to a listing; the pane
@@ -427,6 +448,13 @@ struct App {
     started: std::time::Instant,
     /// Adapter name to prefer, from `--gpu` or `DTR_GPU`.
     gpu_hint: Option<String>,
+    /// Set when the grid must be rebuilt against a new face; the redraw has the
+    /// device, and the settings menu does not.
+    fonts_dirty: bool,
+    /// The settings menu, and the config it edits.
+    settings: crate::settings::Settings,
+    config: dtr_config::Config,
+    config_path: PathBuf,
     /// A copy note and when it was made. Shown briefly, because "did that
     /// work?" is asked at the moment the answer still matters.
     toast: Option<(String, std::time::Instant)>,
@@ -442,6 +470,76 @@ impl App {
                 event_loop.exit();
             }
         }
+    }
+
+    /// Write the menu's draft to the config file and make it live.
+    ///
+    /// Serial settings reach the pane as a command because a baud rate cannot
+    /// be applied to an open port in place: the pane reconnects, keeps its
+    /// scrollback, and comes back talking at the new rate.
+    fn apply_settings(&mut self) {
+        let draft = self.settings.draft().clone();
+        for (key, value) in self.settings.writes() {
+            if let Err(err) = dtr_config::set_value(&self.config_path, &key, &value) {
+                tracing::warn!(%key, %err, "could not save a setting");
+            }
+        }
+
+        let font_changed = draft.font.size != self.config.font.size
+            || draft.font.family != self.config.font.family;
+        let theme_changed = draft.theme != self.config.theme;
+        let serial_changed = draft.serial != self.config.serial;
+
+        self.config = draft;
+        self.look.size = self.config.font.size;
+        self.look.family = self.config.font.family.clone();
+
+        if theme_changed {
+            let theme = self
+                .config
+                .theme
+                .as_deref()
+                .and_then(|name| crate::theme::load(name).ok());
+            self.look = crate::ui::Look::themed(
+                self.look.size,
+                self.look.family.clone(),
+                self.look.path.clone(),
+                theme.as_ref(),
+            );
+            self.theme = theme.clone();
+            for tab in &mut self.tabs {
+                for pane in tab.leaves.values_mut() {
+                    if let Pane::Terminal(session) = pane {
+                        session
+                            .pane
+                            .send(crate::pane::Command::SetTheme(theme.clone()));
+                    }
+                }
+            }
+        }
+
+        if serial_changed {
+            let serial = self.config.serial.clone();
+            for tab in &mut self.tabs {
+                for pane in tab.leaves.values_mut() {
+                    if let Pane::Terminal(session) = pane {
+                        session.pane.send(crate::pane::Command::SetSerial {
+                            baud: serial.baud,
+                            cr_to_crlf: serial.cr_to_crlf,
+                            auto_reconnect: serial.auto_reconnect,
+                        });
+                    }
+                }
+            }
+        }
+
+        self.settings.open = false;
+        if font_changed {
+            // The grid must be rebuilt against the new face, which needs the
+            // device; the next redraw has it.
+            self.fonts_dirty = true;
+        }
+        self.repaint("settings applied");
     }
 
     /// Ask for a frame, and say why: a terminal that redraws continuously while
@@ -778,6 +876,7 @@ impl App {
                     // ones a file pane pushed out of focus.
                     self.look = crate::ui::Look::themed(
                         self.look.size,
+                        self.look.family.clone(),
                         self.look.path.clone(),
                         Some(&theme),
                     );
@@ -1022,6 +1121,28 @@ impl ApplicationHandler<UserEvent> for App {
                         _ => false,
                     };
 
+                // The menu owns the keyboard while it is open: a settings field
+                // that leaks "j" into the shell is worse than a modal.
+                if self.settings.open {
+                    // Ctrl+, closes it, like it opened it. Everything else is
+                    // the menu's: a modal that leaks keystrokes into the shell
+                    // is worse than no modal.
+                    let closes = self.modifiers.control_key()
+                        && matches!(&event.logical_key, winit::keyboard::Key::Character(text) if text == ",");
+                    if closes {
+                        self.settings.open = false;
+                        self.repaint("settings closed");
+                        return;
+                    }
+                    match self.settings.handle(&event.logical_key) {
+                        Some(crate::settings::Effect::Apply) => self.apply_settings(),
+                        Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
+                        Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
+                        None => {}
+                    }
+                    return;
+                }
+
                 let tab_switch = self.modifiers.control_key()
                     && event.state == winit::event::ElementState::Pressed
                     && match &event.logical_key {
@@ -1095,6 +1216,16 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(session) = self.session() {
                         session.pane.send(crate::pane::Command::Break);
                     }
+                } else if self.modifiers.control_key()
+                    && matches!(&event.logical_key, winit::keyboard::Key::Character(text) if text == ",")
+                {
+                    if self.settings.open {
+                        self.settings.open = false;
+                    } else {
+                        let config = self.config.clone();
+                        self.settings.show(&config);
+                    }
+                    self.repaint("settings");
                 } else if chord("c") {
                     // The pane rebuilds the text from the terminal when asked;
                     // it cannot reuse a frame, because drawing the frame is what
@@ -1261,7 +1392,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut palette = std::mem::take(&mut self.palette);
                 let screen = (gpu.config.width as f32, gpu.config.height as f32);
                 let scale = gpu.scale();
+                if std::mem::take(&mut self.fonts_dirty) {
+                    gpu.rebuild_grid(&self.look);
+                }
                 self.fit_panes(gpu.metrics(), screen, scale);
+                let settings = if self.settings.open { Some(&self.settings) } else { None };
                 let tab = &self.tabs[self.active];
                 let panes: Vec<_> = self
                     .pane_views(tab, gpu.metrics(), screen, scale)
@@ -1309,6 +1444,7 @@ impl ApplicationHandler<UserEvent> for App {
                     toast_text
                         .as_ref()
                         .map(|(text, alpha)| (text.as_str(), *alpha)),
+                    settings,
                     &look,
                 );
                 self.palette = palette;
@@ -1367,6 +1503,13 @@ struct Gpu {
 }
 
 impl Gpu {
+    /// Rebuild the grid for a new face or size. Cheap enough to do on a settings
+    /// change: it is a fresh atlas, not a reload of the whole renderer.
+    fn rebuild_grid(&mut self, look: &Look) {
+        self.grid = crate::render::GridRenderer::new(&self.device, self.config.format, look);
+        tracing::info!(family = ?look.family, size = look.size, "grid rebuilt");
+    }
+
     fn new(window: Arc<Window>, look: &Look, hint: Option<&str>) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = instance();
@@ -1491,6 +1634,7 @@ impl Gpu {
         copied_text: &mut Option<String>,
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
+        settings: Option<&crate::settings::Settings>,
         look: &Look,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
@@ -1543,6 +1687,9 @@ impl Gpu {
                 }
                 // The palette is an overlay above the panes: a file listing
                 // must not cover the command line it sits beside.
+                if let Some(settings) = settings {
+                    settings.ui(ui, look);
+                }
                 if palette_open {
                     crate::ui::overlay(ui, "dtr-palette", |ui| {
                         if let Some(chosen) = palette.ui(ui, look) {

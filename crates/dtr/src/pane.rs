@@ -153,6 +153,13 @@ pub enum Command {
     /// Apply a theme to the live terminal. Cells are re-read from the terminal,
     /// so existing text takes the new palette too.
     SetTheme(Option<crate::theme::Theme>),
+    /// Apply serial settings. A baud or framing change reconnects; the pane
+    /// keeps its scrollback and its place.
+    SetSerial {
+        baud: u32,
+        cr_to_crlf: bool,
+        auto_reconnect: bool,
+    },
 }
 
 /// What a pane is attached to.
@@ -397,6 +404,9 @@ async fn run(
     let mut source_alive = false;
     // What to reopen if the device disappears, and how to recognise it.
     let mut reconnect: Option<(serial::Config, Option<String>)> = None;
+    // Set to make the current reader return, which the reconnect path treats as
+    // a device that went away and brings back with the new settings.
+    let mut serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut modem: Option<crate::modem::Modem> = None;
     let mut echo = false;
     // Pasting is paced only on a serial line: a device with a tiny input buffer
@@ -432,8 +442,9 @@ async fn run(
             let closed = closed_tx.clone();
             let tx = bytes_tx.clone();
             let reader_log = log.clone();
+            let stop = Arc::clone(&serial_stop);
             tokio::task::spawn_local(async move {
-                read_loop(read_half, mapper, tx, reader_log).await;
+                read_loop(read_half, mapper, tx, reader_log, stop).await;
                 let _ = closed.send(());
             });
             if cfg.auto_reconnect {
@@ -580,8 +591,11 @@ async fn run(
                     let closed = closed_tx.clone();
                     let tx = bytes_tx.clone();
                     let reader_log = log.clone();
+                    // A fresh flag per connection: the old one is spent.
+                    serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let stop = Arc::clone(&serial_stop);
                     tokio::task::spawn_local(async move {
-                        read_loop(read_half, mapper, tx, reader_log).await;
+                        read_loop(read_half, mapper, tx, reader_log, stop).await;
                         let _ = closed.send(());
                     });
                 }
@@ -684,6 +698,23 @@ async fn run(
                         note_scrollback(&term, &stats);
                     }
                     Command::Echo(on) => echo = on,
+                    Command::SetSerial {
+                        baud,
+                        cr_to_crlf,
+                        auto_reconnect,
+                    } => {
+                        if let Some((cfg, _)) = reconnect.as_mut() {
+                            let reconnect_needed =
+                                cfg.baud != baud || cfg.cr_to_crlf != cr_to_crlf;
+                            cfg.baud = baud;
+                            cfg.cr_to_crlf = cr_to_crlf;
+                            cfg.auto_reconnect = auto_reconnect;
+                            if reconnect_needed && source_alive {
+                                tracing::info!(baud, cr_to_crlf, "serial settings changed; reconnecting");
+                                serial_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
                     Command::SetTheme(next) => {
                         if let Some(next) = next.as_ref() {
                             match next.apply(&mut term) {
@@ -887,10 +918,18 @@ async fn read_loop(
     mut mapper: Option<CrToCrlf>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     log: Option<Arc<LogWriter>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut buf = [0u8; 8192];
     let mut out = Vec::with_capacity(8192);
     loop {
+        // A live settings change (baud, framing) cannot reconfigure an open
+        // port in place: it closes this reader, which the reconnect path sees
+        // as a device that went away and immediately brings back at the new
+        // settings.
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         // A timeout is how a pending CR gets flushed: nothing else can tell us
         // the device has stopped mid-line.
         let read = tokio::time::timeout(serial::IDLE_FLUSH, reader.read(&mut buf)).await;

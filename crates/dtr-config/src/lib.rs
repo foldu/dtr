@@ -34,8 +34,12 @@ pub struct Serial {
 pub struct Font {
     /// Grid font size in points.
     pub size: f32,
-    /// A font file to load instead of the embedded default. `.ttf`/`.otf`; the
-    /// first face in the file is used.
+    /// An installed family to use, e.g. `"JetBrains Mono"`. `None` picks the
+    /// first usable family the probe likes.
+    pub family: Option<String>,
+    /// A font file to load instead of any installed family. `.ttf`/`.otf`; the
+    /// first face in the file is used. Hand-edited only: the settings menu
+    /// offers families, because a path you cannot verify is a broken terminal.
     pub path: Option<PathBuf>,
 }
 
@@ -49,6 +53,7 @@ impl Default for Config {
             },
             font: Font {
                 size: 14.0,
+                family: None,
                 path: None,
             },
             theme: None,
@@ -115,7 +120,9 @@ impl Config {
             let name = theme
                 .as_str()
                 .ok_or_else(|| Error::Value("theme must be a string".into()))?;
-            config.theme = Some(name.to_owned());
+            // The settings menu writes an empty string to mean "no theme";
+            // reading it back must not produce a theme called "".
+            config.theme = (!name.is_empty()).then(|| name.to_owned());
         }
 
         if let Some(font) = document.get("font").and_then(Item::as_table) {
@@ -130,6 +137,12 @@ impl Config {
                     )));
                 }
                 config.font.size = size as f32;
+            }
+            if let Some(family) = font.get("family") {
+                let text = family
+                    .as_str()
+                    .ok_or_else(|| Error::Value("font.family must be a string".into()))?;
+                config.font.family = (!text.is_empty()).then(|| text.to_owned());
             }
             if let Some(path) = font.get("path") {
                 let text = path
@@ -166,7 +179,7 @@ pub fn set_value(path: &Path, key: &str, raw: &str) -> Result<(), Error> {
 pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
     let mut document: DocumentMut = text.parse().map_err(|err| Error::Syntax(format!("{err}")))?;
 
-    let item: Item = match raw {
+    let mut item: Item = match raw {
         "true" => value(true),
         "false" => value(false),
         other => match other.parse::<i64>() {
@@ -181,7 +194,10 @@ pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
     match key.split_once('.') {
         // A bare key is top level, like `theme = "kanagawa wave"`.
         None => match document.get_mut(key) {
-            Some(existing) => *existing = item,
+            Some(existing) => {
+                keep_decor(existing, &mut item);
+                *existing = item;
+            }
             None => {
                 document.insert(key, item);
             }
@@ -198,7 +214,10 @@ pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
                 match table.get_mut(name) {
                     // Replacing the value in place keeps the key and the
                     // comments written above it; only the value's text changes.
-                    Some(existing) => *existing = item,
+                    Some(existing) => {
+                        keep_decor(existing, &mut item);
+                        *existing = item;
+                    }
                     None => {
                         table.insert(name, item);
                     }
@@ -208,6 +227,18 @@ pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
     }
 
     Ok(document.to_string())
+}
+
+/// Carry the old value's decor onto the new one.
+///
+/// `toml_edit` stores the whitespace and the trailing comment as *decor on the
+/// value*, so replacing the value wholesale is what silently deletes
+/// `baud = 9600 # an old board` down to `baud = 115200`.
+fn keep_decor(existing: &Item, item: &mut Item) {
+    let (Some(old), Some(new)) = (existing.as_value(), item.as_value_mut()) else {
+        return;
+    };
+    *new.decor_mut() = old.decor().clone();
 }
 
 /// The shipped default file, written when the user asks for one.
@@ -230,6 +261,8 @@ auto_reconnect = true
 [font]
 # Grid font size in points.
 size = 14
+# Installed family to use; `dtr --fonts` lists the ones that work here.
+# family = "JetBrains Mono"
 # Path to a .ttf/.otf to use instead of the embedded font.
 # path = "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"
 "#;
