@@ -1,0 +1,26 @@
+[package]
+name = "dtr"
+description = "A serial-first terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+dirs.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+libghostty-vt.workspace = true
+libghostty-vt-sys.workspace = true
+png.workspace = true
+pollster.workspace = true
+redb.workspace = true
+tokio.workspace = true
+tokio-serial.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wgpu.workspace = true
+winit.workspace = true

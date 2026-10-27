@@ -51,7 +51,7 @@
       fileset = lib.fileset.unions [
         ./Cargo.toml
         ./Cargo.lock
-        ./src
+        ./crates
       ];
     };
 
@@ -59,6 +59,7 @@
       pname = "dtr";
       version = "0.1.0";
       src = src;
+      buildAndTestSubdir = "crates/dtr";
       # Git dependencies need explicit output hashes; both crates come from
       # the same checkout, so they share one. Update on wrapper bumps.
       cargoLock = {
@@ -112,7 +113,8 @@
         export PKG_CONFIG_ALLOW_CROSS=1
         export PKG_CONFIG_PATH=""
         export PKG_CONFIG_LIBDIR=${libghostty-vt-win}/share/pkgconfig
-        cargo zigbuild --offline --locked --release --target x86_64-pc-windows-gnu
+        cargo zigbuild --offline --locked --release --package dtr \
+          --target x86_64-pc-windows-gnu
         runHook postBuild
       '';
       installPhase = ''

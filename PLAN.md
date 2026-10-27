@@ -99,11 +99,37 @@ transport plus a replay transport, selected by enum. If dynamic dispatch is ever
 future (`Pin<Box<dyn Future<Output = …> + '_>>`) rather than reaching for `#[async_trait]`, which
 would add `Send` bounds and break the LocalSet.
 
-### 2.2 Module tree
+### 2.2 Workspace layout
+
+A virtual workspace at the root; every crate lives under `crates/`.
 
 ```
-src/
-  main.rs            // CLI parse, backend pick, run loop or headless render
+Cargo.toml           // [workspace] + shared dependencies and metadata
+crates/
+  dtr/               // the binary: CLI, wiring, window
+    Cargo.toml
+    src/…
+```
+
+One crate for now is deliberate. The split below is where it should go as boundaries earn it, not
+a target to hit up front:
+
+| future crate | contents | why it separates |
+|---|---|---|
+| `dtr` | clap, winit/egui wiring, window | the only thing that needs to be a binary |
+| `dtr-term` | libghostty-vt wrapper, pane actor, `FrameSnapshot` | owns the `unsafe` FFI boundary and the `!Send` rule |
+| `dtr-transport` | `Transport` trait, serial, replay | the whole tokio surface; testable without a window |
+| `dtr-store` | redb schema, migrations | persistence without pulling in egui |
+| `dtr-ui` | chrome widgets, `GridRenderer` | the part that changes when only the looks change |
+
+Good split criterion: extract a crate when it can be tested without a window, or when it owns a
+rule (unsafe, `!Send`, single-writer) that is better enforced by a dependency edge than by
+discipline.
+
+### 2.3 Module tree (inside `crates/dtr/src`)
+
+```
+main.rs            // CLI parse, backend pick, run loop or headless render
   app.rs             // winit + egui plumbing, input routing, hotkeys
   ui/
     chrome.rs        // status bar, later tabs/palette
@@ -145,7 +171,7 @@ what did I plug into it" is the thing serial work actually needs and the thing n
 well. M0 only uses `settings` + `meta`; that is deliberately overkill for one integer, but it means
 M1's logbook is a schema addition rather than a rewrite.
 
-### 2.3 Threading and snapshotting
+### 2.4 Threading and snapshotting
 
 The pane thread runs `Terminal::feed(bytes)` then `RenderState::update(&terminal)`, walks dirty
 rows, and publishes a `FrameSnapshot` over a channel. `RenderState` gives global + per-row dirty
@@ -154,7 +180,7 @@ state; the pane **must** clear both after publishing (`dirty` is sticky by desig
 For M0 the snapshot copies the whole grid — 80×24 cells is nothing. Per-row dirty copy is a
 later optimization, not a design change.
 
-### 2.4 Concurrency: tokio for I/O, LocalSet per pane
+### 2.5 Concurrency: tokio for I/O, LocalSet per pane
 
 **tokio from day one; serial I/O goes through `tokio-serial`.** The constraint that shapes
 everything is that `Terminal` is `!Send` — so the emulation loop cannot live on a work-stealing
@@ -195,7 +221,7 @@ for panes, never `Handle::current().block_on()` on the UI thread. If a future AP
 `Send + 'static` task that needs terminal state, the answer is a channel into the LocalSet, not a
 lock.
 
-### 2.5 libghostty notes that will bite
+### 2.6 libghostty notes that will bite
 
 - `TerminalOptions { cols, rows, max_scrollback }`; `RenderState::new()` once, reused per frame.
 - Set `GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK = false` for **every** non-local-shell
@@ -204,7 +230,7 @@ lock.
 - `Terminal` is `!Send`; keep it inside the pane thread only. No `Arc<Mutex<Terminal>>` anywhere.
 - Kitty graphics are in the render state but textures/clipboard are ours — M3.
 
-### 2.6 Dependencies (M0)
+### 2.7 Dependencies (M0)
 
 | Crate | Role | Notes |
 |---|---|---|
