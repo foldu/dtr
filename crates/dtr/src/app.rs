@@ -35,6 +35,8 @@ pub struct Startup {
     pub theme: Option<crate::theme::Theme>,
     /// A cell range to show selected on the first frame (screenshots).
     pub select: Option<(usize, usize)>,
+    /// Lines to scroll into the scrollback before capturing (screenshots).
+    pub scroll: i64,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -55,6 +57,12 @@ pub fn capture_headless(
     )?;
     if !startup.send.is_empty() {
         pane.write(startup.send.clone());
+    }
+    if startup.scroll != 0 {
+        // After the output has arrived: scrolling an empty screen clamps to
+        // zero, and the result looks like a scroll that did nothing.
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(delay.as_millis() as u64 / 2)));
+        pane.send(crate::pane::Command::Scroll(-startup.scroll as isize));
     }
 
     // Give the session a moment to produce output (a serial device's prompt),
@@ -360,6 +368,32 @@ impl ApplicationHandler<UserEvent> for App {
                         event.logical_key,
                         winit::keyboard::Key::Character(ref character) if character.eq_ignore_ascii_case("p")
                     );
+                // Scrollback: Shift+PageUp/Down a page at a time, Shift+Home/End
+                // to the ends. These are the terminal conventions, and they need
+                // the grid height, which the frame knows.
+                let page = self.frame.as_ref().map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
+                let scroll_key = self.modifiers.shift_key()
+                    && event.state == winit::event::ElementState::Pressed
+                    && match event.logical_key {
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageUp) => {
+                            self.pane.send(crate::pane::Command::Scroll(-page));
+                            true
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::PageDown) => {
+                            self.pane.send(crate::pane::Command::Scroll(page));
+                            true
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Home) => {
+                            self.pane.send(crate::pane::Command::ScrollEdge { top: true });
+                            true
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::End) => {
+                            self.pane.send(crate::pane::Command::ScrollEdge { top: false });
+                            true
+                        }
+                        _ => false,
+                    };
+
                 let chord = |character: &str| {
                     self.modifiers.control_key()
                         && self.modifiers.shift_key()
@@ -369,7 +403,9 @@ impl ApplicationHandler<UserEvent> for App {
                         )
                         && event.state == winit::event::ElementState::Pressed
                 };
-                if chord("d") {
+                if scroll_key {
+                    // Already handled.
+                } else if chord("d") {
                     let level = !self.pane.stats().dtr();
                     self.pane.send(crate::pane::Command::Dtr(level));
                 } else if chord("r") {
@@ -453,6 +489,7 @@ impl ApplicationHandler<UserEvent> for App {
                     rx_rate: self.meter.rx_rate,
                     tx_rate: self.meter.tx_rate,
                     connected: stats.connected(),
+                    scrollback: stats.scrollback(),
                     modem: self
                         .serial
                         .then(|| (stats.dtr(), stats.rts())),

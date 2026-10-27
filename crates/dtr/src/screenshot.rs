@@ -83,6 +83,7 @@ pub fn capture(
         rx_rate: 0.0,
         tx_rate: 0.0,
         connected: stats.connected(),
+        scrollback: stats.scrollback(),
         modem: serial.then(|| (stats.dtr(), stats.rts())),
     };
 

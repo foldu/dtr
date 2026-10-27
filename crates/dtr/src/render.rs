@@ -596,7 +596,11 @@ impl Fonts {
                         .advance_width(font.charmap().map('M'))
                         * look.size
                         / units;
-                    let descent = -font.metrics(&[]).descent * look.size / units;
+                    // swash reports descent as a positive distance *below* the
+                    // baseline (unlike FreeType, which gives it negative), so
+                    // negating it here shrinks the cell and the lines collapse
+                    // into each other.
+                    let descent = font.metrics(&[]).descent * look.size / units;
                     // Whole-pixel cells: a fractional advance puts every glyph
                     // on a half-pixel and the whole screen looks out of focus.
                     // Round *up*: rounding down makes the cell narrower than the

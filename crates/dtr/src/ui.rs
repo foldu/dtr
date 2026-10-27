@@ -124,6 +124,8 @@ pub struct Status<'a> {
     pub connected: bool,
     /// DTR and RTS levels, when the transport has modem lines at all.
     pub modem: Option<(bool, bool)>,
+    /// Rows of scrollback below the viewport; 0 is the live screen.
+    pub scrollback: u64,
 }
 
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
@@ -148,6 +150,14 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
                         }),
                 );
             }
+        }
+        if status.scrollback > 0 {
+            ui.label(
+                RichText::new(format!("↑ {} lines", status.scrollback))
+                    .monospace()
+                    .size(11.0)
+                    .color(Look::colour(look.accent)),
+            );
         }
         if !status.connected {
             ui.label(

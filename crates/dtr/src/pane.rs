@@ -52,6 +52,8 @@ pub struct Stats {
     rx: AtomicU64,
     tx: AtomicU64,
     connected: std::sync::atomic::AtomicBool,
+    /// Rows below the viewport: 0 means you are looking at the live screen.
+    scrollback: AtomicU64,
     dtr: std::sync::atomic::AtomicBool,
     rts: std::sync::atomic::AtomicBool,
 }
@@ -65,6 +67,7 @@ impl Default for Stats {
             // shell or a replay never disconnects, and claiming otherwise put a
             // "reconnecting…" warning on a healthy session.
             connected: std::sync::atomic::AtomicBool::new(true),
+            scrollback: AtomicU64::new(0),
             dtr: std::sync::atomic::AtomicBool::new(false),
             rts: std::sync::atomic::AtomicBool::new(false),
         }
@@ -97,6 +100,15 @@ impl Stats {
         self.connected.store(connected, Ordering::Relaxed);
     }
 
+    /// Rows of scrollback below the viewport.
+    pub fn scrollback(&self) -> u64 {
+        self.scrollback.load(Ordering::Relaxed)
+    }
+
+    fn set_scrollback(&self, rows: u64) {
+        self.scrollback.store(rows, Ordering::Relaxed);
+    }
+
     pub fn dtr(&self) -> bool {
         self.dtr.load(Ordering::Relaxed)
     }
@@ -122,6 +134,10 @@ pub enum Command {
     Rts(bool),
     Break,
     Scroll(isize),
+    /// Jump to the top or the bottom of the scrollback.
+    ScrollEdge {
+        top: bool,
+    },
     Echo(bool),
     Copy,
     /// Copy a cell range: `(start, end)` as linear indices, in either order.
@@ -542,6 +558,12 @@ async fn run(
                 let Some(command) = cmd else { break };
                 match command {
                     Command::Write(bytes) => {
+                        // Typing while scrolled back means you want the live
+                        // screen: follow the cursor rather than swallowing keys.
+                        if stats.scrollback() > 0 {
+                            term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Bottom);
+                            note_scrollback(&term, &stats);
+                        }
                         if let Some(sink) = sink.as_mut() {
                             match sink.write(&bytes).await {
                                 Ok(()) => stats.add_tx(bytes.len()),
@@ -580,7 +602,20 @@ async fn run(
                     }
                     Command::Scroll(lines) => {
                         term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                        // Forced: a viewport move does not necessarily mark the
+                        // render state dirty, and a scroll that does not repaint
+                        // looks like a broken wheel.
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        note_scrollback(&term, &stats);
+                    }
+                    Command::ScrollEdge { top } => {
+                        term.scroll_viewport(if top {
+                            libghostty_vt::terminal::ScrollViewport::Top
+                        } else {
+                            libghostty_vt::terminal::ScrollViewport::Bottom
+                        });
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        note_scrollback(&term, &stats);
                     }
                     Command::Echo(on) => echo = on,
                     Command::SetTheme(next) => {
@@ -665,6 +700,17 @@ fn frame_text(frame: &Frame) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+/// Record how far the viewport is from the live screen.
+fn note_scrollback(term: &Terminal<'_, '_>, stats: &Stats) {
+    let below = match term.scrollbar() {
+        Ok(scrollbar) => scrollbar
+            .total
+            .saturating_sub(scrollbar.offset + scrollbar.len),
+        Err(_) => 0,
+    };
+    stats.set_scrollback(below);
 }
 
 /// Copy from `start` to `end`, inclusive, as text.

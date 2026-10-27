@@ -74,6 +74,10 @@ struct Args {
     #[arg(long, value_name = "PROGRAM")]
     shell: Option<String>,
 
+    /// Scroll N lines into the scrollback before capturing
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    scroll: i64,
+
     /// Select cells START..=END (linear indices) in the screenshot
     #[arg(long, value_name = "START:END")]
     select: Option<String>,
@@ -395,6 +399,7 @@ fn main() -> anyhow::Result<()> {
             look: look.clone(),
             theme: theme.clone(),
             select,
+            scroll: args.scroll,
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         finish(store.as_deref(), session, "screenshot", &result);
@@ -410,6 +415,7 @@ fn main() -> anyhow::Result<()> {
         look,
         theme,
         select,
+        scroll: args.scroll,
     };
     let result = app::run(startup);
     finish(store.as_deref(), session, "closed", &result);

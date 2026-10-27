@@ -512,6 +512,13 @@ texel (0,0) made every solid quad invisible with no validation error, and `queue
 one, and `font.path` still wins when set. Bold and italic are the next slice: the atlas is keyed by
 glyph id and size, not by face, so the face selection has to come first.
 
+**Scrollback you can see.** The wheel scrolls, `Shift+PageUp/PageDown` scrolls a page and `Shift+Home/End`
+jump to the ends, and the status bar says `↑ 20 lines` while you are away from the live screen — because
+a scrolled terminal that looks exactly like an idle one is a trap. Typing returns to the bottom, since
+keys typed while scrolled back are almost always meant for the shell that is waiting there. Scrolling
+forces a repaint: a viewport move does not necessarily dirty the render state, and a scroll that does
+not repaint looks like a broken wheel.
+
 **Selection is a drag and a wash, not a block.** A press anchors a cell, motion extends the range, and
 `Ctrl+Shift+C` copies *the selection* (falling back to the whole screen when there is none). The range
 is copied inclusively and cut at the selection's own edges, so a drag that starts mid-line does not
