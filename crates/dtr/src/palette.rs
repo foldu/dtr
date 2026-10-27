@@ -241,6 +241,17 @@ impl Palette {
                         .size(10.0)
                         .color(Look::colour(look.dim).gamma_multiply(0.7)),
                 );
+                // The only place the keys are written down. Nothing else in the
+                // window says that tabs exist, which is how a terminal ends up
+                // with one tab and no idea there could be more.
+                ui.label(
+                    RichText::new(
+                        "ctrl+shift t tab    ctrl+tab switch    ctrl+shift \\ / - split    \
+                         ctrl+shift w close    ctrl+shift p palette    ctrl+, settings",
+                    )
+                    .size(10.0)
+                    .color(Look::colour(look.dim).gamma_multiply(0.55)),
+                );
             },
         );
 

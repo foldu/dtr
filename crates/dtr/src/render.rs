@@ -25,10 +25,6 @@ struct Glyph {
     top: f32,
     width: f32,
     height: f32,
-    /// The raw bitmap footing, kept so a wide glyph can be re-fitted to the two
-    /// cells it spans without guessing from the already-placed offsets.
-    placement_top: f32,
-    ascent: f32,
 }
 
 // The fields are consumed by `bytemuck_cast`, which the compiler cannot see.
@@ -481,8 +477,6 @@ impl GridRenderer {
                 top: 0.0,
                 width: 0.0,
                 height: 0.0,
-                placement_top: 0.0,
-                ascent: 0.0,
             };
             self.glyphs.insert(key, glyph);
             return Some(glyph);
@@ -541,8 +535,6 @@ impl GridRenderer {
             top: self.fonts.ascent(face, size) - image.placement.top as f32,
             width: width as f32,
             height: height as f32,
-            placement_top: image.placement.top as f32,
-            ascent: self.fonts.ascent(face, size),
         };
         self.glyphs.insert(key, glyph);
         Some(glyph)

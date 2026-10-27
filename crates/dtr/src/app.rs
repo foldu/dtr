@@ -628,7 +628,10 @@ impl App {
             Ok(pane) => {
                 let session = Session {
                     pane,
-                    port: None,
+                    port: match &transport {
+                        Transport::Serial(cfg) => Some(cfg.port.clone()),
+                        _ => None,
+                    },
                     frame: None,
                     label: transport.describe(),
                     serial: matches!(transport, Transport::Serial(_)),
@@ -1309,6 +1312,11 @@ impl ApplicationHandler<UserEvent> for App {
                         self.settings.show_port(&config, port, record);
                     }
                     self.repaint("settings");
+                } else if chord("t") {
+                    // A new tab. The palette can open a shell too, but a
+                    // terminal with no new-tab key has one tab forever, and
+                    // `Ctrl+Tab` with nothing to switch to looks broken.
+                    self.open(Transport::Shell(crate::pty::Config::default()));
                 } else if chord("c") {
                     // The pane rebuilds the text from the terminal when asked;
                     // it cannot reuse a frame, because drawing the frame is what

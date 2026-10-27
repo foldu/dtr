@@ -25,14 +25,17 @@ pub enum Row {
 }
 
 impl Row {
-    const ALL: [Row; 6] = [
+    /// Rows that describe the terminal itself, always shown.
+    const FILE: [Row; 4] = [
         Row::FontSize,
         Row::FontFamily,
         Row::Theme,
-        Row::Baud,
-        Row::CrToCrlf,
         Row::AutoReconnect,
     ];
+    /// Rows that describe one port, shown only while a serial session has focus:
+    /// a rate for a port that is not open is a number belonging to nothing.
+    #[cfg(test)]
+    const PORT: [Row; 2] = [Row::Baud, Row::CrToCrlf];
 
     fn label(self) -> &'static str {
         match self {
@@ -136,8 +139,21 @@ impl Settings {
         &self.draft
     }
 
+    /// The rows this menu shows right now.
+    pub fn rows(&self) -> Vec<Row> {
+        let mut rows = Row::FILE.to_vec();
+        if self.serial.is_some() {
+            // Between the terminal settings and the reconnect policy, which is
+            // where they read as a group.
+            rows.insert(2 + 1, Row::Baud);
+            rows.insert(2 + 2, Row::CrToCrlf);
+        }
+        rows
+    }
+
     pub fn current_row(&self) -> Row {
-        Row::ALL[self.row.min(Row::ALL.len() - 1)]
+        let rows = self.rows();
+        rows[self.row.min(rows.len() - 1)]
     }
 
     pub fn handle(&mut self, key: &winit::keyboard::Key) -> Option<Effect> {
@@ -150,11 +166,13 @@ impl Settings {
             }
             Key::Named(winit::keyboard::NamedKey::Enter) => return Some(Effect::Apply),
             Key::Named(winit::keyboard::NamedKey::ArrowDown) | Key::Named(winit::keyboard::NamedKey::Tab) => {
-                self.row = (self.row + 1) % Row::ALL.len();
+                let count = self.rows().len();
+                self.row = (self.row + 1) % count;
                 return Some(Effect::Changed);
             }
             Key::Named(winit::keyboard::NamedKey::ArrowUp) | Key::Named(winit::keyboard::NamedKey::Backspace) => {
-                self.row = (self.row + Row::ALL.len() - 1) % Row::ALL.len();
+                let count = self.rows().len();
+                self.row = (self.row + count - 1) % count;
                 return Some(Effect::Changed);
             }
             Key::Named(winit::keyboard::NamedKey::ArrowRight) => {
@@ -298,7 +316,7 @@ impl Settings {
     pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) {
         let screen = ui.max_rect();
         let width = 420.0_f32.min(screen.width() - 32.0);
-        let rows = Row::ALL.len() as f32;
+        let rows = self.rows().len() as f32;
         let height = 44.0 + rows * 24.0 + 34.0;
         let rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
         crate::ui::prime_area(ui.ctx(), egui::Id::new("dtr-settings"), egui::Order::Foreground, rect, true);
@@ -331,7 +349,7 @@ impl Settings {
                                 .color(crate::ui::Look::colour(look.foreground)),
                         );
                         ui.add_space(8.0);
-                        for (index, row) in Row::ALL.iter().enumerate() {
+                        for (index, row) in self.rows().iter().enumerate() {
                             let selected = index == self.row;
                             let section = row.section();
                             ui.horizontal(|ui| {
@@ -436,7 +454,7 @@ mod tests {
                 cr_to_crlf: true,
             }),
         );
-        settings.row = Row::ALL.iter().position(|row| *row == Row::Baud).unwrap();
+        settings.row = settings.rows().iter().position(|row| *row == Row::Baud).unwrap();
         settings.nudge(1);
         assert_eq!(settings.serial().unwrap().baud, 230_400);
         settings.nudge(-1);
@@ -447,7 +465,7 @@ mod tests {
     fn without_a_port_the_serial_rows_are_inert_and_say_so() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.row = Row::ALL.iter().position(|row| *row == Row::Baud).unwrap_or(3);
+        settings.row = 0;
         settings.nudge(1);
         assert!(settings.serial_write().is_none());
         assert_eq!(settings.value(Row::Baud), "no port");
@@ -512,10 +530,7 @@ mod tests {
         assert!(keys.contains(&"serial.auto_reconnect"));
         // Every row that lives in the file must have a writer; the serial rate
         // rows live in the store and are covered by `serial_write`.
-        for row in Row::ALL {
-            if matches!(row, Row::Baud | Row::CrToCrlf) {
-                continue;
-            }
+        for row in Row::FILE {
             assert!(keys.contains(&row.key().as_str()), "{} is not written", row.key());
         }
     }

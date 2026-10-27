@@ -132,13 +132,22 @@ the face that produced it, because a fallback rarely shares the grid's ascent.
 the same factor as the bitmap, but `top` is the *distance from the cell's top edge
 to the glyph*, not a size proportional to the glyph — multiplying it moved the
 glyph by the wrong amount and made CJK pile up on its neighbours. Wide glyphs are
-now fitted from the raw placement (`placement_top`, `ascent`): scaled uniformly
-into the two-cell box, centred horizontally, resting on the cell's bottom.
+now fitted from the bitmap itself: scaled uniformly into the two-cell box,
+centred horizontally, resting on the cell's bottom.
 
 **A wide character is two cells, not one.** The render iterator does not report
 cell width, so width comes from `unicode-width`: a character two cells wide is
 drawn across both cells, scaled to fit. Without that, the grid shows a one-cell
 glyph followed by a one-cell hole, which reads as broken spacing.
+
+**There was no new-tab key.** `Ctrl+Tab` cycled tabs that only the palette could
+create, so a terminal had one tab and no discoverable way to get a second — the
+cycling looked broken rather than unused. `Ctrl+Shift+T` opens a tab, and the
+palette footer is the one place the bindings are written down.
+
+**The settings menu shows port rows only when a port is focused.** Baud and CR
+translation belong to one serial device, so with a shell in front there is
+nothing to show: the rows are built per open, not baked into a fixed list.
 
 **A modal must ignore key releases.** The release of the keystroke that opened a
 modal arrives while it is open, so handling releases as well as presses closed
