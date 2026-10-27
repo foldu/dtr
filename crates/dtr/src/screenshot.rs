@@ -25,8 +25,12 @@ pub fn capture(
     files: Option<&crate::explorer::Explorer>,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
+    // Same preference as the window: a capture from a different adapter than
+    // the one the window would use is a capture of a different renderer, and
+    // anti-aliasing and colour handling really do differ between RADV and
+    // llvmpipe.
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
+        power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
         apply_limit_buckets: false,

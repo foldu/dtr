@@ -41,7 +41,8 @@ if command -v cargo-flamegraph >/dev/null 2>&1; then
     if cargo flamegraph --profile profiling --bin dtr --output "${out}.svg" -- "$@"; then
         exit 0
     fi
-    echo "perf could not sample; using dtr's in-process profiler instead" >&2
+    paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "?")
+    echo "perf could not record (perf_event_paranoid=$paranoid); using dtr's in-process profiler instead" >&2
 fi
 
 echo "the text report and the flamegraph are written when the window closes" >&2

@@ -15,6 +15,9 @@ use std::path::Path;
 pub struct Guard {
     #[cfg(target_os = "linux")]
     inner: Option<pprof::ProfilerGuard<'static>>,
+    /// How long we sampled, so the report can say how busy the process was
+    /// rather than only where the samples landed.
+    started: std::time::Instant,
     #[cfg(not(target_os = "linux"))]
     _never: std::marker::PhantomData<()>,
 }
@@ -33,7 +36,10 @@ impl Guard {
             {
                 Ok(guard) => {
                     tracing::info!("cpu profiler started");
-                    Some(Self { inner: Some(guard) })
+                    Some(Self {
+                        inner: Some(guard),
+                        started: std::time::Instant::now(),
+                    })
                 }
                 Err(err) => {
                     tracing::warn!(%err, "could not start the CPU profiler");
@@ -56,9 +62,10 @@ impl Guard {
         #[cfg(target_os = "linux")]
         {
             let Some(guard) = self.inner else { return };
+            let started = self.started;
             match guard.report().build() {
                 Ok(report) => {
-                    report_text(&report);
+                    report_text(&report, started.elapsed());
                     if path.extension().and_then(|ext| ext.to_str()) == Some("svg") {
                         write_flamegraph(&report, path);
                     } else {
@@ -79,7 +86,7 @@ impl Guard {
 
 /// Self time per function, hottest first, on stderr.
 #[cfg(target_os = "linux")]
-fn report_text(report: &pprof::Report) {
+fn report_text(report: &pprof::Report, elapsed: std::time::Duration) {
     use std::collections::HashMap;
 
     // A stack's own cost is its leaf frame; everything above it is the caller
@@ -111,7 +118,15 @@ fn report_text(report: &pprof::Report) {
     let mut rows: Vec<(String, isize)> = self_time.into_iter().collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1));
     let total = total.max(1);
-    tracing::info!("self time, top {} of {total} samples", rows.len().min(25));
+    // 997 Hz across all threads: samples / (rate × seconds) is the fraction of
+    // one core the whole process used. A report of mostly startup work in a
+    // 3-second run means the program was idle, not that it is fast.
+    let busy = 100.0 * total as f64 / (997.0 * elapsed.as_secs_f64().max(0.001));
+    tracing::info!(
+        "self time, top {} of {total} samples over {:.1}s (≈{busy:.0}% of one core)",
+        rows.len().min(25),
+        elapsed.as_secs_f64()
+    );
     for (name, count) in rows.iter().take(25) {
         tracing::info!(
             "{:>5.1}%  {:>6}  {name}",
