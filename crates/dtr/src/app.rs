@@ -414,6 +414,10 @@ struct Tab {
     layout: crate::layout::Layout,
     leaves: std::collections::BTreeMap<crate::layout::LeafId, Pane>,
     focus: crate::layout::LeafId,
+    /// What the tab strip calls this tab: the focused pane's session label,
+    /// kept up to date when the tab is drawn for the *active* tab, and frozen
+    /// otherwise so a background session cannot rename itself under the eye.
+    title: String,
 }
 
 impl Tab {
@@ -421,6 +425,7 @@ impl Tab {
         let mut leaves = std::collections::BTreeMap::new();
         leaves.insert(id, pane);
         Self {
+            title: String::new(),
             layout: crate::layout::Layout::leaf(id),
             leaves,
             focus: id,
@@ -1079,11 +1084,18 @@ impl App {
         scale: f32,
     ) -> Vec<(crate::layout::LeafId, crate::render::PaneView<'a>)> {
         let status_height = (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale;
+        // The tab strip takes the top, and only when there is more than one tab
+        // to show: a lone tab is a title nobody needs.
+        let tabs_height = if self.tabs.len() > 1 {
+            (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
+        } else {
+            0.0
+        };
         let area = crate::layout::Rect::new(
             0.0,
-            0.0,
+            tabs_height,
             screen.0,
-            (screen.1 - status_height).max(0.0),
+            (screen.1 - status_height - tabs_height).max(0.0),
         );
 
         tab.layout
@@ -1575,6 +1587,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.fit_panes(gpu.metrics(), screen, scale);
                 let settings = if self.settings.open { Some(&self.settings) } else { None };
                 // A window capture is due once, then never again.
+                // The active tab follows its focused session; the others keep
+                // the label they had, so a background session cannot rename
+                // itself under the eye.
+                if let Some(session) = self.tabs[self.active].focused_terminal() {
+                    let label = session.label.clone();
+                    self.tabs[self.active].title = label;
+                }
+                let tabs: Vec<String> = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        if tab.title.is_empty() {
+                            format!("tab {}", index + 1)
+                        } else {
+                            tab.title.clone()
+                        }
+                    })
+                    .collect();
+                let mut tab_click = None;
                 let capture_path = match self.capture.take() {
                     Some((path, when)) if std::time::Instant::now() >= when => Some(path),
                     other => {
@@ -1630,10 +1662,20 @@ impl ApplicationHandler<UserEvent> for App {
                         .as_ref()
                         .map(|(text, alpha)| (text.as_str(), *alpha)),
                     settings,
+                    &tabs,
+                    self.active,
+                    &mut tab_click,
                     capture_path.as_deref(),
                     &look,
                 );
                 self.palette = palette;
+                if let Some(index) = tab_click {
+                    // A click on a tab is a switch, exactly like the chord.
+                    if index < self.tabs.len() {
+                        self.active = index;
+                        self.repaint("tab clicked");
+                    }
+                }
                 drop(toast_text);
                 if let Some(text) = copied {
                     let chars = text.chars().count();
@@ -1905,6 +1947,9 @@ impl Gpu {
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
         settings: Option<&crate::settings::Settings>,
+        tabs: &[String],
+        active_tab: usize,
+        tab_click: &mut Option<usize>,
         capture: Option<&std::path::Path>,
         look: &Look,
     ) -> anyhow::Result<()> {
@@ -1929,6 +1974,22 @@ impl Gpu {
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            if !tabs.is_empty() {
+                egui::Panel::top("dtr-tabs")
+                    .exact_size(crate::ui::TAB_HEIGHT * self.scale())
+                    .frame(
+                        egui::Frame::new()
+                            .fill(crate::ui::Look::colour(look.surface))
+                            .inner_margin(egui::Margin::symmetric(6, 4)),
+                    )
+                    .show(ui, |ui| {
+                        if let Some(index) =
+                            crate::ui::tab_bar(ui, tabs, active_tab, &look)
+                        {
+                            *tab_click = Some(index);
+                        }
+                    });
+            }
             egui::Panel::bottom("dtr-status")
                 // Exactly the height the grid reserves. Left to itself the panel
                 // sizes to its content and its margins, comes out a couple of

@@ -166,6 +166,11 @@ without shift so both spellings work); and **a chord that starts a longer bindin
 waits**, which is why a pending sequence flushes after a second to the longest
 binding that is already complete.
 
+**Tabs were invisible until the strip existed.** The top strip is reserved in the grid
+layout only when there is more than one tab, so a single session loses no rows;
+the active tab's title follows its focused session, the others keep the title they
+had. A click on a chip switches tabs through the same `self.active` the chords use.
+
 **There was no new-tab key.** `Ctrl+Tab` cycled tabs that only the palette could
 create, so a terminal had one tab and no discoverable way to get a second — the
 cycling looked broken rather than unused. `Ctrl+Shift+T` opens a tab, and the

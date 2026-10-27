@@ -172,6 +172,10 @@ pub fn overlay(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
 /// this number is load-bearing: it is what keeps a split from running under
 /// the chrome.
 pub const STATUS_HEIGHT: f32 = 24.0;
+/// The tab strip across the top, shown only when there is more than one tab.
+/// Tabs existed before this and were invisible, which made `ctrl+tab` look
+/// broken rather than unused.
+pub const TAB_HEIGHT: f32 = 28.0;
 /// Breathing room between the last row of text and the status strip. Without
 /// it the grid ends exactly on the strip's edge, and a prompt with a descender
 /// looks like it is behind the bar rather than above it.
@@ -261,6 +265,45 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
                     );
                 });
         });
+}
+
+/// The tab strip: one chip per tab, the active one lit, each clickable.
+///
+/// Returns the index the pointer clicked, if any. Drawing and hit-testing are
+/// the same rectangle on purpose — a click that misses the chip the eye sees is
+/// the classic way to make tabs feel broken.
+pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Option<usize> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (index, label) in labels.iter().enumerate() {
+            let is_active = index == active;
+            let text = RichText::new(
+                // A tab is its session: one digit and the label, so the number
+                // matches `alt+1`.
+                format!("{} {}", index + 1, label),
+            )
+            .monospace()
+            .size(12.0)
+            .color(if is_active {
+                Look::colour(look.background)
+            } else {
+                Look::colour(look.foreground)
+            });
+            let button = egui::Button::new(text)
+                .fill(if is_active {
+                    Look::colour(look.accent)
+                } else {
+                    Look::colour(look.surface)
+                })
+                .corner_radius(4.0)
+                .min_size(egui::vec2(0.0, 18.0));
+            if ui.add(button).clicked() {
+                clicked = Some(index);
+            }
+        }
+    });
+    clicked
 }
 
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
