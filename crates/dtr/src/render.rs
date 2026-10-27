@@ -25,6 +25,10 @@ struct Glyph {
     top: f32,
     width: f32,
     height: f32,
+    /// The raw bitmap footing, kept so a wide glyph can be re-fitted to the two
+    /// cells it spans without guessing from the already-placed offsets.
+    placement_top: f32,
+    ascent: f32,
 }
 
 // The fields are consumed by `bytemuck_cast`, which the compiler cannot see.
@@ -354,12 +358,19 @@ impl GridRenderer {
                     continue;
                 };
                 let (width, height, left, top) = if wide && glyph.width > 0.0 {
-                    let scale = (cell_w * 2.0 / glyph.width).min(cell_h / glyph.height.max(1.0));
+                    // Fit the glyph into the two cells it occupies, centred and
+                    // resting on the bottom of the cell. Scaling the already
+                    // placed offsets instead is what made CJK overlap: `top` is
+                    // a distance from the cell's top edge, not a length
+                    // proportional to the bitmap, so multiplying it moved the
+                    // glyph by the wrong amount.
+                    let scale = (cell_w * 2.0 / glyph.width).min(cell_h / glyph.height);
+                    let (width, height) = (glyph.width * scale, glyph.height * scale);
                     (
-                        glyph.width * scale,
-                        glyph.height * scale,
-                        glyph.left * scale,
-                        glyph.top * scale,
+                        width,
+                        height,
+                        (cell_w * 2.0 - width) / 2.0,
+                        (cell_h - height).max(0.0),
                     )
                 } else {
                     (glyph.width, glyph.height, glyph.left, glyph.top)
@@ -470,6 +481,8 @@ impl GridRenderer {
                 top: 0.0,
                 width: 0.0,
                 height: 0.0,
+                placement_top: 0.0,
+                ascent: 0.0,
             };
             self.glyphs.insert(key, glyph);
             return Some(glyph);
@@ -528,6 +541,8 @@ impl GridRenderer {
             top: self.fonts.ascent(face, size) - image.placement.top as f32,
             width: width as f32,
             height: height as f32,
+            placement_top: image.placement.top as f32,
+            ascent: self.fonts.ascent(face, size),
         };
         self.glyphs.insert(key, glyph);
         Some(glyph)

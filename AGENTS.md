@@ -128,6 +128,13 @@ Two things that follow from it: the glyph atlas key includes the *face index*,
 because glyph ids collide between fonts; and a glyph is placed by the ascent of
 the face that produced it, because a fallback rarely shares the grid's ascent.
 
+**A placed offset is not a length.** The wide-glyph fitting scaled `glyph.top` by
+the same factor as the bitmap, but `top` is the *distance from the cell's top edge
+to the glyph*, not a size proportional to the glyph — multiplying it moved the
+glyph by the wrong amount and made CJK pile up on its neighbours. Wide glyphs are
+now fitted from the raw placement (`placement_top`, `ascent`): scaled uniformly
+into the two-cell box, centred horizontally, resting on the cell's bottom.
+
 **A wide character is two cells, not one.** The render iterator does not report
 cell width, so width comes from `unicode-width`: a character two cells wide is
 drawn across both cells, scaled to fit. Without that, the grid shows a one-cell
