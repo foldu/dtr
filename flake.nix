@@ -231,6 +231,10 @@
         pkgs.freetype
         pkgs.socat
         pkgs.just
+        # Sampling tools: `perf` for `cargo flamegraph`, and the wrapper that
+        # drives it. The in-process fallback (`--cpu-profile`) needs neither.
+        pkgs.perf
+        pkgs.cargo-flamegraph
       ];
 
       shellHook = ''

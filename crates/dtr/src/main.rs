@@ -7,6 +7,7 @@ mod layout;
 mod logbook;
 mod modem;
 mod palette;
+mod profile;
 mod render;
 mod pane;
 mod pty;
@@ -63,6 +64,14 @@ enum ThemeAction {
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Close the window after MS milliseconds (shutdown smoke test)
+    #[arg(long, value_name = "MS")]
+    exit_after: Option<u64>,
+
+    /// Write a CPU flamegraph here on exit (Linux; samples this process)
+    #[arg(long, value_name = "PATH")]
+    cpu_profile: Option<PathBuf>,
 
     /// Verbose logging to stderr: -v for debug, -vv for trace (RUST_LOG overrides)
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
@@ -451,6 +460,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = args.screenshot.as_deref() {
         let (width, height) = parse_size(&args.size)?;
         let delay = std::time::Duration::from_millis(args.screenshot_delay);
+        // Profiling a capture is how the setup itself gets tested: same
+        // sampling, no window needed.
+        let profiler = args
+            .cpu_profile
+            .as_ref()
+            .and_then(|_| crate::profile::Guard::start());
+
         let startup = app::Startup {
             transport,
             send,
@@ -463,11 +479,20 @@ fn main() -> anyhow::Result<()> {
             scroll: args.scroll,
             split,
             files,
+            exit_after: args.exit_after,
         };
         let result = app::capture_headless(startup, path, width, height, delay);
+        if let (Some(path), Some(profiler)) = (args.cpu_profile.clone(), profiler) {
+            profiler.finish(&path);
+        }
         finish(store.as_deref(), session, "screenshot", &result);
         return result;
     }
+
+    let profiler = args
+        .cpu_profile
+        .as_ref()
+        .and_then(|_| crate::profile::Guard::start());
 
     let startup = app::Startup {
         transport,
@@ -481,8 +506,14 @@ fn main() -> anyhow::Result<()> {
         scroll: args.scroll,
         split,
         files,
+        exit_after: args.exit_after,
     };
     let result = app::run(startup);
+    if let Some(profiler) = profiler {
+        if let Some(path) = args.cpu_profile.clone() {
+            profiler.finish(&path);
+        }
+    }
     finish(store.as_deref(), session, "closed", &result);
     result
 }

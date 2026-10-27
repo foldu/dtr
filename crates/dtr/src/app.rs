@@ -34,6 +34,8 @@ pub struct Startup {
     pub palette: bool,
     pub look: Look,
     pub theme: Option<crate::theme::Theme>,
+    /// Close the window after this many milliseconds, to exercise shutdown.
+    pub exit_after: Option<u64>,
     /// A cell range to show selected on the first frame (screenshots).
     pub select: Option<(usize, usize)>,
     /// Lines to scroll into the scrollback before capturing (screenshots).
@@ -170,6 +172,8 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         dragging: false,
         cursor_position: None,
         frames_drawn: 0,
+        exit_after: startup.exit_after,
+        started: std::time::Instant::now(),
     };
     // `--files` for screenshots and for starting next to a listing; the pane
     // gets focus, so the arrow keys work immediately.
@@ -347,9 +351,20 @@ struct App {
     cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
     frames_drawn: u64,
+    exit_after: Option<u64>,
+    started: std::time::Instant,
 }
 
 impl App {
+    /// Ask for a frame, and say why: a terminal that redraws continuously while
+    /// nothing moves is a battery bug, and the reason is the only way to find it.
+    fn repaint(&self, why: &'static str) {
+        tracing::debug!(why, "request redraw");
+        if let Some(gpu) = &self.gpu {
+            gpu.window.request_redraw();
+        }
+    }
+
     /// The focused terminal, when the focused pane is one. A file pane makes
     /// this `None`; callers that are terminal-only must handle that.
     fn session(&self) -> Option<&Session> {
@@ -730,6 +745,17 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A self-inflicted close: the window manager's close button cannot be
+        // pressed from a test, and shutdown bugs hide behind that.
+        if let Some(after) = self.exit_after {
+            if self.started.elapsed() >= std::time::Duration::from_millis(after) {
+                tracing::info!("closing after the test interval");
+                event_loop.exit();
+            }
+        }
+    }
+
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: UserEvent) {
         // Every terminal pane publishes frames, not only the focused one: a
         // file pane can have focus while the terminal beside it is still live.
@@ -748,9 +774,7 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
-        if let Some(gpu) = &self.gpu {
-            gpu.window.request_redraw();
-        }
+        self.repaint("pane frame");
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -758,10 +782,15 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         };
 
-        // egui sees every event; the terminal will get its own copy later.
-        let response = gpu.egui_state.on_window_event(&gpu.window, &event);
-        if response.repaint {
-            gpu.window.request_redraw();
+        // egui sees every event except the one asking for a frame: fed
+        // `RedrawRequested`, egui asks for another frame, and the loop runs at
+        // the refresh rate forever — which is exactly the CPU burn this cost.
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            let response = gpu.egui_state.on_window_event(&gpu.window, &event);
+            if response.repaint {
+                tracing::debug!(why = "egui", "request redraw");
+                gpu.window.request_redraw();
+            }
         }
 
         match event {
@@ -909,9 +938,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // File navigation changes what egui paints, not what the
                     // terminal emits, so ask for the frame explicitly.
-                    if let Some(gpu) = self.gpu.as_ref() {
-                        gpu.window.request_redraw();
-                    }
+                    self.repaint("file navigation");
                 } else if chord("d") {
                     if let Some(session) = self.session() {
                         let level = !session.pane.stats().dtr();
@@ -1132,15 +1159,20 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 struct Gpu {
-    window: Arc<Window>,
+    // Fields drop in declaration order, and that order is load-bearing here.
+    // Anything holding a texture, buffer or pipeline must go before the device
+    // that owns them, the surface must go before the window it is a view of, and
+    // the window must go last. Getting it wrong segfaults on close rather than
+    // failing loudly, which is why it is written down.
+    egui_renderer: egui_wgpu::Renderer,
+    grid: crate::render::GridRenderer,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
-    egui_renderer: egui_wgpu::Renderer,
-    grid: crate::render::GridRenderer,
+    window: Arc<Window>,
 }
 
 impl Gpu {
@@ -1211,15 +1243,15 @@ impl Gpu {
         );
 
         Ok(Self {
-            window,
+            egui_renderer,
+            grid,
             surface,
             device,
             queue,
             config,
             egui_ctx,
             egui_state,
-            egui_renderer,
-            grid,
+            window,
         })
     }
 

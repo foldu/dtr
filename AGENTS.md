@@ -95,10 +95,30 @@ and `encode` falls back to the character when `text` is empty — so encoding ev
 `KeyboardInput` sends each keystroke twice ("typing `ls` shows `lsls`"). `input::encode`
 drops anything whose state is not `Pressed`; do not move that check out.
 
+**Feeding `RedrawRequested` to egui creates an infinite redraw loop.** egui replies
+"yes, repaint" to that event, we ask winit for another frame, and the app spins at
+the refresh rate while looking idle — 133 frames in 1.2 s of a terminal doing
+nothing. Every event *except* `RedrawRequested` goes to `egui_state.on_window_event`.
+
+**`Gpu`'s fields drop in declaration order, and it matters.** Anything holding a
+texture, buffer or pipeline must drop before the device; the surface must drop
+before the window it views; the window must drop last. Wrong order segfaults on
+close instead of failing loudly.
+
 **Panes share one instance buffer, and queue writes land before submission.** A
 per-pane draw would rewrite the buffer between panes and the last pane would win;
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
+
+## Profiling
+
+`./scripts/flamegraph.sh --demo` builds the `profiling` profile (release + debug
+info) and samples a real window. It uses `perf` through `cargo flamegraph` when
+the kernel allows recording, and otherwise `dtr --cpu-profile <path>`, which
+samples itself and needs no privileges. `--cpu-profile /tmp/x.svg` always prints
+a text self-time report; the `.svg` suffix adds the graph. `--exit-after MS`
+closes the window by itself, which is how shutdown gets exercised without a
+window manager.
 
 ## Gotchas that are real
 

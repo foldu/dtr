@@ -40,5 +40,12 @@ tempfile.workspace = true
 
 # Modem control lines are ioctls on the tty descriptor; Windows needs a
 # different API and does not have it yet.
+# In-process CPU sampling: `perf` is not always permitted (and never on
+# Windows), and a terminal that cannot be profiled is a terminal nobody
+# optimises.
+[target.'cfg(target_os = "linux")'.dependencies]
+pprof.workspace = true
+rustc-demangle.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

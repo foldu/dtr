@@ -7,6 +7,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Unlicense"
 
+[profile.profiling]
+inherits = "release"
+# Flamegraphs are unreadable without symbols; this profile exists only for
+# `scripts/flamegraph.sh`, so the shipped release stays stripped.
+debug = true
+strip = false
+
 [workspace.dependencies]
 # VT core. Pinned to a git rev, not crates.io: 0.2.2's bindings reference C
 # functions that do not exist at the ghostty commit the sys crate pins (PLAN §12.4).
@@ -31,6 +38,8 @@ portable-pty = "0.9"
 redb = "4"
 toml_edit = "0.23"
 serialport = "4"
+pprof = { version = "0.14", features = ["flamegraph"] }
+rustc-demangle = "0.1"
 swash = "0.2"
 fontique = "0.12"
 tempfile = "3"
