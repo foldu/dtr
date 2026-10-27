@@ -163,6 +163,10 @@ pub fn overlay(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
 /// this number is load-bearing: it is what keeps a split from running under
 /// the chrome.
 pub const STATUS_HEIGHT: f32 = 24.0;
+/// Breathing room between the last row of text and the status strip. Without
+/// it the grid ends exactly on the strip's edge, and a prompt with a descender
+/// looks like it is behind the bar rather than above it.
+pub const GRID_GAP: f32 = 4.0;
 
 /// Gap between split panes, in logical points.
 pub const SPLIT_GAP: f32 = 3.0;

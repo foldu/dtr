@@ -631,7 +631,7 @@ impl App {
         screen: (f32, f32),
         scale: f32,
     ) -> Vec<(crate::layout::LeafId, crate::render::PaneView<'a>)> {
-        let status_height = crate::ui::STATUS_HEIGHT * scale;
+        let status_height = (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale;
         let area = crate::layout::Rect::new(
             0.0,
             0.0,
@@ -686,7 +686,8 @@ impl App {
                     0.0,
                     0.0,
                     screen.0,
-                    (screen.1 - crate::ui::STATUS_HEIGHT * scale).max(0.0),
+                    (screen.1 - (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale)
+                        .max(0.0),
                 ),
                 crate::ui::SPLIT_GAP * scale,
             );
