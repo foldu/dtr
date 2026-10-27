@@ -456,7 +456,10 @@ files possible. `dtr --themes` lists what it can see.
 
 The theme is applied to the *terminal*, not to the renderer: `set_default_color_palette` plus the
 default fg/bg/cursor means the whole 256-colour cube follows, not just the sixteen named colours.
-The status bar and palette are still hardcoded greys — that is the visible seam.
+The chrome follows the theme too. No theme format carries colours for a status bar or a launcher, so
+they are **derived**: a surface lifted 10% from the background toward the foreground, secondary text
+55% of the way along the same line, and the theme's cursor colour (or palette 3) as the accent. That
+keeps a theme a document about the *terminal* while the window still looks like one piece.
 
 Colours in the config file itself are deliberately not supported: a theme is a document with a name,
 and pointing at one beats duplicating sixteen hex triplets inline.

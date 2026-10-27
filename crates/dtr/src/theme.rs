@@ -73,11 +73,9 @@ fn colour(rgb: [u8; 3]) -> RgbColor {
 }
 
 fn palette_index(value: u8) -> PaletteIndex {
-    // The parser is the supported way to build one of these from a number, and
-    // it round-trips: `parse_palette_entry` accepts exactly this syntax.
-    Palette::parse_palette_entry(&format!("{value}=#000000"))
-        .map(|(index, _)| index)
-        .expect("a decimal palette index in range always parses")
+    // The tuple field is public and the inner type is `u8`, so this needs no
+    // parsing round-trip.
+    PaletteIndex(value)
 }
 
 impl Theme {

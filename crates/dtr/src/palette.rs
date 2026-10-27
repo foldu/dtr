@@ -7,6 +7,8 @@
 use dtr_complete::{Completion, Engine, Inline};
 use egui::{Align2, Color32, FontId, Key, Modifiers, RichText, Sense, TextEdit, vec2};
 
+use crate::ui::Look;
+
 use crate::sources;
 
 /// What accepting a line asks the app to do.
@@ -65,7 +67,7 @@ impl Palette {
     /// An overlay inside the same `Ui` rather than an `egui::Window`: a palette
     /// is a fixed thing at a fixed place, and a floating window would invite
     /// dragging it around a terminal that has no room for it.
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, look: &Look) -> Option<Action> {
         if !self.open {
             return None;
         }
@@ -78,11 +80,11 @@ impl Palette {
         );
 
         let painter = ui.painter();
-        painter.rect_filled(rect, 6.0, Color32::from_rgb(0x11, 0x15, 0x13));
+        painter.rect_filled(rect, 6.0, Look::colour(look.surface));
         painter.rect_stroke(
             rect,
             6.0,
-            egui::Stroke::new(1.0, Color32::from_rgb(0x2a, 0x33, 0x2f)),
+            egui::Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.5)),
             egui::StrokeKind::Inside,
         );
 
@@ -145,7 +147,7 @@ impl Palette {
                         Align2::LEFT_TOP,
                         &inline.suffix,
                         FontId::monospace(15.0),
-                        Color32::from_rgb(0x4c, 0x5a, 0x54),
+                        Look::colour(look.dim).gamma_multiply(0.7),
                     );
                 }
 
@@ -154,7 +156,7 @@ impl Palette {
                     ui.label(
                         RichText::new("nothing matches")
                             .size(12.0)
-                            .color(Color32::from_rgb(0x6b, 0x77, 0x72)),
+                            .color(Look::colour(look.dim)),
                     );
                     return;
                 }
@@ -181,7 +183,7 @@ impl Palette {
                         painter.rect_filled(
                             rect.expand2(vec2(4.0, 0.0)),
                             3.0,
-                            Color32::from_rgb(0x1b, 0x23, 0x1f),
+                            Look::colour(look.dim).gamma_multiply(0.25),
                         );
                     }
                     painter.text(
@@ -190,9 +192,9 @@ impl Palette {
                         &completion.item.label,
                         FontId::monospace(13.0),
                         if selected {
-                            Color32::from_rgb(0xff, 0xd8, 0x8a)
+                            Look::colour(look.accent)
                         } else {
-                            Color32::from_rgb(0xd8, 0xe1, 0xdc)
+                            Look::colour(look.foreground)
                         },
                     );
                     painter.text(
@@ -200,7 +202,7 @@ impl Palette {
                         Align2::RIGHT_CENTER,
                         &completion.item.detail,
                         FontId::proportional(11.0),
-                        Color32::from_rgb(0x6b, 0x77, 0x72),
+                        Look::colour(look.dim),
                     );
                     if response.clicked() {
                         self.selected = index;
@@ -212,7 +214,7 @@ impl Palette {
                 ui.label(
                     RichText::new("↑↓ choose   tab complete   enter run   esc close")
                         .size(10.0)
-                        .color(Color32::from_rgb(0x4c, 0x5a, 0x54)),
+                        .color(Look::colour(look.dim).gamma_multiply(0.7)),
                 );
             },
         );

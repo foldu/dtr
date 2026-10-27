@@ -18,6 +18,17 @@ use crate::pane::Frame;
 pub struct Look {
     pub size: f32,
     pub path: Option<PathBuf>,
+    /// The terminal's own background, used behind the grid and as the base from
+    /// which the chrome is mixed.
+    pub background: [u8; 3],
+    pub foreground: [u8; 3],
+    /// Cursor/selection accent; the theme's cursor colour when it has one.
+    pub accent: [u8; 3],
+    /// Status bar and palette background: the terminal background lifted just
+    /// enough to be a separate surface.
+    pub surface: [u8; 3],
+    /// Secondary text.
+    pub dim: [u8; 3],
 }
 
 impl Default for Look {
@@ -25,8 +36,54 @@ impl Default for Look {
         Self {
             size: 14.0,
             path: None,
+            background: [0x0b, 0x0f, 0x0e],
+            foreground: [0xdc, 0xdf, 0xdd],
+            accent: [0xff, 0xb0, 0x00],
+            surface: [0x14, 0x18, 0x16],
+            dim: [0x6b, 0x77, 0x72],
         }
     }
+}
+
+impl Look {
+    /// Build the chrome colours from a theme, if there is one.
+    ///
+    /// The chrome is not themed by any format in the wild, so it is derived:
+    /// a surface slightly lighter than the background, secondary text between
+    /// background and foreground, and the theme's cursor colour as the accent.
+    pub fn themed(size: f32, path: Option<PathBuf>, theme: Option<&crate::theme::Theme>) -> Self {
+        let mut look = Self {
+            size,
+            path,
+            ..Self::default()
+        };
+        let Some(theme) = theme else { return look };
+
+        if let Some(bg) = theme.background {
+            look.background = bg;
+        }
+        if let Some(fg) = theme.foreground {
+            look.foreground = fg;
+        }
+        if let Some(cursor) = theme.cursor {
+            look.accent = cursor;
+        } else if let Some(yellow) = theme.palette[3] {
+            look.accent = yellow;
+        }
+        look.surface = mix(look.background, look.foreground, 0.10);
+        look.dim = mix(look.background, look.foreground, 0.55);
+        look
+    }
+
+    pub fn colour(rgb: [u8; 3]) -> Color32 {
+        Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    }
+}
+
+/// Linear blend of two colours; `t` of 0 is `a`, 1 is `b`.
+fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let blend = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    [blend(a[0], b[0]), blend(a[1], b[1]), blend(a[2], b[2])]
 }
 
 impl Look {
@@ -133,12 +190,11 @@ pub fn draw(ui: &mut Ui, frame: &Frame, look: &Look) {
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        let _ = look;
         ui.label(
             RichText::new(status.label)
                 .monospace()
                 .size(12.0)
-                .color(Color32::from_rgb(0x9a, 0xa5, 0xa0)),
+                .color(Look::colour(look.foreground).gamma_multiply(0.8)),
         );
         if let Some((dtr, rts)) = status.modem {
             for (label, level) in [("DTR", dtr), ("RTS", rts)] {
@@ -147,9 +203,9 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
                         .monospace()
                         .size(11.0)
                         .color(if level {
-                            Color32::from_rgb(0xff, 0xb0, 0x00)
+                            Look::colour(look.accent)
                         } else {
-                            Color32::from_rgb(0x4c, 0x5a, 0x54)
+                            Look::colour(look.dim)
                         }),
                 );
             }
@@ -159,7 +215,7 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
                 RichText::new("reconnecting…")
                     .monospace()
                     .size(12.0)
-                    .color(Color32::from_rgb(0xff, 0xb0, 0x00)),
+                    .color(Look::colour(look.accent)),
             );
         }
         ui.label(
@@ -172,7 +228,7 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
             ))
             .monospace()
             .size(12.0)
-            .color(Color32::from_rgb(0x6b, 0x77, 0x72)),
+            .color(Look::colour(look.dim)),
         );
     });
 }

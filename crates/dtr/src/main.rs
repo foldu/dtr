@@ -199,10 +199,7 @@ fn main() -> anyhow::Result<()> {
         },
         None => None,
     };
-    let look = ui::Look {
-        size: config.font.size,
-        path: config.font.path.clone(),
-    };
+    let look = ui::Look::themed(config.font.size, config.font.path.clone(), theme.as_ref());
 
     // Never fatal: a broken or read-only state file must not stop a terminal
     // from opening a port.

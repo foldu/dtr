@@ -524,19 +524,19 @@ impl Gpu {
             egui::Panel::bottom("dtr-status")
                 .frame(
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(0x14, 0x18, 0x16))
+                        .fill(crate::ui::Look::colour(look.surface))
                         .inner_margin(egui::Margin::symmetric(8, 4)),
                 )
                 .show(ui, |ui| crate::ui::status_bar(ui, status, look));
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.background)))
                 .show(ui, |ui| match frame {
                     Some(frame) => crate::ui::draw(ui, frame, look),
                     None => {
                         ui.label("waiting for the pane…");
                     }
                 });
-                if let Some(chosen) = palette.ui(ui) {
+                if let Some(chosen) = palette.ui(ui, look) {
                     *action = Some(chosen);
                 }
                 // Clipboard in and out. egui hands paste over as an event; the

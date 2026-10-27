@@ -87,19 +87,19 @@ pub fn capture(
         egui::Panel::bottom("dtr-status")
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(0x14, 0x18, 0x16))
+                    .fill(crate::ui::Look::colour(look.surface))
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ui, |ui| crate::ui::status_bar(ui, &status, look));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+            .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.background)))
             .show(ui, |ui| match frame {
                 Some(frame) => crate::ui::draw(ui, frame, look),
                 None => {
                     ui.label("no frame yet");
                 }
             });
-        palette.ui(ui);
+        palette.ui(ui, look);
     });
 
     let pixels_per_point = full_output.pixels_per_point;
