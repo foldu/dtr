@@ -45,7 +45,12 @@ mid-session to test reconnect. Kill it with `pkill -x socat` — `pkill -f
 - **`git add` before `nix build`.** A flake build sees only git-tracked files,
   so a new source file that is untracked produces a confusing "file not found"
   or a phantom compile error about a *different* crate.
-- **Screenshots are in-app only** (`--screenshot`), never a compositor grab.
+- **Screenshots are in-app only**, never a compositor grab. Two paths exist and
+they are not the same picture: `--screenshot` renders offscreen from injected
+state, while `--capture PATH --capture-after MS` copies the *live window's*
+surface (configured `COPY_SRC` for exactly this). When a menu or a font behaves
+differently in the window than in a capture, `--capture` is the one that tells
+the truth.
 - Commits end with the co-author trailer.
 
 ## Things that look like bugs and are not

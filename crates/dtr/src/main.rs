@@ -80,6 +80,16 @@ struct Args {
     #[arg(long, value_name = "TEXT")]
     gpu: Option<String>,
 
+    /// Write a PNG of the live window once, MS after it opens. This is the only
+    /// way to capture what the window draws: the offscreen path is a different
+    /// renderer state and has disagreed with the window before.
+    #[arg(long, value_name = "PATH", requires = "capture_after")]
+    capture: Option<std::path::PathBuf>,
+
+    /// How long after opening to take the `--capture` PNG
+    #[arg(long, value_name = "MS", default_value_t = 1200)]
+    capture_after: u64,
+
     /// Close the window after MS milliseconds (shutdown smoke test)
     #[arg(long, value_name = "MS")]
     exit_after: Option<u64>,
@@ -585,6 +595,8 @@ fn main() -> anyhow::Result<()> {
             split,
             files,
             exit_after: args.exit_after,
+            capture: args.capture.clone(),
+            capture_after: args.capture_after,
             gpu: gpu.clone(),
             settings: args.settings,
             config: config.clone(),
@@ -616,6 +628,8 @@ fn main() -> anyhow::Result<()> {
         split,
         files,
         exit_after: args.exit_after,
+        capture: args.capture.clone(),
+        capture_after: args.capture_after,
         gpu,
         settings: args.settings,
         config,

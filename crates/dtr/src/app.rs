@@ -34,6 +34,11 @@ pub struct Startup {
     pub palette: bool,
     pub look: Look,
     pub theme: Option<crate::theme::Theme>,
+    /// Write a PNG of the live window once, `capture_after` milliseconds in.
+    /// The only way to see what the window draws, as opposed to what the
+    /// offscreen capture path draws.
+    pub capture: Option<PathBuf>,
+    pub capture_after: u64,
     /// Close the window after this many milliseconds, to exercise shutdown.
     pub exit_after: Option<u64>,
     /// Adapter name to prefer, e.g. "nvidia".
@@ -267,6 +272,16 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         keymap: crate::keys::Keymap::new(&startup.config.keys),
         pending: Vec::new(),
         pending_since: None,
+        capture: startup
+            .capture
+            .clone()
+            .map(|path| {
+                (
+                    path,
+                    std::time::Instant::now()
+                        + std::time::Duration::from_millis(startup.capture_after),
+                )
+            }),
         held: None,
         config: startup.config.clone(),
         config_path: startup.config_path.clone(),
@@ -470,6 +485,8 @@ struct App {
     /// When the first chord of a pending binding was typed: Zed waits a second
     /// for the rest, then fires the longest binding that is already complete.
     pending_since: Option<std::time::Instant>,
+    /// Where to write a PNG of the live window, and when. Set by `--capture`.
+    capture: Option<(std::path::PathBuf, std::time::Instant)>,
     /// The key the menu thinks is down. A second press for the same key without
     /// a release in between is a duplicate the compositor sent, not a second
     /// keystroke, and acting on it moves the selection two rows.
@@ -1518,6 +1535,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.fit_panes(gpu.metrics(), screen, scale);
                 let settings = if self.settings.open { Some(&self.settings) } else { None };
+                // A window capture is due once, then never again.
+                let capture_path = match self.capture.take() {
+                    Some((path, when)) if std::time::Instant::now() >= when => Some(path),
+                    other => {
+                        self.capture = other;
+                        None
+                    }
+                };
                 let tab = &self.tabs[self.active];
                 let panes: Vec<_> = self
                     .pane_views(tab, gpu.metrics(), screen, scale)
@@ -1566,6 +1591,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .as_ref()
                         .map(|(text, alpha)| (text.as_str(), *alpha)),
                     settings,
+                    capture_path.as_deref(),
                     &look,
                 );
                 self.palette = palette;
@@ -1624,6 +1650,86 @@ struct Gpu {
 }
 
 impl Gpu {
+    /// Copy the frame that was just drawn into a PNG.
+    ///
+    /// The surface is configured `COPY_SRC` for this: an offscreen capture of
+    /// the same state is not the same picture, and twice now the difference
+    /// mattered (a menu that only drew in the window, a font that only broke
+    /// there).
+    fn write_capture(&self, output: &wgpu::SurfaceTexture, path: &std::path::Path) -> anyhow::Result<()> {
+        let (width, height) = (self.config.width, self.config.height);
+        // Copy rows must be a multiple of 256 bytes.
+        let unpadded = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dtr-capture"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dtr-capture"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+
+        let mut pixels = Vec::with_capacity((unpadded * height) as usize);
+        {
+            let Ok(view) = slice.get_mapped_range() else {
+                anyhow::bail!("could not map the capture buffer");
+            };
+            for row in 0..height {
+                let start = (row * padded) as usize;
+                let end = start + unpadded as usize;
+                pixels.extend_from_slice(&view[start..end]);
+            }
+        }
+        buffer.unmap();
+
+        // The surface is BGRA; PNG wants RGBA.
+        if self.config.format == wgpu::TextureFormat::Bgra8Unorm {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+        crate::screenshot::write_png(path, width, height, &pixels)?;
+        tracing::info!(path = %path.display(), width, height, "captured the window");
+        Ok(())
+    }
+
     /// Rebuild the grid for a new face or size. Cheap enough to do on a settings
     /// change: it is a fresh atlas, not a reload of the whole renderer.
     fn rebuild_grid(&mut self, look: &Look) {
@@ -1668,6 +1774,10 @@ impl Gpu {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| anyhow::anyhow!("adapter cannot present to this surface"))?;
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // Copyable so the window can photograph itself: that is the only way to
+        // verify what the *window* draws, as opposed to what the offscreen
+        // capture path draws — and the two have disagreed before.
+        config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
         // egui prefers a non-sRGB target and handles the conversion itself.
         if let Some(format) = surface
             .get_capabilities(&adapter)
@@ -1756,6 +1866,7 @@ impl Gpu {
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
         settings: Option<&crate::settings::Settings>,
+        capture: Option<&std::path::Path>,
         look: &Look,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
@@ -1962,6 +2073,11 @@ impl Gpu {
 
         self.queue
             .submit(user_cmds.into_iter().chain(std::iter::once(encoder.finish())));
+        if let Some(path) = capture {
+            if let Err(err) = self.write_capture(&output, path) {
+                tracing::warn!(%err, path = %path.display(), "could not capture the window");
+            }
+        }
         self.queue.present(output);
 
         for id in &full_output.textures_delta.free {

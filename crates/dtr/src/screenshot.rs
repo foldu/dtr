@@ -38,6 +38,25 @@ pub fn cell_metrics(width: u32, height: u32) -> anyhow::Result<crate::render::Me
     Ok(grid.metrics())
 }
 
+/// Write RGBA pixels to `path` as a PNG. Shared with the live-window capture,
+/// so both produce the same file format.
+pub fn write_png(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> anyhow::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut png = png::Encoder::new(&mut writer, width, height);
+    png.set_color(png::ColorType::Rgba);
+    png.set_depth(png::BitDepth::Eight);
+    let mut png = png.write_header()?;
+    png.write_image_data(pixels)?;
+    png.finish()?;
+    Ok(())
+}
+
 pub fn capture(
     frame: Option<&Frame>,
     path: &Path,
