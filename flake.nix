@@ -133,6 +133,12 @@
         export PKG_CONFIG_ALLOW_CROSS=1
         export PKG_CONFIG_PATH=""
         export PKG_CONFIG_LIBDIR=${libghostty-vt-win}/share/pkgconfig
+        # winapi links the `synchronization` API-set import library, which zig's
+        # mingw does not ship. Every symbol it uses is already in kernel32, so an
+        # empty archive satisfies the search without changing the link.
+        mkdir -p api-stubs
+        printf '!<arch>\n' > api-stubs/libsynchronization.a
+        export RUSTFLAGS="-Lnative=$PWD/api-stubs"
         cargo zigbuild --offline --locked --release --package dtr \
           --target x86_64-pc-windows-gnu
         runHook postBuild

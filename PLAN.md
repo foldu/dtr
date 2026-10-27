@@ -274,12 +274,23 @@ lock.
 | 0.9 | Windows cross build in the flake; smoke-run under Wine or a VM | `nix build .#windows` |
 | 0.10 | `scripts/dev-serial.sh` (socat pair + shell) | See §6 |
 | 0.11 | Single-file discipline: embed icon/shaders/fonts, `--licenses`, `checks.single-exe` | See §7, §8 |
+| 0.12 | Local shell over a PTY (`portable-pty`: `openpty` on Unix, ConPTY on Windows) | Default when no `--port`; `--shell` overrides, `--demo` keeps the canned screen |
+| 0.13 | Terminal replies routed back to the session (`Terminal::on_pty_write`) | Without it, anything that probes DA1/XTGETTCAP — fish, tmux — waits on an answer that never comes |
 
-**Status (2026-10-27):** 0.1–0.5, 0.7, 0.8, 0.11 done. Serial receive is verified end to end
+**Status (2026-10-27):** 0.1–0.5, 0.7, 0.8, 0.11, 0.12, 0.13 done. Serial receive is verified end to end
 over a socat pty with a byte sequence that exercises the mapper: `alpha\r` (lone CR → newline),
 `beta\r\n` (real CRLF → not doubled), `gamma\r` (trailing CR → flushed by the idle timeout).
 Remaining in M0: 0.6 (keyboard input), 0.9 (Windows smoke run), 0.10 (dev script exists; no
 bidirectional test yet).
+
+Two things worth recording from getting a shell to run:
+
+- **Because no test proved otherwise.** fish rendered nothing until terminal *replies* were wired:
+  libghostty produces its DA1/XTGETTCAP answers through `on_pty_write`, and dropping them leaves
+  the shell waiting on an alt-screen that never fills. bash never asked, so the gap stayed hidden.
+- **`TERM` should be `xterm-ghostty`**, not `xterm-256color`. We are a libghostty terminal and the
+  terminfo entry describes what we actually implement; it ships with ghostty and in nixpkgs. A
+  system without the entry needs a fallback (open question).
 
 **Acceptance:** `scripts/dev-serial.sh` starts a socat pair with `bash` on the far end;
 `nix run .#default -- --port /dev/pts/N` shows a working shell prompt, colours, and line

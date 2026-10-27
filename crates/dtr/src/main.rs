@@ -2,9 +2,12 @@
 
 mod app;
 mod pane;
+mod pty;
 mod screenshot;
 mod serial;
 mod ui;
+
+use pane::Transport;
 
 use std::path::PathBuf;
 
@@ -20,6 +23,14 @@ struct Args {
     /// Baud rate
     #[arg(short, long, default_value_t = 115_200)]
     baud: u32,
+
+    /// Shell program to launch when no port is given (default: $SHELL, else bash/pwsh)
+    #[arg(long, value_name = "PROGRAM")]
+    shell: Option<String>,
+
+    /// Show a canned screen instead of launching anything
+    #[arg(long)]
+    demo: bool,
 
     /// Serial byte mapping: `cr=crlf` (default) or `none`
     #[arg(long, value_name = "MAP", default_value = "cr=crlf")]
@@ -62,20 +73,25 @@ fn main() -> anyhow::Result<()> {
 
     tracing::debug!(?args, "starting");
 
-    let serial = match args.port.clone() {
-        Some(port) => Some(serial::Config {
+    let transport = if args.demo {
+        Transport::Demo
+    } else if let Some(port) = args.port.clone() {
+        Transport::Serial(serial::Config {
             port,
             baud: args.baud,
             cr_to_crlf: parse_imap(&args.imap)?,
-        }),
-        None => None,
+        })
+    } else {
+        Transport::Shell(pty::Config {
+            program: args.shell.clone(),
+        })
     };
 
     if let Some(path) = args.screenshot.as_deref() {
         let (width, height) = parse_size(&args.size)?;
         let delay = std::time::Duration::from_millis(args.screenshot_delay);
-        return app::capture_headless(path, width, height, serial, delay);
+        return app::capture_headless(path, width, height, transport, delay);
     }
 
-    app::run(serial)
+    app::run(transport)
 }

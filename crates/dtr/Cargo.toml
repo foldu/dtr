@@ -17,6 +17,7 @@ libghostty-vt.workspace = true
 libghostty-vt-sys.workspace = true
 png.workspace = true
 pollster.workspace = true
+portable-pty.workspace = true
 redb.workspace = true
 tokio.workspace = true
 tokio-serial.workspace = true

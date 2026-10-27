@@ -12,7 +12,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
-use crate::pane::{Frame, Pane};
+use crate::pane::{Frame, Pane, Transport};
 
 pub enum UserEvent {
     Frame,
@@ -23,10 +23,10 @@ pub fn capture_headless(
     path: &std::path::Path,
     width: u32,
     height: u32,
-    serial: Option<crate::serial::Config>,
+    transport: Transport,
     delay: std::time::Duration,
 ) -> anyhow::Result<()> {
-    let pane = Pane::spawn(serial, || {})?;
+    let pane = Pane::spawn(transport, || {})?;
 
     // Give the session a moment to produce output (a serial device's prompt),
     // then take the newest frame rather than the first one.
@@ -47,11 +47,11 @@ pub fn capture_headless(
     crate::screenshot::capture(frame.as_ref(), path, width, height)
 }
 
-pub fn run(serial: Option<crate::serial::Config>) -> anyhow::Result<()> {
+pub fn run(transport: Transport) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
 
-    let pane = Pane::spawn(serial, move || {
+    let pane = Pane::spawn(transport, move || {
         let _ = proxy.send_event(UserEvent::Frame);
     })?;
 

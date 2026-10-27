@@ -5,13 +5,17 @@
 //! is an owned [`Frame`] in a latest-value slot: the UI always draws the newest
 //! one and never touches the terminal or blocks the emulation thread.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
+use portable_pty::{Child, MasterPty};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
+use crate::pty;
 use crate::serial::{self, CrToCrlf};
 
 pub const COLS: u16 = 80;
@@ -38,6 +42,29 @@ pub struct Frame {
     pub cells: Vec<Cell>,
 }
 
+/// What a pane is attached to.
+pub enum Transport {
+    Serial(serial::Config),
+    Shell(pty::Config),
+    /// A canned screen, for screenshots and tests.
+    Demo,
+}
+
+/// Where bytes typed in the UI go.
+enum Sink {
+    Serial(WriteHalf<tokio_serial::SerialStream>),
+    Pty(Box<dyn std::io::Write + Send>),
+}
+
+impl Sink {
+    async fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Sink::Serial(write) => write.write_all(bytes).await,
+            Sink::Pty(write) => write.write_all(bytes),
+        }
+    }
+}
+
 pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -49,7 +76,7 @@ impl Pane {
     /// With no serial config the pane shows a demo screen; with one it opens
     /// the port and drives it.
     pub fn spawn(
-        serial: Option<serial::Config>,
+        transport: Transport,
         wake: impl Fn() + Send + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
@@ -71,7 +98,7 @@ impl Pane {
                 };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    if let Err(err) = run(rx, published, wake, serial).await {
+                    if let Err(err) = run(rx, published, wake, transport).await {
                         tracing::error!(%err, "pane");
                     }
                 });
@@ -95,55 +122,116 @@ async fn run(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     out: Arc<Mutex<Option<Frame>>>,
     wake: impl Fn(),
-    serial: Option<serial::Config>,
+    transport: Transport,
 ) -> anyhow::Result<()> {
+    // Terminal replies (device attributes, DECRQM, size reports) have to go
+    // back out to the pty, or programs that probe capabilities — fish, tmux —
+    // sit waiting on an answer that never comes.
+    let replies: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
+    let reply_sink = Rc::clone(&replies);
+
     let mut term = Terminal::new(COLS, ROWS)?;
+    term.on_pty_write(move |_term, data| {
+        reply_sink.borrow_mut().extend_from_slice(data);
+    })?;
     let mut state = RenderState::new()?;
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
 
-    let mut writer: Option<WriteHalf<tokio_serial::SerialStream>> = None;
     let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let mut serial_alive = false;
+    let mut sink: Option<Sink> = None;
+    let mut source_alive = false;
+    // The pty master and child must outlive the pane: dropping the master
+    // closes the terminal and takes the shell with it.
+    let mut pty_keep: Option<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> = None;
 
-    match &serial {
-        Some(cfg) => {
-            // A failed open is fatal: the user asked for this port by name.
+    match transport {
+        Transport::Serial(cfg) => {
             let stream = cfg.open()?;
             tracing::info!(port = %cfg.port, baud = cfg.baud, "serial open");
             let (read_half, write_half) = tokio::io::split(stream);
-            writer = Some(write_half);
+            sink = Some(Sink::Serial(write_half));
             let mapper = cfg.cr_to_crlf.then(CrToCrlf::default);
-            serial_alive = true;
+            source_alive = true;
             tokio::task::spawn_local(read_loop(read_half, mapper, bytes_tx));
         }
-        None => term.vt_write(DEMO),
+        Transport::Shell(cfg) => {
+            let shell = cfg.open()?;
+            let pty::Shell {
+                master,
+                child,
+                mut reader,
+                writer,
+            } = shell;
+            pty_keep = Some((master, child));
+            sink = Some(Sink::Pty(writer));
+            source_alive = true;
+            std::thread::Builder::new()
+                .name("dtr-pty".into())
+                .spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if bytes_tx.send(buf[..n].to_vec()).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(%err, "pty read");
+                                break;
+                            }
+                        }
+                    }
+                })?;
+        }
+            Transport::Demo => term.vt_write(DEMO),
     }
 
-    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake)?;
+    // Always publish once, even if the terminal is still clean: a pane that
+    // has produced no output yet still has an (empty) grid to show.
+    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
 
     loop {
         tokio::select! {
-            chunk = bytes_rx.recv(), if serial_alive => {
+            chunk = bytes_rx.recv(), if source_alive => {
                 match chunk {
                     Some(bytes) => {
                         term.vt_write(&bytes);
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake)?;
+                        flush_replies(&replies, &mut sink).await;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
                     }
-                    None => serial_alive = false,
+                    None => source_alive = false,
                 }
             }
             cmd = rx.recv() => {
                 let Some(bytes) = cmd else { break };
-                if let Some(w) = writer.as_mut() {
-                    if let Err(err) = w.write_all(&bytes).await {
-                        tracing::warn!(%err, "serial write");
+                if let Some(sink) = sink.as_mut() {
+                    if let Err(err) = sink.write(&bytes).await {
+                        tracing::warn!(%err, "write to session");
                     }
                 }
             }
         }
     }
+
+    let _ = &pty_keep;
     Ok(())
+}
+
+/// Write any bytes the terminal produced in response to a query back to the
+/// session. Without this a shell that probes DA1/XTGETTCAP waits forever.
+async fn flush_replies(replies: &RefCell<Vec<u8>>, sink: &mut Option<Sink>) {
+    let out: Vec<u8> = replies.borrow_mut().drain(..).collect();
+    if out.is_empty() {
+        return;
+    }
+    if let Some(sink) = sink.as_mut() {
+        if let Err(err) = sink.write(&out).await {
+            tracing::warn!(%err, "write terminal reply");
+        }
+    }
 }
 
 /// Read the port until it fails or closes, mapping bytes on the way through.
@@ -187,11 +275,12 @@ fn publish(
     cells: &mut CellIterator<'static>,
     out: &Mutex<Option<Frame>>,
     wake: &impl Fn(),
+    force: bool,
 ) -> anyhow::Result<()> {
     let snapshot = state.update(term)?;
 
     // A clean frame means the UI already has the current contents.
-    if matches!(snapshot.dirty()?, Dirty::Clean) {
+    if !force && matches!(snapshot.dirty()?, Dirty::Clean) {
         return Ok(());
     }
 
