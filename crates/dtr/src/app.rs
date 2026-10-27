@@ -1095,13 +1095,14 @@ impl ApplicationHandler<UserEvent> for App {
                         session.pane.send(crate::pane::Command::Break);
                     }
                 } else if chord("c") {
+                    // The pane rebuilds the text from the terminal when asked;
+                    // it cannot reuse a frame, because drawing the frame is what
+                    // empties the pane's copy of it.
                     if let Some(session) = self.session() {
                         match session.selection {
                             Some((start, end)) => session
                                 .pane
                                 .send(crate::pane::Command::CopyRange(start, end)),
-                            // No selection: copy the visible screen, which is what a
-                            // terminal's "copy all" means.
                             None => session.pane.send(crate::pane::Command::Copy),
                         }
                     }

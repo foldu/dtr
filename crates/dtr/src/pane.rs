@@ -695,23 +695,18 @@ async fn run(
                             }
                         }
                     }
-                    Command::Copy => {
-                        let text = out
-                            .lock()
-                            .ok()
-                            .and_then(|slot| slot.as_ref().map(frame_text))
-                            .unwrap_or_default();
-                        if let Ok(mut slot) = copied.lock() {
-                            *slot = Some(text);
-                        }
-                        wake();
-                    }
-                    Command::CopyRange(start, end) => {
-                        let text = out
-                            .lock()
-                            .ok()
-                            .and_then(|slot| slot.as_ref().map(|frame| frame_text_range(frame, start, end)))
-                            .unwrap_or_default();
+                    Command::Copy | Command::CopyRange(_, _) => {
+                        // Read the text out of the terminal now. The published
+                        // frame cannot be used: the UI takes it out of the slot
+                        // to draw it, so a copy would find nothing there — which
+                        // is exactly the "copied 0 chars" that shipped.
+                        let text = match copy_text(&mut term, &mut state, &mut rows, &mut cells, &command) {
+                            Ok(text) => text,
+                            Err(err) => {
+                                tracing::warn!(%err, "could not read the screen to copy");
+                                String::new()
+                            }
+                        };
                         if let Ok(mut slot) = copied.lock() {
                             *slot = Some(text);
                         }
@@ -750,7 +745,7 @@ struct LogWriter {
 /// The visible screen as text: rows trimmed of trailing blanks, and no empty
 /// lines off the bottom. This is what "copy" means in a terminal — what you can
 /// see, not the whole scrollback.
-fn frame_text(frame: &Frame) -> String {
+pub(crate) fn frame_text(frame: &Frame) -> String {
     let cols = frame.cols as usize;
     let mut lines: Vec<String> = frame
         .cells
@@ -766,6 +761,32 @@ fn frame_text(frame: &Frame) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+/// The text a copy command wants: the whole screen, or a cell range.
+fn copy_text(
+    term: &mut Terminal<'static, '_>,
+    state: &mut RenderState<'static>,
+    rows: &mut RowIterator<'static>,
+    cells: &mut CellIterator<'static>,
+    command: &Command,
+) -> anyhow::Result<String> {
+    let snapshot = state.update(term)?;
+    let mut frame = Frame {
+        cols: snapshot.cols()?,
+        rows: snapshot.rows()?,
+        default_fg: [0; 3],
+        default_bg: [0; 3],
+        cursor: None,
+        cells: Vec::with_capacity(
+            usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?),
+        ),
+    };
+    fill_cells(&snapshot, rows, cells, &mut frame)?;
+    Ok(match command {
+        Command::CopyRange(start, end) => frame_text_range(&frame, *start, *end),
+        _ => frame_text(&frame),
+    })
 }
 
 /// Record how far the viewport is from the live screen.
@@ -784,7 +805,7 @@ fn note_scrollback(term: &Terminal<'_, '_>, stats: &Stats) {
 /// The range is two linear cell indices in either order; a partial first and
 /// last row is normal (a drag rarely starts at column zero), so rows are cut at
 /// the selection's own edges and only the trailing blanks are trimmed.
-fn frame_text_range(frame: &Frame, start: usize, end: usize) -> String {
+pub(crate) fn frame_text_range(frame: &Frame, start: usize, end: usize) -> String {
     let cols = usize::from(frame.cols).max(1);
     let (first, last) = if start <= end {
         (start, end)

@@ -110,6 +110,13 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**A copy cannot use the published frame, because drawing it is what removes it.**
+The UI takes the frame out of the pane's slot to render it, so a copy that reads
+that slot gets `None` and copies the empty string — which shipped as "copied 0
+chars" with a selection on screen. `Command::Copy`/`CopyRange` rebuild the text
+from the terminal at copy time instead; the pane is the only place that still
+holds the cells.
+
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler
 only parks the text in the pane's `copied` slot; the UI does the clipboard work
