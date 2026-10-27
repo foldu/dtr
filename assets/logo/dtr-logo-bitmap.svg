@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 24" width="80" height="24" shape-rendering="crispEdges" role="img" aria-labelledby="t d">
+  <title id="t">dtr — bitmap lockup</title>
+  <desc id="d">An 8x16 character-cell prompt reading ~/dtr, then an amber dollar and a block cursor.</desc>
+  <rect width="80" height="24" fill="#0B0F0E"/>
+  <g id="prompt-line">
+    <!-- ~ -->
+    <path fill="#EDE6D6" d="M6 8h4v1h-4zM5 9h1v1h-1zM9 9h2v1h-2zM4 10h2v1h-2zM10 10h2v1h-2z"/>
+    <!-- / -->
+    <path fill="#EDE6D6" d="M18 5h2v1h-2zM18 6h2v1h-2zM17 7h2v1h-2zM17 8h2v1h-2zM16 9h2v1h-2zM16 10h2v1h-2zM15 11h2v1h-2zM15 12h2v1h-2zM14 13h2v1h-2zM14 14h2v1h-2zM13 15h2v1h-2zM13 16h2v1h-2z"/>
+    <!-- d -->
+    <path fill="#EDE6D6" d="M26 5h2v1h-2zM26 6h2v1h-2zM26 7h2v1h-2zM21 8h7v1h-7zM21 9h7v1h-7zM21 10h2v1h-2zM26 10h2v1h-2zM21 11h2v1h-2zM26 11h2v1h-2zM21 12h2v1h-2zM26 12h2v1h-2zM21 13h2v1h-2zM26 13h2v1h-2zM21 14h7v1h-7zM21 15h7v1h-7z"/>
+    <!-- t -->
+    <path fill="#EDE6D6" d="M31 5h2v1h-2zM31 6h2v1h-2zM31 7h2v1h-2zM29 8h6v1h-6zM29 9h6v1h-6zM31 10h2v1h-2zM31 11h2v1h-2zM31 12h2v1h-2zM31 13h2v1h-2zM30 14h4v1h-4zM30 15h4v1h-4z"/>
+    <!-- r -->
+    <path fill="#EDE6D6" d="M37 8h6v1h-6zM37 9h6v1h-6zM37 10h2v1h-2zM41 10h2v1h-2zM37 11h2v1h-2zM37 12h2v1h-2zM37 13h2v1h-2zM37 14h2v1h-2zM37 15h2v1h-2z"/>
+    <!-- $ -->
+    <path fill="#FFB000" d="M55 5h2v1h-2zM53 6h6v1h-6zM53 7h6v1h-6zM53 8h2v1h-2zM53 9h2v1h-2zM53 10h6v1h-6zM53 11h6v1h-6zM57 12h2v1h-2zM57 13h2v1h-2zM53 14h6v1h-6zM53 15h6v1h-6zM55 16h2v1h-2z"/>
+    <!-- block cursor: one full character cell -->
+    <rect x="68" y="4" width="8" height="16" fill="#FFB000"/>
+  </g>
+</svg>

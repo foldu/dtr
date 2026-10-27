@@ -1,36 +1,83 @@
 # dtr logo
 
-The logo is a shell prompt, because that is what dtr is for: `~/dtr` is the directory you are
-standing in, the amber `$` is the prompt, and the block cursor is the line still open. The amber
-is the phosphor of the serial consoles this tool serves, not the grey of a modern IDE; the cursor
-is the one piece of chrome a terminal never removes. The mark on its own is the `$` — the atom of
-the prompt, and the only part of the line that can still be read at 16 px.
+Two directions live here: the **geometric** mark and lockup from round 1, and the **bitmap**
+(character-cell) version from round 2. Both are original, vector-only, flat, two-colour, and
+contain no `<text>`, no fonts, no filters, no embedded images and no external references.
 
-The system is flat and built on a grid: one background and two inks. The mark sits on a 64-unit
-square: the S is three horizontal bars (y = 12/32/52) joined by two 180° turns of r = 10, drawn
-with an 8-unit stroke, with a lighter 6-unit stem running from y = 2 to y = 62. The lockup runs on
-a 48-unit monospace cell with a 34-unit x-height and a 54-unit ascender; the letters carry a
-10-unit stroke, while the `$` keeps the mark's 8-unit stroke (that is what keeps its counters open
-at 16 px). Every letter is a path drawn for this project: there are no `<text>` elements, no
-fonts, no filters, no embedded images and no external references.
+![geometric, bitmap and hybrid compared](comparison.png)
+
+## The idea
+
+The logo is a shell prompt: `~/dtr` is the directory you are standing in, the amber `$` is the
+prompt, and the block cursor is the line still open. Amber is the phosphor of the serial-era
+consoles this tool is for; the block cursor is DTR asserted — the terminal saying "I am here,
+you may talk to me". The mark on its own is the `$`: the atom of the prompt, and the only part
+of the line that can still be read at 16 px.
+
+## A. Geometric (round 1)
+
+The mark sits on a 64-unit square: the S is three horizontal bars (y = 12/32/52) joined by two
+180° turns of r = 10, drawn with an 8-unit stroke, with a lighter 6-unit stem running from y = 2
+to y = 62. The lockup runs on a 48-unit monospace cell with a 34-unit x-height and a 54-unit
+ascender; the letters carry a 10-unit stroke, while the `$` keeps the mark's 8-unit stroke. The
+sides are curved, the terminals flat, the weight a medium.
+
+## B. Bitmap (round 2)
+
+Every glyph is drawn on a real **8×16 pixel grid** (the MDA/VGA character cell), with hard
+stair-steps and `shape-rendering="crispEdges"` — no curves and no anti-aliasing. The lockup is
+`~/dtr $ █` at one unit per pixel (80 × 24 units, nine cells); the cursor is one full 8×16 cell,
+so it is exactly the size of the font, as asked. The mark is a hand-tuned **16×16 pixel `$`**
+with 2-unit strokes: the 8×16 text glyph is too narrow and its counters too cramped to work as an
+icon at 16 px, so the icon is drawn at icon resolution, on the same square-pixel grid and at the
+same 2-unit stroke weight. This is the one place where two forms exist — a 16×16 icon glyph and
+an 8×16 text glyph; the lockup's `$` is the text form, the mark file is the icon form.
+
+## Three-way comparison and recommendation
+
+**Bitmap at large sizes.** At 1024 px the bitmap lockup is not better than the geometric one. An
+8×16 cell forces the compromises real terminal fonts make — a `$` that can read as a 5, a `t`
+that is a cross with a foot, an `r` that is a gamma — and at roughly 13 px per bit those
+compromises become the whole impression: it reads as a screenshot of a terminal, not a logo. The
+1-pixel-stroke alternative is more honest to a ROM font but looks spindly at the same size. The
+bitmap glyphs here are a first pass; a dedicated pixel typeface would improve them, but the 8×16
+cell still caps how much detail the large lockup can hold. The bitmap genuinely wins at 320 px and below, where the geometric line thins out and the pixel line
+gets sharper; the 16×16 mark is excellent at 16, 32 and 64.
+
+**Hybrid.** Bitmap lockup with the round-1 geometric mark: in the comparison it reads as two
+logos in one frame — a smooth `$` sitting beside pixel text is a visible dialect change. I would
+not ship that combination.
+
+**My pick.** Keep the geometric set as the primary brand, because the primary use is a README
+banner, a window icon and a slide at 512 px and up, and that is where it is stronger. Use the
+16×16 bitmap mark as the favicon / 16–32 px icon if you want the pixel treatment (that is the
+inverse hybrid: pixel icon, geometric lockup — the two are rarely seen together at one size).
+If the bitmap screen is the identity you want everywhere, ship the bitmap set and accept the
+coarser display lockup; to make a bitmap face that holds up at 1024, the next round should double
+the cell (16×32) instead of stretching the 8×16 one.
 
 ## Files
 
 | File | What it is | Use it on |
 | --- | --- | --- |
-| `dtr-mark.svg` | The mark: amber `$`, transparent background | Dark backgrounds, favicons, window icon |
-| `dtr-mark-mono.svg` | The mark in `currentColor`, transparent | One-colour stamps, single-colour print, forced dark/light inversion |
-| `dtr-mark-light.svg` | The mark in deep amber `#924F00`, transparent | Light backgrounds only |
-| `dtr-logo.svg` | Primary lockup: `~/dtr $ █` in bone + amber, black background baked in | READMEs, slides, dark UI |
-| `dtr-logo-light.svg` | The same lockup in ink + deep amber on paper | Light documents |
-| `dtr-mark-512.png` | 512 px render of the mark on `#0B0F0E` | Preview, icon source |
-| `dtr-mark-32.png` | 32 px render on `#0B0F0E` | Preview of the favicon size |
-| `dtr-mark-16.png` | 16 px render on `#0B0F0E` | Proof of the minimum size |
-| `dtr-logo-1024.png` | 1024 px render of the primary lockup | README header |
-| `dtr-logo-light-1024.png` | 1024 px render of the light lockup | Light documents |
+| `dtr-mark.svg` | Geometric mark: amber `$`, transparent | Dark backgrounds, favicons, window icon |
+| `dtr-mark-mono.svg` | Geometric mark in `currentColor`, transparent | One-colour stamps, print, inversion |
+| `dtr-mark-light.svg` | Geometric mark in deep amber `#924F00`, transparent | Light backgrounds |
+| `dtr-logo.svg` | Geometric lockup `~/dtr $ █`, black background baked in | READMEs, slides, dark UI |
+| `dtr-logo-light.svg` | Geometric lockup, ink + deep amber on paper | Light documents |
+| `dtr-mark-bitmap.svg` | 16×16 pixel mark, amber, transparent | 16/32/64 px icon, favicon, dark UI |
+| `dtr-mark-bitmap-mono.svg` | 16×16 pixel mark in `currentColor` | One-colour stamps, inversion |
+| `dtr-mark-bitmap-light.svg` | 16×16 pixel mark in deep amber | Light backgrounds |
+| `dtr-logo-bitmap.svg` | 8×16-cell lockup, black background baked in | Small/retro lockup |
+| `dtr-logo-bitmap-light.svg` | 8×16-cell lockup, ink + deep amber on paper | Light documents |
+| `dtr-mark-512.png`, `dtr-mark-32.png`, `dtr-mark-16.png` | Geometric mark previews on `#0B0F0E` | Preview |
+| `dtr-logo-1024.png`, `dtr-logo-light-1024.png` | Geometric lockup previews | Preview |
+| `dtr-mark-bitmap-512.png`, `-32.png`, `-16.png` | Bitmap mark previews on `#0B0F0E` | Preview |
+| `dtr-logo-bitmap-1024.png`, `dtr-logo-bitmap-light-1024.png` | Bitmap lockup previews | Preview |
+| `comparison.png` | The three-way comparison above | Review |
 
-The PNGs are previews with the brand background baked in. The SVGs are the masters, and the three
-mark files are transparent.
+The PNGs are previews with the brand background baked in. The SVGs are the masters, and the mark
+files are transparent.
 
 ## Palette
 
@@ -47,19 +94,25 @@ deep amber and the mono file rather than the primary amber.
 
 ## Minimum sizes
 
-- **Mark** — 16 px on screen, 4 mm in print. On light surfaces use `dtr-mark-light.svg` (or the mono
-  file) at any size; the primary amber mark is for dark surfaces.
-- **Lockup** — 320 px wide on screen (the letters are then about 34 px tall), 30 mm in print.
-  Below that, use the mark alone; the path and the cursor are the details that go first.
-- **Cursor** — the cursor block is 5% of the lockup's width. At 320 px it is still 16 px wide.
+- **Geometric mark** — 16 px on screen, 4 mm in print. On light surfaces use the light or mono file.
+- **Geometric lockup** — 320 px wide on screen, 30 mm in print. Below that, use the mark.
+- **Bitmap mark** — 16 px (native 1 px per bit), crisp at 16/32/64/512; do not go below 16.
+- **Bitmap lockup** — 240 px wide at the smallest (3 px per bit); 320–640 px is its comfortable
+  range, and it is legible but coarse at 1024.
+- **Cursor** — in the bitmap lockup the cursor is one full cell (8 × 16 px at native), exactly the
+  font size; in the geometric lockup it is 22 units wide at a 423-unit line width.
 
 ## Clear space
 
-- Around the **mark**: at least 16 units of the 64-unit box (25% of its height) on every side.
-- Around the **lockup**: at least 22 units (the width of the block cursor) on every side. The file
-  already carries at least a 26-unit margin, so the artwork can be placed as supplied.
-- Don't set the mark on a busy photograph without the mono version or a solid tile; don't add
-  glows, shadows or gradients; don't re-space the prompt line.
+- Around the **geometric mark**: at least 16 units of the 64-unit box (25% of its height).
+- Around the **geometric lockup**: at least 22 units (the width of the block cursor); the file
+  already carries at least a 26-unit margin.
+- Around the **bitmap mark**: at least one cell (1/16 of the icon); the SVG already has 1–2 cells
+  of padding.
+- Around the **bitmap lockup**: at least four cells (the built-in margin), so the artwork can be
+  placed as supplied.
+- Don't add glows, shadows, gradients, or re-space either prompt line; don't scale the bitmap
+  files by a non-integer factor if you need the stair-steps to stay exact.
 
 ## Rendering
 
@@ -67,8 +120,9 @@ The PNGs were rendered with resvg:
 
 ```sh
 nix run nixpkgs#resvg -- -w 512 -h 512 --background '#0B0F0E' assets/logo/dtr-mark.svg assets/logo/dtr-mark-512.png
-nix run nixpkgs#resvg -- -w 32  -h 32  --background '#0B0F0E' assets/logo/dtr-mark.svg assets/logo/dtr-mark-32.png
 nix run nixpkgs#resvg -- -w 1024 assets/logo/dtr-logo.svg assets/logo/dtr-logo-1024.png
+nix run nixpkgs#resvg -- -w 16 -h 16 --background '#0B0F0E' assets/logo/dtr-mark-bitmap.svg assets/logo/dtr-mark-bitmap-16.png
+nix run nixpkgs#resvg -- -w 1024 assets/logo/dtr-logo-bitmap.svg assets/logo/dtr-logo-bitmap-1024.png
 ```
 
 ## License
