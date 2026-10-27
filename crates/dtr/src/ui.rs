@@ -112,6 +112,53 @@ impl Look {
 
 }
 
+/// Give an area a known rectangle before it is shown.
+///
+/// An area whose size egui has not seen yet spends its first frame in a
+/// sizing pass, and a sizing pass paints nothing. That is invisible in a live
+/// window (the second frame draws), but `--screenshot` renders exactly one
+/// frame, so an unprimed area would be missing from every capture. Seeding the
+/// state with the rectangle we already know skips that pass.
+pub(crate) fn prime_area(
+    ctx: &egui::Context,
+    id: egui::Id,
+    order: egui::Order,
+    rect: egui::Rect,
+    interactable: bool,
+) {
+    let mut state = egui::AreaState::default();
+    state.pivot_pos = Some(rect.min);
+    state.size = Some(rect.size());
+    state.interactable = interactable;
+    ctx.memory_mut(|memory| {
+        memory
+            .areas_mut()
+            .set_state(egui::LayerId::new(order, id), state);
+    });
+}
+
+/// Draw a full-screen overlay in a layer above the panes.
+///
+/// Panes are egui `Area`s in the background layer; the palette has to be above
+/// them, or a file listing would paint over the command line it is feeding.
+pub fn overlay(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let screen = ui.max_rect();
+    let ctx = ui.ctx().clone();
+    let id = egui::Id::unique(id);
+    prime_area(&ctx, id, egui::Order::Foreground, screen, true);
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .constrain(false)
+        .fade_in(false)
+        .show(&ctx, |ui| {
+            ui.set_min_size(screen.size());
+            ui.set_max_size(screen.size());
+            ui.set_clip_rect(screen);
+            add(ui);
+        });
+}
+
 /// Height of the status strip in logical points. The panes stop above it, so
 /// this number is load-bearing: it is what keeps a split from running under
 /// the chrome.

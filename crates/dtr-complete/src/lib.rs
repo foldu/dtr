@@ -92,6 +92,11 @@ const COMMANDS: &[Command] = &[
         argument: Argument::None,
     },
     Command {
+        name: "files",
+        summary: "open a file browser pane",
+        argument: Argument::None,
+    },
+    Command {
         name: "log",
         summary: "append raw bytes to a file",
         argument: Argument::None,
@@ -422,6 +427,13 @@ mod tests {
         let completions = engine().complete("shell fi");
         assert_eq!(completions[0].item.label, "fish");
         assert_eq!(completions[0].item.kind, Kind::Shell);
+    }
+
+    #[test]
+    fn files_is_a_command() {
+        let completions = engine().complete("fil");
+        assert_eq!(completions[0].item.label, "files");
+        assert_eq!(completions[0].item.kind, Kind::Command);
     }
 
     #[test]

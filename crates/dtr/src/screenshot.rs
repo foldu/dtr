@@ -22,6 +22,7 @@ pub fn capture(
     look: &crate::ui::Look,
     selection: Option<(usize, usize)>,
     split: Option<crate::layout::Axis>,
+    files: Option<&crate::explorer::Explorer>,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -90,6 +91,68 @@ pub fn capture(
         modem: serial.then(|| (stats.dtr(), stats.rts())),
     };
 
+    // The layout is decided before the egui pass because the file pane's
+    // rectangle comes from the same split tree the grid uses.
+    let mut grid = crate::render::GridRenderer::new(&device, format, look);
+    let status_height = crate::ui::STATUS_HEIGHT;
+    let area = crate::layout::Rect::new(
+        0.0,
+        0.0,
+        width as f32,
+        (height as f32 - status_height).max(1.0),
+    );
+    let mut layout = crate::layout::Layout::leaf(1);
+    let (panes, file_rect): (Vec<crate::render::PaneView<'_>>, _) = if files.is_some() {
+        // A real listing next to the terminal: the left-hand pane keeps the
+        // grid, the right-hand one is painted by egui.
+        let _ = layout.split(1, crate::layout::Axis::Horizontal, 2, false);
+        let rects = layout.rects(area, crate::ui::SPLIT_GAP);
+        let file_rect = rects
+            .iter()
+            .find(|(id, _)| *id == 2)
+            .map(|(_, rect)| *rect);
+        let panes = rects
+            .into_iter()
+            .map(|(id, rect)| crate::render::PaneView {
+                rect,
+                frame: if id == 1 { frame } else { None },
+                selection: if id == 1 { selection } else { None },
+                cursor: id == 1,
+            })
+            .collect();
+        (panes, file_rect)
+    } else {
+        match split {
+            // The same frame twice: this is a review of the layout and the
+            // renderer's per-pane clipping, not of two live sessions.
+            Some(axis) => {
+                let _ = layout.split(1, axis, 2, false);
+                (
+                    layout
+                        .rects(area, crate::ui::SPLIT_GAP)
+                        .into_iter()
+                        .map(|(id, rect)| crate::render::PaneView {
+                            rect,
+                            frame,
+                            selection: if id == 1 { selection } else { None },
+                            cursor: id == 1,
+                        })
+                        .collect(),
+                    None,
+                )
+            }
+            None => (
+                vec![crate::render::PaneView {
+                    rect: area,
+                    frame,
+                    selection,
+                    cursor: true,
+                }],
+                None,
+            ),
+        }
+    };
+
     let mut palette = crate::palette::Palette::new(show_palette);
     let mut full_output = ctx.run_ui(raw_input, |ui| {
         egui::Panel::bottom("dtr-status")
@@ -103,7 +166,21 @@ pub fn capture(
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .show(ui, |_ui| {});
-        palette.ui(ui, look);
+        if let (Some(explorer), Some(rect)) = (files, file_rect) {
+            crate::explorer::pane_ui(
+                ui,
+                egui::Id::unique("dtr-screenshot-files"),
+                rect,
+                explorer,
+                look,
+                true,
+            );
+        }
+        if show_palette {
+            crate::ui::overlay(ui, "dtr-screenshot-palette", |ui| {
+                palette.ui(ui, look);
+            });
+        }
     });
 
     let pixels_per_point = full_output.pixels_per_point;
@@ -127,38 +204,6 @@ pub fn capture(
     device.on_uncaptured_error(std::sync::Arc::new(|err: wgpu::Error| {
         tracing::error!(%err, "wgpu validation");
     }));
-    let mut grid = crate::render::GridRenderer::new(&device, format, look);
-    let status_height = crate::ui::STATUS_HEIGHT;
-    let area = crate::layout::Rect::new(
-        0.0,
-        0.0,
-        width as f32,
-        (height as f32 - status_height).max(1.0),
-    );
-    let panes: Vec<crate::render::PaneView<'_>> = match split {
-        // The same frame twice: this is a review of the layout and the
-        // renderer's per-pane clipping, not of two live sessions.
-        Some(axis) => {
-            let mut layout = crate::layout::Layout::leaf(1);
-            layout.split(1, axis, 2, false);
-            layout
-                .rects(area, crate::ui::SPLIT_GAP)
-                .into_iter()
-                .map(|(id, rect)| crate::render::PaneView {
-                    rect,
-                    frame,
-                    selection: if id == 1 { selection } else { None },
-                    cursor: id == 1,
-                })
-                .collect()
-        }
-        None => vec![crate::render::PaneView {
-            rect: area,
-            frame,
-            selection,
-            cursor: true,
-        }],
-    };
     grid.prepare(
         &device,
         &queue,
