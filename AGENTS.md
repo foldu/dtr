@@ -110,6 +110,12 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**A modal must ignore key releases.** The release of the keystroke that opened a
+modal arrives while it is open, so handling releases as well as presses closed
+the settings menu the instant `Ctrl+,` was let go — it flashed and vanished and
+read as "does not open". Key handling for overlays checks `ElementState::Pressed`
+first; the same trap as the doubled keystrokes, in a different disguise.
+
 **A copy cannot use the published frame, because drawing it is what removes it.**
 The UI takes the frame out of the pane's slot to render it, so a copy that reads
 that slot gets `None` and copies the empty string — which shipped as "copied 0

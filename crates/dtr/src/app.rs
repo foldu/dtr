@@ -1165,7 +1165,13 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // The menu owns the keyboard while it is open: a settings field
                 // that leaks "j" into the shell is worse than a modal.
-                if self.settings.open {
+                //
+                // Everything here runs on *press* only. The release of the very
+                // keystroke that opened the menu arrives while it is open, and
+                // acted on that it closed the menu again — the menu flashed and
+                // vanished, which reads as "it does not open".
+                let pressed = event.state == winit::event::ElementState::Pressed;
+                if self.settings.open && pressed {
                     // Ctrl+, closes it, like it opened it. Everything else is
                     // the menu's: a modal that leaks keystrokes into the shell
                     // is worse than no modal.
@@ -1258,7 +1264,8 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(session) = self.session() {
                         session.pane.send(crate::pane::Command::Break);
                     }
-                } else if self.modifiers.control_key()
+                } else if pressed
+                    && self.modifiers.control_key()
                     && matches!(&event.logical_key, winit::keyboard::Key::Character(text) if text == ",")
                 {
                     if self.settings.open {
