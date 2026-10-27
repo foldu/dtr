@@ -264,6 +264,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             settings
         },
         fonts_dirty: false,
+        held: None,
         config: startup.config.clone(),
         config_path: startup.config_path.clone(),
         toast: None,
@@ -459,6 +460,10 @@ struct App {
     /// Set when the grid must be rebuilt against a new face; the redraw has the
     /// device, and the settings menu does not.
     fonts_dirty: bool,
+    /// The key the menu thinks is down. A second press for the same key without
+    /// a release in between is a duplicate the compositor sent, not a second
+    /// keystroke, and acting on it moves the selection two rows.
+    held: Option<winit::keyboard::Key>,
     /// The settings menu, and the config it edits.
     settings: crate::settings::Settings,
     config: dtr_config::Config,
@@ -1171,7 +1176,27 @@ impl ApplicationHandler<UserEvent> for App {
                 // acted on that it closed the menu again — the menu flashed and
                 // vanished, which reads as "it does not open".
                 let pressed = event.state == winit::event::ElementState::Pressed;
+                if self.settings.open && !pressed {
+                    // A release is how we learn the key is up again; it must
+                    // never act on its own.
+                    self.held = None;
+                    return;
+                }
                 if self.settings.open && pressed {
+                    // Duplicate presses for a key that is already down are
+                    // compositor noise (and the reason navigation jumped two
+                    // rows). A genuine auto-repeat says so in `repeat`.
+                    if !event.repeat && self.held.as_ref() == Some(&event.logical_key) {
+                        tracing::debug!(key = ?event.logical_key, "ignoring a duplicate press");
+                        return;
+                    }
+                    self.held = Some(event.logical_key.clone());
+                    tracing::debug!(
+                        key = ?event.logical_key,
+                        repeat = event.repeat,
+                        row = self.settings.current_row() as u8,
+                        "settings key"
+                    );
                     // Ctrl+, closes it, like it opened it. Everything else is
                     // the menu's: a modal that leaks keystrokes into the shell
                     // is worse than no modal.
