@@ -212,11 +212,24 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
         .interactable(false)
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
+                // Mixed between the theme's surface and its text, so the note
+                // reads as chrome rather than as terminal output — and with
+                // enough contrast to be read at a glance, which is the only
+                // way a toast is ever read.
                 .fill(Color32::from_rgba_unmultiplied(
-                    look.surface[0],
-                    look.surface[1],
-                    look.surface[2],
-                    (235.0 * alpha) as u8,
+                    look.foreground[0],
+                    look.foreground[1],
+                    look.foreground[2],
+                    (36.0 * alpha) as u8,
+                ))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    Color32::from_rgba_unmultiplied(
+                        look.accent[0],
+                        look.accent[1],
+                        look.accent[2],
+                        (200.0 * alpha) as u8,
+                    ),
                 ))
                 .corner_radius(6)
                 .inner_margin(egui::Margin::symmetric(10, 6))
@@ -224,7 +237,8 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
                     ui.label(
                         RichText::new(text)
                             .monospace()
-                            .size(12.0)
+                            .size(13.0)
+                            .strong()
                             .color(Color32::from_rgba_unmultiplied(
                                 look.foreground[0],
                                 look.foreground[1],

@@ -1234,7 +1234,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .session_mut()
                     .and_then(|session| session.pane.take_copied());
                 // A toast lives for 1.8 s and fades over its last 400 ms.
-                const TOAST: std::time::Duration = std::time::Duration::from_millis(1800);
+                const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
                 // Owned, because the draw mutably borrows `self` further down.
                 let toast_text: Option<(String, f32)> =
                     self.toast.as_ref().and_then(|(text, at)| {
@@ -1242,7 +1242,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if age > TOAST {
                             return None;
                         }
-                        let fade = std::time::Duration::from_millis(400);
+                        let fade = std::time::Duration::from_millis(450);
                         let alpha = if age + fade > TOAST {
                             (TOAST - age).as_secs_f32() / fade.as_secs_f32()
                         } else {
@@ -1314,7 +1314,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(text) = copied {
                     let chars = text.chars().count();
                     let bytes = text.len();
-                    let note = if chars < 40 {
+                    // An empty copy is not a success: "copied 0 chars" claims
+                    // work that did not happen, and the usual cause is a click
+                    // that selected one blank cell.
+                    let note = if chars == 0 {
+                        "nothing to copy".to_owned()
+                    } else if chars < 40 {
                         format!("copied {chars} chars")
                     } else {
                         format!("copied {bytes} bytes")
