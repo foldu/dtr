@@ -10,6 +10,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::pane::{Frame, Pane, Transport};
@@ -25,8 +26,12 @@ pub fn capture_headless(
     height: u32,
     transport: Transport,
     delay: std::time::Duration,
+    send: Vec<u8>,
 ) -> anyhow::Result<()> {
     let pane = Pane::spawn(transport, || {})?;
+    if !send.is_empty() {
+        pane.write(send);
+    }
 
     // Give the session a moment to produce output (a serial device's prompt),
     // then take the newest frame rather than the first one.
@@ -47,7 +52,7 @@ pub fn capture_headless(
     crate::screenshot::capture(frame.as_ref(), path, width, height)
 }
 
-pub fn run(transport: Transport) -> anyhow::Result<()> {
+pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
 
@@ -55,10 +60,15 @@ pub fn run(transport: Transport) -> anyhow::Result<()> {
         let _ = proxy.send_event(UserEvent::Frame);
     })?;
 
+    if !send.is_empty() {
+        pane.write(send);
+    }
+
     let mut app = App {
         pane,
         frame: None,
         gpu: None,
+        modifiers: ModifiersState::empty(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -68,6 +78,7 @@ struct App {
     pane: Pane,
     frame: Option<Frame>,
     gpu: Option<Gpu>,
+    modifiers: ModifiersState,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -122,6 +133,12 @@ impl ApplicationHandler<UserEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(bytes) = crate::input::encode(&event, self.modifiers) {
+                    self.pane.write(bytes);
+                }
+            }
             WindowEvent::Resized(size) => gpu.resize(size),
             WindowEvent::RedrawRequested => {
                 if let Err(err) = gpu.render(self.frame.as_ref()) {

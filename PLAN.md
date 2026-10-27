@@ -277,11 +277,16 @@ lock.
 | 0.12 | Local shell over a PTY (`portable-pty`: `openpty` on Unix, ConPTY on Windows) | Default when no `--port`; `--shell` overrides, `--demo` keeps the canned screen |
 | 0.13 | Terminal replies routed back to the session (`Terminal::on_pty_write`) | Without it, anything that probes DA1/XTGETTCAP — fish, tmux — waits on an answer that never comes |
 
-**Status (2026-10-27):** 0.1–0.5, 0.7, 0.8, 0.11, 0.12, 0.13 done. Serial receive is verified end to end
+**Status (2026-10-27):** 0.1–0.8, 0.11, 0.12, 0.13 done. Serial receive is verified end to end
 over a socat pty with a byte sequence that exercises the mapper: `alpha\r` (lone CR → newline),
 `beta\r\n` (real CRLF → not doubled), `gamma\r` (trailing CR → flushed by the idle timeout).
-Remaining in M0: 0.6 (keyboard input), 0.9 (Windows smoke run), 0.10 (dev script exists; no
-bidirectional test yet).
+Remaining in M0: 0.9 (Windows smoke run — cross-build links and imports only system DLLs, but has
+never been executed) and 0.10 (the dev script exists; `--send` now makes a bidirectional test
+possible without a keyboard).
+
+0.6 is deliberately legacy VT/xterm encoding. The kitty keyboard protocol that libghostty
+implements needs mode negotiation with the application, so it belongs with the renderer work in
+M2 rather than in a mapping table.
 
 Two things worth recording from getting a shell to run:
 

@@ -1,6 +1,7 @@
 //! dtr — a serial-first terminal.
 
 mod app;
+mod input;
 mod pane;
 mod pty;
 mod screenshot;
@@ -43,6 +44,10 @@ struct Args {
     /// Frame size for --screenshot, in pixels
     #[arg(long, default_value = "900x620", value_name = "WxH")]
     size: String,
+
+    /// Send these bytes once the session is attached (escapes: \n \r \t \e \\)
+    #[arg(long, value_name = "TEXT")]
+    send: Option<String>,
 
     /// Wait this long before capturing, so a session can produce output
     #[arg(long, default_value_t = 300, value_name = "MS")]
@@ -87,11 +92,13 @@ fn main() -> anyhow::Result<()> {
         })
     };
 
+    let send = args.send.as_deref().map(input::unescape).unwrap_or_default();
+
     if let Some(path) = args.screenshot.as_deref() {
         let (width, height) = parse_size(&args.size)?;
         let delay = std::time::Duration::from_millis(args.screenshot_delay);
-        return app::capture_headless(path, width, height, transport, delay);
+        return app::capture_headless(path, width, height, transport, delay, send);
     }
 
-    app::run(transport)
+    app::run(transport, send)
 }
