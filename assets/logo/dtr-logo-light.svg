@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -88 423 128" width="423" height="128" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">dtr</title>
+  <desc id="logo-desc">A shell prompt reading ~/dtr, then an amber dollar sign and a block cursor.</desc>
+  <rect id="background" x="0" y="-88" width="423" height="128" fill="#F4EFE4"/>
+  <g id="prompt-line" fill="none" stroke="#0B0F0E" stroke-width="10" stroke-linecap="butt" stroke-linejoin="miter">
+  <!-- ~ -->
+  <g transform="translate(50.00 0)">
+    <path d="M -16 -24 A 8 8 0 0 1 0 -24 A 8 8 0 0 0 16 -24"/>
+  </g>
+  <!-- / -->
+  <g transform="translate(98.00 0)">
+    <path d="M -10 2 L 10 -52"/>
+  </g>
+  <!-- d -->
+  <g transform="translate(146.00 0)">
+    <path d="M -16 -34 H 10 Q 16 -34 16 -26 V -8 Q 16 0 10 0 H -10 Q -16 0 -16 -8 V -26 Q -16 -34 -10 -34"/>
+    <path d="M 16 -54 V 0"/>
+  </g>
+  <!-- t -->
+  <g transform="translate(185.50 0)">
+    <path d="M 7 -44 V -15 A 15 15 0 0 0 22 0"/>
+    <path d="M -4 -32 H 24"/>
+  </g>
+  <!-- r -->
+  <g transform="translate(227.00 0)">
+    <path d="M 0 0 V -24 A 10 10 0 0 1 10 -34 H 30"/>
+  </g>
+  <g id="prompt-dollar" stroke="none" transform="translate(306.64 -55.37) scale(0.98)">
+    <path d="M 48 12 H 24 A 10 10 0 0 0 24 32 H 40 A 10 10 0 0 1 40 52 H 16" fill="none" stroke="#924F00" stroke-width="8" stroke-linecap="butt" stroke-linejoin="miter"/>
+    <rect x="29" y="2" width="6" height="60" fill="#924F00"/>
+  </g>
+  <!-- block cursor: line-height tall, a little narrower than a cell -->
+  <rect id="cursor" stroke="none" x="375.00" y="-54" width="22" height="62" fill="#924F00"/>
+  </g>
+</svg>

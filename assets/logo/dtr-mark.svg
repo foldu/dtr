@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="mark-title mark-desc">
+  <title id="mark-title">dtr</title>
+  <desc id="mark-desc">The dtr mark: an amber dollar prompt glyph on transparent.</desc>
+  <!-- Prompt glyph: three bars (y 12 / 32 / 52) joined by two 180-degree turns, r 10. -->
+  <path id="glyph" d="M 48 12 H 24 A 10 10 0 0 0 24 32 H 40 A 10 10 0 0 1 40 52 H 16" fill="none" stroke="#FFB000" stroke-width="8" stroke-linecap="butt" stroke-linejoin="miter"/>
+  <!-- The stem is lighter than the S so it reads as a line run through the glyph. -->
+  <rect id="stem" x="29" y="2" width="6" height="60" fill="#FFB000"/>
+</svg>
