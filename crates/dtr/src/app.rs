@@ -52,6 +52,19 @@ pub fn capture_headless(
     crate::screenshot::capture(frame.as_ref(), path, width, height)
 }
 
+/// One place that decides which backends wgpu may use.
+///
+/// `WGPU_BACKEND` overrides the set, which is how a broken driver stack (or
+/// Wine, which finds dx12 first and then cannot compile egui's shader through
+/// FXC) is worked around without a rebuild.
+pub(crate) fn instance() -> wgpu::Instance {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    if let Some(backends) = wgpu::Backends::from_env() {
+        descriptor.backends = backends;
+    }
+    wgpu::Instance::new(descriptor)
+}
+
 pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
@@ -164,7 +177,7 @@ struct Gpu {
 impl Gpu {
     fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
-        let instance = wgpu::Instance::default();
+        let instance = instance();
         let surface = instance.create_surface(Arc::clone(&window))?;
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

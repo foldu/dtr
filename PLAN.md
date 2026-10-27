@@ -280,9 +280,15 @@ lock.
 **Status (2026-10-27):** 0.1–0.8, 0.11, 0.12, 0.13 done. Serial receive is verified end to end
 over a socat pty with a byte sequence that exercises the mapper: `alpha\r` (lone CR → newline),
 `beta\r\n` (real CRLF → not doubled), `gamma\r` (trailing CR → flushed by the idle timeout).
-Remaining in M0: 0.9 (Windows smoke run — cross-build links and imports only system DLLs, but has
-never been executed) and 0.10 (the dev script exists; `--send` now makes a bidirectional test
-possible without a keyboard).
+0.9 is half done: `scripts/wine-smoke.sh` runs the PE under Wine and asserts its frame is
+**byte-identical** to the Linux build's — same fonts, layout and colours out of a binary built by
+a different compiler for a different target. What that does *not* prove is the console path:
+Wine spawns the ConPTY shell and then delivers no bytes (`cmd /c echo` included), so Windows
+shells remain unexecuted. Only a real Windows box closes that.
+
+A finding from getting there: on Windows wgpu selects **dx12** first, and Wine's FXC cannot
+compile egui's shader (`Shader model 5.1+ resource array`). `WGPU_BACKEND` now overrides the
+backend set, which is both the Wine workaround and a useful escape hatch for broken drivers.
 
 0.6 is deliberately legacy VT/xterm encoding. The kitty keyboard protocol that libghostty
 implements needs mode negotiation with the application, so it belongs with the renderer work in

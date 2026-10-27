@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::pane::Frame;
 
 pub fn capture(frame: Option<&Frame>, path: &Path, width: u32, height: u32) -> anyhow::Result<()> {
-    let instance = wgpu::Instance::default();
+    let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
