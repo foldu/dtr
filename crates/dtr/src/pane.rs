@@ -10,6 +10,9 @@ use std::thread;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+
+use crate::serial::{self, CrToCrlf};
 
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
@@ -42,7 +45,13 @@ pub struct Pane {
 
 impl Pane {
     /// Spawn the pane thread. `wake` is fired whenever a new frame is ready.
-    pub fn spawn(wake: impl Fn() + Send + 'static) -> anyhow::Result<Self> {
+    ///
+    /// With no serial config the pane shows a demo screen; with one it opens
+    /// the port and drives it.
+    pub fn spawn(
+        serial: Option<serial::Config>,
+        wake: impl Fn() + Send + 'static,
+    ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
         let published = Arc::clone(&latest);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -62,7 +71,7 @@ impl Pane {
                 };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    if let Err(err) = run(rx, published, wake).await {
+                    if let Err(err) = run(rx, published, wake, serial).await {
                         tracing::error!(%err, "pane");
                     }
                 });
@@ -86,21 +95,89 @@ async fn run(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     out: Arc<Mutex<Option<Frame>>>,
     wake: impl Fn(),
+    serial: Option<serial::Config>,
 ) -> anyhow::Result<()> {
     let mut term = Terminal::new(COLS, ROWS)?;
     let mut state = RenderState::new()?;
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
 
-    // Until the serial transport lands, show something recognisable.
-    term.vt_write(DEMO);
+    let mut writer: Option<WriteHalf<tokio_serial::SerialStream>> = None;
+    let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let mut serial_alive = false;
+
+    match &serial {
+        Some(cfg) => {
+            // A failed open is fatal: the user asked for this port by name.
+            let stream = cfg.open()?;
+            tracing::info!(port = %cfg.port, baud = cfg.baud, "serial open");
+            let (read_half, write_half) = tokio::io::split(stream);
+            writer = Some(write_half);
+            let mapper = cfg.cr_to_crlf.then(CrToCrlf::default);
+            serial_alive = true;
+            tokio::task::spawn_local(read_loop(read_half, mapper, bytes_tx));
+        }
+        None => term.vt_write(DEMO),
+    }
+
     publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake)?;
 
-    while let Some(bytes) = rx.recv().await {
-        term.vt_write(&bytes);
-        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake)?;
+    loop {
+        tokio::select! {
+            chunk = bytes_rx.recv(), if serial_alive => {
+                match chunk {
+                    Some(bytes) => {
+                        term.vt_write(&bytes);
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake)?;
+                    }
+                    None => serial_alive = false,
+                }
+            }
+            cmd = rx.recv() => {
+                let Some(bytes) = cmd else { break };
+                if let Some(w) = writer.as_mut() {
+                    if let Err(err) = w.write_all(&bytes).await {
+                        tracing::warn!(%err, "serial write");
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// Read the port until it fails or closes, mapping bytes on the way through.
+async fn read_loop(
+    mut reader: ReadHalf<tokio_serial::SerialStream>,
+    mut mapper: Option<CrToCrlf>,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let mut buf = [0u8; 8192];
+    let mut out = Vec::with_capacity(8192);
+    loop {
+        // A timeout is how a pending CR gets flushed: nothing else can tell us
+        // the device has stopped mid-line.
+        let read = tokio::time::timeout(serial::IDLE_FLUSH, reader.read(&mut buf)).await;
+        let n = match read {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => {
+                tracing::warn!(%err, "serial read");
+                break;
+            }
+            Err(_idle) => 0,
+        };
+
+        out.clear();
+        match mapper.as_mut() {
+            Some(m) if n > 0 => m.feed(&buf[..n], &mut out),
+            Some(m) => m.flush(&mut out),
+            None => out.extend_from_slice(&buf[..n]),
+        }
+        if !out.is_empty() && tx.send(out.clone()).is_err() {
+            break;
+        }
+    }
 }
 
 fn publish(

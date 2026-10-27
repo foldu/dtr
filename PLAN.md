@@ -275,6 +275,12 @@ lock.
 | 0.10 | `scripts/dev-serial.sh` (socat pair + shell) | See §6 |
 | 0.11 | Single-file discipline: embed icon/shaders/fonts, `--licenses`, `checks.single-exe` | See §7, §8 |
 
+**Status (2026-10-27):** 0.1–0.5, 0.7, 0.8, 0.11 done. Serial receive is verified end to end
+over a socat pty with a byte sequence that exercises the mapper: `alpha\r` (lone CR → newline),
+`beta\r\n` (real CRLF → not doubled), `gamma\r` (trailing CR → flushed by the idle timeout).
+Remaining in M0: 0.6 (keyboard input), 0.9 (Windows smoke run), 0.10 (dev script exists; no
+bidirectional test yet).
+
 **Acceptance:** `scripts/dev-serial.sh` starts a socat pair with `bash` on the far end;
 `nix run .#default -- --port /dev/pts/N` shows a working shell prompt, colours, and line
 editing; `nix build .#windows` produces `dtr.exe`; `--headless --screenshot` writes a PNG

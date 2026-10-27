@@ -19,31 +19,39 @@ pub enum UserEvent {
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
-pub fn capture_headless(path: &std::path::Path, width: u32, height: u32) -> anyhow::Result<()> {
-    let pane = Pane::spawn(|| {})?;
+pub fn capture_headless(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    serial: Option<crate::serial::Config>,
+    delay: std::time::Duration,
+) -> anyhow::Result<()> {
+    let pane = Pane::spawn(serial, || {})?;
 
-    // The pane publishes its first frame on its own thread.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut frame = None;
-    while std::time::Instant::now() < deadline {
-        if let Some(ready) = pane.take_frame() {
-            frame = Some(ready);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    // Give the session a moment to produce output (a serial device's prompt),
+    // then take the newest frame rather than the first one.
+    std::thread::sleep(delay);
+    let mut frame = pane.take_frame();
     if frame.is_none() {
-        anyhow::bail!("pane did not publish a frame");
+        // The pane may still be opening a port; wait for the first frame.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(ready) = pane.take_frame() {
+                frame = Some(ready);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     crate::screenshot::capture(frame.as_ref(), path, width, height)
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(serial: Option<crate::serial::Config>) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
 
-    let pane = Pane::spawn(move || {
+    let pane = Pane::spawn(serial, move || {
         let _ = proxy.send_event(UserEvent::Frame);
     })?;
 
