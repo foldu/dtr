@@ -5,68 +5,135 @@
 //! critical path short; the wgpu cell renderer replaces this behind the same
 //! call site later (PLAN §3, M2).
 
-use egui::{Align2, Color32, FontId, Rect, Sense, Ui, Vec2};
+use std::collections::HashMap;
+
+use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
 
 use crate::pane::Frame;
 
 const FONT_SIZE: f32 = 14.0;
 
+/// What the status bar shows. Totals come from the pane; rates are the UI's own
+/// measurement, because it is the UI's clock that decides when to repaint.
+pub struct Status<'a> {
+    pub label: &'a str,
+    pub rx: u64,
+    pub tx: u64,
+    pub rx_rate: f64,
+    pub tx_rate: f64,
+}
+
 pub fn draw(ui: &mut Ui, frame: &Frame) {
     let font = FontId::monospace(FONT_SIZE);
     let (cell_w, cell_h) = metrics(ui, &font);
+    let size = vec2(
+        f32::from(frame.cols) * cell_w,
+        f32::from(frame.rows) * cell_h,
+    );
 
-    let cols = f32::from(frame.cols);
-    let rows = f32::from(frame.rows);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(cell_w * cols, cell_h * rows), Sense::hover());
-
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, rgb(frame.default_bg));
+    painter.rect_filled(rect, 0.0, colour(frame.default_bg));
 
-    let cell_size = Vec2::new(cell_w, cell_h);
-    for (i, cell) in frame.cells.iter().enumerate() {
-        let Some(pos) = cell_origin(rect, i, frame.cols, cell_w, cell_h) else {
-            break;
-        };
-
-        if cell.has_bg {
-            painter.rect_filled(Rect::from_min_size(pos, cell_size), 0.0, rgb(cell.bg));
+    // Backgrounds first, so a neighbouring cell's text never sits under a
+    // rectangle painted after it.
+    for (index, cell) in frame.cells.iter().enumerate() {
+        if !cell.has_bg {
+            continue;
         }
+        let (x, y) = cell_origin(frame, index, rect, cell_w, cell_h);
+        painter.rect_filled(
+            Rect::from_min_size(pos2(x, y), vec2(cell_w, cell_h)),
+            0.0,
+            colour(cell.bg),
+        );
+    }
 
-        if !cell.text.is_empty() {
-            let mut text = cell.text.clone();
-            if cell.bold {
-                // egui has no bold monospace face at this size; doubling the
-                // stroke would blur the grid, so leave it be for now.
-                let _ = &mut text;
-            }
-            painter.text(pos, Align2::LEFT_TOP, text, font.clone(), rgb(cell.fg));
+    let mut fonts: HashMap<(bool, bool), FontId> = HashMap::new();
+    for (index, cell) in frame.cells.iter().enumerate() {
+        if cell.text.trim().is_empty() {
+            continue;
         }
+        let (x, y) = cell_origin(frame, index, rect, cell_w, cell_h);
+        let font = fonts
+            .entry((cell.bold, cell.italic))
+            .or_insert_with(|| styled_font(cell.bold, cell.italic))
+            .clone();
+        painter.text(
+            pos2(x, y),
+            Align2::LEFT_TOP,
+            &cell.text,
+            font,
+            colour(cell.fg),
+        );
     }
 
     if let Some((x, y)) = frame.cursor {
-        if let Some(pos) = cell_origin(rect, usize::from(y) * usize::from(frame.cols) + usize::from(x), frame.cols, cell_w, cell_h) {
-            painter.rect_filled(
-                Rect::from_min_size(pos, cell_size),
-                0.0,
-                Color32::from_rgba_unmultiplied(
-                    frame.default_fg[0],
-                    frame.default_fg[1],
-                    frame.default_fg[2],
-                    96,
-                ),
-            );
-        }
+        let origin = pos2(
+            rect.min.x + f32::from(x) * cell_w,
+            rect.min.y + f32::from(y) * cell_h,
+        );
+        let cursor = Rect::from_min_size(origin, vec2(cell_w, cell_h));
+        painter.rect_filled(cursor, 0.0, colour(frame.default_fg).gamma_multiply(0.45));
     }
 }
 
-fn cell_origin(rect: Rect, index: usize, cols: u16, cell_w: f32, cell_h: f32) -> Option<egui::Pos2> {
-    let cols = usize::from(cols);
-    if cols == 0 {
-        return None;
+pub fn status_bar(ui: &mut Ui, status: &Status) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.label(
+            RichText::new(status.label)
+                .monospace()
+                .size(12.0)
+                .color(Color32::from_rgb(0x9a, 0xa5, 0xa0)),
+        );
+        ui.label(
+            RichText::new(format!(
+                "RX {} ({}/s)   TX {} ({}/s)",
+                human_bytes(status.rx as f64),
+                human_bytes(status.rx_rate),
+                human_bytes(status.tx as f64),
+                human_bytes(status.tx_rate),
+            ))
+            .monospace()
+            .size(12.0)
+            .color(Color32::from_rgb(0x6b, 0x77, 0x72)),
+        );
+    });
+}
+
+fn human_bytes(value: f64) -> String {
+    const K: f64 = 1024.0;
+    if !value.is_finite() || value < 0.0 {
+        return "—".to_owned();
     }
-    let x = index % cols;
-    let y = index / cols;
-    Some(rect.min + Vec2::new(x as f32 * cell_w, y as f32 * cell_h))
+    if value < K {
+        format!("{value:.0} B")
+    } else if value < K * K {
+        format!("{:.1} kB", value / K)
+    } else {
+        format!("{:.1} MB", value / (K * K))
+    }
+}
+
+fn cell_origin(frame: &Frame, index: usize, rect: Rect, cell_w: f32, cell_h: f32) -> (f32, f32) {
+    let cols = usize::from(frame.cols).max(1);
+    let (row, col) = (index / cols, index % cols);
+    (
+        rect.min.x + col as f32 * cell_w,
+        rect.min.y + row as f32 * cell_h,
+    )
+}
+
+fn styled_font(bold: bool, italic: bool) -> FontId {
+    // egui's bundled fonts have no bold or italic face; the flags are carried
+    // through the frame so the real renderer (M2) can use them.
+    let _ = (bold, italic);
+    FontId::monospace(FONT_SIZE)
+}
+
+fn colour(rgb: [u8; 3]) -> Color32 {
+    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
 fn metrics(ui: &Ui, font: &FontId) -> (f32, f32) {
@@ -76,8 +143,4 @@ fn metrics(ui: &Ui, font: &FontId) -> (f32, f32) {
         .painter()
         .layout_no_wrap("M".to_owned(), font.clone(), Color32::WHITE);
     (galley.size().x.max(1.0), galley.size().y.max(1.0))
-}
-
-fn rgb(c: [u8; 3]) -> Color32 {
-    Color32::from_rgb(c[0], c[1], c[2])
 }

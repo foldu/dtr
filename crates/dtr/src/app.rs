@@ -14,6 +14,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::pane::{Frame, Pane, Transport};
+use crate::ui::Status;
 
 pub enum UserEvent {
     Frame,
@@ -28,6 +29,7 @@ pub fn capture_headless(
     delay: std::time::Duration,
     send: Vec<u8>,
 ) -> anyhow::Result<()> {
+    let label = describe(&transport);
     let pane = Pane::spawn(transport, || {})?;
     if !send.is_empty() {
         pane.write(send);
@@ -49,7 +51,7 @@ pub fn capture_headless(
         }
     }
 
-    crate::screenshot::capture(frame.as_ref(), path, width, height)
+    crate::screenshot::capture(frame.as_ref(), path, width, height, &label, pane.stats())
 }
 
 /// One place that decides which backends wgpu may use.
@@ -68,6 +70,7 @@ pub(crate) fn instance() -> wgpu::Instance {
 pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
+    let label = describe(&transport);
 
     let pane = Pane::spawn(transport, move || {
         let _ = proxy.send_event(UserEvent::Frame);
@@ -82,6 +85,8 @@ pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
         frame: None,
         gpu: None,
         modifiers: ModifiersState::empty(),
+        label,
+        meter: Meter::new(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -92,6 +97,59 @@ struct App {
     frame: Option<Frame>,
     gpu: Option<Gpu>,
     modifiers: ModifiersState,
+    label: String,
+    meter: Meter,
+}
+
+/// Byte rate over a short window. Cheap, and it would look wrong if it updated
+/// on every frame, so it only resamples a few times a second.
+struct Meter {
+    at: std::time::Instant,
+    rx: u64,
+    tx: u64,
+    rx_rate: f64,
+    tx_rate: f64,
+}
+
+impl Meter {
+    fn new() -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            rx: 0,
+            tx: 0,
+            rx_rate: 0.0,
+            tx_rate: 0.0,
+        }
+    }
+
+    fn sample(&mut self, rx: u64, tx: u64) {
+        let seconds = self.at.elapsed().as_secs_f64();
+        if seconds < 0.25 {
+            return;
+        }
+        self.rx_rate = rx.saturating_sub(self.rx) as f64 / seconds;
+        self.tx_rate = tx.saturating_sub(self.tx) as f64 / seconds;
+        self.rx = rx;
+        self.tx = tx;
+        self.at = std::time::Instant::now();
+    }
+}
+
+/// One line describing what this window is attached to.
+fn describe(transport: &Transport) -> String {
+    match transport {
+        Transport::Serial(config) => format!(
+            "{} {} 8N1{}",
+            config.port,
+            config.baud,
+            if config.cr_to_crlf { " cr=crlf" } else { "" }
+        ),
+        Transport::Shell(config) => match &config.program {
+            Some(program) => format!("shell {program}"),
+            None => "shell".to_owned(),
+        },
+        Transport::Demo => "demo".to_owned(),
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -154,7 +212,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(size) => gpu.resize(size),
             WindowEvent::RedrawRequested => {
-                if let Err(err) = gpu.render(self.frame.as_ref()) {
+                let stats = self.pane.stats().clone();
+                let (rx, tx) = (stats.rx(), stats.tx());
+                self.meter.sample(rx, tx);
+                let status = Status {
+                    label: &self.label,
+                    rx,
+                    tx,
+                    rx_rate: self.meter.rx_rate,
+                    tx_rate: self.meter.tx_rate,
+                };
+                if let Err(err) = gpu.render(self.frame.as_ref(), &status) {
                     tracing::error!(%err, "render");
                 }
             }
@@ -253,7 +321,7 @@ impl Gpu {
         self.window.request_redraw();
     }
 
-    fn render(&mut self, frame: Option<&Frame>) -> anyhow::Result<()> {
+    fn render(&mut self, frame: Option<&Frame>, status: &Status) -> anyhow::Result<()> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -269,6 +337,13 @@ impl Gpu {
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            egui::Panel::bottom("dtr-status")
+                .frame(
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(0x14, 0x18, 0x16))
+                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                )
+                .show(ui, |ui| crate::ui::status_bar(ui, status));
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::BLACK))
                 .show(ui, |ui| match frame {

@@ -21,9 +21,9 @@ struct Args {
     #[arg(short, long)]
     port: Option<String>,
 
-    /// Baud rate
-    #[arg(short, long, default_value_t = 115_200)]
-    baud: u32,
+    /// Baud rate (remembered per port when omitted)
+    #[arg(short, long)]
+    baud: Option<u32>,
 
     /// Shell program to launch when no port is given (default: $SHELL, else bash/pwsh)
     #[arg(long, value_name = "PROGRAM")]
@@ -33,9 +33,17 @@ struct Args {
     #[arg(long)]
     demo: bool,
 
-    /// Serial byte mapping: `cr=crlf` (default) or `none`
-    #[arg(long, value_name = "MAP", default_value = "cr=crlf")]
-    imap: String,
+    /// Serial byte mapping: `cr=crlf` (default) or `none` (remembered per port)
+    #[arg(long, value_name = "MAP")]
+    imap: Option<String>,
+
+    /// Path to the state database
+    #[arg(long, value_name = "PATH")]
+    db: Option<PathBuf>,
+
+    /// Do not read or write remembered settings
+    #[arg(long)]
+    no_remember: bool,
 
     /// Render one frame offscreen to a PNG and exit, without opening a window
     #[arg(long, value_name = "PATH")]
@@ -78,13 +86,53 @@ fn main() -> anyhow::Result<()> {
 
     tracing::debug!(?args, "starting");
 
+    // Never fatal: a broken or read-only state file must not stop a terminal
+    // from opening a port.
+    let store = if args.no_remember {
+        None
+    } else {
+        let path = args.db.clone().or_else(dtr_store::Store::default_path);
+        match path {
+            Some(path) => match dtr_store::Store::open(&path) {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), %err, "no remembered settings");
+                    None
+                }
+            },
+            None => None,
+        }
+    };
+
     let transport = if args.demo {
         Transport::Demo
     } else if let Some(port) = args.port.clone() {
+        let remembered = store
+            .as_ref()
+            .and_then(|store| store.serial(&port).ok().flatten())
+            .unwrap_or_default();
+
+        // Precedence: what was asked for, then what was remembered, then the
+        // built-in 115200 8N1 with CR→CRLF on.
+        let settings = dtr_store::SerialSettings {
+            baud: args.baud.unwrap_or(remembered.baud),
+            cr_to_crlf: match args.imap.as_deref() {
+                Some(spec) => parse_imap(spec)?,
+                None => remembered.cr_to_crlf,
+            },
+        };
+
+        if let Some(store) = store.as_ref() {
+            if let Err(err) = store.remember_serial(&port, &settings) {
+                tracing::warn!(%err, "could not remember the port settings");
+            }
+            let _ = store.set_last_port(&port);
+        }
+
         Transport::Serial(serial::Config {
             port,
-            baud: args.baud,
-            cr_to_crlf: parse_imap(&args.imap)?,
+            baud: settings.baud,
+            cr_to_crlf: settings.cr_to_crlf,
         })
     } else {
         Transport::Shell(pty::Config {

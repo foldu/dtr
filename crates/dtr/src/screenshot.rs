@@ -10,7 +10,14 @@ use std::path::Path;
 
 use crate::pane::Frame;
 
-pub fn capture(frame: Option<&Frame>, path: &Path, width: u32, height: u32) -> anyhow::Result<()> {
+pub fn capture(
+    frame: Option<&Frame>,
+    path: &Path,
+    width: u32,
+    height: u32,
+    label: &str,
+    stats: &crate::pane::Stats,
+) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
@@ -60,7 +67,23 @@ pub fn capture(frame: Option<&Frame>, path: &Path, width: u32, height: u32) -> a
         ..Default::default()
     };
 
+    // Totals are real; a single frame has no rate to report.
+    let status = crate::ui::Status {
+        label,
+        rx: stats.rx(),
+        tx: stats.tx(),
+        rx_rate: 0.0,
+        tx_rate: 0.0,
+    };
+
     let mut full_output = ctx.run_ui(raw_input, |ui| {
+        egui::Panel::bottom("dtr-status")
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(0x14, 0x18, 0x16))
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ui, |ui| crate::ui::status_bar(ui, &status));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ui, |ui| match frame {

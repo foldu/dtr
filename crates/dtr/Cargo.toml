@@ -10,6 +10,7 @@ anyhow.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true
 dirs.workspace = true
+dtr-store = { path = "../dtr-store" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

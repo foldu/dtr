@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -42,6 +43,32 @@ pub struct Frame {
     pub cells: Vec<Cell>,
 }
 
+/// Byte counters, shared with the UI. Totals only: the rate is the UI's
+/// business, because it is the UI's clock that decides when to repaint.
+#[derive(Debug, Default)]
+pub struct Stats {
+    rx: AtomicU64,
+    tx: AtomicU64,
+}
+
+impl Stats {
+    pub fn rx(&self) -> u64 {
+        self.rx.load(Ordering::Relaxed)
+    }
+
+    pub fn tx(&self) -> u64 {
+        self.tx.load(Ordering::Relaxed)
+    }
+
+    fn add_rx(&self, bytes: usize) {
+        self.rx.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn add_tx(&self, bytes: usize) {
+        self.tx.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
+
 /// What a pane is attached to.
 pub enum Transport {
     Serial(serial::Config),
@@ -68,6 +95,7 @@ impl Sink {
 pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    stats: Arc<Stats>,
 }
 
 impl Pane {
@@ -81,6 +109,8 @@ impl Pane {
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
         let published = Arc::clone(&latest);
+        let stats = Arc::new(Stats::default());
+        let counted = Arc::clone(&stats);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         thread::Builder::new()
@@ -98,18 +128,22 @@ impl Pane {
                 };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    if let Err(err) = run(rx, published, wake, transport).await {
+                    if let Err(err) = run(rx, published, wake, transport, counted).await {
                         tracing::error!(%err, "pane");
                     }
                 });
             })?;
 
-        Ok(Self { latest, tx })
+        Ok(Self { latest, tx, stats })
     }
 
     /// Take the newest frame, if the emulator produced one since the last call.
     pub fn take_frame(&self) -> Option<Frame> {
         self.latest.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    pub fn stats(&self) -> &Arc<Stats> {
+        &self.stats
     }
 
     /// Queue bytes for the emulator. Non-blocking; safe from the UI thread.
@@ -123,6 +157,7 @@ async fn run(
     out: Arc<Mutex<Option<Frame>>>,
     wake: impl Fn(),
     transport: Transport,
+    stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
     // Terminal replies (device attributes, DECRQM, size reports) have to go
     // back out to the pty, or programs that probe capabilities — fish, tmux —
@@ -198,6 +233,7 @@ async fn run(
             chunk = bytes_rx.recv(), if source_alive => {
                 match chunk {
                     Some(bytes) => {
+                        stats.add_rx(bytes.len());
                         term.vt_write(&bytes);
                         flush_replies(&replies, &mut sink).await;
                         publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
@@ -208,8 +244,9 @@ async fn run(
             cmd = rx.recv() => {
                 let Some(bytes) = cmd else { break };
                 if let Some(sink) = sink.as_mut() {
-                    if let Err(err) = sink.write(&bytes).await {
-                        tracing::warn!(%err, "write to session");
+                    match sink.write(&bytes).await {
+                        Ok(()) => stats.add_tx(bytes.len()),
+                        Err(err) => tracing::warn!(%err, "write to session"),
                     }
                 }
             }

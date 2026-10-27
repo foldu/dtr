@@ -290,6 +290,17 @@ A finding from getting there: on Windows wgpu selects **dx12** first, and Wine's
 compile egui's shader (`Shader model 5.1+ resource array`). `WGPU_BACKEND` now overrides the
 backend set, which is both the Wine workaround and a useful escape hatch for broken drivers.
 
+**Remembered settings and the status bar landed with `crates/dtr-store`** (M0 0.5, and the bar
+M0 0.2 asked for). The database is a redb file at `$XDG_STATE_HOME/dtr/dtr.redb`
+(`%LOCALAPPDATA%` on Windows, `--db` to override), holding one key/value table namespaced by port,
+so a new field never needs a migration. Precedence is CLI flag > remembered > 115200 8N1 with
+CR→CRLF on, verified: `--baud 9600` once and the next run without it opens at 9600; `--no-remember`
+ignores the store entirely; `--imap none` overrides a remembered mapping without forgetting the
+baud. A failed open of the database is never fatal.
+
+The status bar shows what the window is attached to, plus RX/TX totals and rates. Rates are
+measured by the UI, not the pane: the pane counts bytes, the UI's clock decides what a second is.
+
 0.6 is deliberately legacy VT/xterm encoding. The kitty keyboard protocol that libghostty
 implements needs mode negotiation with the application, so it belongs with the renderer work in
 M2 rather than in a mapping table.

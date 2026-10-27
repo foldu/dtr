@@ -631,6 +631,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "dirs",
+ "dtr-store",
  "egui",
  "egui-wgpu",
  "egui-winit",
@@ -653,6 +654,16 @@ name = "dtr-sshconfig"
 version = "0.1.0"
 dependencies = [
  "glob",
+ "tempfile",
+]
+
+[[package]]
+name = "dtr-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "redb",
  "tempfile",
 ]
 
