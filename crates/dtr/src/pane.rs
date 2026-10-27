@@ -558,6 +558,12 @@ async fn run(
                 let Some(command) = cmd else { break };
                 match command {
                     Command::Write(bytes) => {
+                        // What actually reaches the session, and how often: the
+                        // other half of a doubled keystroke.
+                        tracing::debug!(
+                            bytes = ?String::from_utf8_lossy(&bytes).escape_debug().to_string(),
+                            "write"
+                        );
                         // Typing while scrolled back means you want the live
                         // screen: follow the cursor rather than swallowing keys.
                         if stats.scrollback() > 0 {

@@ -597,6 +597,15 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
+                // Every key event, before any decision: if a character arrives
+                // twice this is where you see it.
+                tracing::debug!(
+                    key = ?event.logical_key,
+                    state = ?event.state,
+                    text = ?event.text,
+                    repeat = event.repeat,
+                    "key"
+                );
                 let palette_key = self.modifiers.control_key()
                     && self.modifiers.shift_key()
                     && matches!(
