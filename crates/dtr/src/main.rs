@@ -14,6 +14,12 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+/// The default Windows allocator is slow and contends badly between the pane
+/// thread, the PTY reader and the UI; mimalloc is the usual answer. It is the
+/// allocator on every platform so a bug here shows up where it is easier to see.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(name = "dtr", version, about = "A serial-first terminal")]
 struct Args {

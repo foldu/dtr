@@ -138,6 +138,11 @@
         # empty archive satisfies the search without changing the link.
         mkdir -p api-stubs
         printf '!<arch>\n' > api-stubs/libsynchronization.a
+        # zig cc enables -Werror=date-time for reproducibility, and mimalloc
+        # mentions __DATE__ in an assert message. Its build script suppresses
+        # that warning only for non-Windows targets (it assumes MSVC there, where
+        # the flag does not exist). Appending the opposite last is what works.
+        export CFLAGS_x86_64_pc_windows_gnu="-Wno-error=date-time"
         export RUSTFLAGS="-Lnative=$PWD/api-stubs"
         cargo zigbuild --offline --locked --release --package dtr \
           --target x86_64-pc-windows-gnu

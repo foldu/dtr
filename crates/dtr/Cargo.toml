@@ -15,6 +15,7 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 libghostty-vt.workspace = true
+mimalloc.workspace = true
 libghostty-vt-sys.workspace = true
 png.workspace = true
 pollster.workspace = true

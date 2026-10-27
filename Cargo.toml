@@ -11,6 +11,7 @@ license = "MIT OR Unlicense"
 # VT core. Pinned to a git rev, not crates.io: 0.2.2's bindings reference C
 # functions that do not exist at the ghostty commit the sys crate pins (PLAN §12.4).
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "9ede35b8ea94a55ed3608408d67e102883129f1e", default-features = false }
+mimalloc = "0.1"
 libghostty-vt-sys = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "9ede35b8ea94a55ed3608408d67e102883129f1e", default-features = false, features = ["pkg-config"] }
 
 anyhow = "1"

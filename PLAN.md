@@ -286,6 +286,17 @@ a different compiler for a different target. What that does *not* prove is the c
 Wine spawns the ConPTY shell and then delivers no bytes (`cmd /c echo` included), so Windows
 shells remain unexecuted. Only a real Windows box closes that.
 
+**Allocator:** `mimalloc` is the global allocator on every platform. Windows' default heap contends
+badly between the pane thread, the PTY reader and the UI, and the frame path allocates a `Cell`
+(with a `String`) 1920 times per publish, which is exactly the shape mimalloc is good at. It is
+enabled everywhere so a bug in it shows up on the platform that is easier to debug.
+
+Getting it to cross-compile found two things worth keeping: `libmimalloc-sys` suppresses
+`-Werror=date-time` only for non-Windows targets (its build script assumes MSVC, where the flag
+does not exist), and **zig cc enables `-Werror=date-time` itself**, so the suppression has to be
+appended after it — `CFLAGS_x86_64_pc_windows_gnu=-Wno-error=date-time`. The claim that mimalloc is
+faster on Windows is not measured here; it needs a Windows machine.
+
 A finding from getting there: on Windows wgpu selects **dx12** first, and Wine's FXC cannot
 compile egui's shader (`Shader model 5.1+ resource array`). `WGPU_BACKEND` now overrides the
 backend set, which is both the Wine workaround and a useful escape hatch for broken drivers.
