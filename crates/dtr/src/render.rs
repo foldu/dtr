@@ -73,7 +73,9 @@ pub struct GridRenderer {
     shelf_y: u32,
     shelf_height: u32,
     shelf_x: u32,
-    glyphs: HashMap<(u16, u32), Glyph>,
+    /// Keyed by (face, glyph id, size×4): the same character is a different
+    /// bitmap in the bold face, and a different size is a different raster.
+    glyphs: HashMap<(u8, u16, u32), Glyph>,
     white: [f32; 4],
     fonts: Fonts,
     instances: Vec<Instance>,
@@ -319,8 +321,9 @@ impl GridRenderer {
                 continue;
             }
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
+            let style = face_for(cell.bold, cell.italic);
             for ch in cell.text.chars() {
-                let Some(glyph) = self.glyph(device, queue, ch, look.size) else {
+                let Some(glyph) = self.glyph(device, queue, ch, style, look.size) else {
                     continue;
                 };
                 self.instances.push(Instance {
@@ -395,15 +398,16 @@ impl GridRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         ch: char,
+        style: Face,
         size: f32,
     ) -> Option<Glyph> {
-        let glyph_id = self.fonts.glyph_id(ch)?;
-        let key = (glyph_id, (size * 4.0) as u32);
+        let glyph_id = self.fonts.glyph_id(style, ch)?;
+        let key = (style as u8, glyph_id, (size * 4.0) as u32);
         if let Some(glyph) = self.glyphs.get(&key) {
             return Some(*glyph);
         }
 
-        let image = self.fonts.rasterise(glyph_id, size)?;
+        let image = self.fonts.rasterise(style, glyph_id, size)?;
         let width = image.placement.width;
         let height = image.placement.height;
         if width == 0 || height == 0 {
@@ -544,25 +548,48 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The font: one face, loaded once, with swash doing the rasterising.
-struct Fonts {
+/// Which face a cell wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Face {
+    Regular = 0,
+    Bold = 1,
+    Italic = 2,
+    BoldItalic = 3,
+}
+
+fn face_for(bold: bool, italic: bool) -> Face {
+    match (bold, italic) {
+        (false, false) => Face::Regular,
+        (true, false) => Face::Bold,
+        (false, true) => Face::Italic,
+        (true, true) => Face::BoldItalic,
+    }
+}
+
+/// One loaded face: bytes plus the index within the file (a `.ttc` holds more
+/// than one).
+struct Loaded {
     bytes: Vec<u8>,
     index: usize,
+}
+
+/// The font family: four faces, loaded once, with swash doing the rasterising.
+struct Fonts {
+    faces: [Loaded; 4],
     context: swash::scale::ScaleContext,
     metrics: Metrics,
 }
 
 impl Fonts {
     fn load(look: &Look) -> Self {
-
-        let (bytes, index) = load_font_bytes(look).unwrap_or_else(|| {
-            tracing::warn!("no font found; the grid will draw backgrounds only");
-            (Vec::new(), 0)
-        });
+        let faces = load_faces(look);
 
         let mut context = swash::scale::ScaleContext::new();
         let metrics = {
-            let font = swash::FontRef::from_index(&bytes, index);
+            let font = swash::FontRef::from_index(
+                &faces[Face::Regular as usize].bytes,
+                faces[Face::Regular as usize].index,
+            );
             match font {
                 Some(font) => {
                     let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
@@ -575,9 +602,12 @@ impl Fonts {
                     let descent = -font.metrics(&[]).descent * look.size / units;
                     // Whole-pixel cells: a fractional advance puts every glyph
                     // on a half-pixel and the whole screen looks out of focus.
+                    // Round *up*: rounding down makes the cell narrower than the
+                    // glyph advance, so neighbours overlap ("llll" renders as a
+                    // smear).
                     Metrics {
-                        cell_width: advance.max(1.0).round(),
-                        cell_height: (ascent + descent).max(1.0).round(),
+                        cell_width: advance.max(1.0).ceil(),
+                        cell_height: (ascent + descent).max(1.0).ceil(),
                         ascent: ascent.round(),
                     }
                 }
@@ -590,27 +620,33 @@ impl Fonts {
         };
 
         Self {
-            bytes,
-            index,
+            faces,
             context,
             metrics,
         }
     }
 
-    fn font(&self) -> Option<swash::FontRef<'_>> {
-        swash::FontRef::from_index(&self.bytes, self.index)
+    fn font(&self, face: Face) -> Option<swash::FontRef<'_>> {
+        let loaded = &self.faces[face as usize];
+        swash::FontRef::from_index(&loaded.bytes, loaded.index)
     }
 
-    fn glyph_id(&self, ch: char) -> Option<u16> {
-        let font = self.font()?;
+    fn glyph_id(&self, face: Face, ch: char) -> Option<u16> {
+        let font = self.font(face)?;
         let id = font.charmap().map(ch);
         (id != 0).then_some(id)
     }
 
-    fn rasterise(&mut self, glyph_id: u16, size: f32) -> Option<swash::scale::image::Image> {
-        // The font borrows `self.bytes`, the context is a separate field: split
-        // the borrow so both can be used at once.
-        let font = swash::FontRef::from_index(&self.bytes, self.index)?;
+    fn rasterise(
+        &mut self,
+        face: Face,
+        glyph_id: u16,
+        size: f32,
+    ) -> Option<swash::scale::image::Image> {
+        // The font borrows the face's bytes, the context is a separate field:
+        // split the borrow so both can be used at once.
+        let loaded = &self.faces[face as usize];
+        let font = swash::FontRef::from_index(&loaded.bytes, loaded.index)?;
         let context = &mut self.context;
         let mut scaler = context
             .builder(font)
@@ -627,11 +663,25 @@ impl Fonts {
     }
 }
 
-/// Find a monospace face: the configured file first, then the system's fonts.
-fn load_font_bytes(look: &Look) -> Option<(Vec<u8>, usize)> {
+/// Load the four faces: regular, bold, italic, bold-italic.
+///
+/// `font.path` wins and can only supply one face, so the other three fall back
+/// to it — a user who points at a single file gets a uniform grid rather than a
+/// partial one. Otherwise the family is asked for each style and a missing face
+/// falls back down the chain: bold-italic → italic → bold → regular, which is
+/// what a terminal does when a family ships only two weights.
+fn load_faces(look: &Look) -> [Loaded; 4] {
     if let Some(path) = look.path.as_ref() {
         match std::fs::read(path) {
-            Ok(bytes) => return Some((bytes, 0)),
+            Ok(bytes) => {
+                let loaded = Loaded { bytes, index: 0 };
+                return [
+                    loaded.clone_face(),
+                    loaded.clone_face(),
+                    loaded.clone_face(),
+                    loaded,
+                ];
+            }
             Err(err) => tracing::warn!(path = %path.display(), %err, "configured font"),
         }
     }
@@ -650,14 +700,78 @@ fn load_font_bytes(look: &Look) -> Option<(Vec<u8>, usize)> {
         let Some(info) = collection.family_by_name(family) else {
             continue;
         };
-        let Some(font) = info.default_font() else {
-            continue;
-        };
-        if let Some(blob) = font.load(None) {
-            tracing::info!(family, "grid font");
-            return Some((blob.data().to_vec(), font.index() as usize));
+
+        let mut faces: Vec<Option<Loaded>> = Vec::with_capacity(4);
+        for (style, weight) in [
+            (fontique::FontStyle::Normal, fontique::FontWeight::NORMAL),
+            (fontique::FontStyle::Normal, fontique::FontWeight::BOLD),
+            (fontique::FontStyle::Italic, fontique::FontWeight::NORMAL),
+            (fontique::FontStyle::Italic, fontique::FontWeight::BOLD),
+        ] {
+            // `synthesize_style: false`: a slanted copy of the regular face is
+            // worse than the regular face, and we can tell the difference.
+            let font = info.match_font(fontique::FontWidth::NORMAL, style, weight, false);
+            let loaded = font.and_then(|font| {
+                let blob = font.load(None)?;
+                Some(Loaded {
+                    bytes: blob.data().to_vec(),
+                    index: font.index() as usize,
+                })
+            });
+            faces.push(loaded);
+        }
+
+        // Bold without an italic face keeps the bold shape, and vice versa.
+        let regular = faces[0].take();
+        let clone = |face: &Option<Loaded>| face.as_ref().map(Loaded::clone_face);
+        let bold = faces[1].take().or_else(|| clone(&regular));
+        let italic = faces[2].take().or_else(|| clone(&regular));
+        let bold_italic = faces[3]
+            .take()
+            .or_else(|| clone(&bold))
+            .or_else(|| clone(&italic))
+            .or_else(|| clone(&regular));
+
+        if let Some(regular) = regular {
+            tracing::info!(
+                family,
+                bold = bold.is_some(),
+                italic = italic.is_some(),
+                "grid font"
+            );
+            let empty = Loaded {
+                bytes: Vec::new(),
+                index: 0,
+            };
+            return [
+                regular,
+                bold.unwrap_or_else(|| empty.clone_face()),
+                italic.unwrap_or_else(|| empty.clone_face()),
+                bold_italic.unwrap_or(empty),
+            ];
         }
     }
-    tracing::warn!("no monospace family found");
-    None
+
+    tracing::warn!("no monospace family found; the grid will draw backgrounds only");
+    let empty = Loaded {
+        bytes: Vec::new(),
+        index: 0,
+    };
+    [
+        empty.clone_face(),
+        empty.clone_face(),
+        empty.clone_face(),
+        empty,
+    ]
+}
+
+impl Loaded {
+    /// `Loaded` is not `Clone` because the bytes are large; callers that need a
+    /// second copy of the same face say so explicitly.
+    fn clone_face(&self) -> Loaded {
+        Loaded {
+            bytes: self.bytes.clone(),
+            index: self.index,
+        }
+    }
 }
