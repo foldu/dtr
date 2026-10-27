@@ -37,6 +37,8 @@ pub struct Startup {
     pub select: Option<(usize, usize)>,
     /// Lines to scroll into the scrollback before capturing (screenshots).
     pub scroll: i64,
+    /// Draw the capture as a split, to review the layout (screenshots).
+    pub split: Option<crate::layout::Axis>,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -96,6 +98,7 @@ pub fn capture_headless(
         serial,
         &startup.look,
         startup.select,
+        startup.split,
     )
 }
 
@@ -129,16 +132,20 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     }
 
     let mut app = App {
-        sessions: vec![Session {
-            pane,
-            frame: None,
-            label,
-            serial,
-            echo: false,
-            selection: startup.select,
-            meter: Meter::new(),
-        }],
+        tabs: vec![Tab::new(
+            1,
+            Session {
+                pane,
+                frame: None,
+                label,
+                serial,
+                echo: false,
+                selection: startup.select,
+                meter: Meter::new(),
+            },
+        )],
         active: 0,
+        next_leaf: 2,
         gpu: None,
         modifiers: ModifiersState::empty(),
         fatal: None,
@@ -195,9 +202,41 @@ struct Session {
     meter: Meter,
 }
 
+/// One tab: a layout of panes, the panes themselves, and which one has focus.
+///
+/// The layout knows nothing about what a pane *is*; `leaves` is the map that
+/// decides, which is how a file-explorer pane becomes a new entry in this map
+/// rather than a change to the geometry.
+struct Tab {
+    layout: crate::layout::Layout,
+    leaves: std::collections::BTreeMap<crate::layout::LeafId, Session>,
+    focus: crate::layout::LeafId,
+}
+
+impl Tab {
+    fn new(id: crate::layout::LeafId, session: Session) -> Self {
+        let mut leaves = std::collections::BTreeMap::new();
+        leaves.insert(id, session);
+        Self {
+            layout: crate::layout::Layout::leaf(id),
+            leaves,
+            focus: id,
+        }
+    }
+
+    fn focused(&self) -> &Session {
+        &self.leaves[&self.focus]
+    }
+
+    fn focused_mut(&mut self) -> &mut Session {
+        self.leaves.get_mut(&self.focus).expect("focus is a leaf")
+    }
+}
+
 struct App {
-    sessions: Vec<Session>,
+    tabs: Vec<Tab>,
     active: usize,
+    next_leaf: crate::layout::LeafId,
     gpu: Option<Gpu>,
     modifiers: ModifiersState,
     /// Set when the pane fails; `run` returns it once the loop has stopped.
@@ -215,11 +254,11 @@ struct App {
 
 impl App {
     fn session(&self) -> &Session {
-        &self.sessions[self.active]
+        self.tabs[self.active].focused()
     }
 
     fn session_mut(&mut self) -> &mut Session {
-        &mut self.sessions[self.active]
+        self.tabs[self.active].focused_mut()
     }
 
     /// Open a session in a new tab and switch to it. The palette's actions all
@@ -237,7 +276,7 @@ impl App {
         );
         match spawned {
             Ok(pane) => {
-                self.sessions.push(Session {
+                let session = Session {
                     pane,
                     frame: None,
                     label: transport.describe(),
@@ -245,8 +284,11 @@ impl App {
                     echo: false,
                     selection: None,
                     meter: Meter::new(),
-                });
-                self.active = self.sessions.len() - 1;
+                };
+                let id = self.next_leaf;
+                self.next_leaf += 1;
+                self.tabs.push(Tab::new(id, session));
+                self.active = self.tabs.len() - 1;
             }
             Err(err) => {
                 tracing::error!(%err, "could not start the session");
@@ -257,10 +299,24 @@ impl App {
 
     /// Close the active tab. The last tab closes the window, because a terminal
     /// with no sessions has nothing to show.
+    /// Close the focused pane; when it is the last pane in its tab, close the
+    /// tab; when it is the last tab, close the window.
     fn close_active(&mut self) {
-        match closed(self.active, self.sessions.len()) {
+        let tab = &mut self.tabs[self.active];
+        if tab.leaves.len() > 1 && tab.layout.remove(tab.focus) {
+            let gone = tab.focus;
+            tab.leaves.remove(&gone);
+            // Focus the first remaining pane: predictable, and never the one
+            // whose geometry just changed under the pointer.
+            if let Some(first) = tab.layout.leaves().first().copied() {
+                tab.focus = first;
+            }
+            return;
+        }
+
+        match closed(self.active, self.tabs.len()) {
             Some(active) => {
-                self.sessions.remove(self.active);
+                self.tabs.remove(self.active);
                 self.active = active;
             }
             // The last tab takes the window with it: a terminal with no
@@ -269,8 +325,101 @@ impl App {
         }
     }
 
+    /// Split the focused pane and give the new one its own session.
+    fn split(&mut self, axis: crate::layout::Axis, transport: Transport) {
+        let proxy = self.proxy.clone();
+        let spawned = Pane::spawn(
+            transport.clone(),
+            self.log.clone(),
+            self.theme.clone(),
+            move || {
+                let _ = proxy.send_event(UserEvent::Frame);
+            },
+        );
+        let pane = match spawned {
+            Ok(pane) => pane,
+            Err(err) => {
+                tracing::error!(%err, "could not start the split");
+                return;
+            }
+        };
+
+        let id = self.next_leaf;
+        self.next_leaf += 1;
+        let tab = &mut self.tabs[self.active];
+        let target = tab.focus;
+        if !tab.layout.split(target, axis, id, false) {
+            return;
+        }
+        tab.leaves.insert(
+            id,
+            Session {
+                pane,
+                frame: None,
+                label: transport.describe(),
+                serial: matches!(transport, Transport::Serial(_)),
+                echo: false,
+                selection: None,
+                meter: Meter::new(),
+            },
+        );
+        tab.focus = id;
+    }
+
     fn cycle(&mut self, forward: bool) {
-        self.active = cycled(self.active, self.sessions.len(), forward);
+        self.active = cycled(self.active, self.tabs.len(), forward);
+    }
+
+    /// The panes to draw, with the rectangle each one occupies.
+    ///
+    /// The status strip is subtracted first: panes live above it, and a split
+    /// that ran under the chrome would hide its own last row.
+    fn pane_views<'a>(
+        &self,
+        tab: &'a Tab,
+        metrics: crate::render::Metrics,
+    ) -> Vec<(crate::layout::LeafId, crate::render::PaneView<'a>)> {
+        let gpu = match self.gpu.as_ref() {
+            Some(gpu) => gpu,
+            None => return Vec::new(),
+        };
+        let size = (gpu.config.width, gpu.config.height);
+        let (width, height) = (size.0 as f32, size.1 as f32);
+        let status_height = crate::ui::STATUS_HEIGHT * gpu.scale();
+        let area = crate::layout::Rect::new(
+            0.0,
+            0.0,
+            width,
+            (height - status_height).max(0.0),
+        );
+
+        tab.layout
+            .rects(area, crate::ui::SPLIT_GAP * gpu.scale())
+            .into_iter()
+            .filter_map(|(id, rect)| {
+                let session = tab.leaves.get(&id)?;
+                let _ = metrics;
+                Some((
+                    id,
+                    crate::render::PaneView {
+                        rect,
+                        frame: session.frame.as_ref(),
+                        selection: session.selection,
+                        cursor: id == tab.focus,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Which pane is under a physical pixel position, if any.
+    fn pane_at(&self, x: f64, y: f64) -> Option<crate::layout::LeafId> {
+        let gpu = self.gpu.as_ref()?;
+        let tab = &self.tabs[self.active];
+        self.pane_views(tab, gpu.metrics())
+            .into_iter()
+            .find(|(_, pane)| pane.rect.contains(x as f32, y as f32))
+            .map(|(id, _)| id)
     }
 
     /// Which cell is under a physical pixel position, if any.
@@ -288,8 +437,15 @@ impl App {
         if cols == 0 || rows == 0 {
             return None;
         }
-        let col = (x as f32 / metrics.cell_width).floor().max(0.0) as u32;
-        let row = (y as f32 / metrics.cell_height).floor().max(0.0) as u32;
+        // Relative to the focused pane: a split moves the grid's origin.
+        let tab = &self.tabs[self.active];
+        let origin = self
+            .pane_views(tab, metrics)
+            .into_iter()
+            .find(|(id, _)| *id == tab.focus)
+            .map(|(_, pane)| (pane.rect.x, pane.rect.y))?;
+        let col = ((x as f32 - origin.0) / metrics.cell_width).floor().max(0.0) as u32;
+        let row = ((y as f32 - origin.1) / metrics.cell_height).floor().max(0.0) as u32;
         if col >= cols || row >= rows {
             return None;
         }
@@ -469,6 +625,32 @@ impl ApplicationHandler<UserEvent> for App {
                         _ => false,
                     };
 
+                // Splits: the new pane gets a shell, because a serial port
+                // cannot be opened twice and "split this port" is meaningless.
+                let split_key = self.modifiers.control_key()
+                    && self.modifiers.shift_key()
+                    && event.state == winit::event::ElementState::Pressed
+                    && match &event.logical_key {
+                        winit::keyboard::Key::Character(text) => match text.as_str() {
+                            "\\" => {
+                                self.split(
+                                    crate::layout::Axis::Horizontal,
+                                    Transport::Shell(crate::pty::Config::default()),
+                                );
+                                true
+                            }
+                            "-" | "_" => {
+                                self.split(
+                                    crate::layout::Axis::Vertical,
+                                    Transport::Shell(crate::pty::Config::default()),
+                                );
+                                true
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+
                 let tab_switch = self.modifiers.control_key()
                     && event.state == winit::event::ElementState::Pressed
                     && match &event.logical_key {
@@ -479,10 +661,10 @@ impl ApplicationHandler<UserEvent> for App {
                         winit::keyboard::Key::Character(text) if self.modifiers.alt_key() => {
                             match text.chars().next().and_then(|c| c.to_digit(10)) {
                                 Some(0) => {
-                                    self.active = self.sessions.len() - 1;
+                                    self.active = self.tabs.len() - 1;
                                     true
                                 }
-                                Some(digit) if digit as usize <= self.sessions.len() => {
+                                Some(digit) if digit as usize <= self.tabs.len() => {
                                     self.active = digit as usize - 1;
                                     true
                                 }
@@ -501,7 +683,7 @@ impl ApplicationHandler<UserEvent> for App {
                         )
                         && event.state == winit::event::ElementState::Pressed
                 };
-                if scroll_key || tab_switch {
+                if scroll_key || tab_switch || split_key {
                     // Already handled above.
                 } else if chord("w") {
                     self.close_active();
@@ -552,12 +734,20 @@ impl ApplicationHandler<UserEvent> for App {
                 if button == winit::event::MouseButton::Left {
                     match state {
                         winit::event::ElementState::Pressed => {
+                            // Clicking a pane focuses it, which is what makes a
+                            // split usable at all: keys follow the pointer.
+                            if let Some((x, y)) = self.cursor_position {
+                                if let Some(id) = self.pane_at(x, y) {
+                                    self.tabs[self.active].focus = id;
+                                }
+                            }
                             // A click without a drag is not a selection until
                             // the pointer moves; the anchor waits here.
-                            self.session_mut().selection = self
+                            let anchor = self
                                 .cursor_position
                                 .and_then(|(x, y)| self.cell_at(x, y))
                                 .map(|cell| (cell, cell));
+                            self.session_mut().selection = anchor;
                             self.dragging = true;
                         }
                         winit::event::ElementState::Released => {
@@ -593,7 +783,7 @@ impl ApplicationHandler<UserEvent> for App {
                     (meter.rx_rate, meter.tx_rate)
                 };
                 let label = self.session().label.clone();
-                let tabs = (self.active + 1, self.sessions.len());
+                let tabs = (self.active + 1, self.tabs.len());
                 let status = Status {
                     label: &label,
                     tabs,
@@ -615,18 +805,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // frame, pane and look are `&`, and taking them out one by one
                 // is what makes that legal.
                 let mut palette = std::mem::replace(&mut self.palette, Palette::new(false));
-                let session = &self.sessions[self.active];
+                let tab = &self.tabs[self.active];
+                let panes: Vec<_> = self
+                    .pane_views(tab, gpu.metrics())
+                    .into_iter()
+                    .map(|(_, pane)| pane)
+                    .collect();
                 let look = self.look.clone();
                 let rendered = gpu.render(
-                    session.frame.as_ref(),
+                    &panes,
                     &status,
                     &mut palette,
                     &mut action,
-                    &session.pane,
+                    &tab.focused().pane,
                     palette_open,
                     &mut copied_text,
                     &look,
-                    session.selection,
                 );
                 self.palette = palette;
                 if let Err(err) = rendered {
@@ -735,6 +929,11 @@ impl Gpu {
         self.grid.metrics()
     }
 
+    /// Backing-store pixels per logical point, for chrome measurements.
+    fn scale(&self) -> f32 {
+        self.config.width as f32 / self.window.inner_size().width.max(1) as f32
+    }
+
     fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -747,7 +946,7 @@ impl Gpu {
 
     fn render(
         &mut self,
-        frame: Option<&Frame>,
+        panes: &[crate::render::PaneView<'_>],
         status: &Status,
         palette: &mut Palette,
         action: &mut Option<Action>,
@@ -755,7 +954,6 @@ impl Gpu {
         palette_open: bool,
         copied_text: &mut Option<String>,
         look: &Look,
-        selection: Option<(usize, usize)>,
     ) -> anyhow::Result<()> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -847,11 +1045,9 @@ impl Gpu {
         self.grid.prepare(
             &self.device,
             &self.queue,
-            frame,
+            panes,
             look,
-            self.config.width as f32,
-            self.config.height as f32,
-            selection,
+            (self.config.width as f32, self.config.height as f32),
         );
 
         {

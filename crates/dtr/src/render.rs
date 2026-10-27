@@ -98,6 +98,15 @@ pub struct GridRenderer {
     screen: [f32; 2],
 }
 
+/// One pane to draw: where it goes, what it shows, and whether it has focus.
+pub struct PaneView<'a> {
+    pub rect: crate::layout::Rect,
+    pub frame: Option<&'a Frame>,
+    pub selection: Option<(usize, usize)>,
+    /// Only the focused pane draws a cursor.
+    pub cursor: bool,
+}
+
 const ATLAS_SIZE: u32 = 1024;
 const WHITE_PX: u32 = 1;
 
@@ -254,50 +263,82 @@ impl GridRenderer {
         self.fonts.metrics
     }
 
-    /// Build this frame's instances and upload whatever glyphs are new.
+    /// Build one frame's instances for every visible pane and upload whatever
+    /// glyphs are new.
+    ///
+    /// Panes share one instance buffer and one draw: a per-pane draw would need
+    /// the buffer rewritten between them, and the queue writes all land before
+    /// the command buffer is submitted, so the last pane would win.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        frame: Option<&Frame>,
+        panes: &[PaneView<'_>],
         look: &Look,
-        width: f32,
-        height: f32,
-        selection: Option<(usize, usize)>,
+        screen: (f32, f32),
     ) {
-        self.screen = [width, height];
+        self.screen = [screen.0, screen.1];
         queue.write_buffer(
             &self.uniform,
             0,
-            bytemuck_cast(&[width, height, 0.0, 0.0]),
+            bytemuck_cast(&[screen.0, screen.1, 0.0, 0.0]),
         );
 
         self.instances.clear();
 
-        let Some(frame) = frame else {
-            self.upload_instances(device, queue);
-            return;
-        };
-
         let metrics = self.fonts.metrics;
         let (cell_w, cell_h) = (metrics.cell_width, metrics.cell_height);
 
+        for pane in panes {
+            self.prepare_pane(device, queue, pane, look, cell_w, cell_h);
+        }
+
+        self.upload_instances(device, queue);
+        tracing::debug!(
+            instances = self.instances.len(),
+            glyphs = self.glyphs.len(),
+            "grid prepared"
+        );
+    }
+
+    fn prepare_pane(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pane: &PaneView<'_>,
+        look: &Look,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        let Some(frame) = pane.frame else { return };
+        let (origin_x, origin_y) = (pane.rect.x, pane.rect.y);
+        // Cells outside the pane are simply not emitted: cheaper than a scissor
+        // rect and it cannot smear into a neighbour.
+        let cols_fit = (pane.rect.width / cell_w).floor().max(1.0) as usize;
+        let rows_fit = (pane.rect.height / cell_h).floor().max(1.0) as usize;
+        let visible = |index: usize| -> bool {
+            let cols = usize::from(frame.cols).max(1);
+            (index / cols) < rows_fit && (index % cols) < cols_fit
+        };
+
         // Backgrounds first: a glyph must never sit under a later rectangle.
         for (index, cell) in frame.cells.iter().enumerate() {
-            if !cell.has_bg {
+            if !cell.has_bg || !visible(index) {
                 continue;
             }
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
+            let (x, y) = (x + origin_x, y + origin_y);
             self.instances
                 .push(Instance::solid([x, y, cell_w, cell_h], cell.bg, 1.0));
         }
 
         // Then the glyphs.
         for (index, cell) in frame.cells.iter().enumerate() {
-            if cell.text.trim().is_empty() {
+            if cell.text.trim().is_empty() || !visible(index) {
                 continue;
             }
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
+            let (x, y) = (x + origin_x, y + origin_y);
             let style = face_for(cell.bold, cell.italic);
             for ch in cell.text.chars() {
                 let Some(glyph) = self.glyph(device, queue, ch, style, look.size) else {
@@ -318,14 +359,18 @@ impl GridRenderer {
 
         // The selection sits above the text, as a wash rather than a solid
         // block: you still have to be able to read what you selected.
-        if let Some((first, last)) = selection {
+        if let Some((first, last)) = pane.selection {
             let (start, end) = if first <= last {
                 (first, last)
             } else {
                 (last, first)
             };
             for index in start..=end.min(frame.cells.len().saturating_sub(1)) {
+                if !visible(index) {
+                    continue;
+                }
                 let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
+                let (x, y) = (x + origin_x, y + origin_y);
                 self.instances.push(Instance::solid(
                     [x, y, cell_w, cell_h],
                     look.accent,
@@ -334,23 +379,18 @@ impl GridRenderer {
             }
         }
 
-        if let Some((cx, cy)) = frame.cursor {
+        if let (true, Some((cx, cy))) = (pane.cursor, frame.cursor) {
             let (x, y) = cell_origin(
                 usize::from(cy) * usize::from(frame.cols) + usize::from(cx),
                 frame.cols,
                 cell_w,
                 cell_h,
             );
+            let (x, y) = (x + origin_x, y + origin_y);
             self.instances
                 .push(Instance::solid([x, y, cell_w, cell_h], look.accent, 1.0));
         }
 
-        self.upload_instances(device, queue);
-        tracing::debug!(
-            instances = self.instances.len(),
-            glyphs = self.glyphs.len(),
-            "grid prepared"
-        );
     }
 
     fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {

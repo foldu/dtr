@@ -21,6 +21,7 @@ pub fn capture(
     serial: bool,
     look: &crate::ui::Look,
     selection: Option<(usize, usize)>,
+    split: Option<crate::layout::Axis>,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -127,7 +128,44 @@ pub fn capture(
         tracing::error!(%err, "wgpu validation");
     }));
     let mut grid = crate::render::GridRenderer::new(&device, format, look);
-    grid.prepare(&device, &queue, frame, look, width as f32, height as f32, selection);
+    let status_height = crate::ui::STATUS_HEIGHT;
+    let area = crate::layout::Rect::new(
+        0.0,
+        0.0,
+        width as f32,
+        (height as f32 - status_height).max(1.0),
+    );
+    let panes: Vec<crate::render::PaneView<'_>> = match split {
+        // The same frame twice: this is a review of the layout and the
+        // renderer's per-pane clipping, not of two live sessions.
+        Some(axis) => {
+            let mut layout = crate::layout::Layout::leaf(1);
+            layout.split(1, axis, 2, false);
+            layout
+                .rects(area, crate::ui::SPLIT_GAP)
+                .into_iter()
+                .map(|(id, rect)| crate::render::PaneView {
+                    rect,
+                    frame,
+                    selection: if id == 1 { selection } else { None },
+                    cursor: id == 1,
+                })
+                .collect()
+        }
+        None => vec![crate::render::PaneView {
+            rect: area,
+            frame,
+            selection,
+            cursor: true,
+        }],
+    };
+    grid.prepare(
+        &device,
+        &queue,
+        &panes,
+        look,
+        (width as f32, height as f32),
+    );
     {
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {

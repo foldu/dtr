@@ -112,6 +112,14 @@ impl Look {
 
 }
 
+/// Height of the status strip in logical points. The panes stop above it, so
+/// this number is load-bearing: it is what keeps a split from running under
+/// the chrome.
+pub const STATUS_HEIGHT: f32 = 24.0;
+
+/// Gap between split panes, in logical points.
+pub const SPLIT_GAP: f32 = 3.0;
+
 /// What the status bar shows. Totals come from the pane; rates are the UI's own
 /// measurement, because it is the UI's clock that decides when to repaint.
 pub struct Status<'a> {

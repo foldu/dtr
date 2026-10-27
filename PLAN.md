@@ -570,6 +570,21 @@ The index rules are pure functions with tests, because that is where the off-by-
 wraps both ways, a single tab goes nowhere, closing the last of several moves left, and closing the
 only tab ends the window.
 
+**Splits, and a layout that does not care what a pane is.** The tree lives in `layout.rs`: `Leaf(id)` or
+`Split { axis, ratio, first, second }`, with `rects(area, gap)` giving every leaf its rectangle. It knows
+nothing about terminals. A tab owns the layout plus a map from leaf id to *whatever* — today that map
+holds terminal sessions, and a file-explorer pane is a second kind of entry in it rather than surgery on
+the geometry. That is why splits went in generic: the widget pane is now a data change.
+
+The renderer draws every pane in one instanced pass. Panes share an instance buffer because a per-pane
+draw would need the buffer rewritten between them, and queue writes all land before the command buffer
+is submitted — the last pane would win. Overflow is handled by not emitting cells outside a pane's
+rectangle, which is cheaper than a scissor and cannot smear into a neighbour.
+
+Click focuses the pane under the pointer, `Ctrl+Shift+\` splits side by side and `Ctrl+Shift+-` splits
+stacked, `Ctrl+Shift+W` closes the focused pane and collapses its parent. Closing the last pane closes
+the tab. A split opens a *shell*, never a copy of the pane: a serial port cannot be opened twice.
+
 **SFTP is deliberately not here.** The owner's plan is a small file-explorer pane later on, not a
 transfer command; `docs/sftp.md` has the measurements for when that happens.
 

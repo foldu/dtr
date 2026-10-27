@@ -2,6 +2,7 @@
 
 mod app;
 mod input;
+mod layout;
 mod logbook;
 mod modem;
 mod palette;
@@ -73,6 +74,10 @@ struct Args {
     /// Shell program to launch when no port is given (default: $SHELL, else bash/pwsh)
     #[arg(long, value_name = "PROGRAM")]
     shell: Option<String>,
+
+    /// Draw the captured frame as a split (for reviewing the layout)
+    #[arg(long, value_name = "h|v")]
+    split: Option<String>,
 
     /// Scroll N lines into the scrollback before capturing
     #[arg(long, value_name = "N", default_value_t = 0)]
@@ -271,6 +276,12 @@ fn main() -> anyhow::Result<()> {
         },
         None => None,
     };
+    let split = match args.split.as_deref() {
+        None => None,
+        Some("h") => Some(crate::layout::Axis::Horizontal),
+        Some("v") => Some(crate::layout::Axis::Vertical),
+        Some(other) => anyhow::bail!("expected h or v for --split, got {other:?}"),
+    };
     let select = match args.select.as_deref() {
         Some(spec) => {
             let (start, end) = spec
@@ -410,6 +421,7 @@ fn main() -> anyhow::Result<()> {
             theme: theme.clone(),
             select,
             scroll: args.scroll,
+            split,
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         finish(store.as_deref(), session, "screenshot", &result);
@@ -426,6 +438,7 @@ fn main() -> anyhow::Result<()> {
         theme,
         select,
         scroll: args.scroll,
+        split,
     };
     let result = app::run(startup);
     finish(store.as_deref(), session, "closed", &result);
