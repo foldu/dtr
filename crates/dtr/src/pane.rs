@@ -47,13 +47,28 @@ pub struct Frame {
 
 /// Byte counters, shared with the UI. Totals only: the rate is the UI's
 /// business, because it is the UI's clock that decides when to repaint.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Stats {
     rx: AtomicU64,
     tx: AtomicU64,
     connected: std::sync::atomic::AtomicBool,
     dtr: std::sync::atomic::AtomicBool,
     rts: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            rx: AtomicU64::new(0),
+            tx: AtomicU64::new(0),
+            // A pane that exists has a live source until it says otherwise; a
+            // shell or a replay never disconnects, and claiming otherwise put a
+            // "reconnecting…" warning on a healthy session.
+            connected: std::sync::atomic::AtomicBool::new(true),
+            dtr: std::sync::atomic::AtomicBool::new(false),
+            rts: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl Stats {
@@ -442,7 +457,6 @@ async fn run(
                 if let Some((cfg, identity)) = reconnect.clone() {
                     tracing::warn!(port = %cfg.port, "device gone; watching for it");
                     let tx = reconnect_tx.clone();
-                    let stats = Arc::clone(&stats);
                     tokio::task::spawn_local(async move {
                         loop {
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -819,6 +833,30 @@ mod tests {
             cursor: None,
             cells,
         }
+    }
+
+    #[test]
+    fn the_vt_core_gives_back_the_characters_we_sent() {
+        use libghostty_vt::{RenderState, Terminal};
+        use libghostty_vt::render::{CellIterator, RowIterator};
+
+        let mut term = Terminal::new(8, 2).unwrap();
+        let mut state = RenderState::new().unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        term.vt_write(b"OK\r\n");
+        let snapshot = state.update(&term).unwrap();
+        let mut row_it = rows.update(&snapshot).unwrap();
+        let row = row_it.next().unwrap();
+        let mut cell_it = cells.update(row).unwrap();
+        let mut text = String::new();
+        let mut per_cell = Vec::new();
+        while let Some(cell) = cell_it.next() {
+            cell.graphemes_utf8(&mut text).unwrap();
+            per_cell.push(text.clone());
+        }
+        assert_eq!(per_cell[0], "O", "cells: {per_cell:?}");
+        assert_eq!(per_cell[1], "K", "cells: {per_cell:?}");
     }
 
     #[test]

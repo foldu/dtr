@@ -4,7 +4,7 @@
 //! because the alternative (a dialog of dropdowns) is slower for the same task
 //! and cannot be driven from the keyboard.
 
-use dtr_complete::{Completion, Engine, Inline, Kind};
+use dtr_complete::{Completion, Engine, Inline};
 use egui::{Align2, Color32, FontId, Key, Modifiers, RichText, Sense, TextEdit, vec2};
 
 use crate::sources;
@@ -248,24 +248,6 @@ fn action_for(line: &str) -> Option<Action> {
         ("demo", _) => Some(Action::Demo),
         ("quit", _) => Some(Action::Quit),
         _ => None,
-    }
-}
-
-fn kind_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Command => "cmd",
-        Kind::Host => "ssh",
-        Kind::Port => "port",
-        Kind::Shell => "shell",
-    }
-}
-
-fn kind_colour(kind: Kind) -> Color32 {
-    match kind {
-        Kind::Command => Color32::from_rgb(0xff, 0xb0, 0x00),
-        Kind::Host => Color32::from_rgb(0x7e, 0xe7, 0x87),
-        Kind::Port => Color32::from_rgb(0x7a, 0xc7, 0xe0),
-        Kind::Shell => Color32::from_rgb(0xb0, 0xa5, 0xc7),
     }
 }
 

@@ -15,6 +15,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::palette::{Action, Palette};
+use crate::ui::Look;
 use crate::pane::{Frame, Pane, Transport};
 use crate::ui::Status;
 
@@ -30,6 +31,7 @@ pub struct Startup {
     pub store: Option<Arc<dtr_store::Store>>,
     /// Open the palette on start (also how it gets into screenshots).
     pub palette: bool,
+    pub look: Look,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -76,6 +78,7 @@ pub fn capture_headless(
         pane.stats(),
         startup.palette,
         serial,
+        &startup.look,
     )
 }
 
@@ -118,6 +121,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         fatal: None,
         quit: false,
         palette: Palette::new(startup.palette),
+        look: startup.look.clone(),
         proxy,
         store: startup.store,
         log: startup.log,
@@ -148,6 +152,7 @@ struct App {
     /// Whether this session has modem lines, for the status strip.
     serial: bool,
     echo: bool,
+    look: Look,
 }
 
 impl App {
@@ -253,7 +258,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
 
-        match Gpu::new(window) {
+        match Gpu::new(window, &self.look) {
             Ok(gpu) => {
                 gpu.window.request_redraw();
                 self.gpu = Some(gpu);
@@ -375,6 +380,7 @@ impl ApplicationHandler<UserEvent> for App {
                     &self.pane,
                     palette_open,
                     &mut copied_text,
+                    &self.look,
                 ) {
                     tracing::error!(%err, "render");
                 }
@@ -402,7 +408,7 @@ struct Gpu {
 }
 
 impl Gpu {
-    fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+    fn new(window: Arc<Window>, look: &Look) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = instance();
         let surface = instance.create_surface(Arc::clone(&window))?;
@@ -441,6 +447,7 @@ impl Gpu {
         surface.configure(&device, &config);
 
         let egui_ctx = egui::Context::default();
+        look.install(&egui_ctx);
         egui_ctx.set_visuals(egui::Visuals::dark());
 
         let egui_state = egui_winit::State::new(
@@ -489,6 +496,7 @@ impl Gpu {
         pane: &Pane,
         palette_open: bool,
         copied_text: &mut Option<String>,
+        look: &Look,
     ) -> anyhow::Result<()> {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -511,11 +519,11 @@ impl Gpu {
                         .fill(egui::Color32::from_rgb(0x14, 0x18, 0x16))
                         .inner_margin(egui::Margin::symmetric(8, 4)),
                 )
-                .show(ui, |ui| crate::ui::status_bar(ui, status));
+                .show(ui, |ui| crate::ui::status_bar(ui, status, look));
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::BLACK))
                 .show(ui, |ui| match frame {
-                    Some(frame) => crate::ui::draw(ui, frame),
+                    Some(frame) => crate::ui::draw(ui, frame, look),
                     None => {
                         ui.label("waiting for the pane…");
                     }

@@ -47,6 +47,22 @@ struct Args {
     #[arg(long)]
     palette: bool,
 
+    /// Config file (default: the platform's config dir, `dtr/config.toml`)
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Print the config file path and exit
+    #[arg(long)]
+    config_path: bool,
+
+    /// Write a commented default config file, if there is none
+    #[arg(long)]
+    config_init: bool,
+
+    /// Set one value (`section.key value`) in the config file and exit
+    #[arg(long, num_args = 2, value_names = ["KEY", "VALUE"])]
+    config_set: Option<Vec<String>>,
+
     /// Serial byte mapping: `cr=crlf` (default) or `none` (remembered per port)
     #[arg(long, value_name = "MAP")]
     imap: Option<String>,
@@ -120,6 +136,43 @@ fn main() -> anyhow::Result<()> {
 
     tracing::debug!(?args, "starting");
 
+    let config_path = args.config.clone().unwrap_or_else(dtr_config::default_path);
+    if args.config_path {
+        println!("{}", config_path.display());
+        return Ok(());
+    }
+    if let Some(pair) = &args.config_set {
+        dtr_config::set_value(&config_path, &pair[0], &pair[1])?;
+        println!("{}: {} = {}", config_path.display(), pair[0], pair[1]);
+        return Ok(());
+    }
+    if args.config_init {
+        if config_path.exists() {
+            println!("{} already exists", config_path.display());
+        } else {
+            if let Some(parent) = config_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&config_path, dtr_config::TEMPLATE)?;
+            println!("wrote {}", config_path.display());
+        }
+        return Ok(());
+    }
+
+    // A broken config is worth complaining about but not worth refusing to
+    // start a terminal over: the defaults are always usable.
+    let config = match dtr_config::Config::load(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::warn!(path = %config_path.display(), %err, "config file");
+            dtr_config::Config::default()
+        }
+    };
+    let look = ui::Look {
+        size: config.font.size,
+        path: config.font.path.clone(),
+    };
+
     // Never fatal: a broken or read-only state file must not stop a terminal
     // from opening a port.
     let store: Option<std::sync::Arc<dtr_store::Store>> = if args.no_remember {
@@ -148,13 +201,18 @@ fn main() -> anyhow::Result<()> {
             .and_then(|store| store.serial(&port).ok().flatten())
             .unwrap_or_default();
 
-        // Precedence: what was asked for, then what was remembered, then the
-        // built-in 115200 8N1 with CR→CRLF on.
+        // Precedence: the command line, then the config file, then what was
+        // remembered for this port, then the built-in 115200 8N1 with CR→CRLF.
+        // The config file outranks memory because it is a declaration, not a
+        // side effect of the last session.
         let settings = dtr_store::SerialSettings {
-            baud: args.baud.unwrap_or(remembered.baud),
+            baud: args
+                .baud
+                .or(config.serial.baud.into())
+                .unwrap_or(remembered.baud),
             cr_to_crlf: match args.imap.as_deref() {
                 Some(spec) => parse_imap(spec)?,
-                None => remembered.cr_to_crlf,
+                None => config.serial.cr_to_crlf,
             },
         };
 
@@ -169,7 +227,7 @@ fn main() -> anyhow::Result<()> {
             port,
             baud: settings.baud,
             cr_to_crlf: settings.cr_to_crlf,
-            auto_reconnect: true,
+            auto_reconnect: config.serial.auto_reconnect,
         })
     } else {
         Transport::Shell(pty::Config {
@@ -233,6 +291,7 @@ fn main() -> anyhow::Result<()> {
             log: log.clone(),
             store: store.clone(),
             palette: args.palette,
+            look: look.clone(),
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         finish(store.as_deref(), session, "screenshot", &result);
@@ -245,6 +304,7 @@ fn main() -> anyhow::Result<()> {
         log: log.clone(),
         store: store.clone(),
         palette: args.palette,
+        look,
     };
     let result = app::run(startup);
     finish(store.as_deref(), session, "closed", &result);

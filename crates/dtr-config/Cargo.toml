@@ -1,0 +1,10 @@
+[package]
+name = "dtr-config"
+description = "dtr's config file: reading it, and editing it without rewriting it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dirs.workspace = true
+toml_edit.workspace = true

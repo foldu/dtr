@@ -11,6 +11,7 @@ clap.workspace = true
 crossbeam-channel.workspace = true
 dirs.workspace = true
 dtr-complete = { path = "../dtr-complete" }
+dtr-config = { path = "../dtr-config" }
 dtr-sshconfig = { path = "../dtr-sshconfig" }
 dtr-store = { path = "../dtr-store" }
 egui.workspace = true

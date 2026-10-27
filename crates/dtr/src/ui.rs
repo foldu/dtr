@@ -6,12 +6,60 @@
 //! call site later (PLAN §3, M2).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
 
 use crate::pane::Frame;
 
-const FONT_SIZE: f32 = 14.0;
+/// How the grid is drawn: the font size, and an optional font file to load in
+/// place of the embedded default.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Look {
+    pub size: f32,
+    pub path: Option<PathBuf>,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            size: 14.0,
+            path: None,
+        }
+    }
+}
+
+impl Look {
+    /// Register the configured font with egui, if there is one.
+    ///
+    /// Fonts are installed once, when the context is created: egui rebuilds its
+    /// glyph atlas when the set changes, so doing this per frame would be a
+    /// stutter on every repaint.
+    pub fn install(&self, ctx: &egui::Context) {
+        let Some(path) = self.path.as_ref() else { return };
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "cannot read the configured font; keeping the default");
+                return;
+            }
+        };
+        let mut definitions = egui::FontDefinitions::default();
+        definitions
+            .font_data
+            .insert("dtr-mono".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        definitions
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "dtr-mono".to_owned());
+        ctx.set_fonts(definitions);
+    }
+
+    pub fn font(&self) -> FontId {
+        FontId::monospace(self.size)
+    }
+}
 
 /// What the status bar shows. Totals come from the pane; rates are the UI's own
 /// measurement, because it is the UI's clock that decides when to repaint.
@@ -27,8 +75,8 @@ pub struct Status<'a> {
     pub modem: Option<(bool, bool)>,
 }
 
-pub fn draw(ui: &mut Ui, frame: &Frame) {
-    let font = FontId::monospace(FONT_SIZE);
+pub fn draw(ui: &mut Ui, frame: &Frame, look: &Look) {
+    let font = look.font();
     let (cell_w, cell_h) = metrics(ui, &font);
     let size = vec2(
         f32::from(frame.cols) * cell_w,
@@ -61,7 +109,7 @@ pub fn draw(ui: &mut Ui, frame: &Frame) {
         let (x, y) = cell_origin(frame, index, rect, cell_w, cell_h);
         let font = fonts
             .entry((cell.bold, cell.italic))
-            .or_insert_with(|| styled_font(cell.bold, cell.italic))
+            .or_insert_with(|| styled_font(cell.bold, cell.italic, look))
             .clone();
         painter.text(
             pos2(x, y),
@@ -82,9 +130,10 @@ pub fn draw(ui: &mut Ui, frame: &Frame) {
     }
 }
 
-pub fn status_bar(ui: &mut Ui, status: &Status) {
+pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
+        let _ = look;
         ui.label(
             RichText::new(status.label)
                 .monospace()
@@ -151,11 +200,11 @@ fn cell_origin(frame: &Frame, index: usize, rect: Rect, cell_w: f32, cell_h: f32
     )
 }
 
-fn styled_font(bold: bool, italic: bool) -> FontId {
+fn styled_font(bold: bool, italic: bool, look: &Look) -> FontId {
     // egui's bundled fonts have no bold or italic face; the flags are carried
     // through the frame so the real renderer (M2) can use them.
     let _ = (bold, italic);
-    FontId::monospace(FONT_SIZE)
+    look.font()
 }
 
 fn colour(rgb: [u8; 3]) -> Color32 {

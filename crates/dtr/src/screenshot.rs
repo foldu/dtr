@@ -19,6 +19,7 @@ pub fn capture(
     stats: &crate::pane::Stats,
     show_palette: bool,
     serial: bool,
+    look: &crate::ui::Look,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -57,6 +58,7 @@ pub fn capture(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     let ctx = egui::Context::default();
+    look.install(&ctx);
     ctx.set_visuals(egui::Visuals::dark());
     let mut renderer =
         egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
@@ -88,11 +90,11 @@ pub fn capture(
                     .fill(egui::Color32::from_rgb(0x14, 0x18, 0x16))
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
-            .show(ui, |ui| crate::ui::status_bar(ui, &status));
+            .show(ui, |ui| crate::ui::status_bar(ui, &status, look));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ui, |ui| match frame {
-                Some(frame) => crate::ui::draw(ui, frame),
+                Some(frame) => crate::ui::draw(ui, frame, look),
                 None => {
                     ui.label("no frame yet");
                 }

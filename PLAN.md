@@ -431,6 +431,22 @@ That closes M1 except two honest gaps: **mouse selection** (needs the M2 rendere
 and **reconnect by USB serial number** (only exercised against a pty here — no adapter to unplug).
 M1's own line item "selection" is therefore half done: copy exists, choosing what to copy does not.
 
+**Config and font are configurable.** `crates/dtr-config` reads
+`<config dir>/dtr/config.toml` and edits it with `toml_edit` — the editing half is not a formality:
+a config file is a document a human wrote, and a program that strips the comments and re-sorts the
+keys on save is a program people stop editing. `dtr --config-init` writes a commented template,
+`dtr --config-set font.size 20` changes one value and leaves every other byte alone, `--config-path`
+prints where it lives. A broken config is reported and the defaults are used: a typo must not stop a
+terminal from opening a port.
+
+Precedence is command line, then config file, then the remembered port settings, then the built-in
+115200 8N1. The config file outranks memory because it is a declaration rather than the side effect
+of the last session.
+
+`font.size` and `font.path` are honoured: a `.ttf`/`.otf` is loaded into egui's monospace family at
+context creation (loading per frame would rebuild the glyph atlas on every repaint). Colours are not
+configurable yet — that waits on `docs/themes.md`.
+
 ### M2 — real renderer
 
 - wgpu cell renderer behind `GridRenderer`: instanced bg + glyph quads, glyph atlas,
