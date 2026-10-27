@@ -43,6 +43,10 @@ if command -v cargo-flamegraph >/dev/null 2>&1; then
     fi
     paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo "?")
     echo "perf could not record (perf_event_paranoid=$paranoid); using dtr's in-process profiler instead" >&2
+    if [ "${paranoid:-3}" -ge 2 ] 2>/dev/null; then
+        echo "to allow perf recording instead: sudo sysctl -w kernel.perf_event_paranoid=1" >&2
+        echo "(or give perf CAP_PERFMON: sudo setcap cap_perfmon+ep $(command -v perf))" >&2
+    fi
 fi
 
 echo "the text report and the flamegraph are written when the window closes" >&2
