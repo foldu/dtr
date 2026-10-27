@@ -9,7 +9,15 @@ use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Encode a winit key event for the session, if it produces any bytes.
+///
+/// Releases are dropped here rather than at the call site: a release event
+/// carries the same `logical_key` as its press (only `text` differs, and it
+/// falls back to the character), so encoding both sends every keystroke twice.
+/// That is exactly what "typing `ls` shows `lsls`" was.
 pub fn encode(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
+    if event.state != winit::event::ElementState::Pressed {
+        return None;
+    }
     encode_key(&event.logical_key, event.text.as_deref(), mods)
 }
 

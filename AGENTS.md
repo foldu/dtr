@@ -90,6 +90,11 @@ with no validation error and no log line. Solids now carry a negative uv and
 take their colour from the instance, and the shader branches. If a rectangle
 disappears, suspect the texture path before the blend state.
 
+**A key release carries the same `logical_key` as its press.** Only `text` differs,
+and `encode` falls back to the character when `text` is empty — so encoding every
+`KeyboardInput` sends each keystroke twice ("typing `ls` shows `lsls`"). `input::encode`
+drops anything whose state is not `Pressed`; do not move that check out.
+
 **Panes share one instance buffer, and queue writes land before submission.** A
 per-pane draw would rewrite the buffer between panes and the last pane would win;
 that is why `render::prepare` takes every visible pane at once. Cells outside a
