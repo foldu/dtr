@@ -343,6 +343,16 @@ in CI with no display server.
 - Scrollback + scroll wheel + selection/copy (`libghostty_vt::selection`, `fmt` for HTML copy).
 - `--replay <file>` transport and a golden-file test for byte→grid.
 
+**Status (2026-10-27):** the logbook and `--note` are in. A row is written when a session
+*starts*, so a crash leaves it without an end and `--logbook` shows it as `unfinished` rather than
+pretending it closed. Times are stored as instants and printed in UTC: formatting is a display
+concern, and the timezone is not the database's business. Building it exposed a bug worth more than
+the feature — a port that failed to open only logged on the pane thread, so the app kept running and
+recorded a clean exit for a session that never started; the pane now carries a fatal-error slot and
+the failure surfaces in 0.2 s, non-zero, with `error: …` in the row.
+
+Still open in M1: port picker with USB VID/PID, reconnect-on-replug, DTR/RTS/break, replay.
+
 ### M2 — real renderer
 
 - wgpu cell renderer behind `GridRenderer`: instanced bg + glyph quads, glyph atlas,

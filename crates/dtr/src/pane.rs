@@ -77,6 +77,26 @@ pub enum Transport {
     Demo,
 }
 
+impl Transport {
+    /// One line describing what a pane is attached to: the status bar and the
+    /// logbook both use it, so they cannot drift apart.
+    pub fn describe(&self) -> String {
+        match self {
+            Transport::Serial(config) => format!(
+                "{} {} 8N1{}",
+                config.port,
+                config.baud,
+                if config.cr_to_crlf { " cr=crlf" } else { "" }
+            ),
+            Transport::Shell(config) => match &config.program {
+                Some(program) => format!("shell {program}"),
+                None => "shell".to_owned(),
+            },
+            Transport::Demo => "demo".to_owned(),
+        }
+    }
+}
+
 /// Where bytes typed in the UI go.
 enum Sink {
     Serial(WriteHalf<tokio_serial::SerialStream>),
@@ -96,6 +116,9 @@ pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     stats: Arc<Stats>,
+    /// A fatal pane error. The pane thread owns the terminal, so a failure to
+    /// open a port happens out of sight; this is how it reaches the UI.
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl Pane {
@@ -105,12 +128,15 @@ impl Pane {
     /// the port and drives it.
     pub fn spawn(
         transport: Transport,
-        wake: impl Fn() + Send + 'static,
+        wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
         let published = Arc::clone(&latest);
         let stats = Arc::new(Stats::default());
         let counted = Arc::clone(&stats);
+        let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let failure = Arc::clone(&error);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         thread::Builder::new()
@@ -128,13 +154,30 @@ impl Pane {
                 };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    if let Err(err) = run(rx, published, wake, transport, counted).await {
+                    if let Err(err) = run(
+                        rx,
+                        published,
+                        Arc::clone(&wake),
+                        transport,
+                        counted,
+                    )
+                    .await
+                    {
                         tracing::error!(%err, "pane");
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(format!("{err}"));
+                        }
+                        wake();
                     }
                 });
             })?;
 
-        Ok(Self { latest, tx, stats })
+        Ok(Self {
+            latest,
+            tx,
+            stats,
+            error,
+        })
     }
 
     /// Take the newest frame, if the emulator produced one since the last call.
@@ -146,6 +189,11 @@ impl Pane {
         &self.stats
     }
 
+    /// The pane's fatal error, if it hit one.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|slot| slot.clone())
+    }
+
     /// Queue bytes for the emulator. Non-blocking; safe from the UI thread.
     pub fn write(&self, bytes: Vec<u8>) {
         let _ = self.tx.send(bytes);
@@ -155,7 +203,7 @@ impl Pane {
 async fn run(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     out: Arc<Mutex<Option<Frame>>>,
-    wake: impl Fn(),
+    wake: Arc<dyn Fn() + Send + Sync>,
     transport: Transport,
     stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
@@ -311,7 +359,7 @@ fn publish(
     rows: &mut RowIterator<'static>,
     cells: &mut CellIterator<'static>,
     out: &Mutex<Option<Frame>>,
-    wake: &impl Fn(),
+    wake: &Arc<dyn Fn() + Send + Sync>,
     force: bool,
 ) -> anyhow::Result<()> {
     let snapshot = state.update(term)?;

@@ -29,7 +29,7 @@ pub fn capture_headless(
     delay: std::time::Duration,
     send: Vec<u8>,
 ) -> anyhow::Result<()> {
-    let label = describe(&transport);
+    let label = transport.describe();
     let pane = Pane::spawn(transport, || {})?;
     if !send.is_empty() {
         pane.write(send);
@@ -40,9 +40,13 @@ pub fn capture_headless(
     std::thread::sleep(delay);
     let mut frame = pane.take_frame();
     if frame.is_none() {
-        // The pane may still be opening a port; wait for the first frame.
+        // The pane may still be opening a port; wait for the first frame, but
+        // not longer than it takes for the pane to report that it failed.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
+            if let Some(err) = pane.error() {
+                anyhow::bail!("{err}");
+            }
             if let Some(ready) = pane.take_frame() {
                 frame = Some(ready);
                 break;
@@ -70,7 +74,7 @@ pub(crate) fn instance() -> wgpu::Instance {
 pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
-    let label = describe(&transport);
+    let label = transport.describe();
 
     let pane = Pane::spawn(transport, move || {
         let _ = proxy.send_event(UserEvent::Frame);
@@ -87,9 +91,13 @@ pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
         modifiers: ModifiersState::empty(),
         label,
         meter: Meter::new(),
+        fatal: None,
     };
     event_loop.run_app(&mut app)?;
-    Ok(())
+    match app.fatal {
+        Some(err) => anyhow::bail!("{err}"),
+        None => Ok(()),
+    }
 }
 
 struct App {
@@ -99,6 +107,8 @@ struct App {
     modifiers: ModifiersState,
     label: String,
     meter: Meter,
+    /// Set when the pane fails; `run` returns it once the loop has stopped.
+    fatal: Option<String>,
 }
 
 /// Byte rate over a short window. Cheap, and it would look wrong if it updated
@@ -135,23 +145,6 @@ impl Meter {
     }
 }
 
-/// One line describing what this window is attached to.
-fn describe(transport: &Transport) -> String {
-    match transport {
-        Transport::Serial(config) => format!(
-            "{} {} 8N1{}",
-            config.port,
-            config.baud,
-            if config.cr_to_crlf { " cr=crlf" } else { "" }
-        ),
-        Transport::Shell(config) => match &config.program {
-            Some(program) => format!("shell {program}"),
-            None => "shell".to_owned(),
-        },
-        Transport::Demo => "demo".to_owned(),
-    }
-}
-
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
@@ -182,7 +175,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: UserEvent) {
+        if let Some(err) = self.pane.error() {
+            tracing::error!(%err, "pane failed");
+            self.fatal = Some(err);
+            event_loop.exit();
+            return;
+        }
         if let Some(frame) = self.pane.take_frame() {
             self.frame = Some(frame);
         }

@@ -2,6 +2,7 @@
 
 mod app;
 mod input;
+mod logbook;
 mod pane;
 mod pty;
 mod screenshot;
@@ -50,6 +51,14 @@ struct Args {
     /// Do not read or write remembered settings
     #[arg(long)]
     no_remember: bool,
+
+    /// Why this session happened; stored in the logbook
+    #[arg(long, value_name = "TEXT")]
+    note: Option<String>,
+
+    /// List recorded sessions and exit
+    #[arg(long)]
+    logbook: bool,
 
     /// Render one frame offscreen to a PNG and exit, without opening a window
     #[arg(long, value_name = "PATH")]
@@ -146,13 +155,69 @@ fn main() -> anyhow::Result<()> {
         })
     };
 
+    if args.logbook {
+        let Some(store) = store.as_ref() else {
+            anyhow::bail!("--logbook needs the state database; drop --no-remember");
+        };
+        return logbook::print(store);
+    }
+
     let send = args.send.as_deref().map(input::unescape).unwrap_or_default();
+
+    // A session is recorded when it starts, so a crash leaves a row with no
+    // end — which is exactly what `unfinished` in the listing means.
+    let session = match (store.as_ref(), &transport) {
+        (_, Transport::Demo) | (None, _) => None,
+        (Some(store), transport) => {
+            let mut record = dtr_store::SessionRecord {
+                label: transport.describe(),
+                note: args.note.clone(),
+                started_at: dtr_store::now_ms(),
+                ..dtr_store::SessionRecord::default()
+            };
+            if let Transport::Serial(config) = transport {
+                record.port = Some(config.port.clone());
+                record.baud = Some(config.baud);
+                record.imap = Some(if config.cr_to_crlf { "cr=crlf" } else { "none" }.to_owned());
+            }
+            match store.begin_session(&record) {
+                Ok(id) => Some(id),
+                Err(err) => {
+                    tracing::warn!(%err, "could not record the session");
+                    None
+                }
+            }
+        }
+    };
 
     if let Some(path) = args.screenshot.as_deref() {
         let (width, height) = parse_size(&args.size)?;
         let delay = std::time::Duration::from_millis(args.screenshot_delay);
-        return app::capture_headless(path, width, height, transport, delay, send);
+        let result = app::capture_headless(path, width, height, transport, delay, send);
+        finish(store.as_ref(), session, "screenshot", &result);
+        return result;
     }
 
-    app::run(transport, send)
+    let result = app::run(transport, send);
+    finish(store.as_ref(), session, "closed", &result);
+    result
+}
+
+/// Close the logbook row, whatever happened.
+fn finish(
+    store: Option<&dtr_store::Store>,
+    session: Option<u64>,
+    clean: &str,
+    result: &anyhow::Result<()>,
+) {
+    let (Some(store), Some(id)) = (store, session) else {
+        return;
+    };
+    let reason = match result {
+        Ok(()) => clean.to_owned(),
+        Err(err) => format!("error: {err}"),
+    };
+    if let Err(err) = store.end_session(id, dtr_store::now_ms(), &reason) {
+        tracing::warn!(%err, "could not close the logbook row");
+    }
 }
