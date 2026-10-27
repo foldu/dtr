@@ -5,6 +5,7 @@ mod input;
 mod logbook;
 mod modem;
 mod palette;
+mod render;
 mod pane;
 mod pty;
 mod screenshot;
@@ -25,9 +26,42 @@ use clap::Parser;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Non-interactive commands. They are real subcommands rather than more flat
+/// flags because `theme` is the start of a family (`list`, `cp` and `edit` are
+/// already in the memo) and a flag per verb would sprawl; the existing flat
+/// flags keep working unchanged.
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Work with theme files
+    Theme {
+        #[command(subcommand)]
+        action: ThemeAction,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ThemeAction {
+    /// Convert an iTerm2 .itermcolors file into a dtr theme
+    Import {
+        /// The .itermcolors file to read
+        file: PathBuf,
+
+        /// Theme name to write (default: the input file name without extension)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Overwrite an existing theme file
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "dtr", version, about = "A serial-first terminal")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Serial port path, e.g. /dev/ttyUSB0 or COM7
     #[arg(short, long)]
     port: Option<String>,
@@ -132,6 +166,28 @@ fn parse_size(size: &str) -> anyhow::Result<(u32, u32)> {
     Ok((w.trim().parse()?, h.trim().parse()?))
 }
 
+/// Run one non-interactive command and exit. These never open a terminal.
+fn run_command(command: Command) -> anyhow::Result<()> {
+    match command {
+        Command::Theme { action } => match action {
+            ThemeAction::Import { file, name, force } => {
+                let mut import = theme::import_itermcolors(&file)?;
+                // Alpha is the one thing the conversion has to throw away;
+                // say so instead of silently changing the colour.
+                for warning in &import.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                if let Some(name) = name {
+                    import.theme.name = name;
+                }
+                let path = theme::write_theme(&import.theme, force)?;
+                println!("wrote {}", path.display());
+            }
+        },
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -140,6 +196,10 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::debug!(?args, "starting");
+
+    if let Some(command) = args.command {
+        return run_command(command);
+    }
 
     let config_path = args.config.clone().unwrap_or_else(dtr_config::default_path);
     if args.config_path {

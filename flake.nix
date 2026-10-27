@@ -71,6 +71,8 @@
       };
       buildInputs = [
         pkgs.udev
+        pkgs.fontconfig
+        pkgs.freetype
         libghostty-vt.dev
         pkgs.vulkan-loader
         pkgs.libxkbcommon
@@ -83,7 +85,7 @@
       ];
       preBuild = ''
         # serialport enumerates through libudev, whose .pc lives in its dev output.
-        export PKG_CONFIG_PATH=${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig
+        export PKG_CONFIG_PATH=${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig:${pkgs.fontconfig.dev}/lib/pkgconfig:${pkgs.freetype.dev}/lib/pkgconfig
       '';
       nativeBuildInputs = [pkgs.pkg-config pkgs.makeWrapper];
 
@@ -174,7 +176,7 @@
       # reaches a new subsystem: serialport pulls cfgmgr32/combase/rpcrt4 for
       # device enumeration, portable-pty pulls oleaut32/shlwapi, and wgpu's GL
       # fallback pulls opengl32. A new entry here is worth a look, not a shrug.
-      allowed='^(api-ms-win-.*|kernel32|user32|gdi32|advapi32|ole32|oleaut32|shell32|shlwapi|dxgi|d3d12|d3dcompiler_47|setupapi|cfgmgr32|combase|rpcrt4|opengl32|ws2_32|bcrypt|bcryptprimitives|ntdll|msvcrt|userenv|uxtheme|dwmapi|imm32|comctl32|propsys|shcore)\.dll$'
+      allowed='^(api-ms-win-.*|kernel32|user32|gdi32|advapi32|ole32|oleaut32|shell32|shlwapi|dwrite|d2d1|dxgi|d3d12|d3dcompiler_47|setupapi|cfgmgr32|combase|rpcrt4|opengl32|ws2_32|bcrypt|bcryptprimitives|ntdll|msvcrt|userenv|uxtheme|dwmapi|imm32|comctl32|propsys|shcore)\.dll$'
       bad=$(objdump -p ${dtr-windows}/bin/dtr.exe \
         | awk '/DLL Name/ {print tolower($3)}' | sort -u | grep -vE "$allowed" || true)
       if [ -n "$bad" ]; then
@@ -192,6 +194,8 @@
         pkgs.zig_0_17
         pkgs.pkg-config
         pkgs.udev
+        pkgs.fontconfig
+        pkgs.freetype
         pkgs.socat
         pkgs.just
       ];
@@ -212,6 +216,7 @@
         libXi
         libXrandr
         udev
+        fontconfig
       ]);
     };
   };

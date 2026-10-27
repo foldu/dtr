@@ -20,10 +20,13 @@ egui-winit.workspace = true
 libghostty-vt.workspace = true
 mimalloc.workspace = true
 libghostty-vt-sys.workspace = true
+plist.workspace = true
 png.workspace = true
 pollster.workspace = true
 portable-pty.workspace = true
 redb.workspace = true
+fontique.workspace = true
+swash.workspace = true
 serialport.workspace = true
 tokio.workspace = true
 tokio-serial.workspace = true
@@ -31,6 +34,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 wgpu.workspace = true
 winit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 # Modem control lines are ioctls on the tty descriptor; Windows needs a
 # different API and does not have it yet.

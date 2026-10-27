@@ -39,7 +39,10 @@ pub fn capture(
         trace: wgpu::Trace::Off,
     }))?;
 
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    // The window renders to a non-sRGB target with the theme's bytes going
+    // straight through; capturing to an sRGB target would gamma-shift every
+    // colour and make the screenshot lie.
+    let format = wgpu::TextureFormat::Rgba8Unorm;
     let extent = wgpu::Extent3d {
         width,
         height,
@@ -92,13 +95,9 @@ pub fn capture(
             )
             .show(ui, |ui| crate::ui::status_bar(ui, &status, look));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.background)))
-            .show(ui, |ui| match frame {
-                Some(frame) => crate::ui::draw(ui, frame, look),
-                None => {
-                    ui.label("no frame yet");
-                }
-            });
+            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+            .show(ui, |_ui| {});
         palette.ui(ui, look);
     });
 
@@ -119,6 +118,38 @@ pub fn capture(
         label: Some("dtr-screenshot"),
     });
     let user_cmds = renderer.update_buffers(&device, &queue, &mut encoder, &clipped, &screen);
+
+    device.on_uncaptured_error(std::sync::Arc::new(|err: wgpu::Error| {
+        tracing::error!(%err, "wgpu validation");
+    }));
+    let mut grid = crate::render::GridRenderer::new(&device, &queue, format, look);
+    grid.prepare(&device, &queue, frame, look, width as f32, height as f32);
+    {
+        let mut pass = encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("grid"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(look.background[0]) / 255.0,
+                            g: f64::from(look.background[1]) / 255.0,
+                            b: f64::from(look.background[2]) / 255.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            })
+            .forget_lifetime();
+        grid.draw(&mut pass);
+    }
     {
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -128,7 +159,7 @@ pub fn capture(
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

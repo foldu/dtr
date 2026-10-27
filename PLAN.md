@@ -479,7 +479,46 @@ the owner's shape `theme = "kanagawa wave"` rather than a `[theme] name = ...` t
 `[theme.overrides]` table is not implemented, so `dtr config set` never needs to walk a three-level
 dotted path.
 
-### M2 — real renderer
+`dtr theme import <file> [--name NAME] [--force]` implements the importer that memo specifies. It is
+the first real subcommand rather than another flat flag, because `theme` is a family (`list`, `cp`,
+`edit` follow) and a flag per verb would sprawl; the existing flags are unchanged. The plist is read
+with `plist` — the memo's one sanctioned dependency — and converted by §6.2's rules verbatim:
+`round(c*255)`, the P3→sRGB matrix, and `Calibrated`/absent colour spaces left as sRGB. Alpha follows
+§6.3: ignored with one warning per file, except a translucent selection background, which is
+composited over the background; absent cursor and selection slots take §5.1's documented fallbacks.
+The name is the input file's stem, the output is `Theme::render()` at `<config>/dtr/themes/<name>`,
+and an existing file is refused unless `--force`. A real `.itermcolors` fixture in
+`crates/dtr/tests/fixtures/` round-trips through `Theme::parse` to the exact RGB bytes; alpha, missing
+keys, P3 conversion, a malformed colour key and the overwrite refusal have unit tests.
+
+### M2 — in progress
+
+**The grid is drawn by wgpu now, not by egui.** M0 painted one `text` call per non-empty cell; at 80×24
+that is 1920 layout passes a frame and bold/italic were whatever egui's single face could fake. The
+renderer is the thing a terminal actually is: a glyph atlas (R8, shelf-packed, 1024²) and one instanced
+draw call for the whole screen. Backgrounds and the cursor share that pipeline by sampling a single
+white texel at the atlas origin — one pipeline, one draw, no special cases.
+
+Cells are whole-pixel and glyphs land on integer offsets, because a fractional advance puts every glyph
+on a half-pixel and the entire screen looks out of focus; that was the difference between the first
+attempt and the screenshot that made it into the status report.
+
+Two bugs worth keeping: sampling the white texel at the *centre of the atlas* rather than the centre of
+texel (0,0) made every solid quad invisible with no validation error, and `queue.write_texture` on a
+1-pixel-wide atlas row is only valid because the row is a single texel.
+
+**The font comes from fontique** (system discovery, DirectWrite on Windows, fontconfig on Linux) with
+**swash** rasterising. That means a real system face — DejaVu Sans Mono here — instead of egui's bundled
+one, and `font.path` still wins when set. Bold and italic are the next slice: the atlas is keyed by
+glyph id and size, not by face, so the face selection has to come first.
+
+**Importing themes from iTerm2** (`dtr theme import <FILE> [--name] [--force]`) is done: `plist` parses
+the XML, the P3 matrix and the alpha policy come from `docs/themes.md` §6.2, and the output is a
+Ghostty-format theme in `dtr`'s own themes directory, so an imported theme and a hand-written one are
+indistinguishable afterwards. Names cannot escape the themes directory (`..` is rejected), and an
+existing file is only overwritten with `--force`.
+
+### M2 — the rest
 
 - wgpu cell renderer behind `GridRenderer`: instanced bg + glyph quads, glyph atlas,
   `egui_wgpu::CallbackTrait`, per-row dirty scissor.

@@ -25,6 +25,12 @@ pub struct Theme {
     pub foreground: Option<[u8; 3]>,
     pub background: Option<[u8; 3]>,
     pub cursor: Option<[u8; 3]>,
+    /// Text drawn over the cursor block; falls back to the background.
+    pub cursor_text: Option<[u8; 3]>,
+    /// Selection background; falls back to the foreground (inverse video).
+    pub selection_background: Option<[u8; 3]>,
+    /// Selection foreground; falls back to the background.
+    pub selection_foreground: Option<[u8; 3]>,
 }
 
 impl Theme {
@@ -35,6 +41,9 @@ impl Theme {
             foreground: None,
             background: None,
             cursor: None,
+            cursor_text: None,
+            selection_background: None,
+            selection_foreground: None,
         }
     }
 
@@ -113,6 +122,20 @@ impl Theme {
                     parse_colour(value)
                         .map_err(|err| Error::Line(number + 1, format!("cursor-color: {err}")))?,
                 ),
+                "cursor-text" | "cursor_text" => theme.cursor_text = Some(
+                    parse_colour(value)
+                        .map_err(|err| Error::Line(number + 1, format!("cursor-text: {err}")))?,
+                ),
+                "selection-background" | "selection_background" => {
+                    theme.selection_background = Some(parse_colour(value).map_err(|err| {
+                        Error::Line(number + 1, format!("selection-background: {err}"))
+                    })?)
+                }
+                "selection-foreground" | "selection_foreground" => {
+                    theme.selection_foreground = Some(parse_colour(value).map_err(|err| {
+                        Error::Line(number + 1, format!("selection-foreground: {err}"))
+                    })?)
+                }
                 // Everything else in a Ghostty theme file is about fonts,
                 // opacity or window chrome; ignoring it is what lets us read
                 // existing themes instead of demanding our own.
@@ -133,6 +156,15 @@ impl Theme {
         }
         if let Some(rgb) = self.cursor {
             out.push_str(&format!("cursor-color = {}\n", hex(rgb)));
+        }
+        if let Some(rgb) = self.cursor_text {
+            out.push_str(&format!("cursor-text = {}\n", hex(rgb)));
+        }
+        if let Some(rgb) = self.selection_background {
+            out.push_str(&format!("selection-background = {}\n", hex(rgb)));
+        }
+        if let Some(rgb) = self.selection_foreground {
+            out.push_str(&format!("selection-foreground = {}\n", hex(rgb)));
         }
         if self.palette.iter().any(Option::is_some) {
             out.push('\n');
@@ -155,14 +187,349 @@ fn parse_colour(value: &str) -> Result<[u8; 3], String> {
     Ok([rgb.r, rgb.g, rgb.b])
 }
 
+/// A theme converted from an iTerm2 `.itermcolors` file, and anything about the
+/// file the user should hear about (today: alpha that had to be thrown away).
+#[derive(Debug)]
+pub struct Import {
+    pub theme: Theme,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Slot {
+    Ansi(usize),
+    Background,
+    Foreground,
+    Cursor,
+    CursorText,
+    SelectionBackground,
+    SelectionForeground,
+}
+
+/// The keys the memo (§4.2) documents. Everything else in the plist — `Bold
+/// Color`, `Cursor Guide Color`, and the 81-key "dynamic colours" exports — is
+/// ignored rather than rejected; .itermcolors files carry more than a theme.
+const ITERM_SLOTS: [(&str, Slot); 22] = [
+    ("Ansi 0 Color", Slot::Ansi(0)),
+    ("Ansi 1 Color", Slot::Ansi(1)),
+    ("Ansi 2 Color", Slot::Ansi(2)),
+    ("Ansi 3 Color", Slot::Ansi(3)),
+    ("Ansi 4 Color", Slot::Ansi(4)),
+    ("Ansi 5 Color", Slot::Ansi(5)),
+    ("Ansi 6 Color", Slot::Ansi(6)),
+    ("Ansi 7 Color", Slot::Ansi(7)),
+    ("Ansi 8 Color", Slot::Ansi(8)),
+    ("Ansi 9 Color", Slot::Ansi(9)),
+    ("Ansi 10 Color", Slot::Ansi(10)),
+    ("Ansi 11 Color", Slot::Ansi(11)),
+    ("Ansi 12 Color", Slot::Ansi(12)),
+    ("Ansi 13 Color", Slot::Ansi(13)),
+    ("Ansi 14 Color", Slot::Ansi(14)),
+    ("Ansi 15 Color", Slot::Ansi(15)),
+    ("Background Color", Slot::Background),
+    ("Foreground Color", Slot::Foreground),
+    ("Cursor Color", Slot::Cursor),
+    ("Cursor Text Color", Slot::CursorText),
+    ("Selection Color", Slot::SelectionBackground),
+    ("Selected Text Color", Slot::SelectionForeground),
+];
+
+/// Read and convert one `.itermcolors` file.
+pub fn import_itermcolors(path: &Path) -> Result<Import, Error> {
+    let bytes =
+        std::fs::read(path).map_err(|err| Error::Io(path.to_path_buf(), err.to_string()))?;
+    import_itermcolors_bytes(path, &bytes)
+}
+
+/// Convert `.itermcolors` bytes. `path` supplies the theme name and every
+/// diagnostic, so it is named even though it need not exist on disk.
+pub fn import_itermcolors_bytes(path: &Path, bytes: &[u8]) -> Result<Import, Error> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes));
+    let value = value.map_err(|err| {
+        import_error(
+            path,
+            None,
+            format!("not an XML property list: {err}"),
+        )
+    })?;
+    let dictionary = value.as_dictionary().ok_or_else(|| {
+        import_error(
+            path,
+            None,
+            "the property list's top level is not a dictionary",
+        )
+    })?;
+    let name = name_from_path(path)?;
+
+    let mut ansi: [Option<[u8; 3]>; 16] = [None; 16];
+    let mut background = None;
+    let mut foreground = None;
+    let mut cursor = None;
+    let mut cursor_text = None;
+    let mut selection_background = None;
+    let mut selection_foreground = None;
+    // One warning for the whole file, not one per colour: the memo (§6.3) asks
+    // for that, and 22 warnings would bury the fact.
+    let mut alpha_keys: Vec<&str> = Vec::new();
+
+    for (key, slot) in ITERM_SLOTS {
+        let Some(value) = dictionary.get(key) else {
+            continue;
+        };
+        let (alpha, rgb) = iterm_colour(path, key, value)?;
+        match slot {
+            Slot::Ansi(index) => ansi[index] = Some(rgb),
+            Slot::Background => background = Some(rgb),
+            Slot::Foreground => foreground = Some(rgb),
+            Slot::Cursor => cursor = Some(rgb),
+            Slot::CursorText => cursor_text = Some(rgb),
+            Slot::SelectionBackground => selection_background = Some((alpha, rgb)),
+            Slot::SelectionForeground => selection_foreground = Some(rgb),
+        }
+        // The selection background is the one slot whose alpha is honoured
+        // (composited below), so it is not reported as ignored.
+        if alpha < 1.0 && !matches!(slot, Slot::SelectionBackground) {
+            alpha_keys.push(key);
+        }
+    }
+
+    // A theme without these is not a theme. ANSI 0..15, background and
+    // foreground are required by the file format dtr reads (§8.1); the six
+    // optional slots fall back below.
+    let background = background.ok_or_else(|| {
+        import_error(path, Some("Background Color"), "missing from the file")
+    })?;
+    let foreground = foreground.ok_or_else(|| {
+        import_error(path, Some("Foreground Color"), "missing from the file")
+    })?;
+    for (index, entry) in ansi.iter().enumerate() {
+        if entry.is_none() {
+            let key = format!("Ansi {index} Color");
+            return Err(import_error(
+                path,
+                Some(&key),
+                "missing from the file",
+            ));
+        }
+    }
+    let palette = ansi;
+
+    // §5.1's documented fallbacks. Cursor text is the background because the
+    // cursor sits on a cell that colour; the selection pair is the same
+    // inversion, which stays legible for light and dark themes alike.
+    let cursor = cursor.unwrap_or(foreground);
+    let cursor_text = cursor_text.unwrap_or(background);
+    let selection_background = match selection_background {
+        Some((alpha, rgb)) if alpha < 1.0 => composite(rgb, alpha, background),
+        Some((_, rgb)) => rgb,
+        None => foreground,
+    };
+    let selection_foreground = selection_foreground.unwrap_or(background);
+
+    let mut warnings = Vec::new();
+    if !alpha_keys.is_empty() {
+        let keys = alpha_keys
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warnings.push(format!(
+            "{}: ignoring alpha below 1.0 on {keys}; dtr themes are opaque",
+            path.display()
+        ));
+    }
+
+    Ok(Import {
+        theme: Theme {
+            name,
+            palette,
+            foreground: Some(foreground),
+            background: Some(background),
+            cursor: Some(cursor),
+            cursor_text: Some(cursor_text),
+            selection_background: Some(selection_background),
+            selection_foreground: Some(selection_foreground),
+        },
+        warnings,
+    })
+}
+
+/// One iTerm2 colour dictionary: three components, a colour space and an
+/// optional alpha. Returns the alpha and the 8-bit sRGB colour.
+fn iterm_colour(path: &Path, key: &str, value: &plist::Value) -> Result<(f64, [u8; 3]), Error> {
+    let dictionary = value
+        .as_dictionary()
+        .ok_or_else(|| import_error(path, Some(key), "expected a colour dictionary"))?;
+
+    let mut components = [0.0; 3];
+    for (index, name) in ["Red Component", "Green Component", "Blue Component"]
+        .iter()
+        .enumerate()
+    {
+        let value = dictionary
+            .get(name)
+            .ok_or_else(|| import_error(path, Some(key), format!("missing {name:?}")))?;
+        components[index] = number(value)
+            .ok_or_else(|| import_error(path, Some(key), format!("{name:?} is not a number")))?;
+    }
+
+    // §6.2: only P3 is converted. `Calibrated` is treated as sRGB — wrong in
+    // principle, but what every converter in this ecosystem does (26 of 1012
+    // colour dictionaries measured), and the alternative is worse.
+    let space = dictionary
+        .get("Color Space")
+        .and_then(plist::Value::as_string)
+        .unwrap_or("");
+    let rgb = if space == "P3" {
+        p3_to_srgb(components)
+    } else {
+        components
+    };
+
+    let alpha = match dictionary.get("Alpha Component") {
+        Some(value) => number(value).ok_or_else(|| {
+            import_error(path, Some(key), "\"Alpha Component\" is not a number")
+        })?,
+        None => 1.0,
+    };
+
+    Ok((alpha, rgb.map(component_to_byte)))
+}
+
+/// plist reals are the documented shape; integers are accepted too because
+/// iTerm2 itself is not consistent about which it writes.
+fn number(value: &plist::Value) -> Option<f64> {
+    value
+        .as_real()
+        .or_else(|| value.as_signed_integer().map(|number| number as f64))
+        .or_else(|| value.as_unsigned_integer().map(|number| number as f64))
+}
+
+/// §6.2's measured rule: round, do not truncate. `0.0353` is 9/255 and must
+/// come back as 9, which only rounding gives.
+fn component_to_byte(component: f64) -> u8 {
+    (component * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// The P3 → sRGB matrix from §6.2 (the hub's own `_p3_to_srgb`).
+const P3_TO_SRGB: [[f64; 3]; 3] = [
+    [1.22494018, -0.22469880, -0.00012973],
+    [-0.04205631, 1.04203282, -0.00000601],
+    [-0.01963755, -0.07862814, 1.09826365],
+];
+
+fn srgb_to_linear(component: f64) -> f64 {
+    if component < 0.04045 {
+        component / 12.92
+    } else {
+        ((component + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(component: f64) -> f64 {
+    if component < 0.0031308 {
+        12.92 * component
+    } else {
+        1.055 * component.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn p3_to_srgb(rgb: [f64; 3]) -> [f64; 3] {
+    let linear = rgb.map(srgb_to_linear);
+    let converted = [
+        P3_TO_SRGB[0][0] * linear[0]
+            + P3_TO_SRGB[0][1] * linear[1]
+            + P3_TO_SRGB[0][2] * linear[2],
+        P3_TO_SRGB[1][0] * linear[0]
+            + P3_TO_SRGB[1][1] * linear[1]
+            + P3_TO_SRGB[1][2] * linear[2],
+        P3_TO_SRGB[2][0] * linear[0]
+            + P3_TO_SRGB[2][1] * linear[1]
+            + P3_TO_SRGB[2][2] * linear[2],
+    ];
+    converted.map(|component| linear_to_srgb(component.clamp(0.0, 1.0)))
+}
+
+/// §6.3's approximation for a translucent selection background: composite it
+/// over the theme background so a solid colour does not look wrong. iTerm2's
+/// actual drawing is more involved; this is the documented simplification.
+fn composite(colour: [u8; 3], alpha: f64, background: [u8; 3]) -> [u8; 3] {
+    std::array::from_fn(|index| {
+        let mixed = alpha * colour[index] as f64 + (1.0 - alpha) * background[index] as f64;
+        mixed.round().clamp(0.0, 255.0) as u8
+    })
+}
+
+fn import_error(path: &Path, colour: Option<&str>, message: impl Into<String>) -> Error {
+    Error::ItmColors {
+        path: path.to_path_buf(),
+        colour: colour.map(str::to_owned),
+        message: message.into(),
+    }
+}
+
+/// The theme name is the input file's name without its extension: iTerm2 names
+/// its exports `Dracula.itermcolors`, and Ghostty theme names carry no
+/// extension.
+fn name_from_path(path: &Path) -> Result<String, Error> {
+    let name = path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            import_error(
+                path,
+                None,
+                "cannot derive a theme name from the file name; pass --name",
+            )
+        })?;
+    check_name(name)?;
+    Ok(name.to_owned())
+}
+
+fn check_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(Error::InvalidName(name.to_owned()));
+    }
+    Ok(())
+}
+
+/// Where `dtr theme import` writes: dtr's own themes directory, the first
+/// search path, so an imported theme beats a package-managed copy of the name.
+pub fn themes_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|config| config.join("dtr").join("themes"))
+}
+
+/// Write a theme into dtr's own themes directory, creating it if needed.
+pub fn write_theme(theme: &Theme, force: bool) -> Result<PathBuf, Error> {
+    let directory = themes_dir().ok_or(Error::NoConfigDir)?;
+    write_theme_to(&directory, theme, force)
+}
+
+fn write_theme_to(directory: &Path, theme: &Theme, force: bool) -> Result<PathBuf, Error> {
+    check_name(&theme.name)?;
+    let path = directory.join(&theme.name);
+    // `symlink_metadata` also catches a dangling symlink, which `exists` does
+    // not; writing through one could put the file somewhere unexpected.
+    if !force && path.symlink_metadata().is_ok() {
+        return Err(Error::Exists(path));
+    }
+    std::fs::create_dir_all(directory)
+        .map_err(|err| Error::Io(directory.to_path_buf(), err.to_string()))?;
+    std::fs::write(&path, theme.render()).map_err(|err| Error::Io(path.clone(), err.to_string()))?;
+    Ok(path)
+}
+
 /// Where themes are looked for, most specific first.
 ///
 /// The Ghostty directory is last: reading themes the user already has is the
 /// point, but our own directory wins if a name exists in both.
 pub fn search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    if let Some(themes) = themes_dir() {
+        paths.push(themes);
+    }
     if let Some(config) = dirs::config_dir() {
-        paths.push(config.join("dtr").join("themes"));
         paths.push(config.join("ghostty").join("themes"));
     }
     if let Some(data) = dirs::data_dir() {
@@ -227,10 +594,10 @@ pub fn names() -> Vec<String> {
             continue;
         };
         for entry in entries.flatten() {
-            if entry.path().is_file() {
-                if let Some(name) = entry.file_name().to_str() {
-                    names.push(name.to_owned());
-                }
+            if entry.path().is_file()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                names.push(name.to_owned());
             }
         }
     }
@@ -247,6 +614,17 @@ pub enum Error {
     },
     Io(PathBuf, String),
     Line(usize, String),
+    /// An `.itermcolors` file that cannot be converted. `colour` is the
+    /// offending top-level key when there is one, so the message can point at
+    /// it rather than only at the file.
+    ItmColors {
+        path: PathBuf,
+        colour: Option<String>,
+        message: String,
+    },
+    Exists(PathBuf),
+    InvalidName(String),
+    NoConfigDir,
 }
 
 impl fmt::Display for Error {
@@ -261,6 +639,30 @@ impl fmt::Display for Error {
             }
             Error::Io(path, message) => write!(formatter, "{}: {message}", path.display()),
             Error::Line(number, message) => write!(formatter, "line {number}: {message}"),
+            Error::ItmColors {
+                path,
+                colour,
+                message,
+            } => match colour {
+                Some(colour) => write!(
+                    formatter,
+                    "{}: colour {colour:?}: {message}",
+                    path.display()
+                ),
+                None => write!(formatter, "{}: {message}", path.display()),
+            },
+            Error::Exists(path) => write!(
+                formatter,
+                "{} already exists; pass --force to overwrite it",
+                path.display()
+            ),
+            Error::InvalidName(name) => write!(
+                formatter,
+                "theme name {name:?} must be a bare file name with no path separators"
+            ),
+            Error::NoConfigDir => {
+                write!(formatter, "no config directory found to write themes into")
+            }
         }
     }
 }
@@ -269,7 +671,12 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
-    use super::Theme;
+    use super::{Error, Theme, import_itermcolors_bytes, write_theme_to};
+    use std::path::Path;
+
+    /// A real iTerm2 export: the Dracula scheme, reduced to the keys the
+    /// importer reads plus the two it must ignore.
+    const DRACULA: &str = include_str!("../tests/fixtures/Dracula.itermcolors");
 
     const WAVE: &str = r#"
 # Kanagawa Wave
@@ -327,5 +734,292 @@ palette = 15=#dcd7ba
         let original = Theme::parse("kanagawa wave", WAVE).unwrap();
         let again = Theme::parse("kanagawa wave", &original.render()).unwrap();
         assert_eq!(original, again);
+    }
+
+    /// One `<key>… Color</key><dict>` per colour: `(name, r, g, b, alpha, space)`.
+    type Entry = (&'static str, f64, f64, f64, f64, &'static str);
+
+    const ANSI_KEYS: [&str; 16] = [
+        "Ansi 0 Color",
+        "Ansi 1 Color",
+        "Ansi 2 Color",
+        "Ansi 3 Color",
+        "Ansi 4 Color",
+        "Ansi 5 Color",
+        "Ansi 6 Color",
+        "Ansi 7 Color",
+        "Ansi 8 Color",
+        "Ansi 9 Color",
+        "Ansi 10 Color",
+        "Ansi 11 Color",
+        "Ansi 12 Color",
+        "Ansi 13 Color",
+        "Ansi 14 Color",
+        "Ansi 15 Color",
+    ];
+
+    /// A complete, unremarkable file: every slot the importer reads is present.
+    fn entries() -> Vec<Entry> {
+        let mut entries: Vec<Entry> = ANSI_KEYS
+            .iter()
+            .map(|key| (*key, 0.1, 0.2, 0.3, 1.0, "sRGB"))
+            .collect();
+        entries.extend([
+            ("Background Color", 0.1569, 0.1647, 0.2118, 1.0, "sRGB"),
+            ("Foreground Color", 0.9725, 0.9725, 0.9490, 1.0, "sRGB"),
+            ("Cursor Color", 0.9725, 0.9725, 0.9490, 1.0, "sRGB"),
+            ("Cursor Text Color", 0.1569, 0.1647, 0.2118, 1.0, "sRGB"),
+            ("Selection Color", 0.2667, 0.2784, 0.3529, 1.0, "sRGB"),
+            ("Selected Text Color", 1.0, 1.0, 1.0, 1.0, "sRGB"),
+        ]);
+        entries
+    }
+
+    fn plist(entries: &[Entry]) -> String {
+        let mut out = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n<dict>\n",
+        );
+        for &(name, red, green, blue, alpha, space) in entries {
+            out.push_str(&format!(
+                "\t<key>{name}</key>\n\t<dict>\n\
+                 \t\t<key>Alpha Component</key><real>{alpha}</real>\n\
+                 \t\t<key>Blue Component</key><real>{blue}</real>\n\
+                 \t\t<key>Color Space</key><string>{space}</string>\n\
+                 \t\t<key>Green Component</key><real>{green}</real>\n\
+                 \t\t<key>Red Component</key><real>{red}</real>\n\
+                 \t</dict>\n"
+            ));
+        }
+        out.push_str("</dict>\n</plist>\n");
+        out
+    }
+
+    #[test]
+    fn an_itermcolors_file_round_trips_to_the_exact_bytes() {
+        let import =
+            import_itermcolors_bytes(Path::new("Dracula.itermcolors"), DRACULA.as_bytes())
+                .expect("import");
+        assert!(
+            import.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            import.warnings
+        );
+        let theme = import.theme;
+
+        assert_eq!(theme.name, "Dracula");
+        assert_eq!(
+            theme.palette,
+            [
+                Some([0x21, 0x22, 0x2c]),
+                Some([0xff, 0x55, 0x55]),
+                Some([0x50, 0xfa, 0x7b]),
+                Some([0xf1, 0xfa, 0x8c]),
+                Some([0xbd, 0x93, 0xf9]),
+                Some([0xff, 0x79, 0xc6]),
+                Some([0x8b, 0xe9, 0xfd]),
+                Some([0xf8, 0xf8, 0xf2]),
+                Some([0x62, 0x72, 0xa4]),
+                Some([0xff, 0x6e, 0x6e]),
+                Some([0x69, 0xff, 0x94]),
+                Some([0xff, 0xff, 0xa5]),
+                Some([0xd6, 0xac, 0xff]),
+                Some([0xff, 0x92, 0xdf]),
+                Some([0xa4, 0xff, 0xff]),
+                Some([0xff, 0xff, 0xff]),
+            ]
+        );
+        assert_eq!(theme.background, Some([0x28, 0x2a, 0x36]));
+        assert_eq!(theme.foreground, Some([0xf8, 0xf8, 0xf2]));
+        assert_eq!(theme.cursor, Some([0xf8, 0xf8, 0xf2]));
+        assert_eq!(theme.cursor_text, Some([0x28, 0x2a, 0x36]));
+        assert_eq!(theme.selection_background, Some([0x44, 0x47, 0x5a]));
+        assert_eq!(theme.selection_foreground, Some([0xff, 0xff, 0xff]));
+
+        // The written file is the one dtr reads: render, re-parse, equal.
+        let written = theme.render();
+        let again = Theme::parse(&theme.name, &written).expect("re-parse");
+        assert_eq!(again, theme);
+        assert!(written.contains("palette = 0=#21222c"), "{written}");
+        assert!(written.contains("cursor-text = #282a36"), "{written}");
+        assert!(
+            written.contains("selection-background = #44475a"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn the_theme_name_is_the_file_name_without_its_extension() {
+        let import = import_itermcolors_bytes(
+            Path::new("kanagawa wave.itermcolors"),
+            DRACULA.as_bytes(),
+        )
+        .expect("import");
+        assert_eq!(import.theme.name, "kanagawa wave");
+    }
+
+    #[test]
+    fn alpha_is_ignored_but_reported_once_per_file() {
+        let mut entries = entries();
+        for entry in &mut entries {
+            if entry.0 == "Ansi 3 Color" {
+                *entry = ("Ansi 3 Color", 0.5, 0.25, 0.75, 0.5, "sRGB");
+            }
+            if entry.0 == "Ansi 9 Color" {
+                *entry = ("Ansi 9 Color", 1.0, 0.0, 0.0, 0.25, "sRGB");
+            }
+        }
+        let import =
+            import_itermcolors_bytes(Path::new("Faded.itermcolors"), plist(&entries).as_bytes())
+                .expect("import");
+
+        // §6.2/§6.3: alpha is ignored, so the RGB components are unchanged:
+        // 0.5*255 rounds to 128, 0.25*255 to 64, 0.75*255 to 191.
+        assert_eq!(import.theme.palette[3], Some([128, 64, 191]));
+        assert_eq!(import.theme.palette[9], Some([255, 0, 0]));
+
+        // Not silently dropped: one warning for the file, naming it and both
+        // colours whose alpha had to go.
+        assert_eq!(import.warnings.len(), 1, "{:?}", import.warnings);
+        let warning = &import.warnings[0];
+        assert!(warning.contains("Faded.itermcolors"), "{warning}");
+        assert!(warning.contains("Ansi 3 Color"), "{warning}");
+        assert!(warning.contains("Ansi 9 Color"), "{warning}");
+    }
+
+    #[test]
+    fn a_translucent_selection_background_is_composited_over_the_background() {
+        let mut entries = entries();
+        for entry in &mut entries {
+            if entry.0 == "Selection Color" {
+                *entry = ("Selection Color", 1.0, 1.0, 1.0, 0.25, "sRGB");
+            }
+        }
+        let import =
+            import_itermcolors_bytes(Path::new("Faded.itermcolors"), plist(&entries).as_bytes())
+                .expect("import");
+
+        // Background is (40, 42, 54); 0.25*255 + 0.75*background rounds to
+        // (94, 95, 104).
+        assert_eq!(
+            import.theme.selection_background,
+            Some([94, 95, 104]),
+            "§6.3 composites selection alpha over the background"
+        );
+        // That alpha was honoured, so it is not reported as ignored.
+        assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    }
+
+    #[test]
+    fn missing_optional_colours_use_the_documented_fallbacks() {
+        let optional = [
+            "Cursor Color",
+            "Cursor Text Color",
+            "Selection Color",
+            "Selected Text Color",
+        ];
+        let entries: Vec<Entry> = entries()
+            .into_iter()
+            .filter(|entry| !optional.contains(&entry.0))
+            .collect();
+        let import =
+            import_itermcolors_bytes(Path::new("Sparse.itermcolors"), plist(&entries).as_bytes())
+                .expect("a missing cursor must not fail the import");
+
+        assert_eq!(import.theme.cursor, import.theme.foreground);
+        assert_eq!(import.theme.cursor_text, import.theme.background);
+        assert_eq!(import.theme.selection_background, import.theme.foreground);
+        assert_eq!(import.theme.selection_foreground, import.theme.background);
+        assert_eq!(import.theme.cursor, Some([0xf8, 0xf8, 0xf2]));
+        assert_eq!(import.theme.cursor_text, Some([0x28, 0x2a, 0x36]));
+    }
+
+    #[test]
+    fn p3_colours_are_converted_through_the_memo_matrix() {
+        let mut entries = entries();
+        for entry in &mut entries {
+            if entry.0 == "Ansi 1 Color" {
+                *entry = ("Ansi 1 Color", 0.9, 0.2, 0.1, 1.0, "P3");
+            }
+            // "Calibrated" is not converted, per §6.2.
+            if entry.0 == "Ansi 2 Color" {
+                *entry = ("Ansi 2 Color", 0.1, 0.2, 0.3, 1.0, "Calibrated");
+            }
+        }
+        let import =
+            import_itermcolors_bytes(Path::new("Wide.itermcolors"), plist(&entries).as_bytes())
+                .expect("import");
+
+        assert_eq!(import.theme.palette[1], Some([250, 5, 0]));
+        assert_eq!(import.theme.palette[2], Some([26, 51, 77]));
+    }
+
+    #[test]
+    fn a_broken_colour_names_the_file_and_the_key() {
+        const BROKEN: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <key>Ansi 2 Color</key>
+    <dict>
+        <key>Red Component</key><real>1</real>
+        <key>Blue Component</key><real>0.5</real>
+        <key>Color Space</key><string>sRGB</string>
+    </dict>
+</dict>
+</plist>
+"#;
+        let error = import_itermcolors_bytes(Path::new("Broken.itermcolors"), BROKEN.as_bytes())
+            .expect_err("an incomplete colour must not import")
+            .to_string();
+        assert!(error.contains("Broken.itermcolors"), "{error}");
+        assert!(error.contains("Ansi 2 Color"), "{error}");
+        assert!(error.contains("Green Component"), "{error}");
+    }
+
+    #[test]
+    fn import_writes_a_theme_and_refuses_to_overwrite_without_force() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let theme = import_itermcolors_bytes(
+            Path::new("Dracula.itermcolors"),
+            DRACULA.as_bytes(),
+        )
+        .expect("import")
+        .theme;
+
+        let path = write_theme_to(directory.path(), &theme, false).expect("write");
+        assert_eq!(path, directory.path().join("Dracula"));
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(written, theme.render());
+        assert_eq!(
+            Theme::parse("Dracula", &written).expect("parse"),
+            theme,
+            "the written file is a theme dtr can load"
+        );
+
+        match write_theme_to(directory.path(), &theme, false) {
+            Err(Error::Exists(existing)) => assert_eq!(existing, path),
+            other => panic!("expected an existing-file refusal, got {other:?}"),
+        }
+        write_theme_to(directory.path(), &theme, true).expect("--force overwrites");
+    }
+
+    #[test]
+    fn a_theme_name_cannot_escape_the_themes_directory() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut theme = import_itermcolors_bytes(
+            Path::new("Dracula.itermcolors"),
+            DRACULA.as_bytes(),
+        )
+        .expect("import")
+        .theme;
+        theme.name = "../escape".to_owned();
+
+        match write_theme_to(directory.path(), &theme, true) {
+            Err(Error::InvalidName(name)) => assert_eq!(name, "../escape"),
+            other => panic!("expected a name rejection, got {other:?}"),
+        }
+        assert!(!directory.path().join("escape").exists());
     }
 }

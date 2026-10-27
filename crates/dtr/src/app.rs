@@ -426,6 +426,7 @@ struct Gpu {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    grid: crate::render::GridRenderer,
 }
 
 impl Gpu {
@@ -485,6 +486,7 @@ impl Gpu {
             config.format,
             egui_wgpu::RendererOptions::default(),
         );
+        let grid = crate::render::GridRenderer::new(&device, &queue, config.format, look);
 
         Ok(Self {
             window,
@@ -495,6 +497,7 @@ impl Gpu {
             egui_ctx,
             egui_state,
             egui_renderer,
+            grid,
         })
     }
 
@@ -542,13 +545,8 @@ impl Gpu {
                 )
                 .show(ui, |ui| crate::ui::status_bar(ui, status, look));
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.background)))
-                .show(ui, |ui| match frame {
-                    Some(frame) => crate::ui::draw(ui, frame, look),
-                    None => {
-                        ui.label("waiting for the pane…");
-                    }
-                });
+                .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                .show(ui, |_ui| {});
                 if let Some(chosen) = palette.ui(ui, look) {
                     *action = Some(chosen);
                 }
@@ -610,6 +608,43 @@ impl Gpu {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.grid.prepare(
+            &self.device,
+            &self.queue,
+            frame,
+            look,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("grid"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: f64::from(look.background[0]) / 255.0,
+                                g: f64::from(look.background[1]) / 255.0,
+                                b: f64::from(look.background[2]) / 255.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            self.grid.draw(&mut pass);
+        }
+
         {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -619,7 +654,8 @@ impl Gpu {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            // Keep the grid underneath.
+                            load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
                         },
                     })],
