@@ -99,28 +99,14 @@ jobs:
           retention-days: 14
 
   test:
-    name: cargo test
+    name: tests
     runs-on: ubuntu-24.04
-    # `nix develop --command cargo test` is trivial to invoke but it is a full
-    # Rust compile of the workspace (dtr pulls in wgpu/egui), not a second *Nix*
-    # build: the devShell's store paths come from the cache above. Without the
-    # cargo cache below that compile would happen cold on every run, which is
-    # why the target directory is cached separately (debuginfo is disabled to
-    # keep it small). It runs in parallel with `windows`, so it adds no time to
-    # the critical path, and the unit tests in crates/dtr cover
-    # pane/transport/key-mapping logic the artifact alone cannot check. Drop
-    # this job if CI minutes or the 10 GB cache budget matter more.
+    # A Nix check now, not a cargo cache hack: `checks.tests` shares the
+    # crane-compiled dependency set with `.#dtr`, so CI and a local build agree
+    # and the binary cache does the caching. It runs in parallel with `windows`.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
-
-      - name: Cache cargo build artifacts
-        uses: actions/cache@v6.1.0
-        with:
-          path: target
-          key: cargo-test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-test-${{ runner.os }}-
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v23
@@ -136,12 +122,8 @@ jobs:
           use-flakehub: "false"
           diagnostic-endpoint: ""
 
-      - name: cargo test
-        env:
-          # Tests do not need debug symbols; this roughly halves the cache.
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: nix develop --command cargo test --locked --workspace
+      - name: tests
+        run: nix build .#checks.x86_64-linux.tests
 
   # Optional and deliberately isolated: a release upload failure must never
   # turn a green build red. Tag pushes only; `continue-on-error` keeps the

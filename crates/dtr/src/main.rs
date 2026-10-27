@@ -478,3 +478,5 @@ fn finish(
         tracing::warn!(%err, "could not close the logbook row");
     }
 }
+
+// timing probe

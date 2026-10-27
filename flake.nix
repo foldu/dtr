@@ -6,11 +6,17 @@
     url = "github:oxalica/rust-overlay";
     inputs.nixpkgs.follows = "nixpkgs";
   };
+  # crane splits the build in two: dependencies compile once into
+  # `cargoArtifacts`, and a source-only change recompiles just our crates.
+  # With buildRustPackage every edit rebuilt the whole dependency graph, which
+  # is minutes of waiting per keystroke-sized change.
+  inputs.crane.url = "github:ipetkov/crane";
 
   outputs = {
     self,
     nixpkgs,
     rust-overlay,
+    crane,
   }: let
     system = "x86_64-linux";
     pkgs = import nixpkgs {
@@ -55,20 +61,17 @@
       ];
     };
 
-    dtr = pkgs.rustPlatform.buildRustPackage {
+    rustHost = pkgs.rust-bin.stable.latest.default;
+    craneLib = (crane.mkLib pkgs).overrideToolchain rustHost;
+
+    # Everything the two halves of the build agree on. `cargoArtifacts` is
+    # keyed on the *dependencies*, so editing `crates/dtr` reuses the compiled
+    # graph and only recompiles the crates that changed.
+    cargoCommon = {
+      inherit src;
       pname = "dtr";
       version = "0.1.0";
-      src = src;
-      buildAndTestSubdir = "crates/dtr";
-      # Git dependencies need explicit output hashes; both crates come from
-      # the same checkout, so they share one. Update on wrapper bumps.
-      cargoLock = {
-        lockFile = ./Cargo.lock;
-        outputHashes = {
-          "libghostty-vt-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
-          "libghostty-vt-sys-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
-        };
-      };
+      strictDeps = true;
       buildInputs = [
         pkgs.udev
         pkgs.fontconfig
@@ -83,19 +86,39 @@
         pkgs.libXi
         pkgs.libXrandr
       ];
-      preBuild = ''
-        # serialport enumerates through libudev, whose .pc lives in its dev output.
-        export PKG_CONFIG_PATH=${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig:${pkgs.fontconfig.dev}/lib/pkgconfig:${pkgs.freetype.dev}/lib/pkgconfig
-      '';
       nativeBuildInputs = [pkgs.pkg-config pkgs.makeWrapper];
+      # serialport enumerates through libudev, whose .pc lives in its dev output.
+      PKG_CONFIG_PATH = lib.makeSearchPath "share/pkgconfig" [libghostty-vt.dev]
+        + ":" + lib.makeSearchPath "lib/pkgconfig" [pkgs.udev.dev pkgs.fontconfig.dev pkgs.freetype.dev];
+      # Vendored once, shared by the dependency build and the package build.
+      # crane fetches the git dependency at the revision Cargo.lock pins; that
+      # revision, not a store hash, is what makes it reproducible here — crane
+      # keys output hashes by lock source, so importCargoLock's crate-keyed
+      # verification cannot be reused with it.
+      cargoVendorDir = craneLib.vendorCargoDeps {
+        inherit src;
+      };
+    };
 
-      # winit and wgpu-hal resolve these with dlopen, so they never appear as
-      # DT_NEEDED entries and no rpath can reach them. A wrapper is the only
-      # thing that works for dlopened libraries.
-      postInstall = ''
-        mv $out/bin/dtr $out/bin/.dtr-unwrapped
-        makeWrapper $out/bin/.dtr-unwrapped $out/bin/dtr \
-          --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath (with pkgs; [
+    # Built once per dependency set; this is the half that used to run on every
+    # edit. `cargoArtifacts` is a plain derivation, so it caches in the store and
+    # in the binary cache like anything else.
+    dtrDeps = craneLib.buildDepsOnly (cargoCommon // {pname = "dtr-deps";});
+
+    dtr = craneLib.buildPackage (cargoCommon
+      // {
+        cargoArtifacts = dtrDeps;
+        # Tests are their own check: `nix build .#dtr` is what you run twenty
+        # times an hour, and it should not wait for the whole suite.
+        doCheck = false;
+
+        # winit and wgpu-hal resolve these with dlopen, so they never appear as
+        # DT_NEEDED entries and no rpath can reach them. A wrapper is the only
+        # thing that works for dlopened libraries.
+        postInstall = ''
+          mv $out/bin/dtr $out/bin/.dtr-unwrapped
+          makeWrapper $out/bin/.dtr-unwrapped $out/bin/dtr \
+            --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath (with pkgs; [
           wayland
           libxkbcommon
           vulkan-loader
@@ -106,9 +129,9 @@
           libXi
           libXrandr
         ])} \
-          --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib
-      '';
-    };
+            --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib
+        '';
+      });
 
     dtr-windows = pkgs.stdenv.mkDerivation {
       pname = "dtr";
@@ -116,6 +139,8 @@
       src = src;
       cargoDeps = pkgs.rustPlatform.importCargoLock {
         lockFile = ./Cargo.lock;
+        # Git dependencies need explicit hashes; both crates come from the same
+        # checkout, so they share one. Update on wrapper bumps.
         outputHashes = {
           "libghostty-vt-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
           "libghostty-vt-sys-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
@@ -169,9 +194,16 @@
       default = dtr;
     };
 
-    checks.${system}.single-exe = pkgs.runCommand "dtr-single-exe" {
-      nativeBuildInputs = [pkgs.binutils];
-    } ''
+    checks.${system} = {
+      tests = craneLib.cargoTest (cargoCommon
+        // {
+          cargoArtifacts = dtrDeps;
+          cargoTestExtraArgs = "--workspace";
+        });
+
+      single-exe = pkgs.runCommand "dtr-single-exe" {
+        nativeBuildInputs = [pkgs.binutils];
+      } ''
       # Every one of these ships with Windows. The list grows when a dependency
       # reaches a new subsystem: serialport pulls cfgmgr32/combase/rpcrt4 for
       # device enumeration, portable-pty pulls oleaut32/shlwapi, and wgpu's GL
@@ -184,8 +216,9 @@
         echo "$bad" >&2
         exit 1
       fi
-      touch $out
-    '';
+        touch $out
+      '';
+    };
 
     devShells.${system}.default = pkgs.mkShell {
       packages = [
