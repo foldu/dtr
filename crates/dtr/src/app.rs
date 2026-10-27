@@ -28,9 +28,10 @@ pub fn capture_headless(
     transport: Transport,
     delay: std::time::Duration,
     send: Vec<u8>,
+    log: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let label = transport.describe();
-    let pane = Pane::spawn(transport, || {})?;
+    let pane = Pane::spawn(transport, log, || {})?;
     if !send.is_empty() {
         pane.write(send);
     }
@@ -71,12 +72,16 @@ pub(crate) fn instance() -> wgpu::Instance {
     wgpu::Instance::new(descriptor)
 }
 
-pub fn run(transport: Transport, send: Vec<u8>) -> anyhow::Result<()> {
+pub fn run(
+    transport: Transport,
+    send: Vec<u8>,
+    log: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
     let label = transport.describe();
 
-    let pane = Pane::spawn(transport, move || {
+    let pane = Pane::spawn(transport, log, move || {
         let _ = proxy.send_event(UserEvent::Frame);
     })?;
 

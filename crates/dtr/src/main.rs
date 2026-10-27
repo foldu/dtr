@@ -52,6 +52,14 @@ struct Args {
     #[arg(long)]
     no_remember: bool,
 
+    /// Replay a captured byte stream instead of opening a device
+    #[arg(long, value_name = "PATH")]
+    replay: Option<PathBuf>,
+
+    /// Append the raw bytes received to this file
+    #[arg(long, value_name = "PATH")]
+    log: Option<PathBuf>,
+
     /// Why this session happened; stored in the logbook
     #[arg(long, value_name = "TEXT")]
     note: Option<String>,
@@ -121,6 +129,8 @@ fn main() -> anyhow::Result<()> {
 
     let transport = if args.demo {
         Transport::Demo
+    } else if let Some(path) = args.replay.clone() {
+        Transport::Replay(path)
     } else if let Some(port) = args.port.clone() {
         let remembered = store
             .as_ref()
@@ -193,12 +203,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = args.screenshot.as_deref() {
         let (width, height) = parse_size(&args.size)?;
         let delay = std::time::Duration::from_millis(args.screenshot_delay);
-        let result = app::capture_headless(path, width, height, transport, delay, send);
+        let result =
+            app::capture_headless(path, width, height, transport, delay, send, args.log.clone());
         finish(store.as_ref(), session, "screenshot", &result);
         return result;
     }
 
-    let result = app::run(transport, send);
+    let result = app::run(transport, send, args.log.clone());
     finish(store.as_ref(), session, "closed", &result);
     result
 }

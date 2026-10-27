@@ -351,7 +351,20 @@ the feature — a port that failed to open only logged on the pane thread, so th
 recorded a clean exit for a session that never started; the pane now carries a fatal-error slot and
 the failure surfaces in 0.2 s, non-zero, with `error: …` in the row.
 
-Still open in M1: port picker with USB VID/PID, reconnect-on-replug, DTR/RTS/break, replay.
+Also in: `--replay <file>` (feeds a captured stream through the same path, paced, so the terminal
+can be exercised with no hardware) and `--log <file>` (raw bytes as they arrived, *before* the
+CR→CRLF mapping — verified byte-identical against a socat far end that sent `alpha\rbeta\r\ngamma\r`,
+CRs intact, while the screen still showed three translated lines).
+
+**DTR/RTS/break are blocked on a real design problem, not on effort.** `tokio_serial::SerialStream`
+refuses `try_clone` ("Cannot clone Tokio handles"), and `tokio::io::split` — which the pane needs so
+`select!` can read and write at once — yields halves that do not implement `SerialPort`. So there is
+no handle left to call `write_data_terminal_ready` on, and opening the device a second time would
+assert DTR again, resetting the board you were trying to talk to. The fix is to give the port to a
+single owner task that receives `Write`/`Dtr`/`Rts`/`Break` commands, which means replacing the
+split-read design; that is its own piece of work.
+
+Still open in M1: port picker with USB VID/PID, reconnect-on-replug, timestamped log mode.
 
 ### M2 — real renderer
 

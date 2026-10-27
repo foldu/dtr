@@ -6,6 +6,8 @@
 //! one and never touches the terminal or blocks the emulation thread.
 
 use std::cell::RefCell;
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,6 +75,8 @@ impl Stats {
 pub enum Transport {
     Serial(serial::Config),
     Shell(pty::Config),
+    /// Play a captured byte stream back into the terminal, with pacing.
+    Replay(PathBuf),
     /// A canned screen, for screenshots and tests.
     Demo,
 }
@@ -92,6 +96,7 @@ impl Transport {
                 Some(program) => format!("shell {program}"),
                 None => "shell".to_owned(),
             },
+            Transport::Replay(path) => format!("replay {}", path.display()),
             Transport::Demo => "demo".to_owned(),
         }
     }
@@ -128,6 +133,7 @@ impl Pane {
     /// the port and drives it.
     pub fn spawn(
         transport: Transport,
+        log: Option<PathBuf>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
@@ -160,6 +166,7 @@ impl Pane {
                         Arc::clone(&wake),
                         transport,
                         counted,
+                        log,
                     )
                     .await
                     {
@@ -206,7 +213,24 @@ async fn run(
     wake: Arc<dyn Fn() + Send + Sync>,
     transport: Transport,
     stats: Arc<Stats>,
+    log_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    // Raw bytes as they arrive, before any mapping: this is what the wire said,
+    // which is what you want when the point is to find out what the device did.
+    let log: Option<Arc<Mutex<std::fs::File>>> = match &log_path {
+        Some(path) => match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(file) => Some(Arc::new(Mutex::new(file))),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "cannot open the session log");
+                None
+            }
+        },
+        None => None,
+    };
     // Terminal replies (device attributes, DECRQM, size reports) have to go
     // back out to the pty, or programs that probe capabilities — fish, tmux —
     // sit waiting on an answer that never comes.
@@ -236,7 +260,7 @@ async fn run(
             sink = Some(Sink::Serial(write_half));
             let mapper = cfg.cr_to_crlf.then(CrToCrlf::default);
             source_alive = true;
-            tokio::task::spawn_local(read_loop(read_half, mapper, bytes_tx));
+            tokio::task::spawn_local(read_loop(read_half, mapper, bytes_tx, log.clone()));
         }
         Transport::Shell(cfg) => {
             let shell = cfg.open()?;
@@ -249,6 +273,7 @@ async fn run(
             pty_keep = Some((master, child));
             sink = Some(Sink::Pty(writer));
             source_alive = true;
+            let pty_log = log.clone();
             std::thread::Builder::new()
                 .name("dtr-pty".into())
                 .spawn(move || {
@@ -257,6 +282,7 @@ async fn run(
                         match reader.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
+                                log_chunk(&pty_log, &buf[..n]);
                                 if bytes_tx.send(buf[..n].to_vec()).is_err() {
                                     break;
                                 }
@@ -269,7 +295,23 @@ async fn run(
                     }
                 })?;
         }
-            Transport::Demo => term.vt_write(DEMO),
+            Transport::Replay(path) => {
+            let bytes = std::fs::read(&path)?;
+            tracing::info!(path = %path.display(), bytes = bytes.len(), "replay");
+            source_alive = true;
+            let tx = bytes_tx;
+            let replay_log = log.clone();
+            tokio::task::spawn_local(async move {
+                for chunk in bytes.chunks(256) {
+                    log_chunk(&replay_log, chunk);
+                    if tx.send(chunk.to_vec()).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            });
+        }
+        Transport::Demo => term.vt_write(DEMO),
     }
 
     // Always publish once, even if the terminal is still clean: a pane that
@@ -305,6 +347,19 @@ async fn run(
     Ok(())
 }
 
+/// Append the raw bytes to the session log, if one is open.
+fn log_chunk(log: &Option<Arc<Mutex<std::fs::File>>>, bytes: &[u8]) {
+    let Some(log) = log else { return };
+    match log.lock() {
+        Ok(mut file) => {
+            if let Err(err) = file.write_all(bytes) {
+                tracing::warn!(%err, "session log write");
+            }
+        }
+        Err(err) => tracing::warn!("session log poisoned: {err}"),
+    }
+}
+
 /// Write any bytes the terminal produced in response to a query back to the
 /// session. Without this a shell that probes DA1/XTGETTCAP waits forever.
 async fn flush_replies(replies: &RefCell<Vec<u8>>, sink: &mut Option<Sink>) {
@@ -324,6 +379,7 @@ async fn read_loop(
     mut reader: ReadHalf<tokio_serial::SerialStream>,
     mut mapper: Option<CrToCrlf>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    log: Option<Arc<Mutex<std::fs::File>>>,
 ) {
     let mut buf = [0u8; 8192];
     let mut out = Vec::with_capacity(8192);
@@ -340,6 +396,10 @@ async fn read_loop(
             }
             Err(_idle) => 0,
         };
+
+        if n > 0 {
+            log_chunk(&log, &buf[..n]);
+        }
 
         out.clear();
         match mapper.as_mut() {
