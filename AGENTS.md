@@ -190,6 +190,11 @@ layout only when there is more than one tab, so a single session loses no rows;
 the active tab's title follows its focused session, the others keep the title they
 had. A click on a chip switches tabs through the same `self.active` the chords use.
 
+**A tab chip is a hit target, not a control.** egui buttons take keyboard focus, so
+Enter (and Space) activated the focused chip — pressing Enter in the shell switched
+tabs. The chips are painted and hit-tested by hand with `Sense::click()`, which takes
+the pointer and nothing else.
+
 **There was no new-tab key.** `Ctrl+Tab` cycled tabs that only the palette could
 create, so a terminal had one tab and no discoverable way to get a second — the
 cycling looked broken rather than unused. `Ctrl+Shift+T` opens a tab, and the

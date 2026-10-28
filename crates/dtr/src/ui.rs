@@ -278,27 +278,41 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
         ui.spacing_mut().item_spacing.x = 4.0;
         for (index, label) in labels.iter().enumerate() {
             let is_active = index == active;
-            let text = RichText::new(
-                // A tab is its session: one digit and the label, so the number
-                // matches `alt+1`.
-                format!("{} {}", index + 1, label),
-            )
-            .monospace()
-            .size(12.0)
-            .color(if is_active {
-                Look::colour(look.background)
-            } else {
-                Look::colour(look.foreground)
-            });
-            let button = egui::Button::new(text)
-                .fill(if is_active {
+            let text = format!("{} {}", index + 1, label);
+            let galley = ui.painter().layout_no_wrap(
+                text,
+                egui::FontId::monospace(12.0),
+                if is_active {
+                    Look::colour(look.background)
+                } else {
+                    Look::colour(look.foreground)
+                },
+            );
+            // A keyboard-focusable widget here would be activated by Enter and by
+            // Space — pressing Enter in the shell would switch tabs. A chip is a
+            // hit target, not a control: it takes the pointer and nothing else.
+            let size = egui::vec2(galley.size().x + 20.0, galley.size().y + 8.0);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            let painter = ui.painter();
+            painter.rect_filled(
+                rect,
+                4.0,
+                if is_active {
                     Look::colour(look.accent)
                 } else {
                     Look::colour(look.surface)
-                })
-                .corner_radius(4.0)
-                .min_size(egui::vec2(0.0, 18.0));
-            if ui.add(button).clicked() {
+                },
+            );
+            painter.galley(
+                rect.center() - galley.size() / 2.0,
+                galley,
+                if is_active {
+                    Look::colour(look.background)
+                } else {
+                    Look::colour(look.foreground)
+                },
+            );
+            if response.clicked() {
                 clicked = Some(index);
             }
         }
