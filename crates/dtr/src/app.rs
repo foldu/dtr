@@ -708,8 +708,16 @@ impl App {
                 }
             },
         };
-        if let Err(err) = clipboard.set_text(text.to_owned()) {
-            tracing::warn!(%err, "could not write the clipboard");
+        match clipboard.set_text(text.to_owned()) {
+            // Said out loud because "no output" and "copied fine" must not look
+            // the same: `-v` shows this line, and the absence of it means the
+            // copy never ran.
+            Ok(()) => tracing::debug!(
+                chars = text.chars().count(),
+                bytes = text.len(),
+                "clipboard written"
+            ),
+            Err(err) => tracing::warn!(%err, "could not write the clipboard"),
         }
     }
 
