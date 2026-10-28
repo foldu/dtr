@@ -882,6 +882,8 @@ name = "dtr-vfs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
+ "dtr-sftp",
  "tempfile",
  "tokio",
  "tracing",

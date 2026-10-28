@@ -118,6 +118,33 @@ impl Session {
         Ok(entries)
     }
 
+    /// One path's metadata, without listing its directory.
+    ///
+    /// A click on a file needs to know "is it a directory" before deciding what
+    /// to do with it, and fetching a whole directory listing to answer that is
+    /// a round trip for one bit.
+    pub async fn stat(&self, path: &str) -> Result<Entry> {
+        let attrs = self
+            .sftp
+            .metadata(path)
+            .await
+            .with_context(|| format!("stat {path}"))?;
+        Ok(Entry {
+            name: Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_owned()),
+            path: PathBuf::from(path),
+            dir: attrs.is_dir(),
+            size: attrs.len(),
+            modified: attrs.modified().ok().and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|since| since.as_secs())
+            }),
+        })
+    }
+
     /// Copy one file down. Bytes land in `local` only when the transfer
     /// finished, so a cancelled download cannot truncate a good file.
     pub async fn download(&mut self, remote: &str, local: &Path) -> Result<u64> {

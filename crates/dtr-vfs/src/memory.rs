@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context as _, Result};
-use tokio::io::AsyncRead;
 
 use crate::{Backend, BackendId, Batches, BoxFuture, Caps, Entry, Kind, Meta};
 
@@ -81,17 +80,19 @@ impl Backend for Memory {
         })
     }
 
-    fn open<'a>(
-        &'a self,
-        path: &'a Path,
-    ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>>> {
+    fn fetch<'a>(&'a self, path: &'a Path, dest: &'a Path) -> BoxFuture<'a, Result<u64>> {
         Box::pin(async move {
-            let files = self.files.lock().expect("memory lock");
-            let bytes = files
-                .get(path)
-                .with_context(|| format!("open {}", path.display()))?
-                .clone();
-            Ok(Box::new(std::io::Cursor::new(bytes)) as Box<dyn AsyncRead + Send + Unpin>)
+            let bytes = {
+                let files = self.files.lock().expect("memory lock");
+                files
+                    .get(path)
+                    .with_context(|| format!("fetch {}", path.display()))?
+                    .clone()
+            };
+            tokio::fs::write(dest, &bytes)
+                .await
+                .with_context(|| format!("write {}", dest.display()))?;
+            Ok(bytes.len() as u64)
         })
     }
 

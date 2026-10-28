@@ -27,13 +27,15 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
-use tokio::io::AsyncRead;
 
+pub mod cache;
 pub mod local;
 pub mod memory;
+pub mod ssh;
 
 pub use local::Local;
 pub use memory::Memory;
+pub use ssh::Ssh;
 
 /// Which machine a path belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -132,9 +134,13 @@ pub trait Backend: Send + Sync {
 
     fn stat<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Meta>>;
 
-    /// Open a file for reading. Remote backends stream it, so a caller that can
-    /// consume bytes (a pager) never needs a temporary file.
-    fn open<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>>>;
+    /// Copy a file to `dest`, returning how many bytes arrived.
+    ///
+    /// Writing to a destination rather than returning a stream is what the two
+    /// cases share: locally it is a copy, remotely it is the download that
+    /// produces the copy the OS handler will open. A stream will come back when
+    /// the pager needs one; a file is what "open this in a viewer" needs today.
+    fn fetch<'a>(&'a self, path: &'a Path, dest: &'a Path) -> BoxFuture<'a, Result<u64>>;
 
     /// Start a listing. Errors reach the caller through the batch channel, so a
     /// directory that fails halfway is a list *and* an error, never a silently
@@ -148,6 +154,8 @@ pub trait Backend: Send + Sync {
 /// share one, or the second hits the server's session limit.
 pub struct Vfs {
     backends: Mutex<HashMap<BackendId, Arc<dyn Backend>>>,
+    /// Where fetched remote files land.
+    root: PathBuf,
 }
 
 impl Default for Vfs {
@@ -158,10 +166,21 @@ impl Default for Vfs {
 
 impl Vfs {
     pub fn new() -> Self {
+        let root = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("dtr")
+            .join("remote");
+        Self::with_root(root)
+    }
+
+    /// A VFS whose fetched files land under `root`. Tests use this so a fetch
+    /// cannot touch the real cache.
+    pub fn with_root(root: PathBuf) -> Self {
         let mut backends: HashMap<BackendId, Arc<dyn Backend>> = HashMap::new();
         backends.insert(BackendId::Local, Arc::new(Local::new()));
         Self {
             backends: Mutex::new(backends),
+            root,
         }
     }
 
@@ -178,10 +197,16 @@ impl Vfs {
                 .expect("local backend")
                 .clone()),
             BackendId::Ssh(alias) => {
-                if let Some(backend) = self.backends.lock().expect("vfs lock").get(id) {
+                let mut backends = self.backends.lock().expect("vfs lock");
+                if let Some(backend) = backends.get(id) {
                     return Ok(Arc::clone(backend));
                 }
-                anyhow::bail!("remote files are not wired up yet ({alias})")
+                // Cheap to build: the connection happens on the first
+                // operation, and keeping one entry per alias is what makes the
+                // pool a pool rather than a connection per click.
+                let backend: Arc<dyn Backend> = Arc::new(Ssh::new(alias.clone()));
+                backends.insert(id.clone(), Arc::clone(&backend));
+                Ok(backend)
             }
         }
     }
@@ -189,6 +214,38 @@ impl Vfs {
     pub async fn stat(&self, at: &Location) -> Result<Meta> {
         let backend = self.backend(&at.backend)?;
         backend.stat(&at.path).await
+    }
+
+    /// A path another program can open.
+    ///
+    /// Local files are their own path — no copy, ever. A remote one is fetched
+    /// into the cache first, because `xdg-open` and every viewer it starts can
+    /// only open paths, and a remote path is not one. The copy keeps the remote
+    /// name and tree, so the title bar of whatever opens it says where it came
+    /// from.
+    pub async fn materialise(&self, at: &Location) -> Result<PathBuf> {
+        if matches!(at.backend, BackendId::Local) {
+            return Ok(at.path.clone());
+        }
+        let backend = self.backend(&at.backend)?;
+        let dest = cache::path_for(&self.root, &at.backend, &at.path);
+        if let Some(parent) = dest.parent() {
+            let parent = parent.to_path_buf();
+            tokio::task::spawn_blocking(move || cache::ensure_dir(&parent))
+                .await
+                .map_err(|err| anyhow::anyhow!("{err}"))??;
+        }
+        backend
+            .fetch(&at.path, &dest)
+            .await
+            .with_context(|| format!("fetch {}", at.describe()))?;
+        // Private by default: this is somebody's remote file, not ours to
+        // leave world-readable because the umbrella happened to be 0022.
+        let owned = dest.clone();
+        tokio::task::spawn_blocking(move || cache::restrict(&owned))
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))??;
+        Ok(dest)
     }
 }
 
@@ -230,7 +287,6 @@ pub fn open_externally(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
 
     async fn drain(mut batches: Batches) -> Vec<Entry> {
         let mut out = Vec::new();
@@ -259,10 +315,13 @@ mod tests {
         assert_eq!(meta.kind, Kind::File);
         assert_eq!(meta.len, 5);
 
-        let mut file = backend.open(&dir.path().join("a.txt")).await.unwrap();
-        let mut text = String::new();
-        file.read_to_string(&mut text).await.unwrap();
-        assert_eq!(text, "hello");
+        let dest = dir.path().join("copy.txt");
+        let copied = backend
+            .fetch(&dir.path().join("a.txt"), &dest)
+            .await
+            .unwrap();
+        assert_eq!(copied, 5);
+        assert_eq!(std::fs::read_to_string(dest).unwrap(), "hello");
     }
 
     #[tokio::test]
@@ -295,22 +354,61 @@ mod tests {
             mem.stat(Path::new("/home/lab/deeper")).await.unwrap().kind,
             Kind::Dir
         );
-        let mut file = mem.open(Path::new("/home/lab/notes.txt")).await.unwrap();
-        let mut text = String::new();
-        file.read_to_string(&mut text).await.unwrap();
-        assert_eq!(text, "hello");
+        let cache = tempfile::tempdir().unwrap();
+        let dest = cache.path().join("notes.txt");
+        mem.fetch(Path::new("/home/lab/notes.txt"), &dest)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(dest).unwrap(), "hello");
     }
 
-    #[tokio::test]
-    async fn a_remote_path_is_never_read_off_this_disk() {
+    /// A remote location is answered by its own backend, never by the local
+    /// one: the failure mode this guards against is `/etc/hosts` from a remote
+    /// program being served from *this* machine's `/etc/hosts`.
+    #[test]
+    fn a_remote_path_gets_a_remote_backend() {
         let vfs = Vfs::new();
-        let err = vfs
-            .stat(&Location {
-                backend: BackendId::Ssh("jupyter".into()),
-                path: PathBuf::from("/etc/hosts"),
-            })
-            .await
-            .expect_err("should not fall back to local");
-        assert!(err.to_string().contains("jupyter"), "{err}");
+        let backend = vfs
+            .backend(&BackendId::Ssh("jupyter".into()))
+            .expect("a backend");
+        assert_eq!(*backend.id(), BackendId::Ssh("jupyter".into()));
+        // And the same alias gets the same backend, because that Arc is the
+        // connection pool.
+        let again = vfs
+            .backend(&BackendId::Ssh("jupyter".into()))
+            .expect("a backend");
+        assert!(Arc::ptr_eq(&backend, &again));
+    }
+
+    /// A local file is its own path: materialising it must never copy, or every
+    /// click would fork the file the user is working on.
+    #[tokio::test]
+    async fn a_local_file_materialises_to_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let vfs = Vfs::with_root(dir.path().join("cache"));
+        let at = Location::local(&path);
+        assert_eq!(vfs.materialise(&at).await.unwrap(), path);
+    }
+
+    /// A remote file is fetched under its own machine and tree, so whatever
+    /// opens it shows a name that says where it came from.
+    #[tokio::test]
+    async fn a_remote_file_materialises_into_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        // Stand in for the ssh backend: the cache path and the write are what
+        // this is about, and an ssh server is not available in a test.
+        let backend = Memory::new();
+        backend.write("/var/log/syslog", b"line\n");
+        let dest = crate::cache::path_for(
+            &dir.path().join("cache"),
+            &BackendId::Ssh("jupyter".into()),
+            Path::new("/var/log/syslog"),
+        );
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        backend.fetch(Path::new("/var/log/syslog"), &dest).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "line\n");
+        assert!(dest.ends_with("jupyter/var/log/syslog"));
     }
 }

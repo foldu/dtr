@@ -384,6 +384,33 @@ it and starts no drag; everywhere else a press still selects.
 to be known: it moves, waits one frame, then presses. That is what a hand does,
 and it means the scripted path exercises the real one.
 
+**Materialising is where transparency ends, and it says so.** A local file is its
+own path — `materialise` must never copy, or clicking a file forks the one you
+are working on. A remote one is fetched first, because `xdg-open` and every
+viewer it starts can only open paths. The copy lands under
+`<cache>/dtr/remote/<alias>/<path>`: the remote tree is mirrored so the title bar
+of whatever opens it says where it came from, `..` is *dropped* rather than
+resolved (nothing a remote program prints can address the cache root's parent),
+the alias is sanitised because it comes from `~/.ssh/config`, and directories are
+`0700` with files `0600` so a 0022 umask cannot make somebody's remote file
+readable. The toast says "opened a copy of …" for a remote file and nothing for
+a local one, because one is a copy and the other is not.
+
+**One `ssh` child per alias, and a dead one is killed.** `Ssh` holds
+`Arc<Mutex<Option<dtr_sftp::Session>>>` — shared rather than owned, because a
+listing runs in its own task and still has to use *this* connection; a fresh one
+per `read_dir` would spawn an `ssh` per directory, which is the thing pooling
+avoids. `Vfs::backend` keeps one `Arc` per alias and there is a test (`Arc::ptr_eq`)
+that it is the same one twice. Every operation has a 30 s deadline and one
+reconnect; a failure or a timeout **takes the child with it**, because a dead
+session left in the slot makes every later call fail the same way — which reads
+as "this host is down" long after it came back.
+
+`list` over ssh is one `read_dir` round trip delivered in batches. The batch
+shape is what the UI will keep when the protocol starts paging; today the
+protocol hands back the whole directory, and pretending otherwise would be a lie
+in the wrong layer.
+
 **Files work has its own runtime.** `App::files_rt` is separate from `App::worker`
 (which keeps scans): a directory walk must not queue behind serial-port
 enumeration, and the SFTP work that follows will need it.

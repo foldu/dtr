@@ -1173,24 +1173,29 @@ impl App {
         ) else {
             return;
         };
+        // A remote file cannot be handed to a viewer as a path, so it is
+        // fetched first; a local one is its own path and is never copied.
+        let remote = !matches!(location.backend, dtr_vfs::BackendId::Local);
         runtime.spawn(async move {
             let outcome = async {
                 let meta = vfs.stat(&location).await?;
                 if meta.kind.is_dir() {
-                    anyhow::bail!("{} is a directory", location.describe());
+                    anyhow::bail!("{} is a directory", described);
                 }
-                let path = location.path.clone();
-                let opened = tokio::task::spawn_blocking(move || dtr_vfs::open_externally(&path))
+                let path = vfs.materialise(&location).await?;
+                tokio::task::spawn_blocking(move || dtr_vfs::open_externally(&path))
                     .await
-                    .map_err(|err| anyhow::anyhow!("{err}"))?;
-                opened
+                    .map_err(|err| anyhow::anyhow!("{err}"))??;
+                Ok::<(), anyhow::Error>(())
             }
             .await;
-            // Silence is not success, and the failure belongs on screen: the
-            // worker that failed has no UI to say it with.
+            // Silence is not success, and a failure belongs on screen: the
+            // worker that failed has no UI to say it with. A remote copy is
+            // said out loud too, because it is a copy and not the file.
             let note = match outcome {
+                Ok(()) if remote => format!("opened a copy of {described}"),
                 Ok(()) => return,
-                Err(err) => format!("{err}"),
+                Err(err) => format!("{err:#}"),
             };
             let _ = proxy.send_event(UserEvent::Notice(note));
         });

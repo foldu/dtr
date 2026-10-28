@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use tokio::fs;
-use tokio::io::AsyncRead;
 
 use crate::{Backend, BackendId, Batches, BoxFuture, Caps, Entry, Kind, Meta};
 
@@ -67,15 +66,12 @@ impl Backend for Local {
         })
     }
 
-    fn open<'a>(
-        &'a self,
-        path: &'a Path,
-    ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>>> {
+    fn fetch<'a>(&'a self, path: &'a Path, dest: &'a Path) -> BoxFuture<'a, Result<u64>> {
         Box::pin(async move {
-            let file = fs::File::open(path)
+            let copied = fs::copy(path, dest)
                 .await
-                .with_context(|| format!("open {}", path.display()))?;
-            Ok(Box::new(file) as Box<dyn AsyncRead + Send + Unpin>)
+                .with_context(|| format!("copy {} to {}", path.display(), dest.display()))?;
+            Ok(copied)
         })
     }
 
