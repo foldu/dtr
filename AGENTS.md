@@ -544,7 +544,8 @@ that wants the byte (readline) turns it off itself for as long as it wants it.
 
 **A frame per read chunk is a thousand frames a second nobody sees.** The pane
 published from the read arm, so every chunk rebuilt the entire grid — cell by cell
-through the FFI, with a `String` per cell — at about 50 µs a frame. A flood arrives
+through the FFI, with a `String` for each cell that has a grapheme in it — at
+about 50 µs a frame. A flood arrives
 in chunks small enough that a 32 MiB payload became **1.1 million publishes and 57 s
 of CPU inside a 60 s run**, all of it thrown away because a screen shows sixty
 frames a second. The tell was a profile where 92% of the samples sat in
@@ -556,6 +557,16 @@ flood is 484 publishes and 31 ms. Two smaller traps came with it: `bytes_rx.recv
 returning `None` is not a no-op, because that arm is ready for ever and the pane
 spun at 100% after its child exited; and vtebench cannot see either of these,
 because what it times is the pty, not the frame.
+
+The per-cell `String` is the obvious suspect and is not the big half. Measured by
+swapping the global allocator out: a flood of two-byte lines leaves only 34 cells a
+frame with text in them, and mimalloc against the system allocator is **53 µs
+against 54 µs** a frame — nothing. A payload that fills every cell, 3808
+allocations a frame, is **41 µs against 50 µs**: about 2.4 ns an allocation, and
+the other 8 ns a cell are the five FFI crossings it takes to read one (graphemes,
+foreground, background, styling, and the iterator step). At sixty frames a second
+the whole publish is 0.25% of a core and the strings are 0.05% of it, so this is a
+number to know before refactoring, not a reason to.
 
 ## Profiling
 
