@@ -115,40 +115,64 @@ medians() {
         }' "$1"
 }
 
+# sample_size DAT [FALLBACK] — bytes per sample, from the sidecar the run writes.
+#
+# Without it the delta compares milliseconds across runs that may have used
+# different sample sizes, which reads as a 4× regression the moment somebody
+# changes --min-bytes. The sidecar is one number next to the .dat.
+sample_size() {
+    local dat=$1 fallback=${2:-}
+    if [ -f "$dat.size" ]; then
+        head -1 "$dat.size"
+    else
+        printf '%s' "$fallback"
+    fi
+}
+
 # report DAT [PREVIOUS]
 report() {
-    local dat=$1 previous=${2:-} mib prev_rows unmeasured
+    local dat=$1 previous=${2:-} bytes prev_bytes mib prev_mib prev_rows unmeasured
 
-    mib=$(awk -v b="$min_bytes" 'BEGIN { printf "%.4f", b / 1048576 }')
+    bytes=$(sample_size "$dat" "$min_bytes")
+    mib=$(awk -v b="$bytes" 'BEGIN { printf "%.4f", b / 1048576 }')
+    prev_bytes=$(sample_size "$previous")
+    prev_mib=$(awk -v b="$prev_bytes" 'BEGIN { printf "%.4f", b / 1048576 }')
     prev_rows=""
     if [ -n "$previous" ] && [ -s "$previous" ]; then
         prev_rows=$(medians "$previous")
     fi
 
     printf '%-30s %6s %11s %8s %7s\n' benchmark runs median MiB/s vs-prev
-    awk -F'\t' -v mib="$mib" -v previous="$prev_rows" '
+    awk -F'\t' -v mib="$mib" -v prev_mib="$prev_mib" -v previous="$prev_rows" '
         BEGIN {
             # The previous run arrives as tab-separated rows in a variable, so
             # that stdin stays the current run.
             n = split(previous, rows, "\n")
             for (i = 1; i <= n; i++) {
                 split(rows[i], f, "\t")
-                if (f[1] != "") prev[f[1]] = f[3] + 0
+                if (f[1] != "" && f[3] > 0) prev[f[1]] = f[3] + 0
             }
         }
         {
             if ($3 > 0) {
                 med = sprintf("%8.2f ms", $3)
-                rate = sprintf("%8.1f", mib * 1000 / $3)
+                rate = mib * 1000 / $3
+                rate_text = sprintf("%8.1f", rate)
             } else {
                 # Below what vtebench can record, so not a rate at all.
                 med = sprintf("%8s ms", "<1")
-                rate = sprintf("%8s", "-")
+                rate = 0
+                rate_text = sprintf("%8s", "-")
             }
+            # Rates, not milliseconds: a run with a different sample size is a
+            # different amount of work, and the only comparable number is how
+            # fast the bytes went in.
             delta = "-"
-            if (($1 in prev) && $3 > 0 && prev[$1] > 0)
-                delta = sprintf("%+.1f%%", (prev[$1] - $3) * 100 / prev[$1])
-            printf "%-30s %6d %s %s %7s\n", $1, $2, med, rate, delta
+            if (($1 in prev) && rate > 0 && prev_mib > 0) {
+                was = prev_mib * 1000 / prev[$1]
+                delta = sprintf("%+.1f%%", (rate - was) * 100 / was)
+            }
+            printf "%-30s %6d %s %s %7s\n", $1, $2, med, rate_text, delta
         }' <(medians "$dat")
 
     # A zero median is the measurement failing, not a fast terminal.
@@ -156,6 +180,10 @@ report() {
     if [ "$unmeasured" -gt 0 ]; then
         echo "bench: $unmeasured benchmark(s) finished a sample under a millisecond —" >&2
         echo "bench: vtebench records whole milliseconds, so raise --min-bytes and rerun" >&2
+    fi
+    if [ -n "$previous" ] && [ -s "$previous" ] && [ -z "$prev_bytes" ]; then
+        echo "bench: the previous run did not record its sample size, so no deltas —" >&2
+        echo "bench: they compare rates, and two sizes are not comparable" >&2
     fi
 }
 
@@ -299,6 +327,9 @@ dat="$PWD/$out_dir/latest.dat"
 previous="$PWD/$out_dir/previous.dat"
 if [ -f "$dat" ]; then
     mv "$dat" "$previous"
+    # The sample size travels with the results: the delta is a rate, and a rate
+    # cannot be compared across two different amounts of work.
+    [ -f "$dat.size" ] && mv "$dat.size" "$previous.size"
 fi
 
 shell_cmd="$vtebench_bin --dat $dat ${select_args[*]} --min-bytes $min_bytes --max-secs $max_secs"
@@ -333,6 +364,7 @@ if [ ! -s "$dat" ]; then
     exit 1
 fi
 
+printf '%s\n' "$min_bytes" > "$dat.size"
 report "$dat" "$previous" | tee "$out_dir/summary.txt"
 
 echo >&2

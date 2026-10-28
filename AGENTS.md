@@ -590,7 +590,11 @@ Reading the table:
 - **Absolute numbers only mean anything on one machine against itself.** A CI
   runner and a laptop have different fonts, GPUs and compositors.
 - **The previous run is the baseline**, so bench one change at a time, and
-  rebuild first: a stale binary makes the number describe something else.
+  rebuild first: a stale binary makes the number describe something else. The
+  delta is a *rate*, not a time, and the sample size is recorded next to each
+  `.dat` for exactly that reason: the table reads milliseconds, but comparing
+  two runs that measured different amounts of work is how a 4× payload change
+  looks like a 4× regression.
 - **vtebench records whole milliseconds**, so a 1 MiB sample from a fast
   terminal quantises to 2 or 3 ms, and dtr now drains about a gigabyte a
   second. The script's default is 32 MiB per sample, near 30 ms; a median of
