@@ -562,8 +562,10 @@ thing. `a_selection_that_leaves_the_frame_is_dropped` covers both directions.
 A press that has not moved is an anchor and not a selection: nothing is
 highlighted, so a single click deselects rather than selecting one cell. The
 anchor has to exist at the press or a drag could not grow from it, which is why
-the rule lives in `selection_span` (both ends equal → `None`) and not in the
-commands.
+the rule lives in `selection_span` and not in the commands — and why the anchors
+carry a `deliberate` flag. A word, a line or a drag is deliberate, so its
+one-cell case still paints: double-clicking `x` is a real selection, and only a
+press that went nowhere is silent.
 
 **Double- and triple-click are counted, not reported.** winit has no click
 count, so `App::count_clicks` counts a press within 400 ms and four pixels of

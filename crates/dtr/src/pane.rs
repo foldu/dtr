@@ -936,7 +936,11 @@ async fn run(
                             y: u32::from(y),
                         });
                         let moved = match selection.as_mut() {
-                            Some(anchors) => anchors.head.set(&mut term, point).is_ok(),
+                            Some(anchors) => anchors
+                                .head
+                                .set(&mut term, point)
+                                .map(|_| anchors.deliberate = true)
+                                .is_ok(),
                             None => false,
                         };
                         if moved {
@@ -1206,15 +1210,15 @@ fn publish(
         Some((
             viewport_cell(&anchors.start, frame.rows)?,
             viewport_cell(&anchors.head, frame.rows)?,
+            anchors.deliberate,
         ))
     });
     match resolved {
-        Some((start, head)) => {
-            // One cell is a press, not a selection: the anchor has to exist so
-            // a drag can grow from it, but a highlight there would claim a
-            // choice the user has not made — which is why a single click that
-            // never moves deselects.
-            frame.selection = selection_span(start, head, frame.cols);
+        Some((start, head, deliberate)) => {
+            // One cell is a press, not a selection — unless the user chose it,
+            // which is why a single click that never moves deselects and a
+            // one-character word still highlights.
+            frame.selection = selection_span(start, head, frame.cols, deliberate);
         }
         // Out of the frame: a highlight clamped to the edge would claim cells
         // the selection does not cover, so the selection goes instead of
@@ -1250,6 +1254,10 @@ fn publish(
 struct SelectionAnchors {
     start: TrackedGridRef,
     head: TrackedGridRef,
+    /// Whether the user chose this. A press that has not moved is an anchor —
+    /// no highlight, so a click deselects — but a word, a line or a drag is a
+    /// choice, and one cell of it is a real answer: the word `x` has one.
+    deliberate: bool,
 }
 
 impl SelectionAnchors {
@@ -1262,6 +1270,7 @@ impl SelectionAnchors {
         Ok(Self {
             start: term.track_grid_ref(point)?,
             head: term.track_grid_ref(point)?,
+            deliberate: false,
         })
     }
 
@@ -1297,6 +1306,7 @@ fn anchors_from(term: &Terminal<'_, '_>, selection: &Selection<'_>) -> Option<Se
     Some(SelectionAnchors {
         start: term.track_grid_ref(Point::Viewport(start)).ok()?,
         head: term.track_grid_ref(Point::Viewport(head)).ok()?,
+        deliberate: true,
     })
 }
 
@@ -1330,13 +1340,20 @@ fn viewport_ref<'t>(
     .ok()
 }
 
-/// The highlight's linear span, or `None` while both ends are the same cell.
+/// The highlight's linear span, or `None` for a press that has not moved.
 ///
 /// A press that has not moved leaves the anchor exactly where the pointer went
 /// down, and showing that as a selection makes every click look like it chose
-/// something.
-fn selection_span(start: (u16, u16), head: (u16, u16), cols: u16) -> Option<(usize, usize)> {
-    if start == head {
+/// something. A *deliberate* one-cell selection is different: double-clicking
+/// the word `x`, or dragging back onto the cell you started on, really is one
+/// character and has to paint.
+fn selection_span(
+    start: (u16, u16),
+    head: (u16, u16),
+    cols: u16,
+    deliberate: bool,
+) -> Option<(usize, usize)> {
+    if start == head && !deliberate {
         return None;
     }
     let cols = usize::from(cols.max(1));
@@ -1976,6 +1993,18 @@ mod selection_tests {
         assert_eq!(cell.text(&term), before);
     }
 
+    /// A one-character word is still a word: clicking `b` in `a b` selects one
+    /// cell, and it is a choice rather than a press, so it paints.
+    #[test]
+    fn a_one_character_word_still_selects() {
+        let mut term = Terminal::new(20, 2).unwrap();
+        term.vt_write(b"a b\r\n");
+        // 'a' at 0, the space at 1, 'b' at 2 — the cell under the pointer.
+        let cell = super::select_word(&term, 2, 0).expect("a word");
+        assert_eq!(cell.text(&term).as_deref(), Some("b"));
+        assert!(cell.deliberate, "a word is a choice, even one cell wide");
+    }
+
     /// A triple-click takes the whole line, without the blanks that fill the
     /// rest of the row.
     #[test]
@@ -1990,11 +2019,16 @@ mod selection_tests {
     /// highlighted, so a click deselects instead of selecting one cell.
     #[test]
     fn a_press_that_never_moved_shows_no_selection() {
-        assert_eq!(super::selection_span((4, 2), (4, 2), 80), None);
+        assert_eq!(super::selection_span((4, 2), (4, 2), 80, false), None);
         assert_eq!(
-            super::selection_span((4, 2), (5, 2), 80),
+            super::selection_span((4, 2), (5, 2), 80, false),
             Some((164, 165)),
             "one cell across is a selection, and the indices are row-major"
+        );
+        assert_eq!(
+            super::selection_span((4, 2), (4, 2), 80, true),
+            Some((164, 164)),
+            "a chosen one-cell selection is the word `x`, and it paints"
         );
     }
 
