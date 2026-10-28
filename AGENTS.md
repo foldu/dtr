@@ -211,6 +211,22 @@ drawing, so a window that has settled produces no picture; the deadline passes.
 Believed fixed once by waking from `about_to_wait`, but it still misses on a plain
 shell window, so the wake is not reaching the loop the way it looks like it should.
 
+**`inner_size()` is already physical in winit 0.30, so a "scale" divided by it is
+always 1.0.** `Gpu::scale()` was `config.width / window.inner_size().width`, which
+is physical/physical — the DPI factor never entered it. Every consumer of `scale`
+then reserved *half* the space it needed on a HiDPI display: the tab strip's
+`top_inset` was 34 physical pixels over a strip that egui draws at 30 **points**
+(60 px at 2×), so the first rows sat underneath it. At scale 1 the bug does not
+exist, which is why it reproduced on the laptop and not in the captures here.
+
+`scale()` is `window.scale_factor()` now. `-v` logs `strip geometry` once per
+scale: `reserved_px` must be at least `strip_px`, both physical.
+
+The units rule that the same area needs: egui works in **points** and applies the
+DPI factor itself (`Panel::top(...).exact_size(n)` is `n` points), while `top_inset`
+and the grid rects are **physical pixels**. So layout constants are points, grid
+sizes are physical, and the scale is applied exactly once — by egui, or by us.
+
 **Two layouts must agree on the top inset.** The terminal is sized by `fit_panes` and
 drawn by `pane_views`; when only one of them knew about the tab strip, the pty kept
 the rows of a taller area and the first prompt row was drawn underneath the strip.

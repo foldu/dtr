@@ -277,6 +277,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         fatal: None,
         quit: false,
         wake: std::cell::Cell::new(false),
+        strip_logged: None,
         palette: Palette::new(startup.palette),
         look: startup.look.clone(),
         theme: startup.theme.clone(),
@@ -532,6 +533,8 @@ struct App {
     quit: bool,
     /// Set when a frame is wanted; `about_to_wait` turns it into a wake-up.
     wake: std::cell::Cell<bool>,
+    /// The scale whose strip geometry was last logged.
+    strip_logged: Option<f32>,
     palette: Palette,
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
@@ -1371,6 +1374,23 @@ impl App {
         self.session().is_some_and(|session| session.counters)
     }
 
+    fn log_strip_geometry(&mut self, scale: f32) {
+        // Once per scale change, so a HiDPI mismatch is visible without a
+        // screenshot: the reservation and the strip must be the same number,
+        // both in physical pixels.
+        if self.strip_logged == Some(scale) {
+            return;
+        }
+        self.strip_logged = Some(scale);
+        tracing::debug!(
+            scale,
+            reserved_px = (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale,
+            strip_px = crate::ui::TAB_HEIGHT * scale,
+            tab_height_points = crate::ui::TAB_HEIGHT,
+            "strip geometry"
+        );
+    }
+
     fn top_inset(&self, scale: f32) -> f32 {
         // Always, not only when there are several tabs: the strip is drawn even
         // for one tab (it is where the session is named, now that a shell has no
@@ -1867,6 +1887,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if std::mem::take(&mut self.fonts_dirty) {
                     gpu.rebuild_grid(&self.look);
                 }
+                self.log_strip_geometry(scale);
                 self.fit_panes(gpu.metrics(), screen, scale);
                 let settings = if self.settings.open { Some(&self.settings) } else { None };
                 // A window capture is due once, then never again.
@@ -2259,7 +2280,12 @@ impl Gpu {
 
     /// Backing-store pixels per logical point, for chrome measurements.
     fn scale(&self) -> f32 {
-        self.config.width as f32 / self.window.inner_size().width.max(1) as f32
+        // The DPI factor, not a ratio of two physical sizes: `inner_size` is
+        // already physical in winit 0.30, so dividing the surface width by it is
+        // always 1.0 and everything that multiplies by `scale` — the tab strip's
+        // reservation, split gaps, the status bar — reserved half the space it
+        // needed on a HiDPI display.
+        self.window.scale_factor() as f32
     }
 
     fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -2323,7 +2349,12 @@ impl Gpu {
                 // shorter than it, so nothing egui rounds or grows can paint
                 // over the first terminal row. Same lesson as the status bar.
                 egui::Panel::top("dtr-tabs")
-                    .exact_size(crate::ui::TAB_HEIGHT * self.scale())
+                    // Points, not physical pixels: egui is in points and `scale`
+                    // is applied by egui itself. Multiplying here made the strip
+                    // grow with DPI twice, so at scale 2 it was 60 points tall
+                    // over a 60 *pixel* reservation and the first rows slid
+                    // underneath it — invisible at scale 1.
+                    .exact_size(crate::ui::TAB_HEIGHT)
                     .frame(
                         egui::Frame::new()
                             .fill(crate::ui::Look::colour(look.surface))
