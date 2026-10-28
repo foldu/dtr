@@ -1726,6 +1726,25 @@ mod prompt_tests {
         assert!(block.starts_with("$ "), "block does not start at the prompt: {block:?}");
     }
 
+    /// What fish actually sends, captured from a real `fish --no-config -i`:
+    /// the command is followed by options and terminated with ST, not BEL.
+    /// Reading the kind byte before the options is what makes this work.
+    #[test]
+    fn the_form_fish_sends_is_a_prompt() {
+        let mut term = terminal();
+        let mut marks = PromptMarks::default();
+        marks
+            .write(
+                &mut term,
+                b"\x1b]133;A;click_events=1\x1b\\$ \x1b]133;B\x1b\\ls\r\n\x1b]133;C;cmdline_url=ls\x1b\\a b\r\n\x1b]133;D;0\x1b\\\x1b]133;A;click_events=1\x1b\\$ ",
+            )
+            .unwrap();
+        assert_eq!(marks.marks.len(), 2, "fish's markers should both be read");
+        let block = capture_block(&term, &marks).unwrap().expect("a block");
+        assert!(block.contains("ls"), "no command line in {block:?}");
+        assert!(block.contains("a b"), "no output in {block:?}");
+    }
+
     /// Without shell integration there are no marks, and capture says so rather
     /// than inventing a block.
     #[test]

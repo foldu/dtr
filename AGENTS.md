@@ -343,6 +343,14 @@ and the UI says how much it took; the pager that will read it is not written
 yet. Without shell integration there are no marks, and the toast says so
 instead of inventing a block.
 
+**fish already speaks it** — nothing to install. Captured from a real
+`fish --no-config -i`, the sequence is
+`ESC ] 133 ; A ; click_events=1 ESC \` and the same with `cmdline_url=…` on
+`C`: options after a `;`, and ST rather than BEL as the terminator. Both were
+already handled, and `the_form_fish_sends_is_a_prompt` pins it so they stay
+handled. bash and zsh need the snippet from the shell-integration proposal
+sourced from their prompt.
+
 **A shell that exits closes its tab.** The pane cannot do it — the UI owns the
 tab — so the pty reader sets `Pane::ended` on EOF (the child closed the pty, so
 it has exited) and calls `wake`; `App::reap_ended` closes those tabs, highest
