@@ -26,6 +26,39 @@ pub enum UserEvent {
     Files,
     /// A background scan finished: the destinations to offer now.
     Destinations(Vec<(String, String)>),
+    /// Something the SFTP worker finished.
+    Sftp(SftpEvent),
+}
+
+/// What the SFTP worker is asked to do, and what it reports back.
+///
+/// The connection lives on its own thread, never on the pane's: a 2 GB transfer
+/// must not be able to stall emulation (docs/sftp.md §5.2).
+#[derive(Debug)]
+pub enum SftpMsg {
+    List { alias: String, path: PathBuf },
+    Download {
+        alias: String,
+        remote: PathBuf,
+        local: PathBuf,
+    },
+}
+
+#[derive(Debug)]
+pub enum SftpEvent {
+    Listed {
+        alias: String,
+        path: PathBuf,
+        entries: Vec<dtr_sftp::Entry>,
+    },
+    Downloaded {
+        local: PathBuf,
+        bytes: u64,
+    },
+    Failed {
+        alias: String,
+        message: String,
+    },
 }
 
 /// Everything a fresh window needs that is decided on the command line.
@@ -227,6 +260,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         _ => None,
     };
 
+    let startup_alias = ssh_alias(&startup.transport);
     let pane = TermPane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
         let proxy = proxy.clone();
         move || {
@@ -266,6 +300,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 label,
                 serial,
                 remote,
+                alias: startup_alias,
                 counters,
                 echo: false,
                 selection: startup.select,
@@ -281,6 +316,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         quit: false,
         wake: std::cell::Cell::new(false),
         strip_logged: None,
+        sftp: None,
         wake_why: std::cell::Cell::new("startup"),
         egui_redraw_pending: false,
         loop_report: std::cell::RefCell::new(LoopReport::default()),
@@ -367,6 +403,100 @@ fn cycled(active: usize, count: usize, forward: bool) -> usize {
 
 /// Where the selection lands after closing the active tab, or `None` when that
 /// was the last one.
+/// The worker: one connection per alias, reused until the alias changes.
+///
+/// Everything blocking lives here, on a thread of its own with a
+/// current-thread runtime — the same shape as a pane, for the opposite reason:
+/// a transfer must never share a thread with the emulator.
+fn sftp_worker(
+    rx: std::sync::mpsc::Receiver<SftpMsg>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            tracing::error!(%err, "sftp runtime");
+            return;
+        }
+    };
+    let mut connected: Option<(String, dtr_sftp::Session)> = None;
+
+    while let Ok(message) = rx.recv() {
+        let alias = match &message {
+            SftpMsg::List { alias, .. } | SftpMsg::Download { alias, .. } => alias.clone(),
+        };
+
+        let outcome: Result<SftpEvent, anyhow::Error> = runtime.block_on(async {
+            if connected.as_ref().map(|(name, _)| name.as_str()) != Some(alias.as_str()) {
+                connected = None;
+                let session = dtr_sftp::Session::connect(&alias).await?;
+                connected = Some((alias.clone(), session));
+            }
+            let (_, session) = connected.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
+            match message {
+                SftpMsg::List { alias, path } => {
+                    // "." is the pane's way of asking for the home directory:
+                    // only the server knows where that is.
+                    let path = if path == std::path::Path::new(".") {
+                        session.home().await?
+                    } else {
+                        path
+                    };
+                    let entries = session.list(&path.to_string_lossy()).await?;
+                    Ok(SftpEvent::Listed {
+                        alias,
+                        path,
+                        entries,
+                    })
+                }
+                SftpMsg::Download { remote, local, .. } => {
+                    let bytes = session.download(&remote.to_string_lossy(), &local).await?;
+                    tracing::info!(?remote, ?local, bytes, "sftp download");
+                    Ok(SftpEvent::Downloaded { local, bytes })
+                }
+            }
+        });
+
+        let event = match outcome {
+            Ok(event) => event,
+            Err(err) => SftpEvent::Failed {
+                alias,
+                message: format!("{err:#}"),
+            },
+        };
+        let _ = proxy.send_event(UserEvent::Sftp(event));
+    }
+}
+
+/// Where a remote file lands: `~/Downloads`, created if it is missing. Asking
+/// per transfer would be a dialog, and this is the first slice.
+fn download_target(remote: &std::path::Path) -> PathBuf {
+    let name = remote
+        .file_name()
+        .map(|name| name.to_owned())
+        .unwrap_or_else(|| "download".into());
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Downloads");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(name)
+}
+
+/// The alias an `ssh -t <alias>` shell was started with.
+fn ssh_alias(transport: &Transport) -> Option<String> {
+    let Transport::Shell(config) = transport else {
+        return None;
+    };
+    let program = config.program.as_deref()?.trim();
+    let rest = program.strip_prefix("ssh")?.trim_start();
+    let rest = rest.strip_prefix("-t").map(str::trim)?;
+    let alias = rest.split_whitespace().next()?;
+    (!alias.is_empty()).then(|| alias.to_owned())
+}
+
 fn closed(active: usize, count: usize) -> Option<usize> {
     if count <= 1 {
         return None;
@@ -415,6 +545,8 @@ struct Session {
     /// Whether the shell is an `ssh` client, so its reported directory belongs
     /// to another machine and must not be used as a local path.
     remote: bool,
+    /// The ssh alias this session is connected to, when it is remote.
+    alias: Option<String>,
     /// Whether byte counters belong on the status strip.
     counters: bool,
     echo: bool,
@@ -544,6 +676,8 @@ struct App {
     wake: std::cell::Cell<bool>,
     /// The scale whose strip geometry was last logged.
     strip_logged: Option<f32>,
+    /// The SFTP worker, and the alias it is connected to.
+    sftp: Option<std::sync::mpsc::Sender<SftpMsg>>,
     /// Why the last wake was asked for, so a spin can name its cause.
     wake_why: std::cell::Cell<&'static str>,
     /// A redraw asked for on egui's behalf has not been drawn yet. Asking again
@@ -1190,6 +1324,7 @@ impl App {
                         if cfg.program.as_deref().is_some_and(|p| {
                             p.trim_start().starts_with("ssh")
                         })),
+                    alias: ssh_alias(&transport),
                     counters: !matches!(transport, Transport::Shell(_)),
                     echo: false,
                     selection: None,
@@ -1318,6 +1453,7 @@ impl App {
                 serial: matches!(transport, Transport::Serial(_)),
                 remote: matches!(&transport, Transport::Shell(cfg)
                     if cfg.program.as_deref().is_some_and(|p| p.trim_start().starts_with("ssh"))),
+                alias: ssh_alias(&transport),
                 counters: !matches!(transport, Transport::Shell(_)),
                 echo: false,
                 selection: None,
@@ -1330,6 +1466,108 @@ impl App {
 
     /// Split the focused pane and put a file manager in the new half. Side by
     /// side is the useful default: a listing next to the command line it feeds.
+    /// Start the SFTP worker if it is not running yet.
+    ///
+    /// One worker per window, not per pane: the file browser is a window-level
+    /// tool, and every transfer it makes shares one connection per host.
+    fn sftp_worker(&mut self) -> &std::sync::mpsc::Sender<SftpMsg> {
+        if self.sftp.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<SftpMsg>();
+            let proxy = self.proxy.clone();
+            std::thread::Builder::new()
+                .name("dtr-sftp".into())
+                .spawn(move || sftp_worker(rx, proxy))
+                .ok();
+            self.sftp = Some(tx);
+        }
+        // `is_none` was false either way by now.
+        self.sftp.as_ref().expect("worker started")
+    }
+
+    /// Ask for whatever the focused remote pane is waiting on, and start any
+    /// download it asked for.
+    fn pump_sftp(&mut self) {
+        let mut request = None;
+        let mut download = None;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if let Some(explorer) = tab.focused_explorer_mut() {
+                if explorer.alias().is_some() {
+                    request = explorer.take_request();
+                    download = explorer.take_download().map(|remote| {
+                        (explorer.alias().unwrap_or_default().to_owned(), remote)
+                    });
+                }
+            }
+        }
+        if let Some((alias, path)) = request {
+            let tx = self.sftp_worker();
+            let _ = tx.send(SftpMsg::List { alias, path });
+        }
+        if let Some((alias, remote)) = download {
+            let local = download_target(&remote);
+            let tx = self.sftp_worker();
+            let _ = tx.send(SftpMsg::Download {
+                alias,
+                remote,
+                local,
+            });
+        }
+    }
+
+    fn sftp_event(&mut self, event: SftpEvent) {
+        match event {
+            SftpEvent::Listed {
+                alias,
+                path,
+                entries,
+            } => {
+                let entries: Vec<crate::explorer::Entry> = entries
+                    .into_iter()
+                    .map(|entry| crate::explorer::Entry {
+                        name: entry.name,
+                        is_dir: entry.dir,
+                        size: (!entry.dir).then_some(entry.size),
+                    })
+                    .collect();
+                if let Some(explorer) = self.tabs[self.active].focused_explorer_mut() {
+                    if explorer.alias() == Some(alias.as_str()) {
+                        explorer.apply_listing(path, entries);
+                    }
+                }
+            }
+            SftpEvent::Downloaded { local, bytes } => {
+                self.toast = Some((
+                    format!("copied {} bytes to {}", bytes, local.display()),
+                    std::time::Instant::now(),
+                ));
+            }
+            SftpEvent::Failed { alias, message } => {
+                if let Some(explorer) = self.tabs[self.active].focused_explorer_mut() {
+                    if explorer.alias() == Some(alias.as_str()) {
+                        explorer.apply_failure(message);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open a file pane over another machine, beside the terminal that is on it.
+    fn split_files_remote(&mut self, alias: &str) {
+        let id = self.next_leaf;
+        self.next_leaf += 1;
+        let tab = &mut self.tabs[self.active];
+        let target = tab.focus;
+        if !tab
+            .layout
+            .split(target, crate::layout::Axis::Horizontal, id, false)
+        {
+            return;
+        }
+        tab.leaves
+            .insert(id, Pane::Files(Explorer::remote(alias)));
+        tab.focus = id;
+    }
+
     fn split_files(&mut self, path: Option<PathBuf>) {
         let id = self.next_leaf;
         self.next_leaf += 1;
@@ -1594,17 +1832,12 @@ impl App {
                 Err(err) => tracing::warn!(%err, "theme"),
             },
             Action::Files(path) => {
-                if let Some(session) = self.session().filter(|session| session.remote) {
-                    // The session is on another machine: a local browser here
-                    // would show this machine's files under a remote tab's name,
-                    // which is worse than saying so. SFTP is the fix
-                    // (docs/sftp.md), not a fallback.
-                    let _ = session;
-                    self.toast = Some((
-                        "file pane over sftp is not wired up yet".to_owned(),
-                        std::time::Instant::now(),
-                    ));
-                    self.repaint("files refused");
+                if let Some(alias) = self.session().and_then(|session| session.alias.clone()) {
+                    // Another machine: its own files, over SFTP. A local browser
+                    // here would show this machine's files under a remote tab's
+                    // name, which is worse than saying so.
+                    self.split_files_remote(&alias);
+                    self.repaint("remote files");
                 } else {
                     // No argument means "the directory this session is in",
                     // which is what a file pane next to a terminal should show.
@@ -1858,6 +2091,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.scan_due = std::time::Instant::now();
                 self.repaint("watched file changed");
             }
+            UserEvent::Sftp(event) => {
+                self.sftp_event(event);
+                self.repaint("sftp");
+            }
             UserEvent::Destinations(destinations) => {
                 self.destinations = destinations;
                 self.scanning = false;
@@ -2048,7 +2285,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if std::mem::take(&mut self.fonts_dirty) {
                     gpu.rebuild_grid(&self.look);
                 }
-                self.log_strip_geometry(scale);
+                self.pump_sftp();
+        self.log_strip_geometry(scale);
                 self.fit_panes(gpu.metrics(), screen, scale);
                 let settings = if self.settings.open { Some(&self.settings) } else { None };
                 // A window capture is due once, then never again.

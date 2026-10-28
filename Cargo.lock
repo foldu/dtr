@@ -800,6 +800,7 @@ dependencies = [
  "dirs",
  "dtr-complete",
  "dtr-config",
+ "dtr-sftp",
  "dtr-sshconfig",
  "dtr-store",
  "egui",

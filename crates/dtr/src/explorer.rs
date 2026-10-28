@@ -71,12 +71,93 @@ pub struct Explorer {
     /// A filesystem problem to show in the pane itself. The pane stays usable
     /// and its header stays visible; it never goes blank.
     message: Option<String>,
+    /// Set when this pane browses another machine over SFTP. `None` is the
+    /// local filesystem, which is the only case that reads `std::fs`.
+    remote: Option<Remote>,
+}
+
+/// What a remote pane needs from the SFTP worker.
+#[derive(Clone, Debug)]
+pub struct Remote {
+    /// The ssh alias the listing comes from.
+    pub alias: String,
+    /// A directory whose listing has been asked for and not arrived yet.
+    pending: Option<PathBuf>,
+    /// The bytes path of a download the user asked for, for the app to start.
+    pub download: Option<PathBuf>,
 }
 
 impl Explorer {
     /// Open at `start`, or at the process's current directory when there is no
     /// start path. A path that names a file shows its parent directory and
     /// selects the file, which is what `dtr --files some/file` should mean.
+    /// A pane over another machine. Nothing is read here: the app asks the SFTP
+    /// worker for a listing and hands it back with `apply_listing`.
+    pub fn remote(alias: &str) -> Self {
+        let mut explorer = Self {
+            cwd: PathBuf::from("."),
+            home: PathBuf::from("."),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: Cell::new(0),
+            show_hidden: false,
+            message: Some("connecting…".to_owned()),
+            remote: Some(Remote {
+                alias: alias.to_owned(),
+                pending: Some(PathBuf::from(".")),
+                download: None,
+            }),
+        };
+        explorer.remote_request();
+        explorer
+    }
+
+    /// The alias this pane browses, when it browses one.
+    pub fn alias(&self) -> Option<&str> {
+        self.remote.as_ref().map(|remote| remote.alias.as_str())
+    }
+
+    /// The directory the worker should list now, if the pane is waiting.
+    pub fn take_request(&mut self) -> Option<(String, PathBuf)> {
+        let remote = self.remote.as_mut()?;
+        let path = remote.pending.take()?;
+        Some((remote.alias.clone(), path))
+    }
+
+    /// A listing arrived. Ignored when the pane has moved on since asking, so a
+    /// slow reply cannot yank the view back.
+    pub fn apply_listing(&mut self, path: PathBuf, entries: Vec<Entry>) {
+        let Some(remote) = self.remote.as_mut() else {
+            return;
+        };
+        if remote.pending.is_some() && remote.pending.as_deref() != Some(path.as_path()) {
+            return;
+        }
+        self.cwd = path;
+        self.message = None;
+        self.entries = arrange(entries, &self.cwd, self.show_hidden);
+        self.selected = clamp_selection(self.selected, self.entries.len());
+    }
+
+    /// A worker error, shown the way a filesystem error is.
+    pub fn apply_failure(&mut self, message: String) {
+        if self.remote.is_some() {
+            self.message = Some(message);
+        }
+    }
+
+    /// A file the user asked to copy down, taken once.
+    pub fn take_download(&mut self) -> Option<PathBuf> {
+        self.remote.as_mut()?.download.take()
+    }
+
+    fn remote_request(&mut self) {
+        if let Some(remote) = self.remote.as_mut() {
+            remote.pending = Some(self.cwd.clone());
+            self.message = Some("loading…".to_owned());
+        }
+    }
+
     pub fn new(start: Option<PathBuf>) -> Self {
         let home = dirs::home_dir().unwrap_or_default();
         let mut explorer = Self {
@@ -87,6 +168,7 @@ impl Explorer {
             scroll: Cell::new(0),
             show_hidden: false,
             message: None,
+            remote: None,
         };
 
         let (mut cwd, select) = match start {
@@ -121,9 +203,22 @@ impl Explorer {
         explorer
     }
 
-    /// What the status strip calls this pane.
+    /// What the status strip calls this pane. A remote pane names the host,
+    /// because the same path means different things on two machines.
     pub fn title(&self) -> String {
-        format!("files  {}", display_path(&self.cwd, &self.home))
+        match self.alias() {
+            Some(alias) => format!("files  {alias}:{}", display_path(&self.cwd, &self.home)),
+            None => format!("files  {}", display_path(&self.cwd, &self.home)),
+        }
+    }
+
+    /// The header text: the path, prefixed with the host when it is remote.
+    fn header(&self) -> String {
+        let path = display_path(&self.cwd, &self.home);
+        match self.alias() {
+            Some(alias) => format!("{alias}:{path}"),
+            None => path,
+        }
     }
 
     /// Handle one key. Returns a path when the user asked for a file to be put
@@ -160,6 +255,10 @@ impl Explorer {
                     self.go_up();
                 } else if entry.is_dir {
                     self.cd(self.cwd.join(&entry.name));
+                } else if let Some(remote) = self.remote.as_mut() {
+                    // A remote file is copied down, not opened: the editor on
+                    // this machine has no way to reach it.
+                    remote.download = Some(self.cwd.join(&entry.name));
                 } else {
                     return Some(self.cwd.join(&entry.name));
                 }
@@ -189,6 +288,15 @@ impl Explorer {
     /// Read the directory again. A failure is a message in the pane, not a
     /// panic and not an empty pane: the header and the message both stay.
     fn reload(&mut self) {
+        if self.remote.is_some() {
+            let selected = self.selected_entry().map(|entry| entry.name.clone());
+            let _ = selected;
+            self.entries.clear();
+            self.selected = 0;
+            self.scroll.set(0);
+            self.remote_request();
+            return;
+        }
         self.message = None;
         self.entries.clear();
         self.selected = 0;
@@ -261,7 +369,7 @@ impl Explorer {
         painter.text(
             egui::pos2(header.left() + 8.0, header.center().y),
             Align2::LEFT_CENTER,
-            display_path(&self.cwd, &self.home),
+            self.header(),
             FontId::monospace(12.0),
             Look::colour(look.foreground),
         );
