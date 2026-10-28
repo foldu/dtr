@@ -35,33 +35,46 @@ pub struct Session {
 impl Session {
     /// Connect by ssh alias, through the user's own ssh.
     pub async fn connect(alias: &str) -> Result<Self> {
-        let mut child = Command::new("ssh")
-            .args(["-s", alias, "sftp"])
-            // The subsystem is the whole point; a prompt would hang the pipe.
-            // Batch mode makes a missing credential a fast, readable failure
-            // instead of a silent wait.
-            .arg("-o")
-            .arg("BatchMode=yes")
+        let mut command = Command::new("ssh");
+        for arg in ssh_args(alias) {
+            command.arg(arg);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped, not null: when a handshake fails the child's stderr is the
+            // only thing that says why. On its own the protocol error is
+            // "sender dropped", which tells nobody anything.
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("spawn ssh -s {alias} sftp"))?;
+            .with_context(|| format!("spawn ssh for {alias}"))?;
 
         let stdin = child.stdin.take().context("ssh stdin")?;
         let stdout = child.stdout.take().context("ssh stdout")?;
+        let stderr = child.stderr.take();
         let stream = ChildStream {
             read: stdout,
             write: stdin,
         };
-        let sftp = SftpSession::new(stream)
-            .await
-            .with_context(|| format!("sftp handshake with {alias}"))?;
-        Ok(Self {
-            sftp,
-            child: Some(child),
-        })
+        match SftpSession::new(stream).await {
+            Ok(sftp) => Ok(Self {
+                sftp,
+                child: Some(child),
+            }),
+            Err(err) => {
+                let said = read_stderr(stderr).await;
+                let status = child.try_wait().ok().flatten().map(|s| s.to_string());
+                let mut message = format!("sftp handshake with {alias} failed: {err}");
+                if let Some(status) = status {
+                    message.push_str(&format!(" (ssh exited: {status})"));
+                }
+                if !said.is_empty() {
+                    message.push_str(&format!("\nssh said: {said}"));
+                }
+                Err(anyhow::anyhow!(message))
+            }
+        }
     }
 
     /// A session over any bidirectional stream: the tests' way in, and the
@@ -192,6 +205,49 @@ impl Session {
     }
 }
 
+/// The ssh invocation, in the order ssh wants it: every option before the
+/// destination. After the destination ssh treats arguments as a command, so
+/// `-s host sftp -o …` would hand `-o` to the subsystem instead of parsing it.
+fn ssh_args(alias: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    // A broken config is a real failure mode (one store drop-in with wrong
+    // permissions makes every connection fail), so there is a way out.
+    if let Ok(config) = std::env::var("DTR_SSH_CONFIG") {
+        args.push("-F".to_owned());
+        args.push(config);
+    }
+    // Batch mode makes a missing credential a fast, readable failure instead of
+    // a silent wait: the child has no tty to prompt on. `DTR_SSH_BATCH=0` turns
+    // it off for diagnosis - with a pty underneath (docs/sftp.md §5.3) a prompt
+    // is answerable, without one it hangs, which is why it is on by default.
+    if std::env::var("DTR_SSH_BATCH").as_deref() != Ok("0") {
+        args.push("-o".to_owned());
+        args.push("BatchMode=yes".to_owned());
+    }
+    args.push("-s".to_owned());
+    args.push(alias.to_owned());
+    args.push("sftp".to_owned());
+    args
+}
+
+/// Whatever the child said before it died, bounded and time-boxed: a wedged ssh
+/// must not hold the worker.
+async fn read_stderr(stderr: Option<tokio::process::ChildStderr>) -> String {
+    let Some(mut stderr) = stderr else {
+        return String::new();
+    };
+    let mut text = String::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut scratch = Vec::new();
+        let _ = stderr.read_to_end(&mut scratch).await;
+        text = String::from_utf8_lossy(&scratch).trim().to_owned();
+    })
+    .await;
+    // The last line is the one that says why; earlier ones are banners.
+    let last = text.lines().last().unwrap_or("").to_owned();
+    if last.is_empty() { text } else { last }
+}
+
 /// Directories first, then by name: the order every file manager shows, and the
 /// one a person's eye expects when the listing changes underneath them.
 fn sort_entries(entries: &mut [Entry]) {
@@ -226,5 +282,22 @@ mod tests {
         // connection and a `ControlMaster` alive for as long as it runs.
         let source = include_str!("lib.rs");
         assert!(source.contains("kill_on_drop(true)"));
+    }
+}
+
+#[cfg(test)]
+mod ssh_args_tests {
+    use super::ssh_args;
+
+    #[test]
+    fn every_option_comes_before_the_destination() {
+        let args = ssh_args("jupiter");
+        let position = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
+        // After the destination ssh treats the rest as a command, so an option
+        // that lands there is handed to the subsystem instead of parsed.
+        assert!(position("-s") < position("jupiter"));
+        assert!(position("-o") < position("jupiter"));
+        assert!(position("BatchMode=yes") < position("jupiter"));
+        assert_eq!(args.last().map(String::as_str), Some("sftp"));
     }
 }
