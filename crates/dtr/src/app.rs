@@ -41,6 +41,8 @@ pub struct Startup {
     pub capture_after: u64,
     /// A script of keys to type once the window opens, one per frame.
     pub keys: Option<String>,
+    /// A drag to perform once the window opens: `x1,y1,x2,y2` in pixels.
+    pub drag: Option<String>,
     /// Close the window after this many milliseconds, to exercise shutdown.
     pub exit_after: Option<u64>,
     /// Adapter name to prefer, e.g. "nvidia".
@@ -274,6 +276,19 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         keymap: crate::keys::Keymap::new(&startup.config.keys),
         pending: Vec::new(),
         pending_since: None,
+        drag_script: startup.drag.as_deref().and_then(|text| {
+            let parts: Vec<f64> = text
+                .split(',')
+                .filter_map(|part| part.trim().parse().ok())
+                .collect();
+            match parts.as_slice() {
+                [x1, y1, x2, y2] => Some((*x1, *y1, *x2, *y2)),
+                _ => {
+                    tracing::warn!(text, "drag expects x1,y1,x2,y2");
+                    None
+                }
+            }
+        }),
         script: startup
             .keys
             .as_deref()
@@ -495,6 +510,8 @@ struct App {
     /// When the first chord of a pending binding was typed: Zed waits a second
     /// for the rest, then fires the longest binding that is already complete.
     pending_since: Option<std::time::Instant>,
+    /// A drag still to perform, from `--drag`.
+    drag_script: Option<(f64, f64, f64, f64)>,
     /// The keys still to type, from `--keys`.
     script: std::collections::VecDeque<crate::keys::KeyStroke>,
     /// Where to write a PNG of the live window, and when. Set by `--capture`.
@@ -663,6 +680,55 @@ impl App {
                     }
                 }
                 }
+
+    /// The pointer went down at `at`. A press focuses the pane under it and
+    /// starts a selection anchor; the drag turns the anchor into a range.
+    fn pointer_down(&mut self, at: (f64, f64)) {
+        if let Some(id) = self.pane_at(at.0, at.1) {
+            self.tabs[self.active].focus = id;
+        }
+        let anchor = self.cell_at(at.0, at.1).map(|cell| (cell, cell));
+        if let Some(session) = self.session_mut() {
+            session.selection = anchor;
+        }
+        self.dragging = self.session().is_some();
+    }
+
+    /// The pointer moved while down: extend the selection from its anchor.
+    fn pointer_move(&mut self, at: (f64, f64)) {
+        if !self.dragging {
+            return;
+        }
+        let Some(cell) = self.cell_at(at.0, at.1) else {
+            return;
+        };
+        if let Some(session) = self.session_mut() {
+            if let Some((anchor, _)) = session.selection {
+                session.selection = Some((anchor, cell));
+            }
+        }
+    }
+
+    /// The pointer came up: end the drag, and copy what it selected.
+    ///
+    /// Selecting text in a terminal is understood to put it on the clipboard —
+    /// the drag ends, the text is there. A single-cell selection is a click,
+    /// not a selection, and copying one blank cell is the "0 chars" bug again.
+    fn pointer_up(&mut self) {
+        let dragged = std::mem::take(&mut self.dragging);
+        if !dragged {
+            return;
+        }
+        if let Some(session) = self.session() {
+            if let Some((start, end)) = session.selection {
+                if start != end {
+                    session
+                        .pane
+                        .send(crate::pane::Command::CopyRange(start, end));
+                }
+            }
+        }
+    }
 
     /// Do what a binding asks for. Returns whether it acted, so a terminal-only
     /// action with a file pane focused falls through to the pane's own keys.
@@ -1376,6 +1442,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.check_exit_deadline(event_loop);
+        // `--drag`: press, move, release — the three steps a person's hand
+        // makes, so the copy-on-selection path runs without a mouse.
+        if let Some((x1, y1, x2, y2)) = self.drag_script.take() {
+            self.pointer_down((x1, y1));
+            self.pointer_move((x2, y2));
+            self.pointer_up();
+            self.repaint("scripted drag");
+        }
+
         // `--keys`: one stroke per wake-up, so the frame that follows each one
         // exists before the next arrives. This is the harness the user asked
         // for: a scripted run goes through the same handler a keyboard does.
@@ -1501,42 +1576,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some((position.x, position.y));
-                if self.dragging {
-                    if let Some(cell) = self.cell_at(position.x, position.y) {
-                        if let Some(session) = self.session_mut() {
-                            if let Some((anchor, _)) = session.selection {
-                                session.selection = Some((anchor, cell));
-                            }
-                        }
-                    }
-                }
+                self.pointer_move((position.x, position.y));
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == winit::event::MouseButton::Left {
                     match state {
                         winit::event::ElementState::Pressed => {
-                            // Clicking a pane focuses it, which is what makes a
-                            // split usable at all: keys follow the pointer.
-                            if let Some((x, y)) = self.cursor_position {
-                                if let Some(id) = self.pane_at(x, y) {
-                                    self.tabs[self.active].focus = id;
-                                }
+                            if let Some(at) = self.cursor_position {
+                                self.pointer_down(at);
                             }
-                            // A click without a drag is not a selection until
-                            // the pointer moves; the anchor waits here. A file
-                            // pane has no cells to select.
-                            let anchor = self
-                                .cursor_position
-                                .and_then(|(x, y)| self.cell_at(x, y))
-                                .map(|cell| (cell, cell));
-                            if let Some(session) = self.session_mut() {
-                                session.selection = anchor;
-                            }
-                            self.dragging = self.session().is_some();
                         }
-                        winit::event::ElementState::Released => {
-                            self.dragging = false;
-                        }
+                        winit::event::ElementState::Released => self.pointer_up(),
                     }
                 }
             }

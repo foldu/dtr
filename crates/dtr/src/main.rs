@@ -100,6 +100,12 @@ struct Args {
     #[arg(long, value_name = "SCRIPT")]
     keys: Option<String>,
 
+    /// Drag across the terminal once it opens: `x1,y1,x2,y2` in pixels. The
+    /// pointer path is otherwise only exercisable by hand, and selecting text
+    /// is how a copy happens.
+    #[arg(long, value_name = "X1,Y1,X2,Y2")]
+    drag: Option<String>,
+
     /// Close the window after MS milliseconds (shutdown smoke test)
     #[arg(long, value_name = "MS")]
     exit_after: Option<u64>,
@@ -608,6 +614,7 @@ fn main() -> anyhow::Result<()> {
             capture: args.capture.clone(),
             capture_after: args.capture_after,
             keys: args.keys.clone(),
+        drag: args.drag.clone(),
             gpu: gpu.clone(),
             settings: args.settings,
             config: config.clone(),
@@ -642,6 +649,7 @@ fn main() -> anyhow::Result<()> {
         capture: args.capture.clone(),
         capture_after: args.capture_after,
         keys: args.keys.clone(),
+        drag: args.drag.clone(),
         gpu,
         settings: args.settings,
         config,

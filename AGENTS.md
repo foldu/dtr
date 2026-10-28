@@ -259,6 +259,18 @@ the settings menu the instant `Ctrl+,` was let go — it flashed and vanished an
 read as "does not open". Key handling for overlays checks `ElementState::Pressed`
 first; the same trap as the doubled keystrokes, in a different disguise.
 
+**Selecting with the mouse copies.** The drag's release sends
+`Command::CopyRange` for any selection wider than one cell; the pane builds the
+text from the terminal, parks it, and the next frame hands it to
+`ui.ctx().copy_text`, which `egui_state.handle_platform_output` puts on the system
+clipboard. -The release handler used to only clear `dragging`, so a mouse
+selection produced text on screen and nothing in the clipboard.
+
+The pointer now goes through `App::pointer_down/move/up`, which `--drag
+x1,y1,x2,y2` also calls: the copy path can be exercised without a mouse. That
+option is only verifiable where an X display is reachable — a headless shell has
+no clipboard and winit refuses to open.
+
 **A copy cannot use the published frame, because drawing it is what removes it.**
 The UI takes the frame out of the pane's slot to render it, so a copy that reads
 that slot gets `None` and copies the empty string — which shipped as "copied 0
