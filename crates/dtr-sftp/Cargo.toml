@@ -1,0 +1,12 @@
+[package]
+name = "dtr-sftp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SFTP over the host's own ssh: one child process, one protocol stream"
+
+[dependencies]
+anyhow.workspace = true
+russh-sftp = "3.0.1"
+tokio = { workspace = true, features = ["process", "io-util", "rt", "sync", "time", "macros", "fs"] }
+tracing.workspace = true
