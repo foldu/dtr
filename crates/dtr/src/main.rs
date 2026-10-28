@@ -498,6 +498,7 @@ fn main() -> anyhow::Result<()> {
         // agent, jump hosts and known_hosts.
         Transport::Shell(pty::Config {
             program: Some(format!("ssh -t {host}")),
+            ..Default::default()
         })
     } else if let Some(path) = args.replay.clone() {
         Transport::Replay(path)
@@ -532,6 +533,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         Transport::Shell(pty::Config {
             program: args.shell.clone(),
+            ..Default::default()
         })
     };
 

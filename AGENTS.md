@@ -285,6 +285,23 @@ wake rather than a hopeful one.
 This is the general shape of "the UI only updates when I touch it", and it is
 worth checking before blaming the work itself.
 
+**A session knows its directory only because it says so.** There is no portable way
+to ask a running shell where it is: `/proc` is Linux-only, and an `ssh` session has
+no local process at all. OSC 7 (`ESC ] 7 ; file://host/path`, BEL or ST terminated)
+is the report every modern shell and prompt can emit, so `CwdSniffer` watches the
+byte stream before the VT core and keeps the tail across chunks — terminal output
+arrives at arbitrary offsets, and a sequence split in two is the normal case, not
+a corner.
+
+The **host** in that URI is the part that matters: empty, `localhost` or this
+machine's own name is a local directory; any other host is a shell on another
+machine, and a path from there must never be used as a local path — "new tab
+here" would try to `cd` into a directory that only exists on the wrong machine.
+`Session::remote` records the `ssh` case too, so a remote session's directory is
+never adopted even if the remote host happens to share this machine's name.
+
+`+` → local shell starts in the focused tab's directory when that tab is local.
+
 **A shell that exits closes its tab.** The pane cannot do it — the UI owns the
 tab — so the pty reader sets `Pane::ended` on EOF (the child closed the pty, so
 it has exited) and calls `wake`; `App::reap_ended` closes those tabs, highest

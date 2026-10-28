@@ -224,6 +224,8 @@ pub struct Pane {
     /// The child is gone: `Ctrl-D`, `exit`, or a pty that would not read again.
     /// A shell that has ended has nothing left to show, so the UI closes it.
     ended: Arc<std::sync::atomic::AtomicBool>,
+    /// The directory the session last reported with OSC 7.
+    cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl Pane {
@@ -247,6 +249,8 @@ impl Pane {
         let failure = Arc::clone(&error);
         let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ended_flag = Arc::clone(&ended);
+        let cwd = Arc::new(Mutex::new(None));
+        let cwd_seen = Arc::clone(&cwd);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
@@ -274,6 +278,7 @@ impl Pane {
                         log,
                         copy_sink,
                         Arc::clone(&ended_flag),
+                        Arc::clone(&cwd_seen),
                         theme,
                     )
                     .await
@@ -294,6 +299,7 @@ impl Pane {
             error,
             copied,
             ended,
+            cwd,
         })
     }
 
@@ -312,6 +318,11 @@ impl Pane {
     }
 
     /// The pane's fatal error, if it hit one.
+    /// Where the session says it is: the last OSC 7 it sent.
+    pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        self.cwd.lock().ok().and_then(|slot| slot.clone())
+    }
+
     /// True once the process behind this pane has gone away.
     pub fn ended(&self) -> bool {
         self.ended.load(std::sync::atomic::Ordering::Relaxed)
@@ -343,6 +354,7 @@ async fn run(
     log_path: Option<(PathBuf, serial::LogFormat)>,
     copied: Arc<Mutex<Option<String>>>,
     ended: Arc<std::sync::atomic::AtomicBool>,
+    cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
@@ -537,12 +549,18 @@ async fn run(
     // has produced no output yet still has an (empty) grid to show.
     publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
 
+    let mut sniffer = CwdSniffer::default();
     loop {
         tokio::select! {
             chunk = bytes_rx.recv(), if source_alive => {
                 match chunk {
                     Some(bytes) => {
                         stats.add_rx(bytes.len());
+                        if let Some(dir) = sniffer.feed(&bytes) {
+                            if let Ok(mut slot) = cwd.lock() {
+                                *slot = Some(dir);
+                            }
+                        }
                         term.vt_write(&bytes);
                         flush_replies(&replies, &mut sink).await;
                         publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
@@ -1031,6 +1049,110 @@ fn publish(
     Ok(())
 }
 
+/// Watches the byte stream for OSC 7, the working-directory report.
+///
+/// `ESC ] 7 ; file://host/path BEL` (or `ESC \`) is what a shell sends when the
+/// directory changes; there is no other portable way to know where a session is,
+/// since `/proc` is Linux-only and a remote shell has no local process at all.
+/// Chunks arrive at arbitrary offsets, so the tail of a partial sequence is kept.
+#[derive(Default)]
+struct CwdSniffer {
+    buf: Vec<u8>,
+}
+
+impl CwdSniffer {
+    const MAX: usize = 8 * 1024;
+
+    fn feed(&mut self, bytes: &[u8]) -> Option<std::path::PathBuf> {
+        self.buf.extend_from_slice(bytes);
+        let mut found = None;
+        while let Some(start) = find(&self.buf, b"\x1b]7;") {
+            let body = start + 4;
+            let end = self.buf[body..]
+                .iter()
+                .position(|&b| b == 0x07 || b == 0x1b);
+            let Some(len) = end else {
+                // Incomplete: keep from the introducer and wait for more.
+                self.buf.drain(..start);
+                return found;
+            };
+            let payload = &self.buf[body..body + len];
+            if let Some(path) = parse_file_uri(payload) {
+                found = Some(path);
+            }
+            let terminator = match self.buf[body + len] {
+                0x07 => 1,
+                0x1b => 2, // ESC \ (ST)
+                _ => 1,
+            };
+            self.buf.drain(..body + len + terminator);
+        }
+        // Anything else is just bytes we do not care about.
+        let keep = self
+            .buf
+            .iter()
+            .rposition(|&b| b == 0x1b)
+            .filter(|&at| self.buf.len() - at < 8)
+            .unwrap_or(self.buf.len());
+        self.buf.drain(..keep);
+        if self.buf.len() > Self::MAX {
+            self.buf.clear();
+        }
+        found
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// This machine's name, for the host part of an OSC 7 URI. A shell that reports
+/// `file://<hostname>/path` on the local machine is still local; a shell on
+/// another host is not, and its path must never be treated as a local directory.
+fn local_hostname() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok())
+    })
+    .as_deref()
+}
+
+/// `file://host/path` to a path.
+///
+/// The host decides whether the path means anything here: empty, `localhost` or
+/// this machine's own name is a local directory; anything else is a shell on
+/// another host, and a path from there is not a local directory — returning it
+/// would make "new tab here" try to `cd` into a path that happens to exist on the
+/// wrong machine.
+fn parse_file_uri(payload: &[u8]) -> Option<std::path::PathBuf> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let rest = text.strip_prefix("file://")?;
+    let slash = rest.find('/')?;
+    let host = &rest[..slash];
+    let local = host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || local_hostname().is_some_and(|name| host.eq_ignore_ascii_case(name));
+    if !local {
+        return None;
+    }
+    let mut path = String::with_capacity(rest.len() - slash);
+    let mut chars = rest[slash..].chars();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            let byte = u8::from_str_radix(&hex, 16).ok()?;
+            path.push(byte as char);
+        } else {
+            path.push(ch);
+        }
+    }
+    Some(std::path::PathBuf::from(path))
+}
+
 fn fill_cells(
     snapshot: &Snapshot<'static, '_>,
     rows: &mut RowIterator<'static>,
@@ -1181,5 +1303,78 @@ mod tests {
     #[test]
     fn copying_an_empty_screen_gives_nothing() {
         assert_eq!(frame_text(&frame(&["", ""])), "");
+    }
+}
+
+#[cfg(test)]
+mod cwd_tests {
+    use super::CwdSniffer;
+
+    fn path_of(input: &[u8]) -> Option<String> {
+        CwdSniffer::default()
+            .feed(input)
+            .map(|path| path.display().to_string())
+    }
+
+    #[test]
+    fn a_bel_terminated_report_is_a_directory() {
+        assert_eq!(
+            path_of(b"\x1b]7;file:///home/barnabas/src\x07").as_deref(),
+            Some("/home/barnabas/src")
+        );
+        assert_eq!(
+            path_of(b"\x1b]7;file:///home/lab\x07").as_deref(),
+            Some("/home/lab")
+        );
+    }
+
+    #[test]
+    fn an_st_terminated_report_works_too() {
+        assert_eq!(
+            path_of(b"\x1b]7;file:///tmp\x1b\\").as_deref(),
+            Some("/tmp")
+        );
+    }
+
+    #[test]
+    fn a_sequence_split_across_chunks_is_still_read() {
+        let mut sniffer = CwdSniffer::default();
+        assert!(sniffer.feed(b"prompt \x1b]7;file:///ho").is_none());
+        assert_eq!(
+            sniffer
+                .feed(b"me/barnabas\x07")
+                .map(|path| path.display().to_string())
+                .as_deref(),
+            Some("/home/barnabas")
+        );
+    }
+
+    #[test]
+    fn another_host_is_not_a_local_directory() {
+        // A remote shell's path means nothing here; adopting it would make
+        // "new tab here" cd into a directory on the wrong machine.
+        assert_eq!(path_of(b"\x1b]7;file://build-host/home/x\x07"), None);
+    }
+
+    #[test]
+    fn localhost_and_this_machine_are_local() {
+        assert_eq!(
+            path_of(b"\x1b]7;file://localhost/srv\x07").as_deref(),
+            Some("/srv")
+        );
+    }
+
+    #[test]
+    fn percent_escapes_are_decoded() {
+        assert_eq!(
+            path_of(b"\x1b]7;file:///home/a%20b\x07").as_deref(),
+            Some("/home/a b")
+        );
+    }
+
+    #[test]
+    fn ordinary_output_is_not_a_directory() {
+        assert_eq!(path_of(b"just a shell saying hello\x07"), None);
+        assert_eq!(path_of(b"\x1b]0;a title\x07"), None);
     }
 }

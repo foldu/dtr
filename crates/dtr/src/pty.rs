@@ -15,6 +15,9 @@ pub const ROWS: u16 = 24;
 pub struct Config {
     /// Shell to launch; `None` walks a platform default list.
     pub program: Option<String>,
+    /// Where to start. A new tab inherits the directory its parent was in,
+    /// which is what every other terminal does with "open a tab here".
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 pub struct Shell {
@@ -28,11 +31,11 @@ pub struct Shell {
 impl Config {
     pub fn open(&self) -> anyhow::Result<Shell> {
         match &self.program {
-            Some(program) => spawn(program),
+            Some(program) => spawn(program, self.cwd.as_deref()),
             None => {
                 let mut last = None;
                 for program in candidates() {
-                    match spawn(&program) {
+                    match spawn(&program, self.cwd.as_deref()) {
                         Ok(shell) => return Ok(shell),
                         Err(err) => {
                             tracing::debug!(%program, %err, "shell candidate failed");
@@ -46,7 +49,7 @@ impl Config {
     }
 }
 
-fn spawn(program: &str) -> anyhow::Result<Shell> {
+fn spawn(program: &str, cwd: Option<&std::path::Path>) -> anyhow::Result<Shell> {
     let system = native_pty_system();
     let pair = system.openpty(PtySize {
         rows: ROWS,
@@ -59,6 +62,9 @@ fn spawn(program: &str) -> anyhow::Result<Shell> {
     let mut parts = program.split_whitespace();
     let exe = parts.next().unwrap_or(program);
     let mut cmd = CommandBuilder::new(exe);
+    if let Some(dir) = cwd {
+        cmd.cwd(dir);
+    }
     for arg in parts {
         cmd.arg(arg);
     }

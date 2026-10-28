@@ -219,6 +219,8 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
+    let remote = matches!(&startup.transport, Transport::Shell(cfg)
+        if cfg.program.as_deref().is_some_and(|p| p.trim_start().starts_with("ssh")));
     let counters = !matches!(startup.transport, Transport::Shell(_));
     let port = match &startup.transport {
         Transport::Serial(cfg) => Some(cfg.port.clone()),
@@ -263,6 +265,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 frame: None,
                 label,
                 serial,
+                remote,
                 counters,
                 echo: false,
                 selection: startup.select,
@@ -409,6 +412,9 @@ struct Session {
     label: String,
     /// Whether this session has modem lines, for the status strip.
     serial: bool,
+    /// Whether the shell is an `ssh` client, so its reported directory belongs
+    /// to another machine and must not be used as a local path.
+    remote: bool,
     /// Whether byte counters belong on the status strip.
     counters: bool,
     echo: bool,
@@ -1178,6 +1184,12 @@ impl App {
                     frame: None,
                     label: transport.describe(),
                     serial: matches!(transport, Transport::Serial(_)),
+                    // A remote shell reports the *remote* directory; it must not
+                    // be adopted as a local path by a new tab.
+                    remote: matches!(&transport, Transport::Shell(cfg)
+                        if cfg.program.as_deref().is_some_and(|p| {
+                            p.trim_start().starts_with("ssh")
+                        })),
                     counters: !matches!(transport, Transport::Shell(_)),
                     echo: false,
                     selection: None,
@@ -1304,6 +1316,8 @@ impl App {
                 frame: None,
                 label: transport.describe(),
                 serial: matches!(transport, Transport::Serial(_)),
+                remote: matches!(&transport, Transport::Shell(cfg)
+                    if cfg.program.as_deref().is_some_and(|p| p.trim_start().starts_with("ssh"))),
                 counters: !matches!(transport, Transport::Shell(_)),
                 echo: false,
                 selection: None,
@@ -1585,7 +1599,10 @@ impl App {
             }
             Action::Shell(shell) => {
                 let program = (!shell.is_empty()).then_some(shell);
-                self.open(Transport::Shell(crate::pty::Config { program }));
+                self.open(Transport::Shell(crate::pty::Config {
+                    program,
+                    ..Default::default()
+                }));
             }
             Action::Replay(path) => self.open(Transport::Replay(PathBuf::from(path))),
             Action::Demo => self.open(Transport::Demo),
@@ -1595,6 +1612,7 @@ impl App {
                 // and re-implementing those is a project, not a feature.
                 self.open(Transport::Shell(crate::pty::Config {
                     program: Some(format!("ssh -t {host}")),
+                    ..Default::default()
                 }));
             }
             Action::Quit => self.quit = true,
@@ -2122,9 +2140,17 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(crate::ui::TabHit::New(host)) => match host {
                         Some(host) => self.open(Transport::Shell(crate::pty::Config {
                             program: Some(format!("ssh -t {host}")),
+                            ..Default::default()
                         })),
-                        None => {
-                            self.open(Transport::Shell(crate::pty::Config::default()));
+                                        None => {
+                            let cwd = self
+                                .session()
+                                .filter(|session| !session.remote)
+                                .and_then(|session| session.pane.cwd());
+                            self.open(Transport::Shell(crate::pty::Config {
+                                cwd,
+                                ..Default::default()
+                            }));
                             self.repaint("new tab");
                         }
                     },
