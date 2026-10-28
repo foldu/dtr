@@ -232,6 +232,13 @@ create, so a terminal had one tab and no discoverable way to get a second — th
 cycling looked broken rather than unused. `Ctrl+Shift+T` opens a tab, and the
 palette footer is the one place the bindings are written down.
 
+**`cargo build` can pass while `nix build` fails: the sandbox compiles the committed
+tree, not the working one.** Two `#[cfg(test)]` mistakes were caught this way — a
+`Row::key` helper used by production code, and a `default_family` whose body read
+a list that had just been made test-only. Before believing a local build, run
+`git add` and `nix build .#dtr`; a dirty-tree `cargo build` can compile a stale
+file set in ways the release build will not.
+
 **The settings menu is mouse-first.** Rows are click targets, the font size is a
 drag value, the family and the theme are combo boxes, the toggles are checkboxes;
 the keyboard still works but nothing needs it. `Settings::ui` takes `&self` (the

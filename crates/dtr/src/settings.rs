@@ -55,8 +55,8 @@ impl Row {
         }
     }
 
-    /// The key as it appears in the config file, e.g. `serial.baud`.
-    #[cfg(test)]
+    /// The key as it appears in the config file, e.g. `serial.baud`. Also the
+    /// accessible name of the row's control, which is why it is not test-only.
     fn key(self) -> String {
         match self.section() {
             "" => self.label().to_owned(),
@@ -296,6 +296,7 @@ impl Settings {
     }
 
     /// The value column, as it should read in the menu.
+    #[cfg(test)]
     fn value(&self, row: Row) -> String {
         match row {
             Row::FontSize => format!("{:.0} pt", self.draft.font.size),
@@ -602,6 +603,7 @@ impl Settings {
     }
 }
 
+#[cfg(test)]
 fn on_off(value: bool) -> String {
     if value { "on" } else { "off" }.to_owned()
 }

@@ -85,6 +85,7 @@ pub(crate) fn works(data: &[u8], index: u32) -> bool {
 ///
 /// Not a whitelist: everything that passes the probe is offered, this only
 /// decides what the list opens on.
+#[cfg(test)]
 pub const PREFERRED: &[&str] = &[
     "JetBrains Mono",
     "Hack",
@@ -140,6 +141,10 @@ pub const FALLBACK: &[&str] = &[
 
 /// The family to use when nothing is configured: the first preferred one that
 /// is installed, else the first usable family at all.
+///
+/// Test-only since the settings menu became a combo box: the menu lists every
+/// usable family, so nothing has to choose one on the user's behalf.
+#[cfg(test)]
 pub fn default_family(usable: &[String]) -> Option<String> {
     PREFERRED
         .iter()
