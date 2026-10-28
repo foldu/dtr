@@ -1,0 +1,48 @@
+#!/bin/sh
+
+# Fill the grid with double-width characters, one distinct glyph per pass.
+#
+# Every cell here goes through the path that finds a fallback face, fits the
+# bitmap into the two-cell box and keeps the neighbours from overlapping — so a
+# regression lands here as a stalled PTY, which is the cheap symptom of a face
+# lookup that is not cached, a bitmap re-fitted per cell, or a glyph pushed to
+# the atlas on every frame.
+#
+# One glyph per pass, like upstream's `dense_cells`, because the cost being
+# measured is per cell, not per distinct character: the atlas is full after the
+# first sample and the rest of the run is the steady state a screen of Han text
+# actually lives in.
+
+tty="/dev/$(ps -o tty= -p $$)"
+
+# The size comes from `stty`, which asks the tty it is handed on stdin, rather
+# than `tput`, which asks the terminal database and its own stdout — and this
+# script's stdout is a pipe into vtebench. `scripts/bench.sh --check` runs this
+# with no terminal at all, hence the fallback.
+size=$(stty size < "$tty" 2>/dev/null)
+lines=${size%% *}
+columns=${size##* }
+case "$lines" in '' | *[!0-9]*) lines=24 ;; esac
+case "$columns" in '' | *[!0-9]*) columns=80 ;; esac
+# A pty with no size reports 0 0, which is a valid number and not a size.
+[ "$lines" -lt 1 ] && lines=24
+[ "$columns" -lt 2 ] && columns=80
+
+# A wide character covers two cells, so half as many fill the grid. Half a cell
+# does not exist: an odd width loses the last column.
+pairs=$((columns / 2))
+[ "$pairs" -lt 1 ] && pairs=1
+
+offset=0
+for char in 漢 字 日 本 語 中 文 東 京 大 阪 電 車 時 間 新 聞 会 社 学 校 天 気 海 山 川 空 雨 雪 花; do
+    printf "\033[H"
+    for line in $(seq "$lines"); do
+        for column in $(seq "$pairs"); do
+            index=$((line + column + offset))
+            fg_col=$((index % 156 + 100))
+            bg_col=$((255 - index % 156 + 100))
+            printf "\033[38;5;%s;48;5;%s;1;3;4m%s" "$fg_col" "$bg_col" "$char"
+        done
+    done
+    offset=$((offset + 1))
+done

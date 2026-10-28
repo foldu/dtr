@@ -28,6 +28,9 @@ test:
   stage: test
   script:
     - nix develop .#default --command cargo test --workspace
+    # The benchmark payloads are shell scripts, so nothing compiles them. This
+    # proves they still produce bytes, without a window, a GPU or a network.
+    - ./scripts/bench.sh --check
   cache:
     key:
       files:

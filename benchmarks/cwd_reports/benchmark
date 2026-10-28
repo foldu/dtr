@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# OSC 7 working-directory reports, the sequence every modern shell prompt emits.
+#
+# dtr sniffs these out of the byte stream before the VT core sees them, so this
+# measures the scan itself: it has to stay a search for ESC across the chunk and
+# a copy of the tail, never a per-byte state machine running beside the parser.
+# The payload is all report and no screen output, so anything above the cost of
+# parsing the bytes is the sniffer.
+#
+# The host is `localhost` on purpose: a report naming another machine is dropped
+# by design, and a payload that always took that branch would measure the cheap
+# path.
+
+i=0
+while [ "$i" -lt 200 ]; do
+    printf "\033]7;file://localhost/home/bench/project/src/module/number/%s\007" "$i"
+    i=$((i + 1))
+done

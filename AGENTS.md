@@ -542,6 +542,41 @@ you the iGPU on a machine with a discrete card, which is the wrong answer for a
 terminal someone stares at. `--gpu <substring>` (or `DTR_GPU`) picks by adapter
 name; `-v` logs the adapter and every adapter seen.
 
+## Benchmarking
+
+`./scripts/bench.sh` runs vtebench — Alacritty's PTY-read benchmark, the one every
+terminal comparison quotes — against dtr, and prints a table with the delta from
+the previous run. The runner is fetched at a pinned revision into the cache; the
+`benchmarks/` directory is ours and its payloads check with `--check`.
+
+vtebench measures exactly one thing, and its README says so: how fast the
+terminal reads its PTY. It writes the payload to *its own* stdout, so it has to
+run inside the terminal being measured — the script starts dtr with vtebench as
+the shell (`--shell`) and, when vtebench exits, the tab and the window go with
+it. That is why the numbers arrive in a `.dat` file instead of on the screen.
+
+Reading the table:
+
+- **Absolute numbers only mean anything on one machine against itself.** A CI
+  runner and a laptop have different fonts, GPUs and compositors.
+- **The previous run is the baseline**, so bench one change at a time, and
+  rebuild first: a stale binary makes the number describe something else.
+- **vtebench records whole milliseconds**, so a 1 MiB sample from a fast
+  terminal quantises to 2 or 3 ms. The script's default is 8 MiB per sample; a
+  median of `<1 ms` is a failed measurement and it says so.
+- **A sample is bounded by whichever is slower, reading or drawing**, so a
+  renderer that cannot keep up shows up here as well. `--profile` writes
+  `target/bench/profile.svg` for the same flood, and that is where to look once
+  a delta says something regressed.
+
+Two payloads are ours: `wide_cells` walks the double-width path (fallback face,
+bitmap fitted into two cells) and `cwd_reports` floods the OSC 7 sniffer, which
+sits in front of the VT core on every byte. The rest are upstream's.
+
+`scripts/bench.sh --check` validates the payloads without a window, a GPU or a
+network, and is what CI runs — a benchmark that silently produces nothing is
+worse than no benchmark.
+
 ## Gotchas that are real
 
 | Symptom | Cause |
