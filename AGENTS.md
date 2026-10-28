@@ -285,6 +285,21 @@ wake rather than a hopeful one.
 This is the general shape of "the UI only updates when I touch it", and it is
 worth checking before blaming the work itself.
 
+**`ssh` options go before the destination, and its stderr is the error message.**
+`ssh -s host sftp -o BatchMode=yes` looks reasonable and is wrong: after the
+destination ssh treats the rest as a command, so the option is handed to the
+subsystem instead of parsed. `dtr-sftp::ssh_args` builds the list and a test
+asserts every flag precedes the alias.
+
+The second half is what made that failure invisible: the child's stderr was
+`Stdio::null()`, so a dead `ssh` reached the UI as `sender dropped` — the
+protocol's way of saying "nothing more will arrive", which names no cause at all.
+stderr is piped now and quoted in the error with the exit status.
+
+`examples/probe.rs` runs the same path from a shell when a pane refuses to open:
+one line from `ssh` beats guessing. `DTR_SSH_CONFIG=/dev/null` gets past a broken
+config, and `DTR_SSH_BATCH=0` lets a prompt be seen.
+
 **A session knows its directory only because it says so.** There is no portable way
 to ask a running shell where it is: `/proc` is Linux-only, and an `ssh` session has
 no local process at all. OSC 7 (`ESC ] 7 ; file://host/path`, BEL or ST terminated)
