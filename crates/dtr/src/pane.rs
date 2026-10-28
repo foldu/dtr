@@ -17,7 +17,7 @@ use libghostty_vt::Terminal;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, Selection};
-use libghostty_vt::terminal::{Point, PointCoordinate};
+use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
 use portable_pty::{Child, MasterPty};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
@@ -77,6 +77,10 @@ pub struct Frame {
     pub default_fg: [u8; 3],
     pub default_bg: [u8; 3],
     pub cursor: Option<(u16, u16)>,
+    /// The mouse selection as linear cell indices into `cells`, in either
+    /// order, clamped to the visible rows. Recomputed on every publish, so it
+    /// names the same characters after the view scrolls.
+    pub selection: Option<(usize, usize)>,
     /// Row-major, `cols * rows` entries.
     pub cells: Vec<Cell>,
 }
@@ -184,8 +188,14 @@ pub enum Command {
     Echo(bool),
     Copy,
     /// Copy a cell range: `(start, end)` as linear indices, in either order.
-    CopyRange(usize, usize),
     Paste(Vec<u8>),
+    /// Begin a mouse selection at a viewport cell: `x` and `y` are the cell the
+    /// pointer went down on.
+    SelectStart { x: u16, y: u16 },
+    /// Move the selection's head to a viewport cell.
+    SelectHead { x: u16, y: u16 },
+    /// Put the current selection on the clipboard.
+    CopySelection,
     /// Walk the viewport to the previous (negative) or next prompt mark, which
     /// only exists when the shell emits OSC 133.
     ScrollPrompt(isize),
@@ -602,10 +612,11 @@ async fn run(
 
     // Always publish once, even if the terminal is still clean: a pane that
     // has produced no output yet still has an (empty) grid to show.
-    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, None)?;
 
     let mut sniffer = CwdSniffer::default();
     let mut marks = PromptMarks::default();
+    let mut selection: Option<SelectionAnchors> = None;
     // Publishing is what a flood costs, not parsing: one frame rebuilds every
     // cell of the grid. So a pane publishes at most once per budget — and, when
     // it has to wait, a timer arm publishes the frame it owes rather than
@@ -650,7 +661,7 @@ async fn run(
                         flush_replies(&replies, &mut sink).await;
                         tracing::debug!(chunks, bytes = total, "burst parsed");
                         if tokio::time::Instant::now() >= next_publish {
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, selection.as_ref())?;
                             next_publish = tokio::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
@@ -664,7 +675,7 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep_until(next_publish), if publish_pending => {
-                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, selection.as_ref())?;
                 next_publish = tokio::time::Instant::now()
                     + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
                 publish_pending = false;
@@ -770,7 +781,7 @@ async fn run(
                         // are shown without being sent anywhere else.
                         if echo {
                             term.vt_write(&bytes);
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, selection.as_ref())?;
                         }
                     }
                     Command::Dtr(level) => {
@@ -822,14 +833,14 @@ async fn run(
                             }
                         }
                         tracing::debug!(cols = new_cols, rows = new_rows, "resized");
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
                     }
                     Command::Scroll(lines) => {
                         term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
                         // Forced: a viewport move does not necessarily mark the
                         // render state dirty, and a scroll that does not repaint
                         // looks like a broken wheel.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
                         note_scrollback(&term, &stats);
                     }
                     Command::ScrollPrompt(delta) => {
@@ -838,7 +849,7 @@ async fn run(
                         );
                         // Forced, for the same reason as `Scroll`: a viewport
                         // move does not necessarily dirty the render state.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
                         note_scrollback(&term, &stats);
                     }
                     Command::CaptureBlock => {
@@ -866,7 +877,7 @@ async fn run(
                         } else {
                             libghostty_vt::terminal::ScrollViewport::Bottom
                         });
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
                         note_scrollback(&term, &stats);
                     }
                     Command::Echo(on) => echo = on,
@@ -892,18 +903,56 @@ async fn run(
                             match next.apply(&mut term) {
                                 Ok(()) => {
                                     tracing::info!(theme = %next.name, "theme switched");
-                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
                                 }
                                 Err(err) => tracing::warn!(%err, "could not switch theme"),
                             }
                         }
                     }
-                    Command::Copy | Command::CopyRange(_, _) => {
+                    Command::SelectStart { x, y } => {
+                        match SelectionAnchors::at(&term, x, y) {
+                            Ok(anchors) => {
+                                selection = Some(anchors);
+                                publish(
+                                    &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
+                                    true, selection.as_ref(),
+                                )?;
+                            }
+                            Err(err) => tracing::warn!(%err, "could not start a selection"),
+                        }
+                    }
+                    Command::SelectHead { x, y } => {
+                        let point = Point::Viewport(PointCoordinate {
+                            x,
+                            y: u32::from(y),
+                        });
+                        let moved = match selection.as_mut() {
+                            Some(anchors) => anchors.head.set(&mut term, point).is_ok(),
+                            None => false,
+                        };
+                        if moved {
+                            publish(
+                                &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
+                                true, selection.as_ref(),
+                            )?;
+                        }
+                    }
+                    Command::CopySelection => {
+                        let text = selection
+                            .as_ref()
+                            .and_then(|anchors| anchors.text(&term))
+                            .unwrap_or_default();
+                        if let Ok(mut slot) = copied.lock() {
+                            *slot = Some(text);
+                        }
+                        wake();
+                    }
+                    Command::Copy => {
                         // Read the text out of the terminal now. The published
                         // frame cannot be used: the UI takes it out of the slot
                         // to draw it, so a copy would find nothing there — which
                         // is exactly the "copied 0 chars" that shipped.
-                        let text = match copy_text(&mut term, &mut state, &mut rows, &mut cells, &command) {
+                        let text = match copy_text(&mut term, &mut state, &mut rows, &mut cells) {
                             Ok(text) => text,
                             Err(err) => {
                                 tracing::warn!(%err, "could not read the screen to copy");
@@ -972,7 +1021,6 @@ fn copy_text(
     state: &mut RenderState<'static>,
     rows: &mut RowIterator<'static>,
     cells: &mut CellIterator<'static>,
-    command: &Command,
 ) -> anyhow::Result<String> {
     let snapshot = state.update(term)?;
     let mut frame = Frame {
@@ -981,15 +1029,13 @@ fn copy_text(
         default_fg: [0; 3],
         default_bg: [0; 3],
         cursor: None,
+        selection: None,
         cells: Vec::with_capacity(
             usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?),
         ),
     };
     fill_cells(&snapshot, rows, cells, &mut frame)?;
-    Ok(match command {
-        Command::CopyRange(start, end) => frame_text_range(&frame, *start, *end),
-        _ => frame_text(&frame),
-    })
+    Ok(frame_text(&frame))
 }
 
 /// Record how far the viewport is from the live screen.
@@ -1001,42 +1047,6 @@ fn note_scrollback(term: &Terminal<'_, '_>, stats: &Stats) {
         Err(_) => 0,
     };
     stats.set_scrollback(below);
-}
-
-/// Copy from `start` to `end`, inclusive, as text.
-///
-/// The range is two linear cell indices in either order; a partial first and
-/// last row is normal (a drag rarely starts at column zero), so rows are cut at
-/// the selection's own edges and only the trailing blanks are trimmed.
-pub(crate) fn frame_text_range(frame: &Frame, start: usize, end: usize) -> String {
-    let cols = usize::from(frame.cols).max(1);
-    let (first, last) = if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    };
-    let last = last.min(frame.cells.len().saturating_sub(1));
-    let first = first.min(last);
-
-    let (start_row, start_col) = (first / cols, first % cols);
-    let (end_row, end_col) = (last / cols, last % cols);
-
-    let mut lines = Vec::new();
-    for row in start_row..=end_row {
-        let from = if row == start_row { start_col } else { 0 };
-        let to = if row == end_row { end_col } else { cols - 1 };
-        let base = row * cols;
-        if base + from >= frame.cells.len() {
-            break;
-        }
-        let to = to.min(cols - 1);
-        let line: String = frame.cells[base + from..=(base + to).min(frame.cells.len() - 1)]
-            .iter()
-            .map(|cell| cell.text.as_str())
-            .collect();
-        lines.push(line.trim_end().to_owned());
-    }
-    lines.join("\n")
 }
 
 /// Append bytes to the session log, in whichever shape it was asked for.
@@ -1139,6 +1149,7 @@ fn publish(
     out: &Mutex<Option<Frame>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
     force: bool,
+    selection: Option<&SelectionAnchors>,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let snapshot = state.update(term)?;
@@ -1155,10 +1166,27 @@ fn publish(
         default_fg: rgb(colors.foreground),
         default_bg: rgb(colors.background),
         cursor: snapshot.cursor_viewport()?.map(|c| (c.x, c.y)),
+        selection: None,
         cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
     };
 
     fill_cells(&snapshot, rows, cells, &mut frame)?;
+
+    // The selection is resolved here rather than kept by the UI: a viewport
+    // move republishes, so the highlight follows the characters the user
+    // dragged over instead of staying at a row number.
+    if let Some(anchors) = selection {
+        let top = viewport_top(term);
+        let start = viewport_cell(&anchors.start, top, frame.rows);
+        let head = viewport_cell(&anchors.head, top, frame.rows);
+        if let (Some((sx, sy)), Some((hx, hy))) = (start, head) {
+            let cols = usize::from(frame.cols).max(1);
+            frame.selection = Some((
+                usize::from(sy) * cols + usize::from(sx),
+                usize::from(hy) * cols + usize::from(hx),
+            ));
+        }
+    }
 
     // Dirty state is sticky by design; clearing it is the consumer's job.
     snapshot.set_dirty(Dirty::Clean)?;
@@ -1176,6 +1204,67 @@ fn publish(
     }
     wake();
     Ok(())
+}
+
+/// A mouse selection, held as two tracked references.
+///
+/// Cell indices would name whichever characters happen to be at those rows
+/// after a scroll or a reflow; a tracked reference follows the content itself,
+/// which is why dragging across a line and then scrolling still highlights that
+/// line. Resolved to viewport cells on each publish for the renderer, and to a
+/// `Selection` for the copy.
+struct SelectionAnchors {
+    start: TrackedGridRef,
+    head: TrackedGridRef,
+}
+
+impl SelectionAnchors {
+    /// A selection of one cell, at a viewport cell the pointer was over.
+    fn at(term: &Terminal<'_, '_>, x: u16, y: u16) -> anyhow::Result<Self> {
+        let point = Point::Viewport(PointCoordinate {
+            x,
+            y: u32::from(y),
+        });
+        Ok(Self {
+            start: term.track_grid_ref(point)?,
+            head: term.track_grid_ref(point)?,
+        })
+    }
+
+    /// The whole selection as text, or `None` when it holds nothing — the
+    /// first cell of a click, or a block that has been pruned away.
+    fn text(&self, term: &Terminal<'_, '_>) -> Option<String> {
+        let start = self.start.snapshot(term).ok()??;
+        let end = self.head.snapshot(term).ok()??;
+        let selection = Selection::new(start, end, false);
+        let options = FormatOptions::new()
+            .with_selection(&selection)
+            .with_trim(true)
+            .with_unwrap(true);
+        let bytes = term.format_selection_alloc(None, options).ok()??;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+/// Where the viewport's first row sits in screen coordinates, which is the row
+/// a tracked reference reports in.
+fn viewport_top(term: &Terminal<'_, '_>) -> u32 {
+    let Ok(grid_ref) = term.grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 })) else {
+        return 0;
+    };
+    term.point_from_grid_ref(&grid_ref, PointSpace::Screen)
+        .ok()
+        .flatten()
+        .map_or(0, |point| point.y)
+}
+
+/// A tracked reference's cell in the viewport, clamped to its edges: a selection
+/// whose end has scrolled out of view still paints to the border it left by.
+fn viewport_cell(reference: &TrackedGridRef, top: u32, rows: u16) -> Option<(u16, u16)> {
+    let point = reference.point(PointSpace::Screen).ok()??;
+    let last = i64::from(rows.saturating_sub(1));
+    let y = (i64::from(point.y) - i64::from(top)).clamp(0, last);
+    Some((point.x, y as u16))
 }
 
 /// Where the shell's prompts are.
@@ -1506,6 +1595,42 @@ const DEMO: &[u8] = b"\x1b[32mdtr\x1b[0m \xe2\x80\x94 a serial-first terminal\r\
 mod tests {
     use super::{Cell, Frame, frame_text};
 
+    /// Copy from `start` to `end`, inclusive, as text.
+    ///
+    /// The range is two linear cell indices in either order; a partial first and
+    /// last row is normal (a drag rarely starts at column zero), so rows are cut at
+    /// the selection's own edges and only the trailing blanks are trimmed.
+    fn frame_text_range(frame: &Frame, start: usize, end: usize) -> String {
+        let cols = usize::from(frame.cols).max(1);
+        let (first, last) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let last = last.min(frame.cells.len().saturating_sub(1));
+        let first = first.min(last);
+
+        let (start_row, start_col) = (first / cols, first % cols);
+        let (end_row, end_col) = (last / cols, last % cols);
+
+        let mut lines = Vec::new();
+        for row in start_row..=end_row {
+            let from = if row == start_row { start_col } else { 0 };
+            let to = if row == end_row { end_col } else { cols - 1 };
+            let base = row * cols;
+            if base + from >= frame.cells.len() {
+                break;
+            }
+            let to = to.min(cols - 1);
+            let line: String = frame.cells[base + from..=(base + to).min(frame.cells.len() - 1)]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect();
+            lines.push(line.trim_end().to_owned());
+        }
+        lines.join("\n")
+    }
+
     fn frame(rows: &[&str]) -> Frame {
         let cols = 8u16;
         let mut cells = Vec::new();
@@ -1530,6 +1655,7 @@ mod tests {
             default_fg: [255, 255, 255],
             default_bg: [0, 0, 0],
             cursor: None,
+            selection: None,
             cells,
         }
     }
@@ -1564,26 +1690,26 @@ mod tests {
         let frame = frame(&["abcdefgh", "ijklmnop"]);
         // From 'c' (index 2) to 'j' (index 9), both inclusive: the rest of the
         // first row, then the first two cells of the next.
-        assert_eq!(super::frame_text_range(&frame, 2, 9), "cdefgh\nij");
+        assert_eq!(frame_text_range(&frame, 2, 9), "cdefgh\nij");
     }
 
     #[test]
     fn copying_a_range_works_backwards() {
         // A drag can end before it starts; the range is the same either way.
         let frame = frame(&["abcdefgh", "ijklmnop"]);
-        assert_eq!(super::frame_text_range(&frame, 9, 2), super::frame_text_range(&frame, 2, 9));
+        assert_eq!(frame_text_range(&frame, 9, 2), frame_text_range(&frame, 2, 9));
     }
 
     #[test]
     fn copying_a_single_cell_gives_one_character() {
         let frame = frame(&["abcdefgh"]);
-        assert_eq!(super::frame_text_range(&frame, 3, 3), "d");
+        assert_eq!(frame_text_range(&frame, 3, 3), "d");
     }
 
     #[test]
     fn a_range_past_the_end_is_clamped() {
         let frame = frame(&["ab"]);
-        assert_eq!(super::frame_text_range(&frame, 0, 9999), "ab");
+        assert_eq!(frame_text_range(&frame, 0, 9999), "ab");
     }
 
     #[test]
@@ -1668,6 +1794,88 @@ mod cwd_tests {
     fn ordinary_output_is_not_a_directory() {
         assert_eq!(path_of(b"just a shell saying hello\x07"), None);
         assert_eq!(path_of(b"\x1b]0;a title\x07"), None);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::{SelectionAnchors, viewport_cell, viewport_top};
+    use libghostty_vt::Terminal;
+    use libghostty_vt::terminal::{Point, PointCoordinate, ScrollViewport};
+
+    /// Enough output to have somewhere to scroll, and a viewport at the bottom.
+    fn terminal() -> Terminal<'static, 'static> {
+        let mut term = Terminal::new(20, 5).unwrap();
+        for line in 0..40 {
+            term.vt_write(format!("line {line}\r\n").as_bytes());
+        }
+        term
+    }
+
+    fn head(term: &mut Terminal<'static, 'static>, cell: SelectionAnchors, x: u16, y: u16) -> SelectionAnchors {
+        let mut cell = cell;
+        cell.head
+            .set(
+                term,
+                Point::Viewport(PointCoordinate {
+                    x,
+                    y: u32::from(y),
+                }),
+            )
+            .unwrap();
+        cell
+    }
+
+    /// The point of anchoring: the text a selection covers must not change when
+    /// the view does. Cell indices fail this test by construction — that is
+    /// what the old implementation stored.
+    #[test]
+    fn the_selected_text_survives_a_scroll() {
+        let mut term = terminal();
+        let start = SelectionAnchors::at(&term, 0, 3).unwrap();
+        let cell = head(&mut term, start, 5, 3);
+        let before = cell.text(&term).expect("a selection");
+        assert!(before.starts_with("line "), "selected {before:?}");
+
+        term.scroll_viewport(ScrollViewport::Delta(-3));
+        assert_eq!(cell.text(&term).as_deref(), Some(before.as_str()));
+
+        term.scroll_viewport(ScrollViewport::Top);
+        assert_eq!(cell.text(&term).as_deref(), Some(before.as_str()));
+    }
+
+    /// ...and the highlight has to move with it, or the copy and the picture
+    /// disagree about what is selected.
+    #[test]
+    fn the_highlight_moves_with_the_text() {
+        let mut term = terminal();
+        term.scroll_viewport(ScrollViewport::Top);
+        let cell = SelectionAnchors::at(&term, 0, 2).unwrap();
+        let rows = 5;
+        assert_eq!(
+            viewport_cell(&cell.start, viewport_top(&term), rows).map(|cell| cell.1),
+            Some(2)
+        );
+
+        term.scroll_viewport(ScrollViewport::Delta(1));
+        assert_eq!(
+            viewport_cell(&cell.start, viewport_top(&term), rows).map(|cell| cell.1),
+            Some(1),
+            "one row up: the same line, one row higher"
+        );
+    }
+
+    /// A selection whose end has scrolled away still paints to the border it
+    /// left by, so scrolling does not make the highlight vanish.
+    #[test]
+    fn an_end_that_scrolled_off_clamps_to_the_edge() {
+        let mut term = terminal();
+        let cell = SelectionAnchors::at(&term, 0, 3).unwrap();
+        term.scroll_viewport(ScrollViewport::Delta(-10));
+        assert_eq!(
+            viewport_cell(&cell.start, viewport_top(&term), 5).map(|cell| cell.1),
+            Some(4)
+        );
     }
 }
 

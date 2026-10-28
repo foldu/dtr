@@ -287,6 +287,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
 
     let mut app = App {
         frame_budget,
+        scripted_selection: startup.select,
         clipboard: None,
         watcher: crate::watch::Watcher::spawn({
             let proxy = proxy.clone();
@@ -318,7 +319,6 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 alias: startup_alias,
                 counters,
                 echo: false,
-                selection: startup.select,
                 meter: Meter::new(),
                 grid: (0, 0),
             }),
@@ -342,6 +342,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         store: startup.store,
         log: startup.log,
         dragging: false,
+        drag_moved: false,
         cursor_position: None,
         frames_drawn: 0,
         exit_after: startup.exit_after,
@@ -565,8 +566,6 @@ struct Session {
     /// Whether byte counters belong on the status strip.
     counters: bool,
     echo: bool,
-    /// Cell indices of a mouse selection: `(anchor, head)`.
-    selection: Option<(usize, usize)>,
     meter: Meter,
 }
 
@@ -710,6 +709,9 @@ struct App {
     log: Option<(PathBuf, crate::serial::LogFormat)>,
     look: Look,
     dragging: bool,
+    /// Whether the pointer moved to another cell while down: a press that never
+    /// moved is a click, and a click copies nothing.
+    drag_moved: bool,
     cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
     frames_drawn: u64,
@@ -744,6 +746,9 @@ struct App {
     /// A copy note and when it was made. Shown briefly, because "did that
     /// work?" is asked at the moment the answer still matters.
     toast: Option<(String, std::time::Instant)>,
+    /// `--select START:END`, still waiting for a frame to say how wide the grid
+    /// is: the pane wants viewport cells, the flag names linear ones.
+    scripted_selection: Option<(usize, usize)>,
 }
 
 impl App {
@@ -1003,25 +1008,27 @@ impl App {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
         }
-        let anchor = self.cell_at(at.0, at.1).map(|cell| (cell, cell));
-        if let Some(session) = self.session_mut() {
-            session.selection = anchor;
+        self.drag_moved = false;
+        let cell = self.cell_xy(at.0, at.1);
+        if let (Some((x, y)), Some(session)) = (cell, self.session()) {
+            session
+                .pane
+                .send(crate::pane::Command::SelectStart { x, y });
         }
         self.dragging = self.session().is_some();
     }
 
-    /// The pointer moved while down: extend the selection from its anchor.
+    /// The pointer moved while down: move the selection's head with it.
     fn pointer_move(&mut self, at: (f64, f64)) {
         if !self.dragging {
             return;
         }
-        let Some(cell) = self.cell_at(at.0, at.1) else {
+        let Some((x, y)) = self.cell_xy(at.0, at.1) else {
             return;
         };
-        if let Some(session) = self.session_mut() {
-            if let Some((anchor, _)) = session.selection {
-                session.selection = Some((anchor, cell));
-            }
+        self.drag_moved = true;
+        if let Some(session) = self.session() {
+            session.pane.send(crate::pane::Command::SelectHead { x, y });
         }
     }
 
@@ -1032,18 +1039,22 @@ impl App {
     /// not a selection, and copying one blank cell is the "0 chars" bug again.
     fn pointer_up(&mut self) {
         let dragged = std::mem::take(&mut self.dragging);
-        if !dragged {
+        let moved = std::mem::take(&mut self.drag_moved);
+        if !dragged || !moved {
             return;
         }
         if let Some(session) = self.session() {
-            if let Some((start, end)) = session.selection {
-                if start != end {
-                    session
-                        .pane
-                        .send(crate::pane::Command::CopyRange(start, end));
-                }
-            }
+            session.pane.send(crate::pane::Command::CopySelection);
         }
+    }
+
+    /// The viewport cell under the pointer. The pane wants cells rather than
+    /// linear indices because a selection is anchored to the characters, and a
+    /// linear index names whichever character happens to be there later.
+    fn cell_xy(&self, x: f64, y: f64) -> Option<(u16, u16)> {
+        let cell = self.cell_at(x, y)?;
+        let cols = usize::from(self.session()?.frame.as_ref()?.cols).max(1);
+        Some(((cell % cols) as u16, (cell / cols) as u16))
     }
 
     /// Ask the worker runtime for a fresh destination list.
@@ -1134,15 +1145,20 @@ impl App {
             Action::Copy => {
                 // The pane rebuilds the text from the terminal when asked; it
                 // cannot reuse a frame, because drawing the frame is what
-                // empties the pane's copy of it.
+                // empties the pane's copy of it. A selection is copied as
+                // anchored, and with nothing selected the whole screen is what
+                // ctrl-shift-c has always meant.
                 let Some(session) = self.session() else {
                     return false;
                 };
-                match session.selection {
-                    Some((start, end)) => session
-                        .pane
-                        .send(crate::pane::Command::CopyRange(start, end)),
-                    None => session.pane.send(crate::pane::Command::Copy),
+                let selected = session
+                    .frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.selection.is_some());
+                if selected {
+                    session.pane.send(crate::pane::Command::CopySelection);
+                } else {
+                    session.pane.send(crate::pane::Command::Copy);
                 }
                 true
             }
@@ -1391,7 +1407,6 @@ impl App {
                     alias: ssh_alias(&transport),
                     counters: !matches!(transport, Transport::Shell(_)),
                     echo: false,
-                    selection: None,
                     meter: Meter::new(),
                     grid: (0, 0),
                 };
@@ -1521,7 +1536,6 @@ impl App {
                 alias: ssh_alias(&transport),
                 counters: !matches!(transport, Transport::Shell(_)),
                 echo: false,
-                selection: None,
                 meter: Meter::new(),
                 grid: (0, 0),
             }),
@@ -1706,7 +1720,7 @@ impl App {
                 let (frame, selection, cursor) = match tab.leaves.get(&id) {
                     Some(Pane::Terminal(session)) => (
                         session.frame.as_ref(),
-                        session.selection,
+                        session.frame.as_ref().and_then(|frame| frame.selection),
                         id == tab.focus,
                     ),
                     // A widget pane occupies its rectangle in the grid pass
@@ -2172,6 +2186,24 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Frame => {}
         }
         // Every terminal pane publishes frames, not only the focused one: a
+        // `--select START:END` names linear cells from a script; the pane wants
+        // viewport cells, and only a frame knows how wide the grid is.
+        if let Some((start, end)) = self.scripted_selection {
+            if let Some(cols) = self
+                .session()
+                .and_then(|session| session.frame.as_ref())
+                .map(|frame| usize::from(frame.cols).max(1))
+            {
+                let cell = |at: usize| ((at % cols) as u16, (at / cols) as u16);
+                let (sx, sy) = cell(start);
+                let (hx, hy) = cell(end);
+                if let Some(session) = self.session() {
+                    session.pane.send(crate::pane::Command::SelectStart { x: sx, y: sy });
+                    session.pane.send(crate::pane::Command::SelectHead { x: hx, y: hy });
+                }
+                self.scripted_selection = None;
+            }
+        }
         // file pane can have focus while the terminal beside it is still live.
         for tab in &mut self.tabs {
             for pane in tab.leaves.values_mut() {

@@ -536,12 +536,26 @@ also writes the clipboard itself with `arboard`, keeping the handle on `App` for
 the life of the process (on X11 the owner has to stay alive or the text disappears
 with it). Failures are logged; silence is not success.
 
-**Selecting with the mouse copies.** The drag's release sends
-`Command::CopyRange` for any selection wider than one cell; the pane builds the
-text from the terminal, parks it, and the next frame hands it to
-`ui.ctx().copy_text`, which `egui_state.handle_platform_output` puts on the system
-clipboard. -The release handler used to only clear `dragging`, so a mouse
-selection produced text on screen and nothing in the clipboard.
+**Selecting with the mouse copies.** The press sends `Command::SelectStart`, the
+drag `SelectHead`, and the release `CopySelection`; the pane builds the text from
+the terminal, parks it, and the next frame hands it to `ui.ctx().copy_text`, which
+`egui_state.handle_platform_output` puts on the system clipboard. The release
+handler used to only clear `dragging`, so a mouse selection produced text on
+screen and nothing in the clipboard.
+
+**A selection is anchored to characters, not to the grid.** Cell indices name
+whichever character happens to be at a row later, which is fine until the first
+scroll: the block you dragged over has moved and the highlight stays. So the
+pane holds two `TrackedGridRef`s — the kind that follow the page list through
+scrolling, pruning and reflow — and resolves them to viewport cells on *every*
+publish. That is also why the frame carries the resolved range rather than the
+UI holding one: a scroll republishes, so the picture and the copy cannot
+disagree about what is selected.
+
+An end that has scrolled out of view is clamped to the border it left by, so the
+highlight does not vanish and half a selection still looks like half a
+selection. `the_selected_text_survives_a_scroll` is the test that would fail on
+the old representation by construction.
 
 The pointer now goes through `App::pointer_down/move/up`, which `--drag
 x1,y1,x2,y2` also calls: the copy path can be exercised without a mouse. That
@@ -551,7 +565,7 @@ no clipboard and winit refuses to open.
 **A copy cannot use the published frame, because drawing it is what removes it.**
 The UI takes the frame out of the pane's slot to render it, so a copy that reads
 that slot gets `None` and copies the empty string — which shipped as "copied 0
-chars" with a selection on screen. `Command::Copy`/`CopyRange` rebuild the text
+chars" with a selection on screen. `Command::Copy`/`CopySelection` rebuild the text
 from the terminal at copy time instead; the pane is the only place that still
 holds the cells.
 
