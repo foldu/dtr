@@ -29,6 +29,8 @@ crossbeam-channel = "0.5"
 dirs = "6"
 egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
+# SVG icons: lucide ships them as SVG, and this rasterises them for egui.
+egui_extras = { version = "0.37", features = ["svg"] }
 egui-winit = "0.37"
 # The system clipboard, written directly: egui-winit's own clipboard path
 # silently falls back to an in-app buffer when it cannot reach a display, which

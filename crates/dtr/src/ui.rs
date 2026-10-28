@@ -150,6 +150,12 @@ pub(crate) fn prime_area(
 ///
 /// Panes are egui `Area`s in the background layer; the palette has to be above
 /// them, or a file listing would paint over the command line it is feeding.
+/// Install the image loaders once, before the first frame: the SVG loader is
+/// what turns a Lucide file into a texture.
+pub fn install_image_loaders(ctx: &egui::Context) {
+    egui_extras::loaders::install_image_loaders(ctx);
+}
+
 pub fn overlay(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
     let screen = ui.max_rect();
     let ctx = ui.ctx().clone();
@@ -284,6 +290,9 @@ pub enum TabHit {
 }
 
 pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Option<TabHit> {
+    // Idempotent, and here rather than only at startup so every caller — the
+    // window, a capture, a kittest harness — gets a working loader.
+    install_image_loaders(ui.ctx());
     let mut clicked = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -314,7 +323,7 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
             );
             let close = ui.interact(
                 close_rect,
-                egui::Id::new(egui::IdSalt::new(("dtr-tab-close", index))),
+                egui::Id::unique(("dtr-tab-close", index)),
                 egui::Sense::click(),
             );
 
@@ -333,12 +342,15 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
                 galley,
                 fg,
             );
-            // The cross is drawn, not a glyph: egui's default font has no "×"
-            // and a missing glyph would be an empty box.
-            let stroke = egui::Stroke::new(1.5, fg);
-            let inset = close_rect.shrink(close_size * 0.3);
-            painter.line_segment([inset.left_top(), inset.right_bottom()], stroke);
-            painter.line_segment([inset.right_top(), inset.left_bottom()], stroke);
+            // Lucide's `x`, fetched by the lucide-icons skill and embedded, so
+            // the one-file build still has it. Tinted rather than recoloured:
+            // the SVG keeps `currentColor` and stays byte-identical upstream.
+            ui.put(
+                close_rect.shrink(2.0),
+                egui::Image::new(egui::include_image!("../assets/icons/x.svg"))
+                    .fit_to_exact_size(close_rect.shrink(2.0).size())
+                    .tint(fg),
+            );
 
             // Painted by hand, so the accessibility nodes are declared by hand
             // too — otherwise a screen reader (and the test harness) sees a
@@ -460,12 +472,15 @@ mod kittest_tests {
         let clicked = std::rc::Rc::new(std::cell::RefCell::new(None));
         let sink = clicked.clone();
         let mut harness = Harness::new_ui(move |ui| {
+            // Icons are SVG: the loader has to exist before the first frame.
+            // (Installed per harness, not per process — each has its own ctx.)
             // Accumulate: a click is reported on the frame it happens and the
             // next frame starts from `None`.
             if let Some(index) = tab_bar(ui, &labels, 0, &look) {
                 *sink.borrow_mut() = Some(index);
             }
         });
+        install_image_loaders(&harness.ctx);
         harness.run();
         assert_eq!(*clicked.borrow(), None, "drawing alone must not switch tabs");
 

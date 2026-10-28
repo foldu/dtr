@@ -17,6 +17,7 @@ dtr-store = { path = "../dtr-store" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
+egui_extras.workspace = true
 arboard.workspace = true
 libghostty-vt.workspace = true
 mimalloc.workspace = true

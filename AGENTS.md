@@ -217,6 +217,17 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**Icons are Lucide SVGs, fetched by a skill in this repository.** `.dsh/skills/lucide-icons`
+holds the instructions and `scripts/fetch.sh`, which pulls `https://lucide.dev/api/icons/<name>`
+into `crates/dtr/assets/icons/<name>.svg` and refuses to overwrite one that is
+already committed. They are embedded with `egui::include_image!` and rasterised by
+`egui_extras`' SVG loader, so the one-file build still carries them.
+
+The loader must be installed before the first image, and `install_image_loaders` is
+idempotent, so `tab_bar` calls it rather than trusting startup — a kittest harness
+creates its own `Context` and would otherwise draw egui's missing-image glyph,
+which is a `⚠` that egui's own fonts cannot render either.
+
 **A chip has two hit targets.** The label switches tabs, a cross on the right closes
 that tab — whichever tab is active. Both are pointer-only `Sense::click` regions
 with declared accessibility names (`2 shell`, `close tab 2`), so Enter cannot

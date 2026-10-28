@@ -2054,6 +2054,8 @@ impl Gpu {
         surface.configure(&device, &config);
 
         let egui_ctx = egui::Context::default();
+        // Before any image is drawn: the SVG loader is what decodes the icons.
+        crate::ui::install_image_loaders(&egui_ctx);
         look.install(&egui_ctx);
         egui_ctx.set_visuals(egui::Visuals::dark());
 
