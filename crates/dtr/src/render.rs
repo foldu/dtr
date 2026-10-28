@@ -711,7 +711,12 @@ impl Fonts {
             candidates: Vec::new(),
             names: Vec::new(),
             fallback_order: Vec::new(),
-            collection: None,
+            // Built here, not on the first unmapped character: creating it is a
+            // fontconfig scan, and doing that inside `face_for` means a frame
+            // that happens to draw a new character pays for a font sort.
+            collection: Some(fontique::Collection::new(
+                fontique::CollectionOptions::default(),
+            )),
             source_cache: fontique::SourceCache::default(),
         }
     }
@@ -741,11 +746,6 @@ impl Fonts {
             }
         }
 
-        if self.collection.is_none() {
-            self.collection = Some(fontique::Collection::new(
-                fontique::CollectionOptions::default(),
-            ));
-        }
         if self.candidates.is_empty() {
             if let Some(collection) = self.collection.as_mut() {
                 // The preference list first, then everything else: a terminal
