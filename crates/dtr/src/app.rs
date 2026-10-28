@@ -233,6 +233,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
 
     let mut app = App {
         clipboard: None,
+        destinations: crate::sources::ssh_destinations(),
         tabs: vec![Tab::new(
             1,
             Pane::Terminal(Session {
@@ -484,6 +485,9 @@ struct App {
     /// The system clipboard, held for as long as the app runs: on X11 the owner
     /// of the selection has to stay alive or the text goes with it.
     clipboard: Option<arboard::Clipboard>,
+    /// Destinations the new-tab menu offers, read once from `~/.ssh/config`:
+    /// re-reading the file every frame would be a syscall per redraw.
+    destinations: Vec<(String, String)>,
     active: usize,
     next_leaf: crate::layout::LeafId,
     gpu: Option<Gpu>,
@@ -1833,6 +1837,7 @@ impl ApplicationHandler<UserEvent> for App {
                     settings,
                     &tabs,
                     self.active,
+                    &self.destinations,
                     &mut tab_click,
                     self.status_visible(),
                     &mut settings_change,
@@ -1853,6 +1858,15 @@ impl ApplicationHandler<UserEvent> for App {
                         self.repaint("tab clicked");
                     }
                     Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
+                    Some(crate::ui::TabHit::New(host)) => match host {
+                        Some(host) => self.open(Transport::Shell(crate::pty::Config {
+                            program: Some(format!("ssh -t {host}")),
+                        })),
+                        None => {
+                            self.open(Transport::Shell(crate::pty::Config::default()));
+                            self.repaint("new tab");
+                        }
+                    },
                     _ => {}
                 }
                 drop(toast_text);
@@ -2133,6 +2147,7 @@ impl Gpu {
         settings: Option<&crate::settings::Settings>,
         tabs: &[String],
         active_tab: usize,
+        destinations: &[(String, String)],
         tab_click: &mut Option<crate::ui::TabHit>,
         status_visible: bool,
         settings_change: &mut Option<crate::settings::Change>,
@@ -2183,7 +2198,9 @@ impl Gpu {
                             }),
                     )
                     .show(ui, |ui| {
-                        if let Some(hit) = crate::ui::tab_bar(ui, tabs, active_tab, &look) {
+                        if let Some(hit) =
+                            crate::ui::tab_bar(ui, tabs, active_tab, destinations, &look)
+                        {
                             *tab_click = Some(hit);
                         }
                     });

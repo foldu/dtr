@@ -69,6 +69,12 @@ fn ssh_config_path() -> PathBuf {
         .join("config")
 }
 
+/// The ssh hosts the new-tab menu offers: `~/.ssh/config`'s aliases, with the
+/// detail line each one shows.
+pub fn ssh_destinations() -> Vec<(String, String)> {
+    ssh_hosts(&ssh_config_path())
+}
+
 /// Host aliases from `~/.ssh/config`, with the detail line the picker shows.
 ///
 /// Aliases only: a wildcard pattern is not something you can connect to, and

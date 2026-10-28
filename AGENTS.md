@@ -217,6 +217,20 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**The new-tab button is a menu, not a chord.** The `+` at the end of the strip opens
+`egui::Popup::menu`: the local shell first, then every alias in `~/.ssh/config`
+with the detail line the palette shows. It returns `TabHit::New(Option<String>)` —
+`None` is local, `Some(alias)` is `ssh -t <alias>` through the system client, so
+jump hosts and agent forwarding keep working. The destination list is read once at
+startup into `App::destinations`; reading `~/.ssh/config` per frame would be a
+syscall per redraw.
+
+**Lucide's `currentColor` is black, and a tint multiplies.** An icon fetched
+verbatim disappeared on a dark chip: the rasteriser resolves `currentColor` to
+black and `Image::tint` only multiplies, so black × colour is black. `fetch.sh`
+rewrites it to `#ffffff`, which makes each file a white mask that the tint colours.
+The geometry is still upstream's.
+
 **Icons are Lucide SVGs, fetched by a skill in this repository.** `.dsh/skills/lucide-icons`
 holds the instructions and `scripts/fetch.sh`, which pulls `https://lucide.dev/api/icons/<name>`
 into `crates/dtr/assets/icons/<name>.svg` and refuses to overwrite one that is

@@ -28,6 +28,10 @@ for name in "$@"; do
         echo "no icon named $name (see https://lucide.dev/icons)" >&2
         exit 1
     fi
+    # Lucide strokes with `currentColor`, which an SVG rasteriser resolves to
+    # black — and a tint multiplies, so black stays black. White strokes make
+    # the file a mask that `.tint()` can colour at draw time.
+    sed -i 's/currentColor/#ffffff/g' "$out"
     # The API answers 200 with HTML for some unknown names; a real icon starts
     # with an <svg> element.
     if ! head -c 4 "$out" | grep -q '<svg'; then

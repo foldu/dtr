@@ -283,13 +283,21 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
 /// the same rectangle on purpose — a click that misses the chip the eye sees is
 /// the classic way to make tabs feel broken.
 /// What a click in the tab strip asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TabHit {
     Select(usize),
     Close(usize),
+    /// Open a new tab: `None` is the local shell, `Some(alias)` an ssh host.
+    New(Option<String>),
 }
 
-pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Option<TabHit> {
+pub fn tab_bar(
+    ui: &mut Ui,
+    labels: &[String],
+    active: usize,
+    destinations: &[(String, String)],
+    look: &Look,
+) -> Option<TabHit> {
     // Idempotent, and here rather than only at startup so every caller — the
     // window, a capture, a kittest harness — gets a working loader.
     install_image_loaders(ui.ctx());
@@ -368,6 +376,52 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
                 clicked = Some(TabHit::Select(index));
             }
         }
+
+        // The new-tab button. Its menu is where a terminal's destinations live:
+        // the local shell first, then whatever `~/.ssh/config` offers. Pointer
+        // only, like the chips, so Enter in the shell never opens a menu.
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
+            egui::Sense::click(),
+        );
+        ui.painter()
+            .rect_filled(rect, 4.0, Look::colour(look.surface));
+        // An `Image` widget rather than `painter.image`: only the widget goes
+        // through the loaders, and only the widget can tint an SVG.
+        ui.put(
+            rect.shrink(4.0),
+            egui::Image::new(egui::include_image!("../assets/icons/plus.svg"))
+                .fit_to_exact_size(rect.shrink(4.0).size())
+                .tint(Look::colour(look.foreground)),
+        );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "new tab"));
+
+        let menu = egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(220.0);
+            if ui.button("local shell").clicked() {
+                clicked = Some(TabHit::New(None));
+                ui.close();
+            }
+            if destinations.is_empty() {
+                ui.label(
+                    egui::RichText::new("no hosts in ~/.ssh/config")
+                        .size(11.0)
+                        .color(Look::colour(look.dim)),
+                );
+            }
+            for (alias, detail) in destinations {
+                let text = if detail.is_empty() {
+                    alias.clone()
+                } else {
+                    format!("{alias}  {detail}")
+                };
+                if ui.button(text).clicked() {
+                    clicked = Some(TabHit::New(Some(alias.clone())));
+                    ui.close();
+                }
+            }
+        });
+        let _ = menu;
     });
     clicked
 }
@@ -457,6 +511,44 @@ mod kittest_tests {
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
+    /// The new-tab button offers the destinations a terminal has: the local
+    /// shell, and the hosts from `~/.ssh/config`.
+    #[test]
+    fn the_new_tab_menu_offers_the_local_shell_and_the_ssh_hosts() {
+        let look = Look::default();
+        let clicked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = clicked.clone();
+        let labels = vec!["demo".to_owned()];
+        let hosts = vec![("web".to_owned(), "alice@10.0.0.2".to_owned())];
+        let mut harness = Harness::new_ui(move |ui| {
+            if let Some(hit) = tab_bar(ui, &labels, 0, &hosts, &look) {
+                *sink.borrow_mut() = Some(hit);
+            }
+        });
+        harness.run();
+
+        harness.get_by_label("new tab").click();
+        harness.run();
+        harness.get_by_label("local shell").click();
+        harness.run();
+        assert_eq!(
+            clicked.borrow().clone(),
+            Some(TabHit::New(None)),
+            "the first entry is the local shell"
+        );
+
+        *clicked.borrow_mut() = None;
+        harness.get_by_label("new tab").click();
+        harness.run();
+        harness.get_by_label("web  alice@10.0.0.2").click();
+        harness.run();
+        assert_eq!(
+            clicked.borrow().clone(),
+            Some(TabHit::New(Some("web".to_owned()))),
+            "a host opens that host"
+        );
+    }
+
     /// The strip's whole contract, without a window: a chip switches, its cross
     /// closes, and a key that belongs to the terminal touches neither.
     ///
@@ -476,7 +568,7 @@ mod kittest_tests {
             // (Installed per harness, not per process — each has its own ctx.)
             // Accumulate: a click is reported on the frame it happens and the
             // next frame starts from `None`.
-            if let Some(index) = tab_bar(ui, &labels, 0, &look) {
+            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look) {
                 *sink.borrow_mut() = Some(index);
             }
         });
@@ -520,7 +612,7 @@ mod kittest_tests {
         let look = Look::default();
         let mut harness = Harness::new_ui(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            tab_bar(ui, &labels, 1, &look);
+            tab_bar(ui, &labels, 1, &[], &look);
         });
         harness.run();
         harness.snapshot("tab_bar");

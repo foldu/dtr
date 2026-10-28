@@ -50,8 +50,11 @@ what makes the one-file Windows build still one file.
 
 ## Rules that save time
 
-- **Tint, do not recolour the file.** Lucide SVGs use `currentColor`; the tint goes
-  on the `Image`, and the file stays byte-identical to upstream.
+- **White strokes, tint at draw time.** Lucide ships `stroke="currentColor"`, which
+  a rasteriser resolves to *black* — and `Image::tint` multiplies, so black stays
+  black and the icon disappears on a dark background. `fetch.sh` rewrites
+  `currentColor` to `#ffffff`, making each file a white mask that `.tint()` can
+  colour; the geometry is still upstream's, untouched.
 - **Give the icon a name.** A bare image has no text, so attach
   `Response::widget_info(|| WidgetInfo::labeled(Role::Button, true, "close tab 2"))`
   or a tooltip; otherwise a screen reader and the test harness see nothing.
