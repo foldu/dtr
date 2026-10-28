@@ -1481,7 +1481,24 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 self.on_key(&stroke);
             }
-            WindowEvent::Resized(size) => gpu.resize(size),
+            WindowEvent::Resized(size) => {
+                gpu.resize(size);
+                // The surface is not the only thing that depends on the window
+                // size: the terminal's rows and columns do, and every pane
+                // rectangle does. Without this the pty keeps the grid of the old
+                // window, and with a strip across the top the first row slides
+                // underneath it.
+                let (metrics, scale) = match self.gpu.as_ref() {
+                    Some(gpu) => (gpu.metrics(), gpu.scale()),
+                    None => return,
+                };
+                self.fit_panes(
+                    metrics,
+                    (size.width as f32, size.height as f32),
+                    scale,
+                );
+                self.repaint("resize");
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some((position.x, position.y));
                 if self.dragging {
@@ -2016,12 +2033,26 @@ impl Gpu {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             if !tabs.is_empty() {
+                // The panel is the strip's full height and the chips are
+                // shorter than it, so nothing egui rounds or grows can paint
+                // over the first terminal row. Same lesson as the status bar.
                 egui::Panel::top("dtr-tabs")
                     .exact_size(crate::ui::TAB_HEIGHT * self.scale())
                     .frame(
                         egui::Frame::new()
                             .fill(crate::ui::Look::colour(look.surface))
-                            .inner_margin(egui::Margin::symmetric(6, 4)),
+                            .inner_margin(egui::Margin {
+                                left: 6,
+                                right: 6,
+                                top: ((crate::ui::TAB_HEIGHT
+                                    - crate::ui::TAB_CHIP_HEIGHT)
+                                    / 2.0)
+                                    .floor() as i8,
+                                bottom: ((crate::ui::TAB_HEIGHT
+                                    - crate::ui::TAB_CHIP_HEIGHT)
+                                    / 2.0)
+                                    .ceil() as i8,
+                            }),
                     )
                     .show(ui, |ui| {
                         if let Some(index) =

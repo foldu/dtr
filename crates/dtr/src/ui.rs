@@ -175,7 +175,11 @@ pub const STATUS_HEIGHT: f32 = 24.0;
 /// The tab strip across the top, shown only when there is more than one tab.
 /// Tabs existed before this and were invisible, which made `ctrl+tab` look
 /// broken rather than unused.
-pub const TAB_HEIGHT: f32 = 28.0;
+pub const TAB_HEIGHT: f32 = 30.0;
+/// The chip inside the strip. The strip is taller than this by design: a chip
+/// that fills its panel makes any rounding in egui's layout paint over the first
+/// terminal row.
+pub const TAB_CHIP_HEIGHT: f32 = 20.0;
 /// Breathing room between the last row of text and the status strip. Without
 /// it the grid ends exactly on the strip's edge, and a prompt with a descender
 /// looks like it is behind the bar rather than above it.
@@ -291,7 +295,7 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
             // A keyboard-focusable widget here would be activated by Enter and by
             // Space — pressing Enter in the shell would switch tabs. A chip is a
             // hit target, not a control: it takes the pointer and nothing else.
-            let size = egui::vec2(galley.size().x + 20.0, galley.size().y + 8.0);
+            let size = egui::vec2(galley.size().x + 18.0, TAB_CHIP_HEIGHT);
             let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
             let painter = ui.painter();
             painter.rect_filled(
