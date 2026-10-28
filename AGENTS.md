@@ -253,6 +253,15 @@ idempotent, so `tab_bar` calls it rather than trusting startup — a kittest har
 creates its own `Context` and would otherwise draw egui's missing-image glyph,
 which is a `⚠` that egui's own fonts cannot render either.
 
+**Overlapping click targets read as "sometimes unresponsive".** The chip and its
+close cross were two sensors over the same rectangle, with the icon added as a
+third `ui.put` widget on top. egui gives the press to the topmost widget that
+senses clicks, so which one won depended on allocation order — the cross closed
+sometimes and selected the tab otherwise, and the `+` lost its press to its own
+icon. The fix is disjoint rects: the chip only reserves space (`Sense::hover`),
+the label and the cross are separate `interact` regions that do not overlap, and
+icons are drawn with `Image::paint_at`, which cannot sense anything.
+
 **A chip has two hit targets.** The label switches tabs, a cross on the right closes
 that tab — whichever tab is active. Both are pointer-only `Sense::click` regions
 with declared accessibility names (`2 shell`, `close tab 2`), so Enter cannot

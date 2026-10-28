@@ -321,13 +321,28 @@ pub fn tab_bar(
             // A keyboard-focusable widget here would be activated by Enter and
             // by Space — pressing Enter in the shell must not touch the strip,
             // so both are pointer-only.
+            //
+            // The two targets have to be **disjoint rects**, not two sensors over
+            // the same chip. Overlapping click targets make egui's topmost-widget
+            // rule decide who gets the press, and the deciding factor is the
+            // allocation order — which reads as a button that works only some of
+            // the time. The chip itself only reserves space and senses hover.
             let close_size = TAB_CHIP_HEIGHT - 4.0;
             let size = egui::vec2(galley.size().x + 18.0 + close_size, TAB_CHIP_HEIGHT);
-            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
 
             let close_rect = egui::Rect::from_center_size(
                 egui::pos2(rect.right() - 8.0 - close_size / 2.0, rect.center().y),
                 egui::vec2(close_size, close_size),
+            );
+            let label_rect = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(close_rect.left() - 4.0, rect.max.y),
+            );
+            let response = ui.interact(
+                label_rect,
+                egui::Id::unique(("dtr-tab", index)),
+                egui::Sense::click(),
             );
             let close = ui.interact(
                 close_rect,
@@ -353,12 +368,13 @@ pub fn tab_bar(
             // Lucide's `x`, fetched by the lucide-icons skill and embedded, so
             // the one-file build still has it. Tinted rather than recoloured:
             // the SVG keeps `currentColor` and stays byte-identical upstream.
-            ui.put(
-                close_rect.shrink(2.0),
-                egui::Image::new(egui::include_image!("../assets/icons/x.svg"))
-                    .fit_to_exact_size(close_rect.shrink(2.0).size())
-                    .tint(fg),
-            );
+            // `paint_at`, not `ui.put`: an image added as a widget is another
+            // click target sitting on top of the cross, and it wins the press
+            // half the time. Painting cannot sense anything.
+            egui::Image::new(egui::include_image!("../assets/icons/x.svg"))
+                .fit_to_exact_size(close_rect.shrink(2.0).size())
+                .tint(fg)
+                .paint_at(ui, close_rect.shrink(2.0));
 
             // Painted by hand, so the accessibility nodes are declared by hand
             // too — otherwise a screen reader (and the test harness) sees a
@@ -386,14 +402,12 @@ pub fn tab_bar(
         );
         ui.painter()
             .rect_filled(rect, 4.0, Look::colour(look.surface));
-        // An `Image` widget rather than `painter.image`: only the widget goes
-        // through the loaders, and only the widget can tint an SVG.
-        ui.put(
-            rect.shrink(4.0),
-            egui::Image::new(egui::include_image!("../assets/icons/plus.svg"))
-                .fit_to_exact_size(rect.shrink(4.0).size())
-                .tint(Look::colour(look.foreground)),
-        );
+        // Painted, for the same reason as the cross: a widget here would sit on
+        // top of the button and eat its clicks.
+        egui::Image::new(egui::include_image!("../assets/icons/plus.svg"))
+            .fit_to_exact_size(rect.shrink(4.0).size())
+            .tint(Look::colour(look.foreground))
+            .paint_at(ui, rect.shrink(4.0));
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "new tab"));
 
         let menu = egui::Popup::menu(&response).show(|ui| {
