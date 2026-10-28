@@ -28,6 +28,10 @@ pub enum UserEvent {
     Destinations(Vec<(String, String)>),
     /// Something the SFTP worker finished.
     Sftp(SftpEvent),
+    /// A link pointed at a local directory, so the UI should show it. The worker
+    /// that resolved the link knows what the path *is*; only the UI knows where a
+    /// pane may go.
+    Reveal(PathBuf),
     /// A message for the user that no worker can put on screen itself: a link
     /// that could not be opened, a path that is not what it claimed.
     Notice(String),
@@ -72,79 +76,113 @@ struct LinkHover {
     uri: String,
 }
 
-/// The path a `file:` URI names, if it names one on this machine.
-///
-/// Percent escapes are decoded (`%20` is a space); an empty or `localhost`
-/// authority means this machine, and anything else is refused — resolving
-/// another host's path against this disk is the one mistake here that cannot be
-/// undone by pointing at the right file afterwards.
-fn local_path_of(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    let at = rest.find('/')?;
-    let (authority, path) = (&rest[..at], &rest[at..]);
-    if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
-        return None;
-    }
-    if !path.starts_with('/') {
-        return None;
-    }
-    Some(PathBuf::from(percent_decode(path)))
+/// What a `file:` link names, once the session that printed it is taken into
+/// account: the same URI is a local path in one tab and a path on another
+/// machine in the next.
+#[derive(Debug, PartialEq, Eq)]
+enum LinkTarget {
+    /// A path this session can reach.
+    Path(PathBuf),
+    /// Another machine, which this session has no way to read.
+    Elsewhere(String),
+    /// Not a path at all.
+    Unsupported,
 }
 
-/// `%20` and friends. An escape that is not valid hex stays literal rather than
-/// being dropped, so a path with a stray `%` survives.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' && at + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[at + 1..at + 3]) {
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    at += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[at]);
-        at += 1;
+/// Resolve a link the way `session_remote` would.
+///
+/// A local session's `file:` link is on this disk only when the URI is about
+/// this machine: no host, `localhost`, or this machine's own name — which is the
+/// form `ls --hyperlink=always` prints, and the reason clicking its output used
+/// to fail. Anything else is another machine, and resolving its path here is the
+/// one mistake in this feature that cannot be undone by pointing at the right
+/// file afterwards.
+///
+/// A remote session resolves *every* `file:` path on its own host, because that
+/// is the machine the pane's backend reads: `file://localhost/x` printed on
+/// `jupyter` means jupyter's `/x`, not this machine's, and the VFS never lets an
+/// ssh backend fall back to a local read.
+fn link_target(uri: &str, session_remote: bool) -> LinkTarget {
+    let Some((host, path)) = crate::uri::split(uri) else {
+        return LinkTarget::Unsupported;
+    };
+    if session_remote || crate::uri::is_local_host(host) {
+        LinkTarget::Path(PathBuf::from(path))
+    } else {
+        LinkTarget::Elsewhere(host.to_owned())
     }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
 mod link_tests {
-    use super::local_path_of;
+    use super::{LinkTarget, link_target};
+    use crate::uri;
+    use std::path::PathBuf;
 
-    /// `file:` with no authority is this machine, and percent escapes are part
-    /// of the path rather than decoration.
+    fn locally(uri: &str) -> LinkTarget {
+        link_target(uri, false)
+    }
+
+    fn path(uri: &str, remote: bool) -> Option<PathBuf> {
+        match link_target(uri, remote) {
+            LinkTarget::Path(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// `file:` with no host is this machine, and percent escapes are part of the
+    /// path rather than decoration.
     #[test]
     fn a_file_uri_names_a_path() {
         assert_eq!(
-            local_path_of("file:///tmp/notes.txt"),
-            Some(std::path::PathBuf::from("/tmp/notes.txt"))
+            path("file:///tmp/notes.txt", false),
+            Some(PathBuf::from("/tmp/notes.txt"))
         );
         assert_eq!(
-            local_path_of("file://localhost/tmp/a%20b.png"),
-            Some(std::path::PathBuf::from("/tmp/a b.png"))
+            path("file://localhost/tmp/a%20b.png", false),
+            Some(PathBuf::from("/tmp/a b.png"))
         );
         // A stray % is a literal: dropping it would silently change the path.
+        assert_eq!(path("file:///tmp/100%", false), Some(PathBuf::from("/tmp/100%")));
+    }
+
+    /// `ls --hyperlink=always` writes this machine's name into the URI, not
+    /// `localhost` and not an empty host. Refusing that form refused every link
+    /// `ls` ever printed.
+    #[test]
+    fn this_machine_by_name_is_this_machine() {
+        let Some(name) = uri::local_hostname() else {
+            return;
+        };
         assert_eq!(
-            local_path_of("file:///tmp/100%"),
-            Some(std::path::PathBuf::from("/tmp/100%"))
+            path(&format!("file://{name}/tmp/notes.txt"), false),
+            Some(PathBuf::from("/tmp/notes.txt"))
         );
     }
 
-    /// Anything that is not this machine's file is refused rather than guessed:
-    /// reading another host's path off this disk is the one unrecoverable
-    /// mistake in the whole feature.
+    /// Anything that is not this machine's file is named rather than guessed,
+    /// so the toast can say which machine it was.
     #[test]
     fn another_machine_is_not_this_one() {
-        assert_eq!(local_path_of("file://jupyter/etc/hosts"), None);
-        assert_eq!(local_path_of("https://example.com/x"), None);
-        assert_eq!(local_path_of("/tmp/relative"), None);
-        assert_eq!(local_path_of("file://"), None);
+        assert_eq!(
+            locally("file://some-other-host.invalid/etc/hosts"),
+            LinkTarget::Elsewhere("some-other-host.invalid".to_owned())
+        );
+        assert_eq!(locally("https://example.com/x"), LinkTarget::Unsupported);
+        assert_eq!(locally("/tmp/relative"), LinkTarget::Unsupported);
+        assert_eq!(locally("file://"), LinkTarget::Unsupported);
+    }
+
+    /// On a remote session every `file:` path is that host's, including
+    /// `localhost` — which names the *remote* machine there, not this one.
+    #[test]
+    fn a_remote_session_resolves_on_its_own_host() {
+        assert_eq!(path("file://localhost/etc/hosts", true), Some(PathBuf::from("/etc/hosts")));
+        assert_eq!(path("file:///etc/hosts", true), Some(PathBuf::from("/etc/hosts")));
+        assert_eq!(
+            path("file://jupyter.example/etc/hosts", true),
+            Some(PathBuf::from("/etc/hosts"))
+        );
     }
 }
 
@@ -1136,18 +1174,10 @@ impl App {
 
     /// Open a hyperlink, resolving it the way this session would.
     ///
-    /// Only `file:` is understood for now, and only on the machine dtr runs on.
-    /// A remote session's answer comes from the backend, which says plainly
-    /// that it is not wired up yet rather than reading one machine's path off
-    /// another's disk.
+    /// A file goes to the desktop's opener; a directory opens a file pane beside
+    /// the terminal, because clicking a directory is asking to look inside it and
+    /// a second window from the desktop's file manager is one to close again.
     fn open_link(&mut self, uri: &str) {
-        let Some(path) = local_path_of(uri) else {
-            self.toast = Some((
-                format!("cannot open {uri}"),
-                std::time::Instant::now(),
-            ));
-            return;
-        };
         let Some(session) = self.session() else {
             return;
         };
@@ -1162,7 +1192,26 @@ impl App {
                 return;
             }
         };
-        let location = dtr_vfs::Location { backend, path };
+        let path = match link_target(uri, session.remote) {
+            LinkTarget::Path(path) => path,
+            // Said out loud, and named: "cannot open" leaves the reader with
+            // nothing to do about it, and the host is the interesting part.
+            LinkTarget::Elsewhere(host) => {
+                self.toast = Some((
+                    format!("{uri} is on {host}, not this machine"),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+            LinkTarget::Unsupported => {
+                self.toast = Some((format!("cannot open {uri}"), std::time::Instant::now()));
+                return;
+            }
+        };
+        let location = dtr_vfs::Location {
+            backend,
+            path: path.clone(),
+        };
         let described = location.describe();
         tracing::info!(target = %described, "opening a link");
 
@@ -1180,7 +1229,14 @@ impl App {
             let outcome = async {
                 let meta = vfs.stat(&location).await?;
                 if meta.kind.is_dir() {
-                    anyhow::bail!("{} is a directory", described);
+                    // A remote directory cannot be fetched, and the pane that
+                    // would list it is driven by the SFTP worker rather than by
+                    // this task — so it is named rather than opened.
+                    if remote {
+                        anyhow::bail!("{described} is a directory on another machine");
+                    }
+                    let _ = proxy.send_event(UserEvent::Reveal(path));
+                    return Ok(());
                 }
                 let path = vfs.materialise(&location).await?;
                 tokio::task::spawn_blocking(move || dtr_vfs::open_externally(&path))
@@ -1199,6 +1255,40 @@ impl App {
             };
             let _ = proxy.send_event(UserEvent::Notice(note));
         });
+    }
+
+    /// Show a directory in a file pane beside the terminal that asked for it.
+    ///
+    /// Focus stays on the terminal: the click happened in the shell and the next
+    /// keystroke belongs there, not in a listing nobody meant to type into. A tab
+    /// that already has a file pane retargets it rather than growing another one,
+    /// because a second click in the same tab means "look there", not "one more
+    /// pane".
+    fn reveal_directory(&mut self, path: PathBuf) {
+        let existing = {
+            let tab = &self.tabs[self.active];
+            tab.layout
+                .leaves()
+                .into_iter()
+                .find(|id| matches!(tab.leaves.get(id), Some(Pane::Files(_))))
+        };
+        if let Some(id) = existing {
+            self.tabs[self.active]
+                .leaves
+                .insert(id, Pane::Files(Explorer::new(Some(path))));
+            return;
+        }
+        let id = self.next_leaf;
+        self.next_leaf += 1;
+        let tab = &mut self.tabs[self.active];
+        let target = tab.focus;
+        if !tab
+            .layout
+            .split(target, crate::layout::Axis::Horizontal, id, false)
+        {
+            return;
+        }
+        tab.leaves.insert(id, Pane::Files(Explorer::new(Some(path))));
     }
 
     /// The pointer went down at `at`. A press focuses the pane under it and
@@ -2465,6 +2555,10 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Sftp(event) => {
                 self.sftp_event(event);
                 self.repaint("sftp");
+            }
+            UserEvent::Reveal(path) => {
+                self.reveal_directory(path);
+                self.repaint("a link named a directory");
             }
             UserEvent::Notice(text) => {
                 tracing::info!(%text, "notice");

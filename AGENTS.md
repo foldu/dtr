@@ -374,11 +374,35 @@ is another 30 µs on a 41 µs publish for a link nobody is pointing at. The repl
 carries the cell it was asked about, so a frame-late answer is dropped instead of
 opening the wrong link — hover state without that is a race with a real mouse.
 
-Only `file:` is understood, with no authority or `localhost`, percent-decoded,
-`stat`ed through the VFS and handed to `xdg-open`/`open`/`explorer` — never a
-shell, because the path comes from a program's output. A directory, a remote
-session, or another scheme is said out loud in a toast. A press on a link opens
-it and starts no drag; everywhere else a press still selects.
+Only `file:` is understood, percent-decoded, `stat`ed through the VFS and handed
+to `xdg-open`/`open`/`explorer` — never a shell, because the path comes from a
+program's output. Another scheme is said out loud in a toast. A press on a link
+opens it and starts no drag; everywhere else a press still selects.
+
+**The host part decides which machine, and `file://blah` usually has one.**
+`ls --hyperlink=always` prints `file://<hostname>/path` — not `localhost`, not an
+empty host — so a rule that accepted only those two refused every link `ls` ever
+printed. The rule lives in `crate::uri` now and is shared with the OSC 7 sniffer,
+which had always known about the machine's own name while the link opener did not;
+that is what "clicking a link says cannot open file://jupiter/…" was.
+
+A local session resolves a path only when the host is empty, `localhost` or this
+machine; anything else is named in the toast (`… is on build-host, not this
+machine`) rather than guessed, because reading another machine's path off this
+disk is the one mistake a link can make that pointing at the right file later does
+not undo. A remote session resolves *every* `file:` path on its own host, and that
+is correct rather than lax: `file://localhost/x` printed on `jupyter` means
+jupyter's `/x`, and the backend it asks can only read that machine.
+
+**A directory link opens a file pane, not a toast.** `xdg-open` on a directory
+starts the desktop's file manager, which is a second window to close again; dtr has
+a file pane, so the click shows the directory there, beside the terminal. The
+worker that resolved the link sends `UserEvent::Reveal(path)` and the UI decides
+where a pane may go — layout is not a worker's business. Focus stays on the
+terminal: the click happened in the shell and the next keystroke belongs there.
+A tab that already shows a file pane retargets it instead of growing a second one.
+A remote directory is still named rather than opened, because the pane that would
+list it is driven by the SFTP worker and not by the link path.
 
 `--click x,y` exists because the hover has to happen before the press for a link
 to be known: it moves, waits one frame, then presses. That is what a hand does,

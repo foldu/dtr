@@ -1649,51 +1649,18 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// This machine's name, for the host part of an OSC 7 URI. A shell that reports
-/// `file://<hostname>/path` on the local machine is still local; a shell on
-/// another host is not, and its path must never be treated as a local directory.
-fn local_hostname() -> Option<&'static str> {
-    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| {
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .or_else(|| std::env::var("HOSTNAME").ok())
-    })
-    .as_deref()
-}
-
-/// `file://host/path` to a path.
+/// `file://host/path` to a local path.
 ///
 /// The host decides whether the path means anything here: empty, `localhost` or
 /// this machine's own name is a local directory; anything else is a shell on
 /// another host, and a path from there is not a local directory — returning it
 /// would make "new tab here" try to `cd` into a path that happens to exist on the
-/// wrong machine.
+/// wrong machine. The rule itself is shared with the link opener, which had its
+/// own copy of it and did not know about the machine's name.
 fn parse_file_uri(payload: &[u8]) -> Option<std::path::PathBuf> {
     let text = std::str::from_utf8(payload).ok()?;
-    let rest = text.strip_prefix("file://")?;
-    let slash = rest.find('/')?;
-    let host = &rest[..slash];
-    let local = host.is_empty()
-        || host.eq_ignore_ascii_case("localhost")
-        || local_hostname().is_some_and(|name| host.eq_ignore_ascii_case(name));
-    if !local {
-        return None;
-    }
-    let mut path = String::with_capacity(rest.len() - slash);
-    let mut chars = rest[slash..].chars();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            let byte = u8::from_str_radix(&hex, 16).ok()?;
-            path.push(byte as char);
-        } else {
-            path.push(ch);
-        }
-    }
-    Some(std::path::PathBuf::from(path))
+    let (host, path) = crate::uri::split(text)?;
+    crate::uri::is_local_host(host).then(|| std::path::PathBuf::from(path))
 }
 
 fn fill_cells(
@@ -1942,6 +1909,12 @@ mod cwd_tests {
             path_of(b"\x1b]7;file://localhost/srv\x07").as_deref(),
             Some("/srv")
         );
+        // A shell reports this machine by name more often than as `localhost`,
+        // and the same name in a hyperlink is what `ls` writes.
+        if let Some(name) = crate::uri::local_hostname() {
+            let report = format!("\x1b]7;file://{name}/srv\x07");
+            assert_eq!(path_of(report.as_bytes()).as_deref(), Some("/srv"));
+        }
     }
 
     #[test]
