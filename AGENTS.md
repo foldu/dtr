@@ -329,6 +329,17 @@ icon. The fix is disjoint rects: the chip only reserves space (`Sense::hover`),
 the label and the cross are separate `interact` regions that do not overlap, and
 icons are drawn with `Image::paint_at`, which cannot sense anything.
 
+**A switch that appears on the next keystroke is a stale frame.** `Ctrl+Tab` was
+reported as "switch to the other tab, press Enter, and it goes back" — the log
+shows the switch happening on the chord and nothing moving it afterwards. The
+switch was always correct; the *picture* was late, and the next keypress was what
+made a frame. Same root cause as the closed tab that only vanished when the mouse
+moved, which is why fixing the loop's control flow made both symptoms disappear.
+
+Every tab switch now goes through `App::set_active`, which logs `active tab
+from=… to=… why=…`. Five call sites can do it and only one is the mouse; the log
+names the one that did.
+
 **Hover is worth a redraw.** Skipping the repaint for pointer motion that cannot
 change anything was tried and rejected: the strip lights up under the pointer, and
 that is worth a frame per refresh. So a terminal redraws while the mouse moves over

@@ -22,3 +22,4 @@ perf.data.*
 *.prof
 flame.svg
 flamegraph.svg
+profile.svg

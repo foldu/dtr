@@ -607,3 +607,31 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tab_through {
+    use super::*;
+    use dtr_config::keys::parse_sequence;
+
+    /// Plain Tab belongs to the shell: it is completion, and a tab key that
+    /// switched tabs would make `cd lo<TAB>` leave the session it was typed in.
+    #[test]
+    fn a_bare_tab_is_not_next_tab() {
+        let overrides = std::collections::BTreeMap::new();
+        let keymap = Keymap::new(&overrides);
+
+        let tab = parse_sequence("tab").expect("tab");
+        assert_eq!(
+            keymap.resolve(&[], tab.chords[0]),
+            Matched::Nothing,
+            "Tab must reach the shell, not the tab bar"
+        );
+
+        let ctrl_tab = parse_sequence("ctrl-tab").expect("ctrl-tab");
+        assert_eq!(
+            keymap.resolve(&[], ctrl_tab.chords[0]),
+            Matched::Action(Action::NextTab),
+            "ctrl-tab still switches"
+        );
+    }
+}

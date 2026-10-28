@@ -600,6 +600,19 @@ impl App {
         }
     }
 
+    /// Change the active tab, and say who asked.
+    ///
+    /// A tab that switches itself back is impossible to chase from the outside:
+    /// five call sites can do it, and only one of them is the mouse. Every one
+    /// goes through here so `-v` names the culprit.
+    fn set_active(&mut self, index: usize, why: &'static str) {
+        if index >= self.tabs.len() || index == self.active {
+            return;
+        }
+        tracing::debug!(from = self.active, to = index, why, "active tab");
+        self.active = index;
+    }
+
     /// Handle one key event. Both the window and `--keys` come through here, so
     /// a scripted run exercises the same decisions a person's hands would.
     fn on_key(&mut self, stroke: &crate::keys::KeyStroke) {
@@ -620,11 +633,11 @@ impl App {
                         winit::keyboard::Key::Character(text) if stroke.mods.alt_key() => {
                             match text.chars().next().and_then(|c| c.to_digit(10)) {
                                 Some(0) => {
-                                    self.active = self.tabs.len() - 1;
+                                    self.set_active(self.tabs.len() - 1, "alt+0");
                                     true
                                 }
                                 Some(digit) if digit as usize <= self.tabs.len() => {
-                                    self.active = digit as usize - 1;
+                                    self.set_active(digit as usize - 1, "alt+digit");
                                     true
                                 }
                                 _ => false,
@@ -1148,6 +1161,7 @@ impl App {
                 self.next_leaf += 1;
                 self.tabs.push(Tab::new(id, Pane::Terminal(session)));
                 self.active = self.tabs.len() - 1;
+                tracing::debug!(active = self.active, "tab opened");
             }
             Err(err) => {
                 tracing::error!(%err, "could not start the session");
@@ -1307,7 +1321,8 @@ impl App {
     }
 
     fn cycle(&mut self, forward: bool) {
-        self.active = cycled(self.active, self.tabs.len(), forward);
+        let next = cycled(self.active, self.tabs.len(), forward);
+        self.set_active(next, "tab chord");
     }
 
     /// The panes to draw, with the rectangle each one occupies.
@@ -2072,7 +2087,7 @@ impl ApplicationHandler<UserEvent> for App {
                 match tab_click {
                     // A click on a tab is a switch, exactly like the chord.
                     Some(crate::ui::TabHit::Select(index)) if index < self.tabs.len() => {
-                        self.active = index;
+                        self.set_active(index, "chip clicked");
                         self.repaint("tab clicked");
                     }
                     Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
