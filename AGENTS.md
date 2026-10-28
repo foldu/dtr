@@ -551,9 +551,15 @@ of CPU inside a 60 s run**, all of it thrown away because a screen shows sixty
 frames a second. The tell was a profile where 92% of the samples sat in
 `pane::fill_cells` and none of them in the parser.
 
-`FRAME_BUDGET` (8 ms) gates publishing now, with a timer arm that publishes the
-frame the pane owes, so a skipped publish cannot leave the picture stale — the same
-flood is 484 publishes and 31 ms. Two smaller traps came with it: `bytes_rx.recv()`
+The gate is now half a refresh interval — 8.3 ms on a 60 Hz panel, 2.1 ms on a
+240 Hz one — with a timer arm that publishes the frame the pane owes, so a skipped
+publish cannot leave the picture stale. Half an interval and not a fixed 8 ms,
+because the gate is a latency floor as much as a work cap: 8 ms would serve a
+240 Hz panel at 125 Hz and leave every other frame stale. It lives in an atomic
+the UI rewrites rather than a constant, because the panel changes under the
+window — on `Moved` and `ScaleFactorChanged`, and once a second from the loop
+report, since a Wayland move tells the client nothing at all. The same flood is
+484 publishes and 31 ms. Two smaller traps came with it: `bytes_rx.recv()`
 returning `None` is not a no-op, because that arm is ready for ever and the pane
 spun at 100% after its child exited; and vtebench cannot see either of these,
 because what it times is the pty, not the frame.

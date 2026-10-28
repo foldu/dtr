@@ -114,6 +114,10 @@ pub fn capture_headless(
         startup.transport,
         startup.log.clone(),
         startup.theme.clone(),
+        // No window, so nothing to ask about a refresh rate: the 60 Hz default.
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            crate::pane::frame_budget(None).as_nanos() as u64,
+        )),
         || {},
     )?;
     if !startup.send.is_empty() {
@@ -261,7 +265,17 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     };
 
     let startup_alias = ssh_alias(&startup.transport);
-    let pane = TermPane::spawn(startup.transport, startup.log.clone(), startup.theme.clone(), {
+    // The window does not exist yet, so this starts at the 60 Hz default and
+    // `resumed` replaces it with the panel's own rate.
+    let frame_budget: crate::pane::FrameBudget = std::sync::Arc::new(
+        std::sync::atomic::AtomicU64::new(crate::pane::frame_budget(None).as_nanos() as u64),
+    );
+    let pane = TermPane::spawn(
+        startup.transport,
+        startup.log.clone(),
+        startup.theme.clone(),
+        std::sync::Arc::clone(&frame_budget),
+        {
         let proxy = proxy.clone();
         move || {
             let _ = proxy.send_event(UserEvent::Frame);
@@ -272,6 +286,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     }
 
     let mut app = App {
+        frame_budget,
         clipboard: None,
         watcher: crate::watch::Watcher::spawn({
             let proxy = proxy.clone();
@@ -646,6 +661,9 @@ impl Tab {
 
 struct App {
     tabs: Vec<Tab>,
+    /// When each pane may publish, shared with every pane as nanoseconds: the
+    /// gate follows the panel, and the panel changes when the window moves.
+    frame_budget: crate::pane::FrameBudget,
     /// The system clipboard, held for as long as the app runs: on X11 the owner
     /// of the selection has to stay alive or the text goes with it.
     clipboard: Option<arboard::Clipboard>,
@@ -729,6 +747,31 @@ struct App {
 }
 
 impl App {
+    /// Follow the panel the window is on.
+    ///
+    /// The publish gate is half a refresh interval, so it is wrong the moment
+    /// the window moves to a display with a different rate — and on Wayland
+    /// nothing tells the client it did. It is therefore recomputed from the
+    /// once-a-second loop report as well as from the events that do arrive, and
+    /// stored where every pane already reads it.
+    fn refresh_frame_budget(&self) {
+        let refresh = self
+            .gpu
+            .as_ref()
+            .and_then(|gpu| gpu.window.current_monitor())
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        let budget = crate::pane::frame_budget(refresh);
+        let nanos = budget.as_nanos() as u64;
+        let before = self.frame_budget.swap(nanos, std::sync::atomic::Ordering::Relaxed);
+        if before != nanos {
+            tracing::debug!(
+                refresh_mhz = refresh.unwrap_or(0),
+                gate_us = budget.as_micros() as u64,
+                "publish gate"
+            );
+        }
+    }
+
     /// A self-inflicted close: the window manager's close button cannot be
     /// pressed from a test, and shutdown bugs hide behind that.
     fn check_exit_deadline(&mut self, event_loop: &ActiveEventLoop) {
@@ -1303,6 +1346,7 @@ impl App {
             transport.clone(),
             self.log.clone(),
             self.theme.clone(),
+            std::sync::Arc::clone(&self.frame_budget),
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);
             },
@@ -1421,6 +1465,7 @@ impl App {
             transport.clone(),
             self.log.clone(),
             self.theme.clone(),
+            std::sync::Arc::clone(&self.frame_budget),
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);
             },
@@ -1944,6 +1989,9 @@ fn report_loop(app: &App) {
         since: std::time::Instant::now(),
         ..LoopReport::default()
     };
+    // Free check once a second: a Wayland move emits no `Moved`, so this is
+    // the only thing that notices the window is on a different panel.
+    app.refresh_frame_budget();
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -1968,6 +2016,7 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(gpu) => {
                 gpu.window.request_redraw();
                 self.gpu = Some(gpu);
+                self.refresh_frame_budget();
             }
             Err(err) => {
                 tracing::error!(%err, "initialise GPU");
@@ -2144,6 +2193,11 @@ impl ApplicationHandler<UserEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Dragged to another monitor: the refresh rate may not be the one
+            // the gate was computed from.
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.refresh_frame_budget();
+            }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let stroke = crate::keys::KeyStroke {

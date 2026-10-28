@@ -24,15 +24,35 @@ use crate::serial::{self, CrToCrlf};
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
-/// How long a burst of output may be parsed before a frame is published.
+/// When each pane may publish, in nanoseconds, shared with the UI.
 ///
-/// One publish rebuilds every cell of the grid, so it costs about 50 µs; a
-/// flood arrives in chunks small enough that a publish per chunk would spend
-/// the whole core rebuilding frames nobody can see. Half a frame at 60 Hz
-/// keeps the picture current and cuts the publishes by three orders of
-/// magnitude. A session with nothing queued publishes immediately, so a shell
-/// prompt is never delayed by this.
-const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+/// The budget follows the panel, and the panel changes: the window can be
+/// dragged to another monitor, and on Wayland nothing tells the client it
+/// moved. So the value lives in an atomic that the UI rewrites and every pane
+/// reads, rather than being baked into a pane at spawn time.
+pub type FrameBudget = std::sync::Arc<std::sync::atomic::AtomicU64>;
+
+/// Half a refresh interval: how long a burst of output may be parsed before a
+/// frame is published.
+///
+/// One publish rebuilds every cell of the grid — about 50 µs for a 34×112 grid
+/// — and a flood arrives in chunks small enough that a publish per chunk spends
+/// the whole core on frames nobody can see. Half an interval is the useful
+/// point: the UI can show one frame per refresh, so publishing twice per
+/// refresh means a publish almost always lands before the next draw, while the
+/// work stays at two frames per drawn frame. A session with nothing queued
+/// publishes immediately, so a shell prompt is never delayed by this.
+///
+/// It has to follow the display, because it is a latency floor as much as a
+/// work cap: a fixed 8 ms would serve a 240 Hz panel at 125 Hz and leave every
+/// other frame stale. The default is half of 60 Hz for a monitor that will not
+/// say; the floor keeps a 1000 Hz panel from turning the gate into a busy loop.
+pub fn frame_budget(refresh_millihertz: Option<u32>) -> std::time::Duration {
+    let mhz = refresh_millihertz
+        .filter(|mhz| *mhz > 0)
+        .unwrap_or(60_000);
+    std::time::Duration::from_micros((500_000_000u64 / u64::from(mhz)).max(2_000))
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
@@ -247,6 +267,7 @@ impl Pane {
         transport: Transport,
         log: Option<(PathBuf, serial::LogFormat)>,
         theme: Option<crate::theme::Theme>,
+        budget: FrameBudget,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
@@ -290,6 +311,7 @@ impl Pane {
                         Arc::clone(&ended_flag),
                         Arc::clone(&cwd_seen),
                         theme,
+                        budget,
                     )
                     .await
                     {
@@ -366,6 +388,7 @@ async fn run(
     ended: Arc<std::sync::atomic::AtomicBool>,
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
+    budget: FrameBudget,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
     // which is what you want when the point is to find out what the device did.
@@ -576,7 +599,11 @@ async fn run(
                         // Parse everything already queued, for at most one
                         // budget's worth of time, then publish once; see the
                         // `next_publish` gate below.
-                        let deadline = tokio::time::Instant::now() + FRAME_BUDGET;
+                        // Read per burst: the panel can change under the
+                        // window, and the UI rewrites this when it does.
+                        let gate =
+                            std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
+                        let deadline = tokio::time::Instant::now() + gate;
                         let mut bytes = bytes;
                         let (mut chunks, mut total) = (0u32, 0usize);
                         loop {
@@ -601,7 +628,7 @@ async fn run(
                         tracing::debug!(chunks, bytes = total, "burst parsed");
                         if tokio::time::Instant::now() >= next_publish {
                             publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
-                            next_publish = tokio::time::Instant::now() + FRAME_BUDGET;
+                            next_publish = tokio::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
                             publish_pending = true;
@@ -615,7 +642,8 @@ async fn run(
             }
             _ = tokio::time::sleep_until(next_publish), if publish_pending => {
                 publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
-                next_publish = tokio::time::Instant::now() + FRAME_BUDGET;
+                next_publish = tokio::time::Instant::now()
+                    + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
                 publish_pending = false;
             }
             _ = closed_rx.recv(), if source_alive => {
@@ -1426,5 +1454,24 @@ mod cwd_tests {
     fn ordinary_output_is_not_a_directory() {
         assert_eq!(path_of(b"just a shell saying hello\x07"), None);
         assert_eq!(path_of(b"\x1b]0;a title\x07"), None);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::frame_budget;
+
+    /// The gate is a latency floor as much as a work cap, so it has to follow
+    /// the panel. A fixed 8 ms would serve a 240 Hz display at 125 Hz.
+    #[test]
+    fn the_gate_follows_the_refresh_rate() {
+        assert_eq!(frame_budget(None).as_micros(), 8_333);
+        assert_eq!(frame_budget(Some(60_000)).as_micros(), 8_333);
+        assert_eq!(frame_budget(Some(144_000)).as_micros(), 3_472);
+        assert_eq!(frame_budget(Some(240_000)).as_micros(), 2_083);
+        // A monitor that will not say gets the 60 Hz default rather than zero.
+        assert_eq!(frame_budget(Some(0)).as_micros(), 8_333);
+        // And a very fast panel does not turn the gate into a busy loop.
+        assert_eq!(frame_budget(Some(1_000_000)).as_micros(), 2_000);
     }
 }
