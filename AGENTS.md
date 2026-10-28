@@ -363,9 +363,10 @@ it — expected, not a leak. The chips and the `+` lighten on hover for exactly 
 reason; a chip that looks identical under the pointer reads as decoration.
 
 **A chip has two hit targets.** The label switches tabs, a cross on the right closes
-that tab — whichever tab is active. Both are pointer-only `Sense::click` regions
-with declared accessibility names (`2 shell`, `close tab 2`), so Enter cannot
-touch either. The cross is *drawn* with two lines, not a `×` glyph: egui's default
+that tab — whichever tab is active. Both are `Sense::click` regions with
+declared accessibility names (`2 shell`, `close tab 2`), and both are gated on a
+real pointer click — see the `Sense::click()` entry, which is the trap that
+`Sense::click` alone does not close. The cross is *drawn* with two lines, not a `×` glyph: egui's default
 font has no multiplication sign and would draw an empty box.
 
 Closing the last tab closes the window, the same rule `close_active` follows: a
@@ -376,10 +377,19 @@ layout only when there is more than one tab, so a single session loses no rows;
 the active tab's title follows its focused session, the others keep the title they
 had. A click on a chip switches tabs through the same `self.active` the chords use.
 
-**A tab chip is a hit target, not a control.** egui buttons take keyboard focus, so
-Enter (and Space) activated the focused chip — pressing Enter in the shell switched
-tabs. The chips are painted and hit-tested by hand with `Sense::click()`, which takes
-the pointer and nothing else.
+**`Sense::click()` is not pointer-only.** egui turns Enter into a click for *any*
+focused widget that senses clicks (`context.rs`: `has_focus(id) && key_pressed(Enter)`
+sets `FAKE_PRIMARY_CLICKED`). A chip that had been clicked once stayed focused for
+the rest of the session, so every Enter typed into the shell switched tabs — with
+no mouse involved, which is why it looked like the tab switched itself. The log
+named it: `active tab why="chip clicked"` one millisecond after `key Named(Enter)`.
+
+Both are needed: the chip surrenders focus after being drawn, and a hit is accepted
+only when the pointer actually clicked (`pointer.any_click()`), because the keyboard
+"click" arrives with the pointer somewhere else entirely. The `+` button clears the
+same flag before handing its response to `Popup::menu`, or Enter would reopen the
+menu. `enter_after_a_click_does_not_press_a_chip_again` puts focus on a chip by hand
+and fails without the fix — kittest's `.click()` alone does not leave focus behind.
 
 **There was no new-tab key.** `Ctrl+Tab` cycled tabs that only the palette could
 create, so a terminal had one tab and no discoverable way to get a second — the

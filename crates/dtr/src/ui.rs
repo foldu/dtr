@@ -387,9 +387,22 @@ pub fn tab_bar(
                 egui::WidgetInfo::labeled(egui::Role::Button, true, &close_name)
             });
 
-            if close.clicked() {
+            // `Sense::click()` is not enough to be pointer-only: egui activates
+            // any focused click-sensing widget on Enter, so a chip that once had
+            // focus turned the next Enter in the shell into a tab switch — the
+            // log said `active tab why="chip clicked"` with no mouse involved.
+            // A keyboard "click" happens with the pointer elsewhere, so hover is
+            // the test that separates them; the focus is surrendered as well so
+            // the chip cannot hold it in the first place.
+            for stolen in [&close, &response] {
+                if stolen.has_focus() {
+                    stolen.surrender_focus();
+                }
+            }
+            let pointer = ui.input(|i| i.pointer.any_click());
+            if close.clicked() && pointer {
                 clicked = Some(TabHit::Close(index));
-            } else if response.clicked() {
+            } else if response.clicked() && pointer {
                 clicked = Some(TabHit::Select(index));
             }
         }
@@ -415,7 +428,17 @@ pub fn tab_bar(
             .paint_at(ui, rect.shrink(4.0));
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "new tab"));
 
-        let menu = egui::Popup::menu(&response).show(|ui| {
+        // Same trap as the chips: a focused click-sensing widget is activated by
+        // Enter, and the popup opens on a click. The fake click is cleared so
+        // only the pointer opens the menu, and the focus is given back.
+        if response.has_focus() {
+            response.surrender_focus();
+        }
+        let mut pointer_only = response;
+        pointer_only
+            .flags
+            .remove(egui::response::Flags::FAKE_PRIMARY_CLICKED);
+        let menu = egui::Popup::menu(&pointer_only).show(|ui| {
             ui.set_min_width(220.0);
             if ui.button("local shell").clicked() {
                 clicked = Some(TabHit::New(None));
@@ -576,6 +599,42 @@ mod kittest_tests {
             clicked.borrow().clone(),
             Some(TabHit::New(Some("web".to_owned()))),
             "a host opens that host"
+        );
+    }
+
+    /// Enter belongs to the terminal, even after a chip was clicked.
+    ///
+    /// egui activates any focused click-sensing widget on Enter, and a chip that
+    /// took focus turned the next Enter in the shell into a tab switch. The log
+    /// said `active tab why="chip clicked"` with no mouse anywhere near it.
+    #[test]
+    fn enter_after_a_click_does_not_press_a_chip_again() {
+        let look = Look::default();
+        let labels = vec!["demo".to_owned(), "shell".to_owned()];
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = std::rc::Rc::clone(&seen);
+        let mut harness = Harness::new_ui(move |ui| {
+            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look) {
+                sink.borrow_mut().push(hit);
+            }
+        });
+
+        harness.get_by_label("1 demo").click();
+        harness.run();
+        assert_eq!(seen.borrow().len(), 1, "the click itself switches");
+        seen.borrow_mut().clear();
+
+        // kittest's click does not leave the chip focused, but egui keeps focus
+        // from a real click indefinitely, so put it there by hand.
+        harness.ctx.memory_mut(|memory| {
+            memory.request_focus(egui::Id::unique(("dtr-tab", 0usize)));
+        });
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(
+            seen.borrow().is_empty(),
+            "Enter must reach the terminal, not the focused chip: {:?}",
+            seen.borrow()
         );
     }
 
