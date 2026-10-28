@@ -4,7 +4,7 @@
 //! as well as for egui, and we want to redraw on bytes rather than on egui's
 //! animation clock.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -28,10 +28,14 @@ pub enum UserEvent {
     Destinations(Vec<(String, String)>),
     /// Something the SFTP worker finished.
     Sftp(SftpEvent),
-    /// A link pointed at a local directory, so the UI should show it. The worker
-    /// that resolved the link knows what the path *is*; only the UI knows where a
-    /// pane may go.
-    Reveal(PathBuf),
+    /// A link pointed at a directory, so the UI should show it — locally, or in a
+    /// pane over `alias` when the session that printed the link was remote. The
+    /// worker that resolved the link knows what the path *is*; only the UI knows
+    /// where a pane may go.
+    Reveal {
+        path: PathBuf,
+        alias: Option<String>,
+    },
     /// A message for the user that no worker can put on screen itself: a link
     /// that could not be opened, a path that is not what it claimed.
     Notice(String),
@@ -1225,17 +1229,20 @@ impl App {
         // A remote file cannot be handed to a viewer as a path, so it is
         // fetched first; a local one is its own path and is never copied.
         let remote = !matches!(location.backend, dtr_vfs::BackendId::Local);
+        // A directory is shown in a file pane, and a remote one in a pane over
+        // the machine it came from — that pane is the only thing that can list it.
+        let reveal_alias = match &location.backend {
+            dtr_vfs::BackendId::Ssh(alias) => Some(alias.clone()),
+            dtr_vfs::BackendId::Local => None,
+        };
         runtime.spawn(async move {
             let outcome = async {
                 let meta = vfs.stat(&location).await?;
                 if meta.kind.is_dir() {
-                    // A remote directory cannot be fetched, and the pane that
-                    // would list it is driven by the SFTP worker rather than by
-                    // this task — so it is named rather than opened.
-                    if remote {
-                        anyhow::bail!("{described} is a directory on another machine");
-                    }
-                    let _ = proxy.send_event(UserEvent::Reveal(path));
+                    let _ = proxy.send_event(UserEvent::Reveal {
+                        path,
+                        alias: reveal_alias,
+                    });
                     return Ok(());
                 }
                 let path = vfs.materialise(&location).await?;
@@ -1260,22 +1267,29 @@ impl App {
     /// Show a directory in a file pane beside the terminal that asked for it.
     ///
     /// Focus stays on the terminal: the click happened in the shell and the next
-    /// keystroke belongs there, not in a listing nobody meant to type into. A tab
-    /// that already has a file pane retargets it rather than growing another one,
-    /// because a second click in the same tab means "look there", not "one more
-    /// pane".
-    fn reveal_directory(&mut self, path: PathBuf) {
+    /// keystroke belongs there, not in a listing nobody meant to type into. A pane
+    /// already browsing the *same machine* is retargeted rather than a second one
+    /// growing — another click means "look there", not "one more pane". Another
+    /// machine is another pane, because a pane reading this disk cannot become one
+    /// reading somebody else's.
+    fn reveal_directory(&mut self, path: PathBuf, alias: Option<String>) {
         let existing = {
             let tab = &self.tabs[self.active];
-            tab.layout
-                .leaves()
-                .into_iter()
-                .find(|id| matches!(tab.leaves.get(id), Some(Pane::Files(_))))
+            tab.layout.leaves().into_iter().find(|id| {
+                matches!(
+                    tab.leaves.get(id),
+                    Some(Pane::Files(explorer)) if explorer.alias() == alias.as_deref()
+                )
+            })
+        };
+        let explorer = match &alias {
+            Some(alias) => Explorer::remote_at(alias, path),
+            None => Explorer::new(Some(path)),
         };
         if let Some(id) = existing {
             self.tabs[self.active]
                 .leaves
-                .insert(id, Pane::Files(Explorer::new(Some(path))));
+                .insert(id, Pane::Files(explorer));
             return;
         }
         let id = self.next_leaf;
@@ -1288,7 +1302,7 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(id, Pane::Files(Explorer::new(Some(path))));
+        tab.leaves.insert(id, Pane::Files(explorer));
     }
 
     /// The pointer went down at `at`. A press focuses the pane under it and
@@ -1926,26 +1940,35 @@ impl App {
         self.sftp.as_ref().expect("worker started")
     }
 
-    /// Ask for whatever the focused remote pane is waiting on, and start any
-    /// download it asked for.
+    /// Ask for whatever any remote pane is waiting on, and start any download it
+    /// asked for.
+    ///
+    /// Every leaf in every tab, not the focused one: a pane nobody is typing in
+    /// still has to list, and the panes a link opens are deliberately unfocused.
+    /// Pumping only the focus left those showing "loading…" for ever.
     fn pump_sftp(&mut self) {
-        let mut request = None;
-        let mut download = None;
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if let Some(explorer) = tab.focused_explorer_mut() {
-                if explorer.alias().is_some() {
-                    request = explorer.take_request();
-                    download = explorer.take_download().map(|remote| {
-                        (explorer.alias().unwrap_or_default().to_owned(), remote)
-                    });
+        let mut requests = Vec::new();
+        let mut downloads = Vec::new();
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                let Pane::Files(explorer) = pane else {
+                    continue;
+                };
+                if let Some(request) = explorer.take_request() {
+                    requests.push(request);
+                }
+                if let Some(remote) = explorer.take_download() {
+                    if let Some(alias) = explorer.alias() {
+                        downloads.push((alias.to_owned(), remote));
+                    }
                 }
             }
         }
-        if let Some((alias, path)) = request {
+        for (alias, path) in requests {
             let tx = self.sftp_worker();
             let _ = tx.send(SftpMsg::List { alias, path });
         }
-        if let Some((alias, remote)) = download {
+        for (alias, remote) in downloads {
             let local = download_target(&remote);
             let tx = self.sftp_worker();
             let _ = tx.send(SftpMsg::Download {
@@ -1954,6 +1977,39 @@ impl App {
                 local,
             });
         }
+    }
+
+    /// The pane waiting for this listing, on this host.
+    ///
+    /// A reply names the directory it answers and two panes can browse one host,
+    /// so the match is by host *and* by what the pane asked for.
+    fn explorer_waiting(&mut self, alias: &str, path: &Path) -> Option<&mut Explorer> {
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                let Pane::Files(explorer) = pane else {
+                    continue;
+                };
+                if explorer.alias() == Some(alias) && explorer.is_waiting_for(path) {
+                    return Some(explorer);
+                }
+            }
+        }
+        None
+    }
+
+    /// Any pane browsing this host, for a failure that names no directory.
+    fn explorer_on(&mut self, alias: &str) -> Option<&mut Explorer> {
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                let Pane::Files(explorer) = pane else {
+                    continue;
+                };
+                if explorer.alias() == Some(alias) {
+                    return Some(explorer);
+                }
+            }
+        }
+        None
     }
 
     fn sftp_event(&mut self, event: SftpEvent) {
@@ -1971,10 +2027,8 @@ impl App {
                         size: (!entry.dir).then_some(entry.size),
                     })
                     .collect();
-                if let Some(explorer) = self.tabs[self.active].focused_explorer_mut() {
-                    if explorer.alias() == Some(alias.as_str()) {
-                        explorer.apply_listing(path, entries);
-                    }
+                if let Some(explorer) = self.explorer_waiting(&alias, &path) {
+                    explorer.apply_listing(path, entries);
                 }
             }
             SftpEvent::Downloaded { local, bytes } => {
@@ -1984,10 +2038,8 @@ impl App {
                 ));
             }
             SftpEvent::Failed { alias, message } => {
-                if let Some(explorer) = self.tabs[self.active].focused_explorer_mut() {
-                    if explorer.alias() == Some(alias.as_str()) {
-                        explorer.apply_failure(message);
-                    }
+                if let Some(explorer) = self.explorer_on(&alias) {
+                    explorer.apply_failure(message);
                 }
             }
         }
@@ -2556,8 +2608,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.sftp_event(event);
                 self.repaint("sftp");
             }
-            UserEvent::Reveal(path) => {
-                self.reveal_directory(path);
+            UserEvent::Reveal { path, alias } => {
+                self.reveal_directory(path, alias);
                 self.repaint("a link named a directory");
             }
             UserEvent::Notice(text) => {

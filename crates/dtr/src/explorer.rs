@@ -81,8 +81,14 @@ pub struct Explorer {
 pub struct Remote {
     /// The ssh alias the listing comes from.
     pub alias: String,
-    /// A directory whose listing has been asked for and not arrived yet.
+    /// A directory whose listing has been asked for and not sent yet.
     pending: Option<PathBuf>,
+    /// The directory the worker is listing now.
+    ///
+    /// The request is consumed when it is handed to the worker, so this has to
+    /// outlive it: matching a reply against `pending` matched nothing, and every
+    /// listing was dropped on the floor for a pane that was still loading.
+    awaiting: Option<PathBuf>,
     /// The bytes path of a download the user asked for, for the app to start.
     pub download: Option<PathBuf>,
 }
@@ -94,17 +100,24 @@ impl Explorer {
     /// A pane over another machine. Nothing is read here: the app asks the SFTP
     /// worker for a listing and hands it back with `apply_listing`.
     pub fn remote(alias: &str) -> Self {
+        Self::remote_at(alias, PathBuf::from("."))
+    }
+
+    /// The same, opening at `path`. `.` is the home directory, because only the
+    /// server knows where that is; a path from a link is already absolute.
+    pub fn remote_at(alias: &str, path: PathBuf) -> Self {
         let mut explorer = Self {
-            cwd: PathBuf::from("."),
+            cwd: path,
             home: PathBuf::from("."),
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
             show_hidden: false,
-            message: Some("connecting…".to_owned()),
+            message: None,
             remote: Some(Remote {
                 alias: alias.to_owned(),
-                pending: Some(PathBuf::from(".")),
+                pending: None,
+                awaiting: None,
                 download: None,
             }),
         };
@@ -121,18 +134,36 @@ impl Explorer {
     pub fn take_request(&mut self) -> Option<(String, PathBuf)> {
         let remote = self.remote.as_mut()?;
         let path = remote.pending.take()?;
+        remote.awaiting = Some(path.clone());
         Some((remote.alias.clone(), path))
     }
 
-    /// A listing arrived. Ignored when the pane has moved on since asking, so a
-    /// slow reply cannot yank the view back.
+    /// Is this pane waiting for exactly this listing?
+    ///
+    /// A reply names the directory it answers, and two panes can browse one host,
+    /// so routing is by what the pane asked for — not by which pane is focused,
+    /// which is what used to drop every reply to a pane the user was not in.
+    pub fn is_waiting_for(&self, path: &Path) -> bool {
+        self.remote
+            .as_ref()
+            .and_then(|remote| remote.awaiting.as_deref())
+            == Some(path)
+    }
+
+    /// A listing arrived. Ignored when the pane is waiting on another directory,
+    /// so a slow reply cannot yank the view back.
     pub fn apply_listing(&mut self, path: PathBuf, entries: Vec<Entry>) {
         let Some(remote) = self.remote.as_mut() else {
             return;
         };
-        if remote.pending.is_some() && remote.pending.as_deref() != Some(path.as_path()) {
+        if remote
+            .awaiting
+            .as_deref()
+            .is_some_and(|awaiting| awaiting != path.as_path())
+        {
             return;
         }
+        remote.awaiting = None;
         self.cwd = path;
         self.message = None;
         self.entries = arrange(entries, &self.cwd, self.show_hidden);
@@ -812,5 +843,57 @@ mod tests {
         assert!(explorer.entries.is_empty());
         let message = explorer.message.expect("a message");
         assert!(message.contains("cannot open"), "{message}");
+    }
+
+    /// A remote pane reads nothing itself: it asks, once, and waits.
+    #[test]
+    fn a_remote_pane_asks_for_its_directory_once() {
+        let mut explorer = Explorer::remote("jupyter");
+        assert_eq!(
+            explorer.take_request(),
+            Some(("jupyter".to_owned(), PathBuf::from(".")))
+        );
+        assert_eq!(explorer.take_request(), None, "one request per navigation");
+        assert!(explorer.entries.is_empty());
+    }
+
+    /// A link names a directory, and the pane has to open *there* rather than at
+    /// the home directory.
+    #[test]
+    fn a_remote_pane_can_open_at_a_linked_directory() {
+        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
+        assert_eq!(explorer.alias(), Some("jupyter"));
+        assert_eq!(
+            explorer.take_request(),
+            Some(("jupyter".to_owned(), PathBuf::from("/var/log")))
+        );
+    }
+
+    /// The reply is matched to the request that asked for it, and the request is
+    /// consumed when it is sent — so "waiting" has to outlive it. Matching on the
+    /// pending request matched nothing, and every listing was dropped for a pane
+    /// that then sat on "loading…" for ever.
+    #[test]
+    fn a_pane_waits_for_the_listing_it_sent() {
+        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
+        assert!(!explorer.is_waiting_for(Path::new("/var/log")), "not sent yet");
+        explorer.take_request();
+        assert!(explorer.is_waiting_for(Path::new("/var/log")));
+        assert!(!explorer.is_waiting_for(Path::new("/etc")));
+        explorer.apply_listing(PathBuf::from("/var/log"), Vec::new());
+        assert!(!explorer.is_waiting_for(Path::new("/var/log")), "answered");
+        // A local pane waits for nothing: it reads the disk when it is built.
+        let local = Explorer::new(Some(PathBuf::from(".")));
+        assert!(!local.is_waiting_for(Path::new(".")));
+    }
+
+    /// A reply for a directory the pane is not waiting on cannot yank it away.
+    #[test]
+    fn a_reply_for_another_directory_is_ignored() {
+        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
+        explorer.take_request();
+        explorer.apply_listing(PathBuf::from("/etc"), Vec::new());
+        assert_eq!(explorer.cwd, PathBuf::from("/var/log"));
+        assert!(explorer.is_waiting_for(Path::new("/var/log")), "still waiting");
     }
 }

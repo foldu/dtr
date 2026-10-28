@@ -397,12 +397,23 @@ jupyter's `/x`, and the backend it asks can only read that machine.
 **A directory link opens a file pane, not a toast.** `xdg-open` on a directory
 starts the desktop's file manager, which is a second window to close again; dtr has
 a file pane, so the click shows the directory there, beside the terminal. The
-worker that resolved the link sends `UserEvent::Reveal(path)` and the UI decides
-where a pane may go — layout is not a worker's business. Focus stays on the
-terminal: the click happened in the shell and the next keystroke belongs there.
-A tab that already shows a file pane retargets it instead of growing a second one.
-A remote directory is still named rather than opened, because the pane that would
-list it is driven by the SFTP worker and not by the link path.
+worker that resolved the link sends `UserEvent::Reveal { path, alias }` and the UI
+decides where a pane may go — layout is not a worker's business. Focus stays on
+the terminal: the click happened in the shell and the next keystroke belongs there.
+A pane already browsing the *same machine* is retargeted instead of a second one
+growing; another machine is another pane, because a pane reading this disk cannot
+become one reading somebody else's. A remote directory opens a pane over its host
+(`Explorer::remote_at`), which is the only thing that can list it.
+
+**A reply has to outlive its request, and a pane nobody is in still has to list.**
+The SFTP pump used to ask only the *focused* pane and deliver only to the focused
+pane, so the pane a link opens — deliberately unfocused — sat on `loading…` for
+ever, and a split pane with the terminal focused never listed at all. Both loops
+walk every leaf now, and the reply is routed by host *and* by the directory the
+pane asked for. That needed a second field: `take_request` consumes `pending`, so
+matching a reply against it matched nothing, and `awaiting` is what survives the
+send. `a_pane_waits_for_the_listing_it_sent` fails if the two are ever merged
+again.
 
 `--click x,y` exists because the hover has to happen before the press for a link
 to be known: it moves, waits one frame, then presses. That is what a hand does,
