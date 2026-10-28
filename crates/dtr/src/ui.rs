@@ -350,16 +350,17 @@ pub fn tab_bar(
                 egui::Sense::click(),
             );
 
+            // Hover is the strip's own affordance: a chip that looks the same
+            // under the pointer as away from it reads as decoration.
+            let hovered = response.hovered() || close.hovered();
+            let fill = match (is_active, hovered) {
+                (true, true) => Look::colour(look.accent).gamma_multiply(1.15),
+                (true, false) => Look::colour(look.accent),
+                (false, true) => Look::colour(look.surface).gamma_multiply(1.6),
+                (false, false) => Look::colour(look.surface),
+            };
             let painter = ui.painter();
-            painter.rect_filled(
-                rect,
-                4.0,
-                if is_active {
-                    Look::colour(look.accent)
-                } else {
-                    Look::colour(look.surface)
-                },
-            );
+            painter.rect_filled(rect, 4.0, fill);
             painter.galley(
                 egui::pos2(rect.left() + 7.0, rect.center().y - galley.size().y / 2.0),
                 galley,
@@ -400,8 +401,12 @@ pub fn tab_bar(
             egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
             egui::Sense::click(),
         );
-        ui.painter()
-            .rect_filled(rect, 4.0, Look::colour(look.surface));
+        let fill = if response.hovered() {
+            Look::colour(look.surface).gamma_multiply(1.6)
+        } else {
+            Look::colour(look.surface)
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
         // Painted, for the same reason as the cross: a widget here would sit on
         // top of the button and eat its clicks.
         egui::Image::new(egui::include_image!("../assets/icons/plus.svg"))

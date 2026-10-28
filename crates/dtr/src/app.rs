@@ -2122,6 +2122,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // answered (the Wayland backend waits for a frame callback)
                 // makes winit's pump loop busy-poll — 55k iterations a second
                 // with 20 frames.
+                // Hover feedback is worth the redraw: the strip lights up under
+                // the pointer, and a frame per refresh while the mouse moves is
+                // what that costs.
                 if gpu.egui_ctx.has_requested_repaint() && !self.egui_redraw_pending {
                     self.egui_redraw_pending = true;
                     gpu.window.request_redraw();

@@ -329,6 +329,12 @@ icon. The fix is disjoint rects: the chip only reserves space (`Sense::hover`),
 the label and the cross are separate `interact` regions that do not overlap, and
 icons are drawn with `Image::paint_at`, which cannot sense anything.
 
+**Hover is worth a redraw.** Skipping the repaint for pointer motion that cannot
+change anything was tried and rejected: the strip lights up under the pointer, and
+that is worth a frame per refresh. So a terminal redraws while the mouse moves over
+it — expected, not a leak. The chips and the `+` lighten on hover for exactly this
+reason; a chip that looks identical under the pointer reads as decoration.
+
 **A chip has two hit targets.** The label switches tabs, a cross on the right closes
 that tab — whichever tab is active. Both are pointer-only `Sense::click` regions
 with declared accessibility names (`2 shell`, `close tab 2`), so Enter cannot
