@@ -1594,8 +1594,26 @@ impl App {
                 Err(err) => tracing::warn!(%err, "theme"),
             },
             Action::Files(path) => {
-                let path = path.filter(|path| !path.is_empty()).map(PathBuf::from);
-                self.split_files(path);
+                if let Some(session) = self.session().filter(|session| session.remote) {
+                    // The session is on another machine: a local browser here
+                    // would show this machine's files under a remote tab's name,
+                    // which is worse than saying so. SFTP is the fix
+                    // (docs/sftp.md), not a fallback.
+                    let _ = session;
+                    self.toast = Some((
+                        "file pane over sftp is not wired up yet".to_owned(),
+                        std::time::Instant::now(),
+                    ));
+                    self.repaint("files refused");
+                } else {
+                    // No argument means "the directory this session is in",
+                    // which is what a file pane next to a terminal should show.
+                    let path = path
+                        .filter(|path| !path.is_empty())
+                        .map(PathBuf::from)
+                        .or_else(|| self.session().and_then(|session| session.pane.cwd()));
+                    self.split_files(path);
+                }
             }
             Action::Shell(shell) => {
                 let program = (!shell.is_empty()).then_some(shell);
