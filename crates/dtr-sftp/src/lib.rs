@@ -27,7 +27,9 @@ pub struct Entry {
 /// A live SFTP session: the ssh child and the protocol on top of it.
 pub struct Session {
     sftp: SftpSession,
-    child: Child,
+    /// `None` when the session was built on a stream instead of a child, which
+    /// is how the tests drive the same code over a duplex pipe.
+    child: Option<Child>,
 }
 
 impl Session {
@@ -56,7 +58,20 @@ impl Session {
         let sftp = SftpSession::new(stream)
             .await
             .with_context(|| format!("sftp handshake with {alias}"))?;
-        Ok(Self { sftp, child })
+        Ok(Self {
+            sftp,
+            child: Some(child),
+        })
+    }
+
+    /// A session over any bidirectional stream: the tests' way in, and the
+    /// reason `connect` is only about *finding* that stream.
+    pub async fn from_stream<S>(stream: S) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let sftp = SftpSession::new(stream).await.context("sftp handshake")?;
+        Ok(Self { sftp, child: None })
     }
 
     /// The directory's entries, sorted the way a file browser shows them:
@@ -123,7 +138,9 @@ impl Session {
     /// Kill the child: a session is a process, and an orphaned `ssh` would
     /// outlive the window that asked for it.
     pub fn close(mut self) {
-        let _ = self.child.start_kill();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 }
 
