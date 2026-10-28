@@ -469,6 +469,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         egui_redraw_pending: false,
         loop_report: std::cell::RefCell::new(LoopReport::default()),
         palette: Palette::new(startup.palette),
+        pager: crate::pager::Pager::default(),
         look: startup.look.clone(),
         theme: startup.theme.clone(),
         proxy,
@@ -865,6 +866,10 @@ struct App {
     /// can be told apart from "drawing a lot" and from "blocked in poll".
     loop_report: std::cell::RefCell<LoopReport>,
     palette: Palette,
+    /// The pager for the last command block. It owns the keyboard while it is
+    /// open, because a keystroke that leaked to the shell would run a command
+    /// nobody typed.
+    pager: crate::pager::Pager,
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
     log: Option<(PathBuf, crate::serial::LogFormat)>,
@@ -1084,6 +1089,31 @@ impl App {
                         Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
                         None => {}
                     }
+                    return;
+                }
+
+                // The pager owns the keyboard while it is open. Strictly: a
+                // keystroke that reached the shell would run a command nobody
+                // meant to type, and `j`/`k` are exactly the keys a shell keeps.
+                if self.pager.is_open() {
+                    if !pressed {
+                        self.held = None;
+                        return;
+                    }
+                    match self.pager.handle(&stroke.key, &stroke.mods) {
+                        Some(crate::pager::Action::Close) => {
+                            self.pager.close();
+                            self.repaint("pager closed");
+                        }
+                        Some(crate::pager::Action::Copy(text)) => {
+                            self.set_clipboard(&text);
+                            let note = format!("copied {} lines from the block", text.lines().count());
+                            self.toast = Some((note, std::time::Instant::now()));
+                            self.repaint("block copied");
+                        }
+                        None => self.repaint("pager scrolled"),
+                    }
+                    self.held = Some(stroke.key.clone());
                     return;
                 }
 
@@ -2720,11 +2750,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some((position.x, position.y));
-                self.pointer_move((position.x, position.y));
-                self.hover((position.x, position.y));
+                // While the pager is open the pointer belongs to egui: hovering
+                // the grid underneath would light up a link the pager covers, and
+                // a drag would select text nobody can see.
+                if !self.pager.is_open() {
+                    self.pointer_move((position.x, position.y));
+                    self.hover((position.x, position.y));
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == winit::event::MouseButton::Left {
+                if button == winit::event::MouseButton::Left && !self.pager.is_open() {
                     match state {
                         winit::event::ElementState::Pressed => {
                             if let Some(at) = self.cursor_position {
@@ -2740,7 +2775,10 @@ impl ApplicationHandler<UserEvent> for App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     winit::event::MouseScrollDelta::PixelDelta(position) => position.y / 20.0,
                 };
-                if lines != 0.0 {
+                // The pager scrolls itself: egui reads the wheel from the event
+                // stream, and sending the same wheel to the shell's scrollback
+                // would move a view the pager is covering.
+                if lines != 0.0 && !self.pager.is_open() {
                     // Wheel up shows older lines, which the terminal calls a
                     // negative delta. Only a focused terminal scrolls.
                     if let Some(session) = self.session() {
@@ -2928,6 +2966,9 @@ impl ApplicationHandler<UserEvent> for App {
                     .collect();
                 let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
                 let look = self.look.clone();
+                // Taken out for the frame for the same reason the palette is: the
+                // pager mutates itself while it draws, and `self` is borrowed.
+                let mut pager = std::mem::take(&mut self.pager);
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
@@ -2938,6 +2979,7 @@ impl ApplicationHandler<UserEvent> for App {
                     &mut action,
                     terminal_pane,
                     palette_open,
+                    &mut pager,
                     &mut copied_text,
                     &mut copied,
                     toast_text
@@ -2954,6 +2996,9 @@ impl ApplicationHandler<UserEvent> for App {
                     &look,
                 );
                 self.palette = palette;
+                // The pager comes back with the scroll the frame measured, which is
+                // the only place that knows how tall the text turned out.
+                self.pager = pager;
                 if let Some(change) = settings_change {
                     // A mouse edit updates the draft, and the file is written
                     // when the menu is saved — same as a keyboard edit.
@@ -2988,19 +3033,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 drop(toast_text);
                 if let Some(text) = captured {
-                    // The pager that will read this does not exist yet; for now
-                    // it says what it grabbed, which is also how a missing shell
-                    // integration shows up.
-                    let note = if text.is_empty() {
-                        "nothing to capture — the shell has not marked a prompt".to_owned()
+                    // An empty block stays a toast: an empty pager would look like
+                    // a bug rather than a shell without prompt marks.
+                    if text.is_empty() {
+                        self.toast = Some((
+                            "nothing to capture — the shell has not marked a prompt".to_owned(),
+                            std::time::Instant::now(),
+                        ));
                     } else {
-                        format!(
-                            "captured {} lines, {} bytes",
-                            text.lines().count(),
-                            text.len()
-                        )
-                    };
-                    self.toast = Some((note, std::time::Instant::now()));
+                        tracing::info!(lines = text.lines().count(), "paging a block");
+                        self.pager.show(text, "the last command block");
+                        // The pointer may be over a link; the pager is not a
+                        // terminal, so the pointing hand has to go.
+                        self.cursor_icon = Some(winit::window::CursorIcon::Default);
+                        self.repaint("pager opened");
+                    }
                 }
                 if let Some(text) = copied {
                     // Both paths: egui's, so its own paste and IME state agree,
@@ -3315,6 +3362,7 @@ impl Gpu {
         action: &mut Option<Action>,
         pane: Option<&TermPane>,
         palette_open: bool,
+        pager: &mut crate::pager::Pager,
         copied_text: &mut Option<String>,
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
@@ -3427,6 +3475,12 @@ impl Gpu {
                             *action = Some(chosen);
                         }
                     });
+                }
+                // Above the panes, in the same foreground layer as the palette: a
+                // pager a file pane could cover would be a pager nobody could
+                // read.
+                if pager.is_open() {
+                    crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
                 }
                 // Clipboard in and out. egui hands paste over as an event; the
                 // pane hands copied text back through a slot it fills itself.

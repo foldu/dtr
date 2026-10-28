@@ -9,6 +9,7 @@ mod layout;
 mod logbook;
 mod modem;
 mod palette;
+mod pager;
 mod profile;
 mod render;
 mod pane;

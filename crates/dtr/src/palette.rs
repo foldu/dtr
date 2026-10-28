@@ -278,8 +278,9 @@ impl Palette {
                 // with one tab and no idea there could be more.
                 ui.label(
                     RichText::new(
-                        "ctrl+shift t tab    ctrl+tab switch    ctrl+| / ctrl+_ split    \
-                         ctrl+shift w close    ctrl+shift p palette    ctrl+, settings",
+                        "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
+                         ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
+                         ctrl+, settings",
                     )
                     .size(10.0)
                     .color(Look::colour(look.dim).gamma_multiply(0.55)),

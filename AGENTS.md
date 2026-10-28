@@ -338,10 +338,34 @@ the mark. The tail is held back unwritten (prefix included) until the
 terminator arrives, or flushed past `CARRY_MAX` so a bogus introducer cannot
 stall the session.
 
-`capture-block` (`ctrl-shift-o`) parks the text in the pane's `captured` slot
-and the UI says how much it took; the pager that will read it is not written
-yet. Without shell integration there are no marks, and the toast says so
-instead of inventing a block.
+`capture-block` (`ctrl-shift-o`) parks the text in the pane's `captured` slot and
+`crate::pager` shows it. Without shell integration there are no marks, and the
+toast says so instead of inventing a block.
+
+**The pager is a `Label` in a `ScrollArea`, and that is the whole design.** The
+text is already in memory, so wrapping, scrolling and mouse selection are egui's
+job; a line-oriented pager would have to re-break every line itself and would
+still disagree with the font about where the break goes. What that costs is two
+things worth knowing: the page height a key must scroll by is only known from the
+*last* frame (so it is remembered, not measured), and "go to the end" is
+`f32::MAX` with the scroll area clamping it, because only the frame knows how tall
+the text turned out to be.
+
+It is **modal**, and the keyboard is the reason: `j`, `k`, `b` and space are a
+shell's keys, and a keystroke that leaked through would run a command nobody typed
+while the thing that typed it is hidden. `App::on_key` therefore hands every key to
+the pager first and returns — including the ones it does not understand. Chords
+are not pager keys, so `ctrl+…` falls through to nothing rather than to a binding
+that would fire under the pager.
+
+The pointer is modal for the same reason: while it is open, the wheel must not also
+scroll the shell's scrollback and a drag must not select text behind the pager, so
+`CursorMoved`, `MouseInput` and `MouseWheel` skip the terminal. It draws in the
+same foreground `overlay` layer as the palette, because a file pane is an `Area`
+and would otherwise paint over it.
+
+Closing drops the text. A captured block can be megabytes, and holding it for the
+rest of the process is a leak nobody would ever look for.
 
 **fish already speaks it** — nothing to install. Captured from a real
 `fish --no-config -i`, the sequence is
