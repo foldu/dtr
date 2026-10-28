@@ -13,3 +13,12 @@
 *.gif
 **/tests/snapshots/**/*.diff.png
 **/tests/snapshots/**/*.new.png
+
+# Profiling output: `dtr --cpu-profile`, `scripts/flamegraph.sh` and `perf
+# record` all write next to the working directory, and none of it belongs in a
+# commit — the inputs are rerunnable in seconds, the files are hundreds of MB.
+perf.data
+perf.data.*
+*.prof
+flame.svg
+flamegraph.svg
