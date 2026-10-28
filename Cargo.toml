@@ -54,7 +54,7 @@ swash = "0.2"
 unicode-width = "0.2"
 fontique = "0.12"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "time", "sync", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "io-util", "macros"] }
 tokio-serial = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

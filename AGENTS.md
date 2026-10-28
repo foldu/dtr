@@ -217,6 +217,17 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**The UI thread asks for slow work, it does not do it.** Enumerating serial ports
+touches udev or SetupAPI and reading the ssh config is a file read; both are
+milliseconds-to-tens-of-milliseconds, which on the drawing thread is a dropped
+frame and a button that feels dead. `App::request_scan` hands the work to a
+one-thread tokio runtime (`App::worker`) with `spawn_blocking`, and the result
+arrives as `UserEvent::Destinations`. `scanning` stops duplicate scans, and
+`scan_due` is the poll interval, not a busy loop.
+
+The panes' runtimes are single-threaded and per-session by design; this one is
+the UI's own, and `rt-multi-thread` had to be added to tokio's features for it.
+
 **udev would be better on Linux and wrong overall.** Devices are *polled* through
 `serialport::available_ports` every couple of seconds, not watched through `/dev`:
 udev is Linux-only, and Windows enumerates COM ports by an entirely different
@@ -224,9 +235,7 @@ route. One mechanism that works on both beats a fast one that only exists here.
 Files are different — `~/.ssh/config` is watched with `notify` (inotify on Linux,
 `ReadDirectoryChangesW` on Windows), because that mechanism *is* portable.
 
-**A burst of filesystem events is one refresh.** inotify during a USB enumeration
-delivers dozens of events per device; `watch::Coalesce` lets the first through and
-swallows the rest inside its window, so the menu is not re-read per event.
+
 
 **The new-tab button is a menu, not a chord.** The `+` at the end of the strip opens
 `egui::Popup::menu`: the local shell first, then every alias in `~/.ssh/config`

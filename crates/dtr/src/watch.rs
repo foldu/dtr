@@ -14,7 +14,6 @@
 //! delivers a burst per device, so a burst is coalesced into one refresh.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 /// Where destinations come from.
 pub fn paths() -> Vec<PathBuf> {
@@ -80,53 +79,9 @@ impl std::fmt::Debug for Watcher {
     }
 }
 
-/// Swallows a burst of change events into one refresh.
-///
-/// A USB enumeration produces dozens of events in a few milliseconds; each one
-/// would mean re-reading `/dev` and the ssh config. This lets the first through
-/// and then ignores the rest for `window`.
-#[derive(Debug)]
-pub struct Coalesce {
-    window: Duration,
-    last: Option<Instant>,
-}
-
-impl Coalesce {
-    pub fn new(window: Duration) -> Self {
-        Self {
-            window,
-            last: None,
-        }
-    }
-
-    /// Whether this change should cause a refresh now.
-    pub fn ready(&mut self, now: Instant) -> bool {
-        match self.last {
-            Some(last) if now.duration_since(last) < self.window => false,
-            _ => {
-                self.last = Some(now);
-                true
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_burst_of_changes_refreshes_once() {
-        let mut coalesce = Coalesce::new(Duration::from_millis(250));
-        let now = Instant::now();
-        assert!(coalesce.ready(now), "the first change refreshes");
-        assert!(!coalesce.ready(now + Duration::from_millis(10)));
-        assert!(!coalesce.ready(now + Duration::from_millis(200)));
-        assert!(
-            coalesce.ready(now + Duration::from_millis(300)),
-            "the window has passed, so the next change refreshes"
-        );
-    }
 
     #[test]
     fn the_ssh_config_is_watched_even_before_it_exists() {

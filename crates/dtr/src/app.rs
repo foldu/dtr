@@ -24,6 +24,8 @@ pub enum UserEvent {
     Frame,
     /// A watched file changed: `~/.ssh/config` was edited.
     Files,
+    /// A background scan finished: the destinations to offer now.
+    Destinations(Vec<(String, String)>),
 }
 
 /// Everything a fresh window needs that is decided on the command line.
@@ -242,8 +244,17 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             }
         }),
         destinations: Vec::new(),
-        port_poll: crate::watch::Coalesce::new(std::time::Duration::from_secs(2)),
-        destinations_dirty: true,
+        // A background runtime for the UI's own slow work, separate from the
+        // panes: those are single-threaded by design, one per session.
+        worker: tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("dtr-scan")
+            .build()
+            .map_err(|err| tracing::warn!(%err, "no worker runtime"))
+            .ok(),
+        scanning: false,
+        scan_due: std::time::Instant::now(),
         tabs: vec![Tab::new(
             1,
             Pane::Terminal(Session {
@@ -501,11 +512,16 @@ struct App {
     /// The watcher for destination files. Held so the watch stays alive.
     #[allow(dead_code)]
     watcher: Option<crate::watch::Watcher>,
-    /// Serial ports are polled, not watched, and a burst of device events must
-    /// not turn into a burst of enumerations.
-    port_poll: crate::watch::Coalesce,
-    /// Set when a watched file changed, cleared when the list is re-read.
-    destinations_dirty: bool,
+    /// The runtime that does the slow work: enumerating serial ports reads
+    /// udev or SetupAPI, which is milliseconds-to-tens-of-milliseconds — an
+    /// eternity on a thread that is also drawing the frame. The UI thread asks
+    /// for a scan and gets the answer back as an event.
+    worker: Option<tokio::runtime::Runtime>,
+    /// A scan is in flight; asking again would only queue duplicate work.
+    scanning: bool,
+    /// When the next poll is due. Serial devices have no portable notification,
+    /// so they are polled — off the UI thread.
+    scan_due: std::time::Instant,
     active: usize,
     next_leaf: crate::layout::LeafId,
     gpu: Option<Gpu>,
@@ -788,6 +804,29 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Ask the worker runtime for a fresh destination list.
+    ///
+    /// Port enumeration touches udev or SetupAPI and the ssh config is a file
+    /// read; both are small but neither belongs on the thread that draws the
+    /// frame, where a few milliseconds is a dropped frame.
+    fn request_scan(&mut self) {
+        const POLL: std::time::Duration = std::time::Duration::from_secs(2);
+        self.scan_due = std::time::Instant::now() + POLL;
+        if self.scanning {
+            return;
+        }
+        let Some(worker) = self.worker.as_ref() else {
+            return;
+        };
+        self.scanning = true;
+        let proxy = self.proxy.clone();
+        worker.spawn_blocking(move || {
+            let mut destinations = crate::sources::serial_destinations();
+            destinations.extend(crate::sources::ssh_destinations());
+            let _ = proxy.send_event(UserEvent::Destinations(destinations));
+        });
     }
 
     /// Do what a binding asks for. Returns whether it acted, so a terminal-only
@@ -1527,13 +1566,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.check_exit_deadline(event_loop);
 
-        // Re-read the destination list when a file changed, or when the poll
-        // window has passed — a device does not announce itself on Windows.
-        if self.destinations_dirty || self.port_poll.ready(std::time::Instant::now()) {
-            let mut destinations = crate::sources::serial_destinations();
-            destinations.extend(crate::sources::ssh_destinations());
-            self.destinations = destinations;
-            self.destinations_dirty = false;
+        // A scan is cheap to *ask* for and expensive to *do*, so asking never
+        // blocks the frame: the work goes to the worker runtime and comes back
+        // as an event.
+        if self.scan_due <= std::time::Instant::now() {
+            self.request_scan();
         }
         // `--drag`: press, move, release — the three steps a person's hand
         // makes, so the copy-on-selection path runs without a mouse.
@@ -1600,9 +1637,18 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        if let UserEvent::Files = event {
-            self.destinations_dirty = true;
-            self.repaint("watched file changed");
+        match event {
+            UserEvent::Files => {
+                // A file changed: scan now rather than at the next poll.
+                self.scan_due = std::time::Instant::now();
+                self.repaint("watched file changed");
+            }
+            UserEvent::Destinations(destinations) => {
+                self.destinations = destinations;
+                self.scanning = false;
+                self.repaint("destinations");
+            }
+            UserEvent::Frame => {}
         }
         // Every terminal pane publishes frames, not only the focused one: a
         // file pane can have focus while the terminal beside it is still live.
