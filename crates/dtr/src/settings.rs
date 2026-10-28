@@ -393,7 +393,7 @@ impl Settings {
                         }
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new("↑↓ row   ←→ change   enter save   esc cancel")
+                            egui::RichText::new("up/down row   left/right change   enter save   esc cancel")
                                 .monospace()
                                 .size(11.0)
                                 .color(crate::ui::Look::colour(look.dim)),
@@ -541,5 +541,50 @@ mod tests {
             self.nudge(step);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod kittest_tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    /// Opening the menu on a shell shows the terminal's own settings and nothing
+    /// about a port, because there is no port to describe.
+    #[test]
+    fn a_shell_menu_has_no_port_rows() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(
+            settings.rows(),
+            vec![Row::FontSize, Row::FontFamily, Row::Theme, Row::AutoReconnect]
+        );
+    }
+
+    /// Escape leaves without writing anything, which is the whole point of a
+    /// draft: a menu you cannot back out of is worse than no menu.
+    #[test]
+    fn escape_cancels_without_writing() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight));
+        assert!(!settings.writes().is_empty(), "the change is in the draft");
+        assert_eq!(
+            settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)),
+            Some(Effect::Cancel)
+        );
+    }
+
+    /// The rows are drawn and the menu renders: a snapshot catches a row that
+    /// moves, a label that disappears, or the highlight landing on the wrong row.
+    #[test]
+    fn the_menu_renders() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown));
+        let look = crate::ui::Look::default();
+        let mut harness = Harness::new_ui(|ui| settings.ui(ui, &look));
+        harness.run();
+        harness.snapshot("settings_menu");
     }
 }

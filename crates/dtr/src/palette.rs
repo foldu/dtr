@@ -237,7 +237,7 @@ impl Palette {
 
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("↑↓ choose   tab complete   enter run   esc close")
+                    RichText::new("up/down choose   tab complete   enter run   esc close")
                         .size(10.0)
                         .color(Look::colour(look.dim).gamma_multiply(0.7)),
                 );
@@ -342,5 +342,60 @@ mod tests {
     fn unknown_lines_do_nothing() {
         assert!(action_for("nonsense").is_none());
         assert!(action_for("connect").is_none());
+    }
+}
+
+#[cfg(test)]
+mod kittest_tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    /// Type a command, press Enter, get the action — the loop the terminal
+    /// actually uses, driven through egui instead of through a window.
+    #[test]
+    fn typing_a_command_and_pressing_enter_returns_its_action() {
+        let mut palette = Palette::new(false);
+        palette.toggle();
+        let look = Look::default();
+        let action = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = action.clone();
+        let mut harness = Harness::new_ui(move |ui| {
+            if let Some(action) = palette.ui(ui, &look) {
+                *sink.borrow_mut() = Some(action);
+            }
+        });
+        harness.run();
+
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("shell");
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+
+        let taken = action.borrow_mut().take();
+        assert!(
+            matches!(taken, Some(Action::Shell(_))),
+            "expected a shell action, got something else"
+        );
+    }
+
+    /// The palette as the eye sees it: a query, the completions it filtered to,
+    /// and the key hints underneath.
+    #[test]
+    fn the_palette_renders() {
+        let mut palette = Palette::new(false);
+        palette.toggle();
+        let look = Look::default();
+        let mut harness = Harness::new_ui(|ui| {
+            palette.ui(ui, &look);
+        });
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("s");
+        harness.run();
+        harness.snapshot("palette");
     }
 }

@@ -364,7 +364,7 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
         }
         if status.scrollback > 0 {
             ui.label(
-                RichText::new(format!("↑ {} lines", status.scrollback))
+                RichText::new(format!("{} lines up", status.scrollback))
                     .monospace()
                     .size(11.0)
                     .color(Look::colour(look.accent)),

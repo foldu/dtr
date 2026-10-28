@@ -132,6 +132,13 @@ were invisible to the harness *and* to a screen reader), and a widget is not a
 `Button` just because it is clickable — `Sense::click()` plus a declared label
 gives a hit target that Enter cannot activate.
 
+**egui's default fonts have no arrows.** `↑↓` and `←→` in the palette and settings
+hints rendered as tofu: the harness panicked with "No glyph for U+2191 in
+Proportional", and the window had been drawing empty boxes in those hints all
+along. Hints are words now (`up/down`, `left/right`), which also reads better in a
+terminal. Any new UI text should assume Latin-1 only until dtr ships its own UI
+font.
+
 **Keys can be typed at the window from a script.** `--keys "ctrl-shift-p;down;down"` applies one
 stroke per frame through the same handler a keyboard uses (`App::on_key`), and
 `--capture PATH --capture-after MS` photographs the window afterwards. `;`
