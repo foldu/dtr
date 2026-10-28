@@ -2007,6 +2007,13 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() > TOAST) {
                     self.toast = None;
                 }
+                // egui asks for another frame when something it drew needs one —
+                // opening a popup, an animation, a hover highlight. Nobody calls
+                // `repaint` for those, so the request has to be carried to the
+                // event loop here or the menu only appears when the mouse moves.
+                if gpu.egui_ctx.has_requested_repaint() {
+                    self.repaint("egui asked");
+                }
                 self.frames_drawn = self.frames_drawn.wrapping_add(1);
                 // A frame that took long enough to feel is worth a line: the
                 // glyph count says whether it was font work or drawing.

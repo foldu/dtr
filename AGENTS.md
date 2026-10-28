@@ -217,6 +217,12 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**egui's own repaint request has to be carried too.** Opening the `+` menu draws
+nothing until the mouse moves, because a popup appears on the *next* frame and
+nothing in dtr called `repaint` for it — the request was egui's. After each frame
+the app asks `has_requested_repaint()` and, if so, repaints. Any egui feature that
+animates or appears late (popups, tooltips, hover) depends on this.
+
 **`request_redraw` inside a redraw does not draw on Wayland.** Closing a tab left
 the strip unchanged until the mouse moved: the redraw request made from inside
 the frame waits for the compositor's next frame callback, which arrives with the
