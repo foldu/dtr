@@ -668,7 +668,9 @@ pub fn display_join(dir: &Path, name: &str, home: &Path) -> String {
     display_path(&dir.join(name), home)
 }
 
-fn human_size(bytes: u64) -> String {
+/// A byte count a person can read. Shared with the app's toasts, which report a
+/// save the same way the pane reports a file.
+pub(crate) fn human_size(bytes: u64) -> String {
     const K: f64 = 1024.0;
     let value = bytes as f64;
     if value < K {

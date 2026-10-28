@@ -470,6 +470,46 @@ checks the pixel at the computed position is the texture's colour and the far co
 is not — a mesh that never reached the screen fails there, which no amount of
 geometry testing would catch.
 
+**Right-clicking a link is a menu, and "Save as" is a path field.** Three things
+can be done with a link that names a file: `Open` (exactly what a left click does —
+it goes through `open_link` with the URI, so a remote one still opens a copy),
+`Save as...`, and `Copy path`. Only a link *under the pointer* gets a menu: a
+right-click on ordinary output has no target, and a menu of nothing is worse than
+no menu. The cell decides, as it does for the press that opens a link — the hover
+is one frame behind the pointer, so a very fast right-click after moving misses.
+
+Dismissal is the part with a trap. A left press outside the menu closes it *and
+goes nowhere else*, because a click that both dismisses a menu and starts a
+selection is how text gets selected by accident. That needs the menu's rect, which
+only the frame that drew it knows, so `LinkMenu::contains` answers from the last
+frame — hit-testing must not depend on this frame's egui pass, or the press would
+dismiss the menu before its own button could see the click. Escape is the menu's
+own (the one key that must not reach the shell); any *other* key closes it and then
+does what it was going to do.
+
+The dialog is a text field, not a native picker: `rfd` would mean GTK on Linux or a
+portal dependency for a one-file Windows build, and a terminal's user can type a
+path. The default is `~/Downloads/<name>` — shared with the explorer's download, so
+two ways of taking a remote file agree — and `~` is expanded, because a field
+showing `~/x` that writes a literal `~` is discovered after the file is gone.
+
+Saving is the same `materialise` a click uses, then `tokio::fs::copy`: local files
+are their own path, remote ones are fetched into the cache first, and the copy is
+the last step, so "Save as" and "Open" cannot disagree about what the bytes are.
+The toast is raised *before* the transfer ("saving x...") and replaced by the
+result: a file over a slow link is otherwise a silence that reads as a dead button.
+There is no progress and no cancel yet.
+
+The image preview is suppressed while either is open, and that is not cosmetic: the
+menu opens *at* the pointer and the preview is drawn 14 points from it, in the
+tooltip layer — which is above a foreground menu. Without the guard the picture
+covers the first two items of the menu that was opened to click them.
+
+**A dialog with a text field owns the keyboard.** `on_key` returns early while the
+save dialog is open; egui reads the same events, so the field still types — without
+the guard, the filename is also sent to the shell as a command. The menu is the
+milder version: it closes on the first key and lets it through.
+
 **A directory link opens a file pane, not a toast.** `xdg-open` on a directory
 starts the desktop's file manager, which is a second window to close again; dtr has
 a file pane, so the click shows the directory there, beside the terminal. The

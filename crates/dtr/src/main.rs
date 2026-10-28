@@ -6,6 +6,7 @@ mod fonts;
 mod input;
 mod keys;
 mod layout;
+mod linkmenu;
 mod logbook;
 mod modem;
 mod palette;

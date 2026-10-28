@@ -87,6 +87,15 @@ struct LinkHover {
     uri: String,
 }
 
+/// What the open link menu is about: the link as printed, and where it lives.
+///
+/// Both are kept because the two answers differ — "Open" wants the URI a click
+/// would have used, "Save as" wants the location the byte comes from.
+struct LinkMenuTarget {
+    uri: String,
+    location: dtr_vfs::Location,
+}
+
 /// How long the pointer has to rest on a remote picture before it is fetched.
 ///
 /// A sweep across a row of names passes over every one of them, and each is a
@@ -556,6 +565,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         hover_link: None,
         thumb: crate::thumb::Cache::default(),
         thumb_pending: None,
+        link_menu: crate::linkmenu::LinkMenu::default(),
+        link_menu_target: None,
+        save: crate::linkmenu::SaveDialog::default(),
         cursor_icon: None,
         script: startup
             .keys
@@ -672,10 +684,12 @@ fn sftp_worker(
     }
 }
 
-/// Where a remote file lands: `~/Downloads`, created if it is missing. Asking
-/// per transfer would be a dialog, and this is the first slice.
-fn download_target(remote: &std::path::Path) -> PathBuf {
-    let name = remote
+/// Where a copy lands by default: `~/Downloads`, created if it is missing.
+///
+/// The file explorer's download and the link menu's "Save as" share it, so a
+/// remote file taken two different ways does not end up in two different places.
+fn save_target(source: &std::path::Path) -> PathBuf {
+    let name = source
         .file_name()
         .map(|name| name.to_owned())
         .unwrap_or_else(|| "download".into());
@@ -944,6 +958,11 @@ struct App {
     thumb: crate::thumb::Cache,
     /// A remote preview waiting for the pointer to rest. Any new hover drops it.
     thumb_pending: Option<PendingThumb>,
+    /// The right-click menu for a link, and what it is about.
+    link_menu: crate::linkmenu::LinkMenu,
+    link_menu_target: Option<LinkMenuTarget>,
+    /// Where a "Save as" copy should go, once the user has said so.
+    save: crate::linkmenu::SaveDialog,
     /// The cursor this window was last told to show, so the icon is set when it
     /// changes rather than on every frame.
     cursor_icon: Option<winit::window::CursorIcon>,
@@ -1087,6 +1106,15 @@ impl App {
                 // not finished yet (`ctrl-k ctrl-s`).
                 let pressed = stroke.state == winit::event::ElementState::Pressed;
 
+                // A dialog asking where to save owns the keyboard entirely. egui
+                // reads the same events, so the text field still types; this is
+                // what stops the filename from being typed into the shell as a
+                // command as well.
+                if self.save.is_open() {
+                    self.held = None;
+                    return;
+                }
+
                 // The menu owns the keyboard while it is open. Releases only
                 // clear the held key; duplicates are compositor noise.
                 if self.settings.open {
@@ -1143,6 +1171,22 @@ impl App {
                     }
                     self.held = Some(stroke.key.clone());
                     return;
+                }
+
+                // The menu owns the keyboard in the same way, but only briefly:
+                // any key dismisses it and then goes where it was going. Escape is
+                // the one that must not reach the shell, because it was aimed at
+                // the menu.
+                if self.link_menu.is_open() && pressed {
+                    let escape = matches!(
+                        &stroke.key,
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                    );
+                    self.link_menu.close();
+                    self.repaint("link menu closed");
+                    if escape {
+                        return;
+                    }
                 }
 
                 let mut consumed = alt_digit;
@@ -1317,6 +1361,162 @@ impl App {
         });
     }
 
+    /// The DPI factor, which the window holds and the GPU knows how to ask for.
+    ///
+    /// egui works in points and winit's pointer arrives in physical pixels, so
+    /// every hand-off between them needs this — once, not twice.
+    fn scale(&self) -> f32 {
+        self.gpu.as_ref().map(|gpu| gpu.scale()).unwrap_or(1.0)
+    }
+
+    /// The right button on a link: a menu, because a link that is a file can be
+    /// taken away as well as opened.
+    ///
+    /// Nothing else gets a menu — a right-click on ordinary output has no target,
+    /// and a menu of nothing is worse than no menu.
+    fn right_click(&mut self, at: (f64, f64)) {
+        let Some(link) = self.hover_link.clone() else {
+            return;
+        };
+        // The hover can be a frame older than the pointer; the cell is what
+        // decides, exactly as it does for the press that opens a link.
+        if self.cell_xy(at.0, at.1) != Some((link.x, link.y)) {
+            return;
+        }
+        let Some(remote) = self.session().map(|session| session.remote) else {
+            return;
+        };
+        let LinkTarget::Path(path) = link_target(&link.uri, remote) else {
+            return;
+        };
+        let Some(location) = self.location(path) else {
+            return;
+        };
+        let title = location
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| location.describe());
+        // egui is in points and winit's pointer is in physical pixels; the DPI
+        // factor is applied exactly once, here.
+        let scale = self.scale();
+        self.link_menu.open_at(
+            egui::pos2(at.0 as f32 / scale, at.1 as f32 / scale),
+            title,
+            location.describe(),
+        );
+        self.link_menu_target = Some(LinkMenuTarget {
+            uri: link.uri,
+            location,
+        });
+        self.repaint("link menu");
+    }
+
+    /// A left press, with the overlays given first refusal.
+    ///
+    /// A press outside an overlay dismisses it and goes nowhere else — that is
+    /// what every menu on the desktop does, and a click that both dismisses a
+    /// menu and starts a selection is how text gets selected by accident.
+    fn left_press(&mut self, at: (f64, f64)) {
+        let scale = self.scale();
+        let points = egui::pos2(at.0 as f32 / scale, at.1 as f32 / scale);
+        if self.link_menu.is_open() {
+            if !self.link_menu.contains(points) {
+                self.link_menu.close();
+                self.repaint("link menu dismissed");
+            }
+            return;
+        }
+        if self.save.is_open() {
+            if !self.save.contains(points) {
+                self.save.close();
+                self.repaint("save dialog dismissed");
+            }
+            return;
+        }
+        self.pointer_down(at);
+    }
+
+    /// Act on what the link menu was asked for.
+    fn link_menu_choice(&mut self, choice: crate::linkmenu::Choice) {
+        let Some(target) = self.link_menu_target.take() else {
+            return;
+        };
+        self.link_menu.close();
+        match choice {
+            // The URI, not the location: "Open" must be exactly what a left
+            // click does, remote copy and all.
+            crate::linkmenu::Choice::Open => self.open_link(&target.uri),
+            crate::linkmenu::Choice::SaveAs => {
+                let described = target.location.describe();
+                let default = save_target(&target.location.path);
+                self.save
+                    .show(target.location, described, default.display().to_string());
+                self.repaint("save dialog");
+            }
+            crate::linkmenu::Choice::CopyPath => {
+                let text = target.location.path.display().to_string();
+                self.set_clipboard(&text);
+                self.toast = Some((format!("copied {text}"), std::time::Instant::now()));
+                self.repaint("path copied");
+            }
+        }
+    }
+
+    fn save_outcome(&mut self, outcome: crate::linkmenu::Outcome) {
+        if let crate::linkmenu::Outcome::Confirm { location, dest } = outcome {
+            self.begin_save(location, dest);
+        }
+    }
+
+    /// Copy a file on this machine or another to `dest`.
+    ///
+    /// The fetch is `materialise`, the same call a click makes: local files are
+    /// their own path, remote ones are fetched into the cache first, and the copy
+    /// is only the last step. The size the user gets told is the copy's.
+    fn begin_save(&mut self, location: dtr_vfs::Location, dest: PathBuf) {
+        let described = location.describe();
+        let name = dest
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dest.display().to_string());
+        let (Some(runtime), vfs, proxy) = (
+            self.files_rt.as_ref(),
+            std::sync::Arc::clone(&self.vfs),
+            self.proxy.clone(),
+        ) else {
+            return;
+        };
+        // Said before rather than after: a file over a slow link is a silence,
+        // and a silence nobody explained reads as a button that did nothing.
+        self.toast = Some((
+            format!("saving {name}..."),
+            std::time::Instant::now(),
+        ));
+        runtime.spawn(async move {
+            let outcome = async {
+                let local = vfs.materialise(&location).await?;
+                if let Some(parent) = dest.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                }
+                tokio::fs::copy(&local, &dest).await?;
+                Ok::<u64, anyhow::Error>(tokio::fs::metadata(&dest).await?.len())
+            }
+            .await;
+            let note = match outcome {
+                Ok(bytes) => format!(
+                    "saved {} to {}",
+                    crate::explorer::human_size(bytes),
+                    dest.display()
+                ),
+                Err(err) => format!("could not save {described}: {err:#}"),
+            };
+            let _ = proxy.send_event(UserEvent::Notice(note));
+        });
+    }
+
     /// Show a directory in a file pane beside the terminal that asked for it.
     ///
     /// Focus stays on the terminal: the click happened in the shell and the next
@@ -1481,8 +1681,10 @@ impl App {
         ctx: &egui::Context,
     ) -> Option<(egui::TextureHandle, egui::Vec2)> {
         // The pager owns the window while it is open; a tooltip over it would be
-        // a picture of a file the user is not pointing at.
-        if self.pager.is_open() {
+        // a picture of a file the user is not pointing at. The link menu is a
+        // sharper case: it opens *at* the pointer, exactly where the preview would
+        // be, and the tooltip layer sits above a foreground menu.
+        if self.pager.is_open() || self.link_menu.is_open() || self.save.is_open() {
             return None;
         }
         let uri = self.hover_link.as_ref()?.uri.clone();
@@ -2161,7 +2363,7 @@ impl App {
             let _ = tx.send(SftpMsg::List { alias, path });
         }
         for (alias, remote) in downloads {
-            let local = download_target(&remote);
+            let local = save_target(&remote);
             let tx = self.sftp_worker();
             let _ = tx.send(SftpMsg::Download {
                 alias,
@@ -2927,8 +3129,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_position = Some((position.x, position.y));
                 // While the pager is open the pointer belongs to egui: hovering
                 // the grid underneath would light up a link the pager covers, and
-                // a drag would select text nobody can see.
-                if !self.pager.is_open() {
+                // a drag would select text nobody can see. The same goes for a
+                // menu or a dialog: they are about one file, not about the cell
+                // under the pointer.
+                if !self.pager.is_open()
+                    && !self.link_menu.is_open()
+                    && !self.save.is_open()
+                {
                     self.pointer_move((position.x, position.y));
                     self.hover((position.x, position.y));
                 }
@@ -2942,14 +3149,29 @@ impl ApplicationHandler<UserEvent> for App {
                 self.thumb_pending = None;
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == winit::event::MouseButton::Left && !self.pager.is_open() {
+                if self.pager.is_open() {
+                    // The pager owns the pointer while it is open; the wheel and
+                    // the drag belong to it.
+                } else if button == winit::event::MouseButton::Right {
+                    if state == winit::event::ElementState::Pressed {
+                        if let Some(at) = self.cursor_position {
+                            self.right_click(at);
+                        }
+                    }
+                } else if button == winit::event::MouseButton::Left {
                     match state {
                         winit::event::ElementState::Pressed => {
                             if let Some(at) = self.cursor_position {
-                                self.pointer_down(at);
+                                self.left_press(at);
                             }
                         }
-                        winit::event::ElementState::Released => self.pointer_up(),
+                        winit::event::ElementState::Released => {
+                            // A press that dismissed a menu started no drag, so
+                            // there is no drag to end.
+                            if !self.link_menu.is_open() && !self.save.is_open() {
+                                self.pointer_up();
+                            }
+                        }
                     }
                 }
             }
@@ -3163,6 +3385,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // Taken out for the frame for the same reason the palette is: the
                 // pager mutates itself while it draws, and `self` is borrowed.
                 let mut pager = std::mem::take(&mut self.pager);
+                let mut link_menu = std::mem::take(&mut self.link_menu);
+                let mut save = std::mem::take(&mut self.save);
+                let mut menu_choice = None;
+                let mut save_outcome = None;
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
@@ -3177,6 +3403,10 @@ impl ApplicationHandler<UserEvent> for App {
                     thumbnail
                         .as_ref()
                         .map(|(texture, size)| (texture, *size)),
+                    &mut link_menu,
+                    &mut menu_choice,
+                    &mut save,
+                    &mut save_outcome,
                     &mut copied_text,
                     &mut copied,
                     toast_text
@@ -3196,6 +3426,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // The pager comes back with the scroll the frame measured, which is
                 // the only place that knows how tall the text turned out.
                 self.pager = pager;
+                self.link_menu = link_menu;
+                self.save = save;
+                // The answers come back after the frame, like a clicked tab: the
+                // drawing code knows what was clicked, the app knows what to do
+                // about it.
+                if let Some(choice) = menu_choice {
+                    self.link_menu_choice(choice);
+                }
+                if let Some(outcome) = save_outcome {
+                    self.save_outcome(outcome);
+                }
                 if let Some(change) = settings_change {
                     // A mouse edit updates the draft, and the file is written
                     // when the menu is saved — same as a keyboard edit.
@@ -3561,6 +3802,10 @@ impl Gpu {
         palette_open: bool,
         pager: &mut crate::pager::Pager,
         thumbnail: Option<(&egui::TextureHandle, egui::Vec2)>,
+        link_menu: &mut crate::linkmenu::LinkMenu,
+        menu_choice: &mut Option<crate::linkmenu::Choice>,
+        save: &mut crate::linkmenu::SaveDialog,
+        save_outcome: &mut Option<crate::linkmenu::Outcome>,
         copied_text: &mut Option<String>,
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
@@ -3685,6 +3930,13 @@ impl Gpu {
                 // it.
                 if let Some((texture, size)) = thumbnail {
                     crate::thumb::draw(ui, texture, size, look);
+                }
+                // A right-click's menu, and the dialog it can lead to.
+                if link_menu.is_open() {
+                    *menu_choice = link_menu.ui(ui, look);
+                }
+                if save.is_open() {
+                    *save_outcome = save.ui(ui, look);
                 }
                 // Clipboard in and out. egui hands paste over as an event; the
                 // pane hands copied text back through a slot it fills itself.
