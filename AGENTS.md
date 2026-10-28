@@ -552,10 +552,18 @@ publish. That is also why the frame carries the resolved range rather than the
 UI holding one: a scroll republishes, so the picture and the copy cannot
 disagree about what is selected.
 
-An end that has scrolled out of view is clamped to the border it left by, so the
-highlight does not vanish and half a selection still looks like half a
-selection. `the_selected_text_survives_a_scroll` is the test that would fail on
-the old representation by construction.
+`PointSpace::Viewport` does the resolving but not the bounding: a cell thirteen
+rows below a five-row viewport comes back as `y = 13`, so the range check is
+ours. Once either end has left the frame the selection is **dropped**, not
+clamped — a highlight stretched to the border would claim cells the selection
+does not cover, and a copy would hand back a fragment that looks like the whole
+thing. `a_selection_that_leaves_the_frame_is_dropped` covers both directions.
+
+A press that has not moved is an anchor and not a selection: nothing is
+highlighted, so a single click deselects rather than selecting one cell. The
+anchor has to exist at the press or a drag could not grow from it, which is why
+the rule lives in `selection_span` (both ends equal → `None`) and not in the
+commands.
 
 **Double- and triple-click are counted, not reported.** winit has no click
 count, so `App::count_clicks` counts a press within 400 ms and four pixels of

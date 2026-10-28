@@ -80,8 +80,9 @@ pub struct Frame {
     pub default_bg: [u8; 3],
     pub cursor: Option<(u16, u16)>,
     /// The mouse selection as linear cell indices into `cells`, in either
-    /// order, clamped to the visible rows. Recomputed on every publish, so it
-    /// names the same characters after the view scrolls.
+    /// order. Recomputed on every publish, so it names the same characters
+    /// after the view scrolls — and `None` once those characters have left the
+    /// frame, because a clamped highlight would lie about what is selected.
     pub selection: Option<(usize, usize)>,
     /// Row-major, `cols * rows` entries.
     pub cells: Vec<Cell>,
@@ -491,6 +492,9 @@ async fn run(
         reply_sink.borrow_mut().extend_from_slice(data);
     })?;
     let mut state = RenderState::new()?;
+    // Declared before the first publish: publishing is where a selection that
+    // has scrolled out of the frame is dropped.
+    let mut selection: Option<SelectionAnchors> = None;
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
 
@@ -618,11 +622,10 @@ async fn run(
 
     // Always publish once, even if the terminal is still clean: a pane that
     // has produced no output yet still has an (empty) grid to show.
-    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, None)?;
+    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
 
     let mut sniffer = CwdSniffer::default();
     let mut marks = PromptMarks::default();
-    let mut selection: Option<SelectionAnchors> = None;
     // Publishing is what a flood costs, not parsing: one frame rebuilds every
     // cell of the grid. So a pane publishes at most once per budget — and, when
     // it has to wait, a timer arm publishes the frame it owes rather than
@@ -667,7 +670,7 @@ async fn run(
                         flush_replies(&replies, &mut sink).await;
                         tracing::debug!(chunks, bytes = total, "burst parsed");
                         if tokio::time::Instant::now() >= next_publish {
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, selection.as_ref())?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
                             next_publish = tokio::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
@@ -681,7 +684,7 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep_until(next_publish), if publish_pending => {
-                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, selection.as_ref())?;
+                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
                 next_publish = tokio::time::Instant::now()
                     + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
                 publish_pending = false;
@@ -787,7 +790,7 @@ async fn run(
                         // are shown without being sent anywhere else.
                         if echo {
                             term.vt_write(&bytes);
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, selection.as_ref())?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
                         }
                     }
                     Command::Dtr(level) => {
@@ -839,14 +842,14 @@ async fn run(
                             }
                         }
                         tracing::debug!(cols = new_cols, rows = new_rows, "resized");
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
                     }
                     Command::Scroll(lines) => {
                         term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
                         // Forced: a viewport move does not necessarily mark the
                         // render state dirty, and a scroll that does not repaint
                         // looks like a broken wheel.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::ScrollPrompt(delta) => {
@@ -855,7 +858,7 @@ async fn run(
                         );
                         // Forced, for the same reason as `Scroll`: a viewport
                         // move does not necessarily dirty the render state.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::CaptureBlock => {
@@ -883,7 +886,7 @@ async fn run(
                         } else {
                             libghostty_vt::terminal::ScrollViewport::Bottom
                         });
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::Echo(on) => echo = on,
@@ -909,7 +912,7 @@ async fn run(
                             match next.apply(&mut term) {
                                 Ok(()) => {
                                     tracing::info!(theme = %next.name, "theme switched");
-                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, selection.as_ref())?;
+                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
                                 }
                                 Err(err) => tracing::warn!(%err, "could not switch theme"),
                             }
@@ -921,7 +924,7 @@ async fn run(
                                 selection = Some(anchors);
                                 publish(
                                     &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                    true, selection.as_ref(),
+                                    true, &mut selection,
                                 )?;
                             }
                             Err(err) => tracing::warn!(%err, "could not start a selection"),
@@ -939,7 +942,7 @@ async fn run(
                         if moved {
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, selection.as_ref(),
+                                true, &mut selection,
                             )?;
                         }
                     }
@@ -948,7 +951,7 @@ async fn run(
                             selection = Some(anchors);
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, selection.as_ref(),
+                                true, &mut selection,
                             )?;
                         }
                     }
@@ -957,7 +960,7 @@ async fn run(
                             selection = Some(anchors);
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, selection.as_ref(),
+                                true, &mut selection,
                             )?;
                         }
                     }
@@ -1173,7 +1176,7 @@ fn publish(
     out: &Mutex<Option<Frame>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
     force: bool,
-    selection: Option<&SelectionAnchors>,
+    selection: &mut Option<SelectionAnchors>,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let snapshot = state.update(term)?;
@@ -1199,17 +1202,24 @@ fn publish(
     // The selection is resolved here rather than kept by the UI: a viewport
     // move republishes, so the highlight follows the characters the user
     // dragged over instead of staying at a row number.
-    if let Some(anchors) = selection {
-        let top = viewport_top(term);
-        let start = viewport_cell(&anchors.start, top, frame.rows);
-        let head = viewport_cell(&anchors.head, top, frame.rows);
-        if let (Some((sx, sy)), Some((hx, hy))) = (start, head) {
-            let cols = usize::from(frame.cols).max(1);
-            frame.selection = Some((
-                usize::from(sy) * cols + usize::from(sx),
-                usize::from(hy) * cols + usize::from(hx),
-            ));
+    let resolved = selection.as_ref().and_then(|anchors| {
+        Some((
+            viewport_cell(&anchors.start, frame.rows)?,
+            viewport_cell(&anchors.head, frame.rows)?,
+        ))
+    });
+    match resolved {
+        Some((start, head)) => {
+            // One cell is a press, not a selection: the anchor has to exist so
+            // a drag can grow from it, but a highlight there would claim a
+            // choice the user has not made — which is why a single click that
+            // never moves deselects.
+            frame.selection = selection_span(start, head, frame.cols);
         }
+        // Out of the frame: a highlight clamped to the edge would claim cells
+        // the selection does not cover, so the selection goes instead of
+        // shrinking to a lie.
+        None => *selection = None,
     }
 
     // Dirty state is sticky by design; clearing it is the consumer's job.
@@ -1320,25 +1330,33 @@ fn viewport_ref<'t>(
     .ok()
 }
 
-/// Where the viewport's first row sits in screen coordinates, which is the row
-/// a tracked reference reports in.
-fn viewport_top(term: &Terminal<'_, '_>) -> u32 {
-    let Ok(grid_ref) = term.grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 })) else {
-        return 0;
-    };
-    term.point_from_grid_ref(&grid_ref, PointSpace::Screen)
-        .ok()
-        .flatten()
-        .map_or(0, |point| point.y)
+/// The highlight's linear span, or `None` while both ends are the same cell.
+///
+/// A press that has not moved leaves the anchor exactly where the pointer went
+/// down, and showing that as a selection makes every click look like it chose
+/// something.
+fn selection_span(start: (u16, u16), head: (u16, u16), cols: u16) -> Option<(usize, usize)> {
+    if start == head {
+        return None;
+    }
+    let cols = usize::from(cols.max(1));
+    Some((
+        usize::from(start.1) * cols + usize::from(start.0),
+        usize::from(head.1) * cols + usize::from(head.0),
+    ))
 }
 
-/// A tracked reference's cell in the viewport, clamped to its edges: a selection
-/// whose end has scrolled out of view still paints to the border it left by.
-fn viewport_cell(reference: &TrackedGridRef, top: u32, rows: u16) -> Option<(u16, u16)> {
-    let point = reference.point(PointSpace::Screen).ok()??;
-    let last = i64::from(rows.saturating_sub(1));
-    let y = (i64::from(point.y) - i64::from(top)).clamp(0, last);
-    Some((point.x, y as u16))
+/// A tracked reference's cell in the viewport, or `None` when it is no longer
+/// in it.
+///
+/// `PointSpace::Viewport` answers in viewport coordinates, but it does *not*
+/// bound them: a cell thirteen rows below a five-row viewport comes back as
+/// `y = 13`. So the check is here, and nothing is clamped — a highlight
+/// stretched to the edge would claim cells the selection does not cover.
+fn viewport_cell(reference: &TrackedGridRef, rows: u16) -> Option<(u16, u16)> {
+    let point = reference.point(PointSpace::Viewport).ok()??;
+    let y = u16::try_from(point.y).ok()?;
+    (y < rows).then_some((point.x, y))
 }
 
 /// Where the shell's prompts are.
@@ -1873,7 +1891,7 @@ mod cwd_tests {
 
 #[cfg(test)]
 mod selection_tests {
-    use super::{SelectionAnchors, viewport_cell, viewport_top};
+    use super::{SelectionAnchors, viewport_cell};
     use libghostty_vt::Terminal;
     use libghostty_vt::terminal::{Point, PointCoordinate, ScrollViewport};
 
@@ -1925,15 +1943,11 @@ mod selection_tests {
         let mut term = terminal();
         term.scroll_viewport(ScrollViewport::Top);
         let cell = SelectionAnchors::at(&term, 0, 2).unwrap();
-        let rows = 5;
-        assert_eq!(
-            viewport_cell(&cell.start, viewport_top(&term), rows).map(|cell| cell.1),
-            Some(2)
-        );
+        assert_eq!(viewport_cell(&cell.start, 5).map(|cell| cell.1), Some(2));
 
         term.scroll_viewport(ScrollViewport::Delta(1));
         assert_eq!(
-            viewport_cell(&cell.start, viewport_top(&term), rows).map(|cell| cell.1),
+            viewport_cell(&cell.start, 5).map(|cell| cell.1),
             Some(1),
             "one row up: the same line, one row higher"
         );
@@ -1972,17 +1986,41 @@ mod selection_tests {
         assert_eq!(cell.text(&term).as_deref(), Some("first line"));
     }
 
-    /// A selection whose end has scrolled away still paints to the border it
-    /// left by, so scrolling does not make the highlight vanish.
+    /// A press that has not moved is an anchor, not a selection: nothing is
+    /// highlighted, so a click deselects instead of selecting one cell.
     #[test]
-    fn an_end_that_scrolled_off_clamps_to_the_edge() {
+    fn a_press_that_never_moved_shows_no_selection() {
+        assert_eq!(super::selection_span((4, 2), (4, 2), 80), None);
+        assert_eq!(
+            super::selection_span((4, 2), (5, 2), 80),
+            Some((164, 165)),
+            "one cell across is a selection, and the indices are row-major"
+        );
+    }
+
+    /// Once the selected characters leave the frame the selection is gone.
+    /// Clamping the ends to the border would paint a highlight over cells the
+    /// selection does not cover, and copying it would hand back a fragment
+    /// that looks like the whole thing.
+    #[test]
+    fn a_selection_that_leaves_the_frame_is_dropped() {
         let mut term = terminal();
         let cell = SelectionAnchors::at(&term, 0, 3).unwrap();
+        assert!(viewport_cell(&cell.start, 5).is_some());
+
         term.scroll_viewport(ScrollViewport::Delta(-10));
         assert_eq!(
-            viewport_cell(&cell.start, viewport_top(&term), 5).map(|cell| cell.1),
-            Some(4)
+            viewport_cell(&cell.start, 5),
+            None,
+            "scrolled out: no cell, and publish drops the selection"
         );
+
+        // The other way: back to the live screen, past the selection entirely.
+        term.scroll_viewport(ScrollViewport::Bottom);
+        for line in 0..20 {
+            term.vt_write(format!("pushed {line}\r\n").as_bytes());
+        }
+        assert_eq!(viewport_cell(&cell.start, 5), None);
     }
 }
 
