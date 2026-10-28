@@ -316,6 +316,13 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
                     Look::colour(look.foreground)
                 },
             );
+            // Painted by hand, so the accessibility node has to be declared by
+            // hand too — otherwise a screen reader (and the test harness) sees a
+            // strip with no tabs in it at all.
+            let label = format!("{} {}", index + 1, &labels[index]);
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+            });
             if response.clicked() {
                 clicked = Some(index);
             }
@@ -400,5 +407,63 @@ fn human_bytes(value: f64) -> String {
         format!("{:.1} kB", value / K)
     } else {
         format!("{:.1} MB", value / (K * K))
+    }
+}
+
+#[cfg(test)]
+mod kittest_tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    /// The strip's whole contract, without a window: a chip is clickable, and a
+    /// key that belongs to the terminal cannot switch tabs.
+    ///
+    /// The second half is a regression test. The chips were `egui::Button`s once,
+    /// and an egui button takes keyboard focus, so Enter — pressed a hundred
+    /// times a minute in a terminal — activated whichever chip had it.
+    #[test]
+    fn a_chip_is_clicked_by_the_pointer_and_ignores_enter() {
+        let labels = vec!["demo".to_owned(), "shell".to_owned()];
+        let look = Look::default();
+        // The closure runs on every step, so the answer is shared state rather
+        // than a captured mutable borrow.
+        let clicked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = clicked.clone();
+        let mut harness = Harness::new_ui(move |ui| {
+            // Accumulate: a click is reported on the frame it happens and the
+            // next frame starts from `None`.
+            if let Some(index) = tab_bar(ui, &labels, 0, &look) {
+                *sink.borrow_mut() = Some(index);
+            }
+        });
+        harness.run();
+        assert_eq!(*clicked.borrow(), None, "drawing alone must not switch tabs");
+
+        harness.get_by_label("2 shell").click();
+        harness.run();
+        assert_eq!(*clicked.borrow(), Some(1), "the pointer switches tabs");
+
+        // Enter is the shell's key. It must not reach the chips.
+        *clicked.borrow_mut() = None;
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert_eq!(*clicked.borrow(), None, "Enter must not activate a tab chip");
+    }
+
+    /// A visual record of the strip: two chips, the second one active.
+    ///
+    /// `UPDATE_SNAPSHOTS=true cargo test` writes the baseline; the default run
+    /// compares against it.
+    #[test]
+    fn the_strip_renders() {
+        let labels = vec!["demo".to_owned(), "shell".to_owned()];
+        let look = Look::default();
+        let mut harness = Harness::new_ui(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            tab_bar(ui, &labels, 1, &look);
+        });
+        harness.run();
+        harness.snapshot("tab_bar");
     }
 }

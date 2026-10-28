@@ -119,6 +119,19 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**The egui layer is tested with `egui_kittest`, not with a window.** `cargo test`
+drives a `Harness` — real egui layout and AccessKit, no event loop — so clicks,
+keys and rendering can be asserted. `crates/dtr/src/ui.rs` has the pattern: query
+a widget by its accessible label, `.click()`, `harness.run()`, assert what the
+widget reported. `UPDATE_SNAPSHOTS=1 cargo test` writes a baseline PNG under
+`crates/dtr/tests/snapshots/`; the plain run compares against it.
+
+Two things it taught, both real bugs: a widget painted by hand has **no
+accessibility node** unless `Response::widget_info` declares one (the tab chips
+were invisible to the harness *and* to a screen reader), and a widget is not a
+`Button` just because it is clickable — `Sense::click()` plus a declared label
+gives a hit target that Enter cannot activate.
+
 **Keys can be typed at the window from a script.** `--keys "ctrl-shift-p;down;down"` applies one
 stroke per frame through the same handler a keyboard uses (`App::on_key`), and
 `--capture PATH --capture-after MS` photographs the window afterwards. `;`
