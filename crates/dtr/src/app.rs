@@ -276,6 +276,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         modifiers: ModifiersState::empty(),
         fatal: None,
         quit: false,
+        wake: std::cell::Cell::new(false),
         palette: Palette::new(startup.palette),
         look: startup.look.clone(),
         theme: startup.theme.clone(),
@@ -529,6 +530,8 @@ struct App {
     /// Set when the pane fails; `run` returns it once the loop has stopped.
     fatal: Option<String>,
     quit: bool,
+    /// Set when a frame is wanted; `about_to_wait` turns it into a wake-up.
+    wake: std::cell::Cell<bool>,
     palette: Palette,
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
@@ -1068,6 +1071,12 @@ impl App {
         if let Some(gpu) = &self.gpu {
             gpu.window.request_redraw();
         }
+        // `request_redraw` alone is not enough on Wayland: a request made from
+        // inside a redraw waits for the compositor's next frame callback, so the
+        // change only appears when something else wakes the loop — a closed tab
+        // that vanishes when the mouse moves. `about_to_wait` turns this flag
+        // into a deadline, which wakes the loop at once.
+        self.wake.set(true);
     }
 
     /// The focused terminal, when the focused pane is one. A file pane makes
@@ -1583,6 +1592,17 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.check_exit_deadline(event_loop);
+
+        // A repaint asked for while the loop was idle: wake now rather than at
+        // the next input event.
+        if self.wake.replace(false) {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now(),
+            ));
+            if let Some(gpu) = &self.gpu {
+                gpu.window.request_redraw();
+            }
+        }
 
         // A scan is cheap to *ask* for and expensive to *do*, so asking never
         // blocks the frame: the work goes to the worker runtime and comes back

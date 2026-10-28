@@ -217,6 +217,16 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**`request_redraw` inside a redraw does not draw on Wayland.** Closing a tab left
+the strip unchanged until the mouse moved: the redraw request made from inside
+the frame waits for the compositor's next frame callback, which arrives with the
+next input event. `App::repaint` now also sets a `wake` flag, and `about_to_wait`
+turns it into `ControlFlow::WaitUntil(now)` plus another request — an immediate
+wake rather than a hopeful one.
+
+This is the general shape of "the UI only updates when I touch it", and it is
+worth checking before blaming the work itself.
+
 **Closing a tab is teardown, and teardown is slow.** Dropping a `Tab` drops a pty
 and the thread that owns it; the child has to notice and exit, which is not
 instant. `close_tab` therefore hands the dead tab to the worker runtime
