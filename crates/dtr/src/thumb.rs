@@ -99,6 +99,24 @@ pub fn load(path: &Path) -> anyhow::Result<Thumb> {
     })
 }
 
+/// Which file a preview belongs to.
+///
+/// The machine is part of the key because the same path on two machines is two
+/// files: `/tmp/shot.png` on `jupyter` and on this disk must not hand each other's
+/// picture back.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Key {
+    /// The ssh alias, or `None` for this machine.
+    pub machine: Option<String>,
+    pub path: PathBuf,
+}
+
+impl Key {
+    pub fn new(machine: Option<String>, path: PathBuf) -> Self {
+        Self { machine, path }
+    }
+}
+
 /// One answer about one path.
 enum Entry {
     /// Decoded off the drawing thread, waiting for a frame to become a texture.
@@ -112,47 +130,47 @@ enum Entry {
 /// The previews that have been asked about, oldest first.
 #[derive(Default)]
 pub struct Cache {
-    entries: Vec<(PathBuf, Entry)>,
-    /// Paths a worker is dealing with right now, so a fast pointer cannot start
+    entries: Vec<(Key, Entry)>,
+    /// Keys a worker is dealing with right now, so a fast pointer cannot start
     /// the same decode twice.
-    loading: HashSet<PathBuf>,
+    loading: HashSet<Key>,
 }
 
 impl Cache {
-    /// Claim `path` for a load. `false` when it is already known or in flight —
+    /// Claim `key` for a load. `false` when it is already known or in flight —
     /// the caller then does nothing at all.
-    pub fn begin(&mut self, path: &Path) -> bool {
-        if self.entries.iter().any(|(known, _)| known == path) {
+    pub fn begin(&mut self, key: &Key) -> bool {
+        if self.entries.iter().any(|(known, _)| known == key) {
             return false;
         }
-        self.loading.insert(path.to_owned())
+        self.loading.insert(key.clone())
     }
 
     /// The worker answered. Nothing is uploaded here — a texture is made during a
     /// frame, by the code that draws it — so a failure is remembered as "no
     /// preview" and a success waits as pixels.
-    pub fn finish(&mut self, path: PathBuf, result: anyhow::Result<Thumb>) {
-        self.loading.remove(&path);
+    pub fn finish(&mut self, key: Key, result: anyhow::Result<Thumb>) {
+        self.loading.remove(&key);
         let entry = match result {
             Ok(thumb) => Entry::Pixels(thumb),
             Err(err) => {
-                tracing::debug!(path = %path.display(), %err, "no thumbnail");
+                tracing::debug!(machine = ?key.machine, path = %key.path.display(), %err, "no thumbnail");
                 Entry::Failed
             }
         };
-        self.entries.push((path, entry));
+        self.entries.push((key, entry));
         if self.entries.len() > CAPACITY {
             self.entries.remove(0);
         }
     }
 
-    /// The texture for `path`, uploading it on first use.
+    /// The texture for `key`, uploading it on first use.
     ///
     /// The upload is here rather than in the loader because it needs an egui
     /// context, which only exists once the window does; the worker has no business
     /// knowing about textures anyway.
-    pub fn texture(&mut self, path: &Path, ctx: &egui::Context) -> Option<&TextureHandle> {
-        let at = self.entries.iter().position(|(known, _)| known == path)?;
+    pub fn texture(&mut self, key: &Key, ctx: &egui::Context) -> Option<&TextureHandle> {
+        let at = self.entries.iter().position(|(known, _)| known == key)?;
         if matches!(&self.entries[at].1, Entry::Pixels(_)) {
             let Entry::Pixels(thumb) = std::mem::replace(&mut self.entries[at].1, Entry::Failed)
             else {
@@ -163,7 +181,7 @@ impl Cache {
                 &thumb.rgba,
             );
             self.entries[at].1 = Entry::Ready(ctx.load_texture(
-                format!("dtr-thumb:{}", path.display()),
+                format!("dtr-thumb:{}", key.path.display()),
                 image,
                 egui::TextureOptions::LINEAR,
             ));
@@ -243,7 +261,7 @@ pub fn draw(ui: &mut egui::Ui, texture: &TextureHandle, size: Vec2, look: &Look)
 
 #[cfg(test)]
 mod tests {
-    use super::{CAPACITY, Cache, MAX_HEIGHT, MAX_WIDTH, Thumb, fit, load, looks_like_image, place};
+    use super::{CAPACITY, Cache, Key, MAX_HEIGHT, MAX_WIDTH, Thumb, fit, load, looks_like_image, place};
     use egui::{Rect, Vec2, pos2};
     use std::path::{Path, PathBuf};
 
@@ -378,6 +396,10 @@ mod tests {
         assert_eq!(thumb.rgba, vec![0x10, 0x20, 0x30, 0xff]);
     }
 
+    fn key(path: &str) -> Key {
+        Key::new(None, PathBuf::from(path))
+    }
+
     /// Each file is opened, decoded and uploaded at most once: the answer — even
     /// "no" — is kept, so a pointer moving along a row of names does not re-read
     /// them all.
@@ -385,15 +407,18 @@ mod tests {
     fn each_file_is_asked_about_once() {
         let ctx = egui::Context::default();
         let mut cache = Cache::default();
-        let path = PathBuf::from("/tmp/picture.png");
+        let picture = key("/tmp/picture.png");
 
-        assert!(cache.begin(&path), "the first hover asks");
-        assert!(!cache.begin(&path), "the second does not, it is in flight");
-        assert!(cache.texture(&path, &ctx).is_none(), "nothing to draw yet");
+        assert!(cache.begin(&picture), "the first hover asks");
+        assert!(
+            !cache.begin(&picture),
+            "the second does not, it is in flight"
+        );
+        assert!(cache.texture(&picture, &ctx).is_none(), "nothing to draw yet");
 
-        cache.finish(path.clone(), Ok(one_pixel()));
-        assert!(!cache.begin(&path), "answered, so never asked again");
-        assert!(cache.texture(&path, &ctx).is_some(), "and it can be drawn");
+        cache.finish(picture.clone(), Ok(one_pixel()));
+        assert!(!cache.begin(&picture), "answered, so never asked again");
+        assert!(cache.texture(&picture, &ctx).is_some(), "and it can be drawn");
     }
 
     /// A refusal is an answer. Without this, every hover on a 2 GB scan would try
@@ -402,12 +427,29 @@ mod tests {
     fn a_refusal_is_remembered_too() {
         let ctx = egui::Context::default();
         let mut cache = Cache::default();
-        let path = PathBuf::from("/tmp/enormous.png");
+        let enormous = key("/tmp/enormous.png");
 
-        assert!(cache.begin(&path));
-        cache.finish(path.clone(), Err(anyhow::anyhow!("too big")));
-        assert!(!cache.begin(&path), "known bad, not asked twice");
-        assert!(cache.texture(&path, &ctx).is_none(), "and nothing to draw");
+        assert!(cache.begin(&enormous));
+        cache.finish(enormous.clone(), Err(anyhow::anyhow!("too big")));
+        assert!(!cache.begin(&enormous), "known bad, not asked twice");
+        assert!(cache.texture(&enormous, &ctx).is_none(), "and nothing to draw");
+    }
+
+    /// The same path on two machines is two files: a remote `/tmp/shot.png` must
+    /// not be answered with this disk's picture of the same name.
+    #[test]
+    fn a_remote_file_is_not_the_local_one_with_its_name() {
+        let ctx = egui::Context::default();
+        let mut cache = Cache::default();
+        let local = Key::new(None, PathBuf::from("/tmp/shot.png"));
+        let remote = Key::new(Some("jupyter".to_owned()), PathBuf::from("/tmp/shot.png"));
+
+        assert!(cache.begin(&local));
+        cache.finish(local.clone(), Ok(one_pixel()));
+
+        assert!(cache.begin(&remote), "another machine, another file");
+        assert!(cache.texture(&remote, &ctx).is_none(), "not fetched yet");
+        assert!(cache.texture(&local, &ctx).is_some(), "the local one stands");
     }
 
     /// The cache is a window over what the pointer has been near, not a library:
@@ -417,25 +459,26 @@ mod tests {
         let ctx = egui::Context::default();
         let mut cache = Cache::default();
         for index in 0..=CAPACITY {
-            let path = PathBuf::from(format!("/tmp/{index}.png"));
-            assert!(cache.begin(&path));
-            cache.finish(path, Ok(one_pixel()));
+            let picture = key(&format!("/tmp/{index}.png"));
+            assert!(cache.begin(&picture));
+            cache.finish(picture, Ok(one_pixel()));
         }
 
         assert!(
-            cache.texture(Path::new("/tmp/0.png"), &ctx).is_none(),
+            cache.texture(&key("/tmp/0.png"), &ctx).is_none(),
             "the first one is gone"
         );
         assert!(
             cache
-                .texture(&PathBuf::from(format!("/tmp/{CAPACITY}.png")), &ctx)
+                .texture(&key(&format!("/tmp/{CAPACITY}.png")), &ctx)
                 .is_some(),
             "the newest one is here"
         );
-        assert!(cache.begin(Path::new("/tmp/0.png")), "and can be asked again");
+        assert!(cache.begin(&key("/tmp/0.png")), "and can be asked again");
     }
 
-    fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {        let file = std::fs::File::create(path).expect("create");
+    fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
+        let file = std::fs::File::create(path).expect("create");
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);

@@ -438,10 +438,24 @@ Three things that are easy to get wrong here:
   re-read a 2 GB file five times; `Entry::Failed` is the answer "no preview" and it
   is as good as a picture.
 
-**A hover does not spend bandwidth.** A remote link gets no preview: the file would
-have to be fetched because the pointer crossed a name, and that is a side effect
-nobody asked for. When it does get one, the cap and a delay before fetching are
-what it will need — not just `materialise` on hover.
+**A remote preview waits, then fetches, and the cap comes before the bytes.** The
+pointer has to rest on a remote link for `PREVIEW_DELAY` (350 ms) before anything is
+transferred: a sweep across a row of names passes over every one of them, each is a
+different link, and without the wait that is one `ssh` fetch per cell. Any new hover
+drops the pending one, and the wait has its own deadline in `about_to_wait` — a
+pointer that has stopped produces no events, so a request nobody wakes for would
+never be made. A local file is read immediately, because there is nothing to spend
+but a read.
+
+Once the wait is over the path goes through the same VFS the click does: `stat`
+first — a remote 400 MB scan must never be downloaded to find out it is too big to
+preview — then `materialise` (a local file is its own path and is never copied, a
+remote one is fetched into the cache), then the decoder on the files runtime.
+
+The cache key is **`{ machine, path }`**, not a path: the same `/tmp/shot.png` on
+`jupyter` and on this disk are two files, and a picture from one must never be
+handed back for the other. `a_remote_file_is_not_the_local_one_with_its_name` pins
+that.
 
 The preview is a tooltip-layer `Area` and `interactable(false)`, because a file pane
 is an `Area` too and a picture that slid underneath one would be a picture nobody

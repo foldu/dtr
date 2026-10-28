@@ -37,10 +37,10 @@ pub enum UserEvent {
         alias: Option<String>,
     },
     /// A preview of an image the pointer hovered: decoded, or the reason it was
-    /// not. Either way it is an answer about `path`, so a late one cannot replace
+    /// not. Either way it is an answer about `key`, so a late one cannot replace
     /// the picture of a file the pointer has already left.
     Thumbnail {
-        path: PathBuf,
+        key: crate::thumb::Key,
         result: anyhow::Result<crate::thumb::Thumb>,
     },
     /// A message for the user that no worker can put on screen itself: a link
@@ -85,6 +85,20 @@ struct LinkHover {
     x: u16,
     y: u16,
     uri: String,
+}
+
+/// How long the pointer has to rest on a remote picture before it is fetched.
+///
+/// A sweep across a row of names passes over every one of them, and each is a
+/// different link: without the wait that is an `ssh` transfer per cell. A local
+/// file has no wait, because there is nothing to spend but a read.
+const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+
+/// A preview that is waiting for the pointer to settle.
+struct PendingThumb {
+    due: std::time::Instant,
+    key: crate::thumb::Key,
+    location: dtr_vfs::Location,
 }
 
 /// What a `file:` link names, once the session that printed it is taken into
@@ -541,6 +555,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         hover_cell: None,
         hover_link: None,
         thumb: crate::thumb::Cache::default(),
+        thumb_pending: None,
         cursor_icon: None,
         script: startup
             .keys
@@ -927,6 +942,8 @@ struct App {
     /// Preview textures for image files the pointer has hovered, asked about
     /// once each. Decoded on the files runtime, never on this thread.
     thumb: crate::thumb::Cache,
+    /// A remote preview waiting for the pointer to rest. Any new hover drops it.
+    thumb_pending: Option<PendingThumb>,
     /// The cursor this window was last told to show, so the icon is set when it
     /// changes rather than on every frame.
     cursor_icon: Option<winit::window::CursorIcon>,
@@ -1210,6 +1227,9 @@ impl App {
         }
         self.hover_cell = cell;
         self.hover_link = None;
+        // A preview that was waiting for the pointer to settle is not wanted any
+        // more: the pointer has moved, which is the whole question.
+        self.thumb_pending = None;
         if let (Some((x, y)), Some(session)) = (cell, self.session()) {
             session
                 .pane
@@ -1223,21 +1243,10 @@ impl App {
     /// the terminal, because clicking a directory is asking to look inside it and
     /// a second window from the desktop's file manager is one to close again.
     fn open_link(&mut self, uri: &str) {
-        let Some(session) = self.session() else {
+        let Some(remote) = self.session().map(|session| session.remote) else {
             return;
         };
-        let backend = match (session.remote, session.alias.clone()) {
-            (false, _) => dtr_vfs::BackendId::Local,
-            (true, Some(alias)) => dtr_vfs::BackendId::Ssh(alias),
-            (true, None) => {
-                self.toast = Some((
-                    "this session has no host to ask".to_owned(),
-                    std::time::Instant::now(),
-                ));
-                return;
-            }
-        };
-        let path = match link_target(uri, session.remote) {
+        let path = match link_target(uri, remote) {
             LinkTarget::Path(path) => path,
             // Said out loud, and named: "cannot open" leaves the reader with
             // nothing to do about it, and the host is the interesting part.
@@ -1253,9 +1262,12 @@ impl App {
                 return;
             }
         };
-        let location = dtr_vfs::Location {
-            backend,
-            path: path.clone(),
+        let Some(location) = self.location(path.clone()) else {
+            self.toast = Some((
+                "this session has no host to ask".to_owned(),
+                std::time::Instant::now(),
+            ));
+            return;
         };
         let described = location.describe();
         tracing::info!(target = %described, "opening a link");
@@ -1346,41 +1358,115 @@ impl App {
         tab.leaves.insert(id, Pane::Files(explorer));
     }
 
-    /// Ask for a preview of the image `uri` names, if it is one and it is on this
-    /// machine.
+    /// Where a path on this session lives: this disk, or the host the session is
+    /// on. `None` when a remote session has no alias to ask, which is the one case
+    /// with no backend at all — never a fallback to reading it locally.
+    fn location(&self, path: PathBuf) -> Option<dtr_vfs::Location> {
+        let session = self.session()?;
+        let backend = match (session.remote, session.alias.clone()) {
+            (false, _) => dtr_vfs::BackendId::Local,
+            (true, Some(alias)) => dtr_vfs::BackendId::Ssh(alias),
+            (true, None) => return None,
+        };
+        Some(dtr_vfs::Location { backend, path })
+    }
+
+    /// What a link would be previewed as, if it is a picture this session can
+    /// reach: the key the cache uses, and where the bytes are.
     ///
-    /// Three refusals, each for its own reason: another scheme is not a path, a
-    /// remote path would have to be fetched over the network because the pointer
-    /// crossed a name — a hover does not get to spend bandwidth — and a name that
-    /// does not promise a picture is not opened at all.
-    fn request_thumbnail(&mut self, uri: &str) {
-        if self.session().is_some_and(|session| session.remote) {
-            return;
-        }
-        let LinkTarget::Path(path) = link_target(uri, false) else {
-            return;
+    /// The machine is in the key because the same path on two machines is two
+    /// files; `None` for the scheme means nothing here.
+    fn thumbnail_target(&self, uri: &str) -> Option<(crate::thumb::Key, dtr_vfs::Location)> {
+        let remote = self.session()?.remote;
+        let LinkTarget::Path(path) = link_target(uri, remote) else {
+            return None;
         };
         if !crate::thumb::looks_like_image(&path) {
-            return;
+            return None;
         }
-        let Some(runtime) = self.files_rt.as_ref() else {
+        let location = self.location(path.clone())?;
+        let machine = match &location.backend {
+            dtr_vfs::BackendId::Ssh(alias) => Some(alias.clone()),
+            dtr_vfs::BackendId::Local => None,
+        };
+        Some((crate::thumb::Key { machine, path }, location))
+    }
+
+    /// Ask for a preview of the picture `uri` names.
+    ///
+    /// A remote one is *not* fetched the instant the pointer crosses the name: a
+    /// sweep across a row of files would start an `ssh` transfer per cell. It waits
+    /// [`PREVIEW_DELAY`] on one link first, and any new hover cancels the wait. A
+    /// local file is read immediately — there is nothing to spend but a read.
+    fn request_thumbnail(&mut self, uri: &str) {
+        // Every hover reply is a new target, so whatever was waiting is not wanted
+        // any more.
+        self.thumb_pending = None;
+        let Some((key, location)) = self.thumbnail_target(uri) else {
             return;
         };
-        let proxy = self.proxy.clone();
+        let delay = match &location.backend {
+            dtr_vfs::BackendId::Ssh(_) => PREVIEW_DELAY,
+            dtr_vfs::BackendId::Local => std::time::Duration::ZERO,
+        };
+        if delay.is_zero() {
+            self.load_thumbnail(key, location);
+        } else {
+            self.thumb_pending = Some(PendingThumb {
+                due: std::time::Instant::now() + delay,
+                key,
+                location,
+            });
+        }
+    }
+
+    /// The wait is over: claim the key and start the fetch and decode.
+    fn due_thumbnail(&mut self) {
+        let Some(pending) = self.thumb_pending.take() else {
+            return;
+        };
+        self.load_thumbnail(pending.key, pending.location);
+    }
+
+    /// Fetch (if remote) and decode, off this thread, then answer with the key so
+    /// a reply for a link the pointer has left cannot replace a newer picture.
+    fn load_thumbnail(&mut self, key: crate::thumb::Key, location: dtr_vfs::Location) {
+        let (Some(runtime), vfs, proxy) = (
+            self.files_rt.as_ref(),
+            std::sync::Arc::clone(&self.vfs),
+            self.proxy.clone(),
+        ) else {
+            return;
+        };
         // Claimed only once there is something to claim it with: a request that
-        // dies between the claim and the spawn would leave the path in flight for
+        // died between the claim and the spawn would leave the key in flight for
         // the life of the process.
-        if !self.thumb.begin(&path) {
+        if !self.thumb.begin(&key) {
             return;
         }
+        let described = location.describe();
         runtime.spawn(async move {
-            let wanted = path.clone();
-            let result = match tokio::task::spawn_blocking(move || crate::thumb::load(&wanted)).await
-            {
-                Ok(result) => result,
-                Err(err) => Err(anyhow::anyhow!("{err}")),
-            };
-            let _ = proxy.send_event(UserEvent::Thumbnail { path, result });
+            let result = async {
+                // The size limit has to come from a `stat`, before the bytes: a
+                // remote 400 MB scan must never be downloaded to find out it is
+                // too big to preview.
+                let meta = vfs.stat(&location).await?;
+                anyhow::ensure!(!meta.kind.is_dir(), "a directory has no picture");
+                anyhow::ensure!(
+                    meta.len <= crate::thumb::MAX_BYTES,
+                    "{} bytes is more than a preview is worth",
+                    meta.len
+                );
+                let local = vfs.materialise(&location).await?;
+                tokio::task::spawn_blocking(move || crate::thumb::load(&local))
+                    .await
+                    .map_err(|err| anyhow::anyhow!("{err}"))?
+            }
+            .await;
+            if result.is_err() {
+                tracing::debug!(target = %described, "no preview");
+            }
+            let _ = proxy.send_event(UserEvent::Thumbnail { key, result });
         });
     }
 
@@ -1399,12 +1485,9 @@ impl App {
         if self.pager.is_open() {
             return None;
         }
-        let link = self.hover_link.as_ref()?;
-        let remote = self.session().is_some_and(|session| session.remote);
-        let LinkTarget::Path(path) = link_target(&link.uri, remote) else {
-            return None;
-        };
-        let texture = self.thumb.texture(&path, ctx)?;
+        let uri = self.hover_link.as_ref()?.uri.clone();
+        let (key, _) = self.thumbnail_target(&uri)?;
+        let texture = self.thumb.texture(&key, ctx)?;
         let [width, height] = texture.size();
         // Points, because the texture is decoded at 2× the drawn size so it stays
         // sharp on a HiDPI display.
@@ -2690,6 +2773,15 @@ impl ApplicationHandler<UserEvent> for App {
             );
         }
 
+        // A preview of a remote picture waits for the pointer to settle, and the
+        // wait needs a wake of its own: the pointer resting produces no events, and
+        // a request nobody wakes for would never be made.
+        match self.thumb_pending.as_ref().map(|pending| pending.due) {
+            Some(due) if std::time::Instant::now() >= due => self.due_thumbnail(),
+            Some(due) => sooner(due, &mut deadline),
+            None => {}
+        }
+
         // One value, every iteration: without this the last deadline stays set
         // and every poll times out immediately.
         event_loop.set_control_flow(match deadline {
@@ -2721,8 +2813,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reveal_directory(path, alias);
                 self.repaint("a link named a directory");
             }
-            UserEvent::Thumbnail { path, result } => {
-                self.thumb.finish(path, result);
+            UserEvent::Thumbnail { key, result } => {
+                self.thumb.finish(key, result);
                 self.repaint("thumbnail");
             }
             UserEvent::Notice(text) => {
@@ -2847,6 +2939,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorLeft { .. } => {
                 self.hover_cell = None;
                 self.hover_link = None;
+                self.thumb_pending = None;
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == winit::event::MouseButton::Left && !self.pager.is_open() {
