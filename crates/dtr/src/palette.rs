@@ -71,6 +71,11 @@ impl Palette {
         );
     }
 
+    /// Which completion is highlighted. The tests read it to check the keys.
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
     /// What has been typed. Read by the tests, and by anything that wants to
     /// know what the palette is asking without looking at the screen.
     pub fn text(&self) -> &str {
@@ -134,10 +139,17 @@ impl Palette {
 
                 // Keys first: consuming them here keeps the text field from
                 // also acting on them (arrow keys move the caret otherwise).
+                // Arrows for the fingers that expect them, `C-n`/`C-p` for the
+                // ones that have been navigating lists since Emacs. Both are
+                // consumed here so the text field never sees them.
                 let (down, up, enter, tab, escape) = ui.input_mut(|input| {
+                    let down = input.consume_key(Modifiers::NONE, Key::ArrowDown)
+                        | input.consume_key(Modifiers::CTRL, Key::N);
+                    let up = input.consume_key(Modifiers::NONE, Key::ArrowUp)
+                        | input.consume_key(Modifiers::CTRL, Key::P);
                     (
-                        input.consume_key(Modifiers::NONE, Key::ArrowDown),
-                        input.consume_key(Modifiers::NONE, Key::ArrowUp),
+                        down,
+                        up,
                         input.consume_key(Modifiers::NONE, Key::Enter),
                         input.consume_key(Modifiers::NONE, Key::Tab),
                         input.consume_key(Modifiers::NONE, Key::Escape),
@@ -254,7 +266,7 @@ impl Palette {
 
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("up/down choose   tab complete   enter run   esc close")
+                    RichText::new("up/down or ctrl-n/ctrl-p choose   tab complete   enter run   esc close")
                         .size(10.0)
                         .color(Look::colour(look.dim).gamma_multiply(0.7)),
                 );
@@ -420,6 +432,42 @@ mod kittest_tests {
         palette.borrow_mut().toggle();
         harness.run();
         assert_eq!(palette.borrow().text(), "", "the field is empty on reopen");
+    }
+
+    /// `C-n` and `C-p` walk the list, and so do the arrows.
+    #[test]
+    fn control_n_and_p_move_through_the_completions() {
+        let palette = std::rc::Rc::new(std::cell::RefCell::new(Palette::new(false)));
+        palette.borrow_mut().toggle();
+        let look = Look::default();
+        let shared = std::rc::Rc::clone(&palette);
+        let mut harness = Harness::new_ui(move |ui| {
+            shared.borrow_mut().ui(ui, &look);
+        });
+        harness.run();
+
+        // An empty query lists every command, so there is always something to
+        // move through whatever the machine has plugged in. `key_press` carries
+        // no modifiers, so the chords go in as raw events.
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::N,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::CTRL,
+        });
+        harness.run();
+        assert_eq!(palette.borrow().selected(), 1, "C-n moves down one");
+
+        harness.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::P,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::CTRL,
+        });
+        harness.run();
+        assert_eq!(palette.borrow().selected(), 0, "C-p comes back");
     }
 
     /// The palette as the eye sees it: a query, the completions it filtered to,

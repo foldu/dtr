@@ -468,6 +468,11 @@ The space is the signal that the argument has started; `Parsed::of` keeps it, an
 The consequence for commands with no arguments: after the space there is nothing
 to complete, so the list is empty rather than offering the command back.
 
+**`C-n` and `C-p` are consumed like the arrows.** The palette takes them from
+`input_mut` before the text field sees them, so navigating with Emacs keys cannot
+land an `n` in the query. The footer says both spellings, because a binding nobody
+can discover is a binding nobody uses.
+
 **Reopening the palette starts a fresh sentence.** `toggle` clears the query, the
 selection and the completions; a palette that remembers the last command turns the
 next one into a correction.
