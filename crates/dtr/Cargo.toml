@@ -27,6 +27,7 @@ mimalloc.workspace = true
 libghostty-vt-sys.workspace = true
 plist.workspace = true
 png.workspace = true
+image.workspace = true
 pollster.workspace = true
 portable-pty.workspace = true
 redb.workspace = true

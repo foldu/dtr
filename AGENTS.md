@@ -418,6 +418,44 @@ not undo. A remote session resolves *every* `file:` path on its own host, and th
 is correct rather than lax: `file://localhost/x` printed on `jupyter` means
 jupyter's `/x`, and the backend it asks can only read that machine.
 
+**A hovered picture is decoded off the drawing thread and capped before it is
+read.** `crate::thumb` previews a link whose path ends in `.png`, `.jpg` or
+`.jpeg`: 16 MiB of source, 8192 pixels a side, 256 MiB of decode — a preview of a
+400 MB scan is not a service to anyone, and a 20000x20000 PNG is 1.6 GB of pixels
+whether or not the pointer stays. The extension only decides whether to *try*: the
+reader sniffs the bytes, so a JPEG named `.png` still works.
+
+Three things that are easy to get wrong here:
+
+- **`DynamicImage::thumbnail` enlarges.** It fits the picture into the box, so a
+  1x1 icon came back 360x360 — invented pixels, and the test says `(1, 1)` now. Only
+  an image larger than the box is downscaled; anything smaller is used as it is.
+- **The texture is made at draw time, not when the decode lands.** `load_texture`
+  needs an egui context, and the worker has no business knowing about textures or
+  owning one. So the cache holds decoded pixels and the first frame that draws the
+  entry uploads them.
+- **A refusal is cached too.** Moving the pointer along a row of names must not
+  re-read a 2 GB file five times; `Entry::Failed` is the answer "no preview" and it
+  is as good as a picture.
+
+**A hover does not spend bandwidth.** A remote link gets no preview: the file would
+have to be fetched because the pointer crossed a name, and that is a side effect
+nobody asked for. When it does get one, the cap and a delay before fetching are
+what it will need — not just `materialise` on hover.
+
+The preview is a tooltip-layer `Area` and `interactable(false)`, because a file pane
+is an `Area` too and a picture that slid underneath one would be a picture nobody
+could see. It is placed below-right of the pointer and flipped at the edges, with a
+clamp last: flipping a picture wider than the window pushes it off the opposite
+edge, which is the case `place` is tested for. `CursorLeft` clears the hover — there
+was no handler at all, so leaving the window left the pointing hand (and would have
+left the preview) standing on a file the pointer is nowhere near.
+
+`the_preview_is_painted_next_to_the_pointer` renders a frame in the harness and
+checks the pixel at the computed position is the texture's colour and the far corner
+is not — a mesh that never reached the screen fails there, which no amount of
+geometry testing would catch.
+
 **A directory link opens a file pane, not a toast.** `xdg-open` on a directory
 starts the desktop's file manager, which is a second window to close again; dtr has
 a file pane, so the click shows the directory there, beside the terminal. The

@@ -36,6 +36,13 @@ pub enum UserEvent {
         path: PathBuf,
         alias: Option<String>,
     },
+    /// A preview of an image the pointer hovered: decoded, or the reason it was
+    /// not. Either way it is an answer about `path`, so a late one cannot replace
+    /// the picture of a file the pointer has already left.
+    Thumbnail {
+        path: PathBuf,
+        result: anyhow::Result<crate::thumb::Thumb>,
+    },
     /// A message for the user that no worker can put on screen itself: a link
     /// that could not be opened, a path that is not what it claimed.
     Notice(String),
@@ -533,6 +540,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             .ok(),
         hover_cell: None,
         hover_link: None,
+        thumb: crate::thumb::Cache::default(),
         cursor_icon: None,
         script: startup
             .keys
@@ -916,6 +924,9 @@ struct App {
     /// Kept together so a reply for an older cell can be dropped.
     hover_cell: Option<(u16, u16)>,
     hover_link: Option<LinkHover>,
+    /// Preview textures for image files the pointer has hovered, asked about
+    /// once each. Decoded on the files runtime, never on this thread.
+    thumb: crate::thumb::Cache,
     /// The cursor this window was last told to show, so the icon is set when it
     /// changes rather than on every frame.
     cursor_icon: Option<winit::window::CursorIcon>,
@@ -1333,6 +1344,74 @@ impl App {
             return;
         }
         tab.leaves.insert(id, Pane::Files(explorer));
+    }
+
+    /// Ask for a preview of the image `uri` names, if it is one and it is on this
+    /// machine.
+    ///
+    /// Three refusals, each for its own reason: another scheme is not a path, a
+    /// remote path would have to be fetched over the network because the pointer
+    /// crossed a name — a hover does not get to spend bandwidth — and a name that
+    /// does not promise a picture is not opened at all.
+    fn request_thumbnail(&mut self, uri: &str) {
+        if self.session().is_some_and(|session| session.remote) {
+            return;
+        }
+        let LinkTarget::Path(path) = link_target(uri, false) else {
+            return;
+        };
+        if !crate::thumb::looks_like_image(&path) {
+            return;
+        }
+        let Some(runtime) = self.files_rt.as_ref() else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        // Claimed only once there is something to claim it with: a request that
+        // dies between the claim and the spawn would leave the path in flight for
+        // the life of the process.
+        if !self.thumb.begin(&path) {
+            return;
+        }
+        runtime.spawn(async move {
+            let wanted = path.clone();
+            let result = match tokio::task::spawn_blocking(move || crate::thumb::load(&wanted)).await
+            {
+                Ok(result) => result,
+                Err(err) => Err(anyhow::anyhow!("{err}")),
+            };
+            let _ = proxy.send_event(UserEvent::Thumbnail { path, result });
+        });
+    }
+
+    /// The preview to draw for the link under the pointer, if there is one ready.
+    ///
+    /// The texture is cloned rather than borrowed because the draw function is
+    /// already holding `&mut` the fields around it — a handle is a reference
+    /// count, not a copy of the pixels.
+    fn hover_thumbnail(
+        &mut self,
+        scale: f32,
+        ctx: &egui::Context,
+    ) -> Option<(egui::TextureHandle, egui::Vec2)> {
+        // The pager owns the window while it is open; a tooltip over it would be
+        // a picture of a file the user is not pointing at.
+        if self.pager.is_open() {
+            return None;
+        }
+        let link = self.hover_link.as_ref()?;
+        let remote = self.session().is_some_and(|session| session.remote);
+        let LinkTarget::Path(path) = link_target(&link.uri, remote) else {
+            return None;
+        };
+        let texture = self.thumb.texture(&path, ctx)?;
+        let [width, height] = texture.size();
+        // Points, because the texture is decoded at 2× the drawn size so it stays
+        // sharp on a HiDPI display.
+        Some((
+            texture.clone(),
+            egui::vec2(width as f32 / scale, height as f32 / scale),
+        ))
     }
 
     /// The pointer went down at `at`. A press focuses the pane under it and
@@ -2642,6 +2721,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reveal_directory(path, alias);
                 self.repaint("a link named a directory");
             }
+            UserEvent::Thumbnail { path, result } => {
+                self.thumb.finish(path, result);
+                self.repaint("thumbnail");
+            }
             UserEvent::Notice(text) => {
                 tracing::info!(%text, "notice");
                 self.toast = Some((text, std::time::Instant::now()));
@@ -2758,6 +2841,13 @@ impl ApplicationHandler<UserEvent> for App {
                     self.hover((position.x, position.y));
                 }
             }
+            // Leaving the window is not a move to another cell, so without this the
+            // last hover would stand: a pointing hand and a preview of a file the
+            // pointer is no longer anywhere near.
+            WindowEvent::CursorLeft { .. } => {
+                self.hover_cell = None;
+                self.hover_link = None;
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == winit::event::MouseButton::Left && !self.pager.is_open() {
                     match state {
@@ -2849,11 +2939,18 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(reply) = self.session_mut().and_then(|session| session.pane.take_link())
                 {
                     if self.hover_cell == Some((reply.x, reply.y)) {
-                        self.hover_link = reply.uri.map(|uri| LinkHover {
+                        let uri = reply.uri;
+                        self.hover_link = uri.as_deref().map(|uri| LinkHover {
                             x: reply.x,
                             y: reply.y,
-                            uri,
+                            uri: uri.to_owned(),
                         });
+                        // Only when the link *changes*: the reply is edge-triggered
+                        // by the pane, so this is once per hovered cell, not once
+                        // per frame.
+                        if let Some(uri) = uri.as_deref() {
+                            self.request_thumbnail(uri);
+                        }
                     }
                 }
                 // A pointing hand is the whole affordance: a link cell has no
@@ -2900,6 +2997,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.pump_sftp();
         self.log_strip_geometry(scale);
                 self.fit_panes(gpu.metrics(), screen, scale);
+                // Before the borrows below: uploading a texture needs `&mut self`
+                // (the cache turns pixels into a texture once) and `settings` is
+                // about to lend `self` out for the whole frame.
+                let thumbnail = self.hover_thumbnail(scale, &gpu.egui_ctx);
                 let settings = if self.settings.open { Some(&self.settings) } else { None };
                 // A window capture is due once, then never again.
                 // The active tab follows its focused session; the others keep
@@ -2980,6 +3081,9 @@ impl ApplicationHandler<UserEvent> for App {
                     terminal_pane,
                     palette_open,
                     &mut pager,
+                    thumbnail
+                        .as_ref()
+                        .map(|(texture, size)| (texture, *size)),
                     &mut copied_text,
                     &mut copied,
                     toast_text
@@ -3363,6 +3467,7 @@ impl Gpu {
         pane: Option<&TermPane>,
         palette_open: bool,
         pager: &mut crate::pager::Pager,
+        thumbnail: Option<(&egui::TextureHandle, egui::Vec2)>,
         copied_text: &mut Option<String>,
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
@@ -3481,6 +3586,12 @@ impl Gpu {
                 // read.
                 if pager.is_open() {
                     crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
+                }
+                // A preview of the image the pointer is on. Last, so it is over
+                // the panes, and in the tooltip layer, so a file pane cannot hide
+                // it.
+                if let Some((texture, size)) = thumbnail {
+                    crate::thumb::draw(ui, texture, size, look);
                 }
                 // Clipboard in and out. egui hands paste over as an event; the
                 // pane hands copied text back through a slot it fills itself.

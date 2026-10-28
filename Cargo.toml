@@ -44,6 +44,9 @@ notify = "8"
 glob = "0.3"
 plist = "1.10"
 png = "0.18"
+# Hover previews. PNG and JPEG only, and no encoders for anything else: the one
+# place dtr writes a picture is `--screenshot`, which uses `png` directly.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pollster = "0.4"
 portable-pty = "0.9"
 redb = "4"

@@ -19,6 +19,7 @@ mod serial;
 mod settings;
 mod sources;
 mod theme;
+mod thumb;
 mod ui;
 mod uri;
 mod watch;
