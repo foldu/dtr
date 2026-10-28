@@ -217,6 +217,12 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**8 ms is a vsync, not a slow frame.** The first version of the `slow frame` log
+timed the whole draw, `present` included, so every frame at 120 Hz was "8.2 ms"
+with `glyphs=0` — the number was the compositor waiting for the next refresh, not
+work. The timing now stops at `submit`; `present` is measured by nobody, because
+it measures the display, not dtr.
+
 **A wake flag set every frame is a busy loop.** Carrying egui's repaint request as a
 *wake* (a zero-delay `WaitUntil`) spun the loop at full CPU: egui asks for a frame
 again while anything animates, so the next `poll` timed out instantly and the

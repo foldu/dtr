@@ -1934,7 +1934,6 @@ impl ApplicationHandler<UserEvent> for App {
                     .collect();
                 let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
                 let look = self.look.clone();
-                let frame_at = std::time::Instant::now();
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
@@ -2021,7 +2020,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.frames_drawn = self.frames_drawn.wrapping_add(1);
                 // A frame that took long enough to feel is worth a line: the
                 // glyph count says whether it was font work or drawing.
-                let frame_ms = frame_at.elapsed().as_secs_f32() * 1000.0;
+                let frame_ms = gpu.cpu_ms;
                 if frame_ms > 8.0 {
                     tracing::debug!(
                         ms = format!("{frame_ms:.1}"),
@@ -2060,6 +2059,10 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
+    /// When the current frame started, and how much of it was CPU work rather
+    /// than waiting for the compositor.
+    frame_began: std::time::Instant,
+    cpu_ms: f32,
     window: Arc<Window>,
 }
 
@@ -2243,6 +2246,8 @@ impl Gpu {
             config,
             egui_ctx,
             egui_state,
+            frame_began: std::time::Instant::now(),
+            cpu_ms: 0.0,
             window,
         })
     }
@@ -2294,6 +2299,7 @@ impl Gpu {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
         let loud = frames_drawn < 3 || frames_drawn % 120 == 0;
+        self.frame_began = std::time::Instant::now();
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -2534,6 +2540,9 @@ impl Gpu {
                 tracing::warn!(%err, path = %path.display(), "could not capture the window");
             }
         }
+        // Everything above is our work; `present` waits for the compositor and
+        // would otherwise be logged as a slow frame at 120 Hz.
+        self.cpu_ms = self.frame_began.elapsed().as_secs_f32() * 1000.0;
         self.queue.present(output);
 
         for id in &full_output.textures_delta.free {
