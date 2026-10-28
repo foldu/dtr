@@ -239,12 +239,19 @@ with `glyphs=0` — the number was the compositor waiting for the next refresh, 
 work. The timing now stops at `submit`; `present` is measured by nobody, because
 it measures the display, not dtr.
 
-**A wake flag set every frame is a busy loop.** Carrying egui's repaint request as a
-*wake* (a zero-delay `WaitUntil`) spun the loop at full CPU: egui asks for a frame
-again while anything animates, so the next `poll` timed out instantly and the
-cycle repeated — 77% of samples sat inside `polling::Poller::wait_impl` and only
-9% were frames. egui's request is a plain `request_redraw` now; the `wake` flag is
-kept for *our* state changes, which need an immediate frame exactly once.
+**Control flow is sticky, and a stale deadline is a spin.** `set_control_flow` is
+the loop's state until something changes it, not a per-iteration timeout. dtr set
+`WaitUntil(now)` for a repaint and then, on iterations where nothing was due, set
+nothing — so the deadline stayed in the past and every `poll` timed out instantly:
+**47,000 loop iterations a second against 5 frames drawn**. `about_to_wait` now
+collects the earliest deadline and sets exactly one value every time, defaulting to
+`Wait`. Any new deadline belongs in that `sooner(...)` list, never in its own
+`set_control_flow` call.
+
+`-v` logs `loop iterations_per_s= frames_per_s= wakes=` once a second, which is the
+measurement that separates a real spin (many iterations, few frames) from drawing
+at refresh rate (frames == iterations) and from an idle terminal (both near zero).
+Without it, 77% of a profile inside `poll` looked identical in all three cases.
 
 **egui's own repaint request has to be carried too.** Opening the `+` menu draws
 nothing until the mouse moves, because a popup appears on the *next* frame and

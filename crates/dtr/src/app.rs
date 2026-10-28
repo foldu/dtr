@@ -278,6 +278,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         quit: false,
         wake: std::cell::Cell::new(false),
         strip_logged: None,
+        wake_why: std::cell::Cell::new("startup"),
+        egui_redraw_pending: false,
+        loop_report: std::cell::RefCell::new(LoopReport::default()),
         palette: Palette::new(startup.palette),
         look: startup.look.clone(),
         theme: startup.theme.clone(),
@@ -535,6 +538,14 @@ struct App {
     wake: std::cell::Cell<bool>,
     /// The scale whose strip geometry was last logged.
     strip_logged: Option<f32>,
+    /// Why the last wake was asked for, so a spin can name its cause.
+    wake_why: std::cell::Cell<&'static str>,
+    /// A redraw asked for on egui's behalf has not been drawn yet. Asking again
+    /// while it is pending makes winit's Wayland pump busy-poll.
+    egui_redraw_pending: bool,
+    /// Loop iterations and frames in the last reporting second, so "spinning"
+    /// can be told apart from "drawing a lot" and from "blocked in poll".
+    loop_report: std::cell::RefCell<LoopReport>,
     palette: Palette,
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
@@ -1070,6 +1081,9 @@ impl App {
     /// Ask for a frame, and say why: a terminal that redraws continuously while
     /// nothing moves is a battery bug, and the reason is the only way to find it.
     fn repaint(&self, why: &'static str) {
+        // Remembered so a spinning loop names its cause: the reason strings are
+        // distinct per caller, and a flood of one of them is the answer.
+        self.wake_why.set(why);
         tracing::debug!(why, "request redraw");
         if let Some(gpu) = &self.gpu {
             gpu.window.request_redraw();
@@ -1546,6 +1560,25 @@ impl App {
     }
 }
 
+/// What the event loop did in the last second.
+struct LoopReport {
+    since: std::time::Instant,
+    iterations: u64,
+    frames: u64,
+    wakes: u64,
+}
+
+impl Default for LoopReport {
+    fn default() -> Self {
+        Self {
+            since: std::time::Instant::now(),
+            iterations: 0,
+            frames: 0,
+            wakes: 0,
+        }
+    }
+}
+
 /// Byte rate over a short window. Cheap, and it would look wrong if it updated
 /// on every frame, so it only resamples a few times a second.
 struct Meter {
@@ -1580,6 +1613,28 @@ impl Meter {
     }
 }
 
+/// Report what the loop is actually doing, once a second.
+///
+/// A trait impl cannot add inherent methods, so this is a free function.
+fn report_loop(app: &App) {
+    let mut report = app.loop_report.borrow_mut();
+    report.iterations += 1;
+    let elapsed = report.since.elapsed();
+    if elapsed < std::time::Duration::from_secs(1) {
+        return;
+    }
+    tracing::debug!(
+        iterations_per_s = report.iterations,
+        frames_per_s = report.frames,
+        wakes = report.wakes,
+        "loop"
+    );
+    *report = LoopReport {
+        since: std::time::Instant::now(),
+        ..LoopReport::default()
+    };
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
@@ -1611,14 +1666,28 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        report_loop(self);
         self.check_exit_deadline(event_loop);
+
+        // The control flow is **sticky**: winit keeps the last value until
+        // something sets it again. Every deadline set below is in the past by
+        // the time the next iteration runs, so leaving one in place makes every
+        // `poll` time out instantly — 55,000 loop iterations a second with 20
+        // frames drawn. So this collects the earliest deadline and sets exactly
+        // one value at the end, defaulting to `Wait`.
+        let mut deadline: Option<std::time::Instant> = None;
+        let sooner = |at: std::time::Instant, deadline: &mut Option<std::time::Instant>| {
+            *deadline = Some(match *deadline {
+                Some(current) => current.min(at),
+                None => at,
+            });
+        };
 
         // A repaint asked for while the loop was idle: wake now rather than at
         // the next input event.
         if self.wake.replace(false) {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                std::time::Instant::now(),
-            ));
+            self.loop_report.borrow_mut().wakes += 1;
+            sooner(std::time::Instant::now(), &mut deadline);
             if let Some(gpu) = &self.gpu {
                 gpu.window.request_redraw();
             }
@@ -1645,9 +1714,10 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(stroke) = self.script.pop_front() {
             self.on_key(&stroke);
             self.repaint("scripted key");
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            sooner(
                 std::time::Instant::now() + std::time::Duration::from_millis(16),
-            ));
+                &mut deadline,
+            );
         }
 
         // A pending capture needs a frame at its deadline. Without this the
@@ -1655,15 +1725,15 @@ impl ApplicationHandler<UserEvent> for App {
         // happens: the deadline passes with nothing drawing.
         if let Some((_, when)) = self.capture.as_ref().map(|(_, when)| ((), *when)) {
             self.repaint("capture pending");
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(when));
+            sooner(when, &mut deadline);
         }
 
         // A half-typed binding must not wait forever. One second, like Zed,
         // then whatever is already complete fires.
         const PENDING: std::time::Duration = std::time::Duration::from_secs(1);
         if let Some(since) = self.pending_since {
-            let deadline = since + PENDING;
-            if std::time::Instant::now() >= deadline {
+            let pending_deadline = since + PENDING;
+            if std::time::Instant::now() >= pending_deadline {
                 let pending = std::mem::take(&mut self.pending);
                 self.pending_since = None;
                 match self.keymap.flush(&pending) {
@@ -1674,16 +1744,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.repaint("pending flushed");
             } else {
-                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
+                sooner(pending_deadline, &mut deadline);
             }
         }
         // Wake up when the deadline is due, rather than hoping some other
         // event brings the loop back: an idle window that never wakes would
         // never take its own exit.
         if let Some(after) = self.exit_after {
-            let deadline = self.started + std::time::Duration::from_millis(after);
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
+            sooner(
+                self.started + std::time::Duration::from_millis(after),
+                &mut deadline,
+            );
         }
+
+        // One value, every iteration: without this the last deadline stays set
+        // and every poll times out immediately.
+        event_loop.set_control_flow(match deadline {
+            Some(at) => winit::event_loop::ControlFlow::WaitUntil(at),
+            None => winit::event_loop::ControlFlow::Wait,
+        });
     }
 
     fn new_events(
@@ -1729,6 +1808,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if matches!(event, WindowEvent::RedrawRequested) {
+            self.egui_redraw_pending = false;
+        }
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -2035,9 +2117,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // frame while anything animates, which spins the loop at 100% CPU
                 // instead of idling. A plain redraw request is enough — the
                 // compositor delivers it.
-                if gpu.egui_ctx.has_requested_repaint() {
+                // Once per drawn frame, not once per check: egui keeps asking
+                // while anything animates, and a `request_redraw` that is never
+                // answered (the Wayland backend waits for a frame callback)
+                // makes winit's pump loop busy-poll — 55k iterations a second
+                // with 20 frames.
+                if gpu.egui_ctx.has_requested_repaint() && !self.egui_redraw_pending {
+                    self.egui_redraw_pending = true;
                     gpu.window.request_redraw();
                 }
+                self.loop_report.borrow_mut().frames += 1;
                 self.frames_drawn = self.frames_drawn.wrapping_add(1);
                 // A frame that took long enough to feel is worth a line: the
                 // glyph count says whether it was font work or drawing.
