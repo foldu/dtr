@@ -36,6 +36,9 @@ egui-winit = "0.37"
 # silently falls back to an in-app buffer when it cannot reach a display, which
 # looks exactly like a copy that worked.
 arboard = "3"
+# inotify on Linux, ReadDirectoryChangesW on Windows: a device can appear
+# without the user doing anything.
+notify = "8"
 glob = "0.3"
 plist = "1.10"
 png = "0.18"

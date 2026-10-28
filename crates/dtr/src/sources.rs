@@ -75,6 +75,17 @@ pub fn ssh_destinations() -> Vec<(String, String)> {
     ssh_hosts(&ssh_config_path())
 }
 
+/// Serial ports the new-tab menu offers, as `(path, detail)`.
+///
+/// Polled rather than watched: `available_ports` is cross-platform, while udev
+/// is Linux-only and would give Windows a second, different behaviour.
+pub fn serial_destinations() -> Vec<(String, String)> {
+    serial_ports()
+        .into_iter()
+        .map(|port| (port.path, port.detail))
+        .collect()
+}
+
 /// Host aliases from `~/.ssh/config`, with the detail line the picker shows.
 ///
 /// Aliases only: a wildcard pattern is not something you can connect to, and

@@ -22,6 +22,8 @@ use crate::ui::Status;
 
 pub enum UserEvent {
     Frame,
+    /// A watched file changed: `~/.ssh/config` was edited.
+    Files,
 }
 
 /// Everything a fresh window needs that is decided on the command line.
@@ -233,7 +235,15 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
 
     let mut app = App {
         clipboard: None,
-        destinations: crate::sources::ssh_destinations(),
+        watcher: crate::watch::Watcher::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(UserEvent::Files);
+            }
+        }),
+        destinations: Vec::new(),
+        port_poll: crate::watch::Coalesce::new(std::time::Duration::from_secs(2)),
+        destinations_dirty: true,
         tabs: vec![Tab::new(
             1,
             Pane::Terminal(Session {
@@ -485,9 +495,17 @@ struct App {
     /// The system clipboard, held for as long as the app runs: on X11 the owner
     /// of the selection has to stay alive or the text goes with it.
     clipboard: Option<arboard::Clipboard>,
-    /// Destinations the new-tab menu offers, read once from `~/.ssh/config`:
-    /// re-reading the file every frame would be a syscall per redraw.
+    /// Destinations the new-tab menu offers: ssh hosts from `~/.ssh/config`
+    /// and the serial ports that exist now.
     destinations: Vec<(String, String)>,
+    /// The watcher for destination files. Held so the watch stays alive.
+    #[allow(dead_code)]
+    watcher: Option<crate::watch::Watcher>,
+    /// Serial ports are polled, not watched, and a burst of device events must
+    /// not turn into a burst of enumerations.
+    port_poll: crate::watch::Coalesce,
+    /// Set when a watched file changed, cleared when the list is re-read.
+    destinations_dirty: bool,
     active: usize,
     next_leaf: crate::layout::LeafId,
     gpu: Option<Gpu>,
@@ -1508,6 +1526,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.check_exit_deadline(event_loop);
+
+        // Re-read the destination list when a file changed, or when the poll
+        // window has passed — a device does not announce itself on Windows.
+        if self.destinations_dirty || self.port_poll.ready(std::time::Instant::now()) {
+            let mut destinations = crate::sources::serial_destinations();
+            destinations.extend(crate::sources::ssh_destinations());
+            self.destinations = destinations;
+            self.destinations_dirty = false;
+        }
         // `--drag`: press, move, release — the three steps a person's hand
         // makes, so the copy-on-selection path runs without a mouse.
         if let Some((x1, y1, x2, y2)) = self.drag_script.take() {
@@ -1572,7 +1599,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.check_exit_deadline(event_loop);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if let UserEvent::Files = event {
+            self.destinations_dirty = true;
+            self.repaint("watched file changed");
+        }
         // Every terminal pane publishes frames, not only the focused one: a
         // file pane can have focus while the terminal beside it is still live.
         for tab in &mut self.tabs {

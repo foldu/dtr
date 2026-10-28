@@ -409,11 +409,22 @@ pub fn tab_bar(
                         .color(Look::colour(look.dim)),
                 );
             }
-            for (alias, detail) in destinations {
+            for (alias, detail) in destinations.iter().filter(|(path, _)| path.starts_with('/')) {
                 let text = if detail.is_empty() {
                     alias.clone()
                 } else {
-                    format!("{alias}  {detail}")
+                    format!("serial {alias}  {detail}")
+                };
+                if ui.button(text).clicked() {
+                    clicked = Some(TabHit::New(Some(alias.clone())));
+                    ui.close();
+                }
+            }
+            for (alias, detail) in destinations.iter().filter(|(path, _)| !path.starts_with('/')) {
+                let text = if detail.is_empty() {
+                    format!("ssh {alias}")
+                } else {
+                    format!("ssh {alias}  {detail}")
                 };
                 if ui.button(text).clicked() {
                     clicked = Some(TabHit::New(Some(alias.clone())));
@@ -540,7 +551,7 @@ mod kittest_tests {
         *clicked.borrow_mut() = None;
         harness.get_by_label("new tab").click();
         harness.run();
-        harness.get_by_label("web  alice@10.0.0.2").click();
+        harness.get_by_label("ssh web  alice@10.0.0.2").click();
         harness.run();
         assert_eq!(
             clicked.borrow().clone(),

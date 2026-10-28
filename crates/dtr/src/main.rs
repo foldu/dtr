@@ -19,6 +19,7 @@ mod settings;
 mod sources;
 mod theme;
 mod ui;
+mod watch;
 
 use pane::Transport;
 
