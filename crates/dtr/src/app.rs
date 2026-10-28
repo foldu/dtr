@@ -1069,6 +1069,30 @@ impl App {
         }
     }
 
+    /// Close one tab by index, whichever is active.
+    ///
+    /// The last tab closing takes the window with it: a terminal with no
+    /// sessions has nothing to show, which is the same rule `close_active`
+    /// follows.
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            self.quit = true;
+            return;
+        }
+        self.tabs.remove(index);
+        // Focus the tab that took its place, or the one before it when the last
+        // tab closed.
+        if self.active > index {
+            self.active -= 1;
+        } else if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        self.repaint("tab closed");
+    }
+
     /// Close the active tab. The last tab closes the window, because a terminal
     /// with no sessions has nothing to show.
     /// Close the focused pane; when it is the last pane in its tab, close the
@@ -1822,12 +1846,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.settings.apply(change);
                     self.repaint("settings changed");
                 }
-                if let Some(index) = tab_click {
+                match tab_click {
                     // A click on a tab is a switch, exactly like the chord.
-                    if index < self.tabs.len() {
+                    Some(crate::ui::TabHit::Select(index)) if index < self.tabs.len() => {
                         self.active = index;
                         self.repaint("tab clicked");
                     }
+                    Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
+                    _ => {}
                 }
                 drop(toast_text);
                 if let Some(text) = copied {
@@ -2105,7 +2131,7 @@ impl Gpu {
         settings: Option<&crate::settings::Settings>,
         tabs: &[String],
         active_tab: usize,
-        tab_click: &mut Option<usize>,
+        tab_click: &mut Option<crate::ui::TabHit>,
         status_visible: bool,
         settings_change: &mut Option<crate::settings::Change>,
         capture: Option<&std::path::Path>,
@@ -2155,10 +2181,8 @@ impl Gpu {
                             }),
                     )
                     .show(ui, |ui| {
-                        if let Some(index) =
-                            crate::ui::tab_bar(ui, tabs, active_tab, &look)
-                        {
-                            *tab_click = Some(index);
+                        if let Some(hit) = crate::ui::tab_bar(ui, tabs, active_tab, &look) {
+                            *tab_click = Some(hit);
                         }
                     });
             }

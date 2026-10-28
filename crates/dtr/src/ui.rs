@@ -276,27 +276,48 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
 /// Returns the index the pointer clicked, if any. Drawing and hit-testing are
 /// the same rectangle on purpose — a click that misses the chip the eye sees is
 /// the classic way to make tabs feel broken.
-pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Option<usize> {
+/// What a click in the tab strip asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabHit {
+    Select(usize),
+    Close(usize),
+}
+
+pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Option<TabHit> {
     let mut clicked = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (index, label) in labels.iter().enumerate() {
             let is_active = index == active;
             let text = format!("{} {}", index + 1, label);
+            let fg = if is_active {
+                Look::colour(look.background)
+            } else {
+                Look::colour(look.foreground)
+            };
             let galley = ui.painter().layout_no_wrap(
                 text,
                 egui::FontId::monospace(12.0),
-                if is_active {
-                    Look::colour(look.background)
-                } else {
-                    Look::colour(look.foreground)
-                },
+                fg,
             );
-            // A keyboard-focusable widget here would be activated by Enter and by
-            // Space — pressing Enter in the shell would switch tabs. A chip is a
-            // hit target, not a control: it takes the pointer and nothing else.
-            let size = egui::vec2(galley.size().x + 18.0, TAB_CHIP_HEIGHT);
+            // Two hit targets in one chip: the label switches, the cross closes.
+            // A keyboard-focusable widget here would be activated by Enter and
+            // by Space — pressing Enter in the shell must not touch the strip,
+            // so both are pointer-only.
+            let close_size = TAB_CHIP_HEIGHT - 4.0;
+            let size = egui::vec2(galley.size().x + 18.0 + close_size, TAB_CHIP_HEIGHT);
             let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 8.0 - close_size / 2.0, rect.center().y),
+                egui::vec2(close_size, close_size),
+            );
+            let close = ui.interact(
+                close_rect,
+                egui::Id::new(egui::IdSalt::new(("dtr-tab-close", index))),
+                egui::Sense::click(),
+            );
+
             let painter = ui.painter();
             painter.rect_filled(
                 rect,
@@ -308,23 +329,31 @@ pub fn tab_bar(ui: &mut Ui, labels: &[String], active: usize, look: &Look) -> Op
                 },
             );
             painter.galley(
-                rect.center() - galley.size() / 2.0,
+                egui::pos2(rect.left() + 7.0, rect.center().y - galley.size().y / 2.0),
                 galley,
-                if is_active {
-                    Look::colour(look.background)
-                } else {
-                    Look::colour(look.foreground)
-                },
+                fg,
             );
-            // Painted by hand, so the accessibility node has to be declared by
-            // hand too — otherwise a screen reader (and the test harness) sees a
+            // The cross is drawn, not a glyph: egui's default font has no "×"
+            // and a missing glyph would be an empty box.
+            let stroke = egui::Stroke::new(1.5, fg);
+            let inset = close_rect.shrink(close_size * 0.3);
+            painter.line_segment([inset.left_top(), inset.right_bottom()], stroke);
+            painter.line_segment([inset.right_top(), inset.left_bottom()], stroke);
+
+            // Painted by hand, so the accessibility nodes are declared by hand
+            // too — otherwise a screen reader (and the test harness) sees a
             // strip with no tabs in it at all.
-            let label = format!("{} {}", index + 1, &labels[index]);
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+            let name = format!("{} {}", index + 1, &labels[index]);
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+            let close_name = format!("close tab {}", index + 1);
+            close.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, &close_name)
             });
-            if response.clicked() {
-                clicked = Some(index);
+
+            if close.clicked() {
+                clicked = Some(TabHit::Close(index));
+            } else if response.clicked() {
+                clicked = Some(TabHit::Select(index));
             }
         }
     });
@@ -416,8 +445,8 @@ mod kittest_tests {
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
-    /// The strip's whole contract, without a window: a chip is clickable, and a
-    /// key that belongs to the terminal cannot switch tabs.
+    /// The strip's whole contract, without a window: a chip switches, its cross
+    /// closes, and a key that belongs to the terminal touches neither.
     ///
     /// The second half is a regression test. The chips were `egui::Button`s once,
     /// and an egui button takes keyboard focus, so Enter — pressed a hundred
@@ -442,7 +471,22 @@ mod kittest_tests {
 
         harness.get_by_label("2 shell").click();
         harness.run();
-        assert_eq!(*clicked.borrow(), Some(1), "the pointer switches tabs");
+        assert_eq!(
+            *clicked.borrow(),
+            Some(TabHit::Select(1)),
+            "the pointer switches tabs"
+        );
+
+        // The cross on the chip closes it, and asks to close the tab it belongs
+        // to rather than the one in front.
+        *clicked.borrow_mut() = None;
+        harness.get_by_label("close tab 2").click();
+        harness.run();
+        assert_eq!(
+            *clicked.borrow(),
+            Some(TabHit::Close(1)),
+            "the cross closes the tab it is on"
+        );
 
         // Enter is the shell's key. It must not reach the chips.
         *clicked.borrow_mut() = None;

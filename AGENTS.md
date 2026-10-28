@@ -217,6 +217,15 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**A chip has two hit targets.** The label switches tabs, a cross on the right closes
+that tab — whichever tab is active. Both are pointer-only `Sense::click` regions
+with declared accessibility names (`2 shell`, `close tab 2`), so Enter cannot
+touch either. The cross is *drawn* with two lines, not a `×` glyph: egui's default
+font has no multiplication sign and would draw an empty box.
+
+Closing the last tab closes the window, the same rule `close_active` follows: a
+terminal with no sessions has nothing to show.
+
 **Tabs were invisible until the strip existed.** The top strip is reserved in the grid
 layout only when there is more than one tab, so a single session loses no rows;
 the active tab's title follows its focused session, the others keep the title they
