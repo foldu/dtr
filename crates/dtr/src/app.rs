@@ -1659,6 +1659,7 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                     .collect();
                 let mut tab_click = None;
+                let mut settings_change = None;
                 let capture_path = match self.capture.take() {
                     Some((path, when)) if std::time::Instant::now() >= when => Some(path),
                     other => {
@@ -1722,10 +1723,17 @@ impl ApplicationHandler<UserEvent> for App {
                     self.active,
                     &mut tab_click,
                     self.status_visible(),
+                    &mut settings_change,
                     capture_path.as_deref(),
                     &look,
                 );
                 self.palette = palette;
+                if let Some(change) = settings_change {
+                    // A mouse edit updates the draft, and the file is written
+                    // when the menu is saved — same as a keyboard edit.
+                    self.settings.apply(change);
+                    self.repaint("settings changed");
+                }
                 if let Some(index) = tab_click {
                     // A click on a tab is a switch, exactly like the chord.
                     if index < self.tabs.len() {
@@ -2008,6 +2016,7 @@ impl Gpu {
         active_tab: usize,
         tab_click: &mut Option<usize>,
         status_visible: bool,
+        settings_change: &mut Option<crate::settings::Change>,
         capture: Option<&std::path::Path>,
         look: &Look,
     ) -> anyhow::Result<()> {
@@ -2094,7 +2103,9 @@ impl Gpu {
                 // The palette is an overlay above the panes: a file listing
                 // must not cover the command line it sits beside.
                 if let Some(settings) = settings {
-                    settings.ui(ui, look);
+                    if let Some(change) = settings.ui(ui, look) {
+                        *settings_change = Some(change);
+                    }
                 }
                 if palette_open {
                     crate::ui::overlay(ui, "dtr-palette", |ui| {

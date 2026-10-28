@@ -65,6 +65,20 @@ impl Row {
     }
 }
 
+/// What a mouse edit in the menu asks for. The menu renders from `&self`, so a
+/// widget reports its edit rather than writing through a borrow the caller
+/// cannot lend it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    Select(usize),
+    FontSize(f32),
+    Family(Option<String>),
+    Theme(Option<String>),
+    AutoReconnect(bool),
+    Baud(u32),
+    CrToCrlf(bool),
+}
+
 /// What a key did to the menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effect {
@@ -149,6 +163,27 @@ impl Settings {
             }
         }
         rows
+    }
+
+    /// Apply one edit from the mouse to the draft.
+    pub fn apply(&mut self, change: Change) {
+        match change {
+            Change::Select(row) => self.row = row,
+            Change::FontSize(size) => self.draft.font.size = size,
+            Change::Family(family) => self.draft.font.family = family,
+            Change::Theme(theme) => self.draft.theme = theme,
+            Change::AutoReconnect(on) => self.draft.serial.auto_reconnect = on,
+            Change::Baud(baud) => {
+                if let Some(serial) = self.serial.as_mut() {
+                    serial.baud = baud;
+                }
+            }
+            Change::CrToCrlf(on) => {
+                if let Some(serial) = self.serial.as_mut() {
+                    serial.cr_to_crlf = on;
+                }
+            }
+        }
     }
 
     pub fn current_row(&self) -> Row {
@@ -313,7 +348,11 @@ impl Settings {
     /// Draw the menu. Called from the same `run_ui` closure as the panes, as an
     /// overlay beside the palette — `egui::Window` renders nothing there.
     #[allow(deprecated)] // one fixed overlay: the id is a name, not a hash of state
-    pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) {
+    /// Draw the menu. Every control is a mouse control: a row is a click target
+    /// for selection, and the values are a drag number, two combo boxes and two
+    /// toggles. The keyboard still works, but nothing here needs it.
+    pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) -> Option<Change> {
+        let mut change = None;
         let screen = ui.max_rect();
         let width = 420.0_f32.min(screen.width() - 32.0);
         let rows = self.rows().len() as f32;
@@ -352,54 +391,200 @@ impl Settings {
                         for (index, row) in self.rows().iter().enumerate() {
                             let selected = index == self.row;
                             let section = row.section();
+                            let clicked = std::cell::Cell::new(None);
                             ui.horizontal(|ui| {
-                                let marker = if selected { "›" } else { " " };
-                                ui.label(
-                                    egui::RichText::new(marker)
-                                        .monospace()
-                                        .size(12.0)
-                                        .color(crate::ui::Look::colour(look.accent)),
-                                );
                                 let name = if section.is_empty() {
                                     row.label().to_owned()
                                 } else {
                                     format!("{section}.{}", row.label())
                                 };
-                                ui.label(
-                                    egui::RichText::new(name)
-                                        .monospace()
-                                        .size(12.0)
-                                        .color(crate::ui::Look::colour(if selected {
-                                            look.foreground
-                                        } else {
-                                            look.dim
-                                        })),
+                                // The label is the selection target, so clicking
+                                // a row does what the arrow keys do.
+                                let label = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(name)
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(crate::ui::Look::colour(if selected {
+                                                look.foreground
+                                            } else {
+                                                look.dim
+                                            })),
+                                    )
+                                    .sense(egui::Sense::click()),
                                 );
+                                if label.clicked() {
+                                    clicked.set(Some(Change::Select(index)));
+                                }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        ui.label(
-                                            egui::RichText::new(self.value(*row))
-                                                .monospace()
-                                                .size(12.0)
-                                                .color(crate::ui::Look::colour(look.accent)),
-                                        );
+                                        if let Some(edit) = self.control(ui, *row, look) {
+                                            clicked.set(Some(edit));
+                                        }
                                     },
                                 );
                             });
+                            if change.is_none() {
+                                change = clicked.into_inner();
+                            }
                             if matches!(row, Row::AutoReconnect) {
                                 ui.add_space(2.0);
                             }
                         }
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new("up/down row   left/right change   enter save   esc cancel")
-                                .monospace()
-                                .size(11.0)
-                                .color(crate::ui::Look::colour(look.dim)),
+                            egui::RichText::new(
+                                "click to change   enter save   esc cancel",
+                            )
+                            .monospace()
+                            .size(11.0)
+                            .color(crate::ui::Look::colour(look.dim)),
                         );
                     });
             });
+        change
+    }
+
+    /// The widget on the right of a row. Every one is a mouse control; each
+    /// returns the edit it made, if any.
+    ///
+    /// Each control names itself for accessibility. A combo box and a checkbox
+    /// carry no text of their own here, so without this they are anonymous —
+    /// invisible to a screen reader and impossible for the test harness to find.
+    fn control(&self, ui: &mut egui::Ui, row: Row, look: &crate::ui::Look) -> Option<Change> {
+        let dim = crate::ui::Look::colour(look.dim);
+        // `theme value`, not `theme`: the row's own label carries the bare name,
+        // and two identical names make a control impossible to address.
+        let name = format!("{} value", row.key());
+        match row {
+            Row::FontSize => {
+                // Drag left/right, or click to type. Both are the mouse.
+                let mut size = self.draft.font.size;
+                let response = ui.add(
+                    egui::DragValue::new(&mut size)
+                        .speed(0.25)
+                        .range(6.0..=48.0)
+                        .fixed_decimals(0)
+                        .suffix(" pt"),
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name)
+                });
+                response.changed().then_some(Change::FontSize(size))
+            }
+            Row::FontFamily => {
+                let families = crate::fonts::usable_families();
+                let current = self
+                    .draft
+                    .font
+                    .family
+                    .clone()
+                    .unwrap_or_else(|| "default".to_owned());
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("font-family")
+                    .selected_text(egui::RichText::new(&current).monospace().size(12.0))
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(self.draft.font.family.is_none(), "default")
+                            .clicked()
+                        {
+                            change = Some(Change::Family(None));
+                        }
+                        for family in families {
+                            let picked = self.draft.font.family.as_deref() == Some(&family);
+                            if ui.selectable_label(picked, &family).clicked() {
+                                change = Some(Change::Family(Some(family)));
+                            }
+                        }
+                    });
+                response.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
+                });
+                change
+            }
+            Row::Theme => {
+                let mut names = crate::theme::names();
+                names.sort();
+                names.dedup();
+                let current = self
+                    .draft
+                    .theme
+                    .clone()
+                    .unwrap_or_else(|| "built-in".to_owned());
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("theme")
+                    .selected_text(egui::RichText::new(&current).monospace().size(12.0))
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(self.draft.theme.is_none(), "built-in")
+                            .clicked()
+                        {
+                            change = Some(Change::Theme(None));
+                        }
+                        for name in names {
+                            let picked = self.draft.theme.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(picked, &name).clicked() {
+                                change = Some(Change::Theme(Some(name)));
+                            }
+                        }
+                    });
+                response.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
+                });
+                change
+            }
+            Row::AutoReconnect => {
+                let mut on = self.draft.serial.auto_reconnect;
+                let response = ui.checkbox(&mut on, "");
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name)
+                });
+                response.changed().then_some(Change::AutoReconnect(on))
+            }
+            Row::Baud => {
+                let Some(serial) = self.serial.as_ref() else {
+                    ui.label(egui::RichText::new("no port").monospace().size(12.0).color(dim));
+                    return None;
+                };
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("baud")
+                    .selected_text(
+                        egui::RichText::new(serial.baud.to_string())
+                            .monospace()
+                            .size(12.0),
+                    )
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for &baud in BAUDS {
+                            if ui
+                                .selectable_label(serial.baud == baud, baud.to_string())
+                                .clicked()
+                            {
+                                change = Some(Change::Baud(baud));
+                            }
+                        }
+                    });
+                response.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
+                });
+                change
+            }
+            Row::CrToCrlf => {
+                let Some(serial) = self.serial.as_ref() else {
+                    ui.label(egui::RichText::new("no port").monospace().size(12.0).color(dim));
+                    return None;
+                };
+                let mut on = serial.cr_to_crlf;
+                let response = ui.checkbox(&mut on, "");
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name)
+                });
+                response.changed().then_some(Change::CrToCrlf(on))
+            }
+        }
     }
 }
 
@@ -547,6 +732,7 @@ mod tests {
 #[cfg(test)]
 mod kittest_tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
     /// Opening the menu on a shell shows the terminal's own settings and nothing
@@ -575,6 +761,34 @@ mod kittest_tests {
         );
     }
 
+    /// The theme is a combo box: click it, click a theme, get the edit. This is
+    /// the mouse path the menu is meant to be driven by.
+    #[test]
+    fn picking_a_theme_from_the_combo_box_reports_it() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        let look = crate::ui::Look::default();
+        let change = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = change.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            if let Some(edit) = settings.ui(ui, &look) {
+                *sink.borrow_mut() = Some(edit);
+            }
+        });
+        harness.run();
+        // The combo box is found by the name it declares, then the list opens.
+        harness.get_by_label("theme value").click();
+        harness.run();
+        // The built-in entry is always in the list, whatever themes are
+        // installed on the machine running the test.
+        harness.get_by_label("built-in").click();
+        harness.run();
+        assert!(
+            matches!(*change.borrow(), Some(Change::Theme(_))),
+            "clicking a theme must report the choice"
+        );
+    }
+
     /// The rows are drawn and the menu renders: a snapshot catches a row that
     /// moves, a label that disappears, or the highlight landing on the wrong row.
     #[test]
@@ -583,7 +797,9 @@ mod kittest_tests {
         settings.show(&Config::default());
         settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown));
         let look = crate::ui::Look::default();
-        let mut harness = Harness::new_ui(|ui| settings.ui(ui, &look));
+        let mut harness = Harness::new_ui(|ui| {
+            settings.ui(ui, &look);
+        });
         harness.run();
         harness.snapshot("settings_menu");
     }

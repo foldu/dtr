@@ -232,6 +232,16 @@ create, so a terminal had one tab and no discoverable way to get a second — th
 cycling looked broken rather than unused. `Ctrl+Shift+T` opens a tab, and the
 palette footer is the one place the bindings are written down.
 
+**The settings menu is mouse-first.** Rows are click targets, the font size is a
+drag value, the family and the theme are combo boxes, the toggles are checkboxes;
+the keyboard still works but nothing needs it. `Settings::ui` takes `&self` (the
+caller cannot lend a mutable borrow while the renderer holds one), so a control
+*reports* its edit as a `Change` and `Settings::apply` writes it into the draft.
+
+Every control declares an accessible name through `Response::widget_info`, and the
+name is `<row> value`, not the row name: the row's label already carries the bare
+name, and two nodes with one name are impossible to address from a test.
+
 **The settings menu shows port rows only when a port is focused.** Baud and CR
 translation belong to one serial device, so with a shell in front there is
 nothing to show: the rows are built per open, not baked into a fixed list.
