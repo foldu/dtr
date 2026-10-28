@@ -803,6 +803,7 @@ dependencies = [
  "dtr-sftp",
  "dtr-sshconfig",
  "dtr-store",
+ "dtr-vfs",
  "egui",
  "egui-wgpu",
  "egui-winit",
@@ -874,6 +875,16 @@ dependencies = [
  "dirs",
  "redb",
  "tempfile",
+]
+
+[[package]]
+name = "dtr-vfs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

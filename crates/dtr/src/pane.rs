@@ -203,6 +203,10 @@ pub enum Command {
     SelectLine { x: u16, y: u16 },
     /// Put the current selection on the clipboard.
     CopySelection,
+    /// Report the hyperlink (OSC 8) at a viewport cell, if any. Answered into
+    /// the pane's link slot, because the URI lives in the terminal and the
+    /// terminal never leaves the pane's thread.
+    HyperlinkAt { x: u16, y: u16 },
     /// Walk the viewport to the previous (negative) or next prompt mark, which
     /// only exists when the shell emits OSC 133.
     ScrollPrompt(isize),
@@ -268,6 +272,14 @@ impl Sink {
     }
 }
 
+/// A hyperlink under a cell, and the cell it was under.
+#[derive(Clone, Debug)]
+pub struct LinkReply {
+    pub x: u16,
+    pub y: u16,
+    pub uri: Option<String>,
+}
+
 pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
     tx: tokio::sync::mpsc::UnboundedSender<Command>,
@@ -277,6 +289,10 @@ pub struct Pane {
     /// The block the last `CaptureBlock` read out of the terminal, waiting for
     /// the UI to take it. The pager that will read it does not exist yet.
     captured: Arc<Mutex<Option<String>>>,
+    /// The last `HyperlinkAt` answer. It carries the cell it was asked about,
+    /// so a reply that arrives after the pointer moved can be dropped instead
+    /// of opening the wrong link.
+    link: Arc<Mutex<Option<LinkReply>>>,
     /// A fatal pane error. The pane thread owns the terminal, so a failure to
     /// open a port happens out of sight; this is how it reaches the UI.
     error: Arc<Mutex<Option<String>>>,
@@ -307,6 +323,8 @@ impl Pane {
         let copy_sink = Arc::clone(&copied);
         let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let captured_sink = Arc::clone(&captured);
+        let link: Arc<Mutex<Option<LinkReply>>> = Arc::new(Mutex::new(None));
+        let link_sink = Arc::clone(&link);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let failure = Arc::clone(&error);
         let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -340,6 +358,7 @@ impl Pane {
                         log,
                         copy_sink,
                         captured_sink,
+                        link_sink,
                         Arc::clone(&ended_flag),
                         Arc::clone(&cwd_seen),
                         theme,
@@ -363,6 +382,7 @@ impl Pane {
             error,
             copied,
             captured,
+            link,
             ended,
             cwd,
         })
@@ -385,6 +405,11 @@ impl Pane {
     /// The last command block the pane captured, if one is waiting.
     pub fn take_captured(&self) -> Option<String> {
         self.captured.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// The last hyperlink answer, if one is waiting.
+    pub fn take_link(&self) -> Option<LinkReply> {
+        self.link.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// The pane's fatal error, if it hit one.
@@ -424,6 +449,7 @@ async fn run(
     log_path: Option<(PathBuf, serial::LogFormat)>,
     copied: Arc<Mutex<Option<String>>>,
     captured: Arc<Mutex<Option<String>>>,
+    link: Arc<Mutex<Option<LinkReply>>>,
     ended: Arc<std::sync::atomic::AtomicBool>,
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
@@ -968,6 +994,14 @@ async fn run(
                             )?;
                         }
                     }
+                    Command::HyperlinkAt { x, y } => {
+                        let uri = hyperlink_at(&term, x, y);
+                        tracing::debug!(x, y, ?uri, "hyperlink");
+                        if let Ok(mut slot) = link.lock() {
+                            *slot = Some(LinkReply { x, y, uri });
+                        }
+                        wake();
+                    }
                     Command::CopySelection => {
                         let text = selection
                             .as_ref()
@@ -1325,6 +1359,25 @@ fn select_line(term: &Terminal<'_, '_>, x: u16, y: u16) -> Option<SelectionAncho
     let options = SelectLineOptions::new(grid_ref);
     let selection = term.select_line(options).ok()??;
     anchors_from(term, &selection)
+}
+
+/// The URI of the cell at a viewport position, if it has one.
+///
+/// Asked on demand rather than carried in the frame: `hyperlink_uri` is one FFI
+/// call per cell, and on a dense 3808-cell grid that is another ~30 µs on top of
+/// a 41 µs publish — for a link nobody has hovered.
+fn hyperlink_at(term: &Terminal<'_, '_>, x: u16, y: u16) -> Option<String> {
+    let grid_ref = viewport_ref(term, x, y)?;
+    let mut buf = vec![0u8; 256];
+    let len = match grid_ref.hyperlink_uri(&mut buf) {
+        Ok(len) => len,
+        Err(libghostty_vt::Error::OutOfSpace { required }) if required > 0 => {
+            buf.resize(required, 0);
+            grid_ref.hyperlink_uri(&mut buf).ok()?
+        }
+        Err(_) => return None,
+    };
+    (len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
 /// A grid reference at a viewport cell.
@@ -1991,6 +2044,20 @@ mod selection_tests {
         assert_eq!(before.as_deref(), Some("two"));
         term.scroll_viewport(ScrollViewport::Delta(-2));
         assert_eq!(cell.text(&term), before);
+    }
+
+    /// OSC 8 gives a cell a URI. It is answered on ask, from the cell under the
+    /// pointer, and a cell outside the link has none.
+    #[test]
+    fn a_hyperlink_is_answered_from_the_cell_under_it() {
+        let mut term = Terminal::new(24, 3).unwrap();
+        term.vt_write(b"\x1b]8;;file:///tmp/x.txt\x07link\x1b]8;;\x07 plain\r\n");
+        assert_eq!(
+            super::hyperlink_at(&term, 1, 0).as_deref(),
+            Some("file:///tmp/x.txt")
+        );
+        assert_eq!(super::hyperlink_at(&term, 7, 0), None, "past the link");
+        assert_eq!(super::hyperlink_at(&term, 0, 2), None, "an empty row");
     }
 
     /// A one-character word is still a word: clicking `b` in `a b` selects one

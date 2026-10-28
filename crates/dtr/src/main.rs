@@ -107,6 +107,12 @@ struct Args {
     #[arg(long, value_name = "X1,Y1,X2,Y2")]
     drag: Option<String>,
 
+    /// Click at `x,y` once it opens. Unlike a drag this hovers first and
+    /// presses on the next frame, because a link is only known once the pane
+    /// has answered what is under the pointer.
+    #[arg(long, value_name = "X,Y")]
+    click: Option<String>,
+
     /// Close the window after MS milliseconds (shutdown smoke test)
     #[arg(long, value_name = "MS")]
     exit_after: Option<u64>,
@@ -617,7 +623,8 @@ fn main() -> anyhow::Result<()> {
             capture: args.capture.clone(),
             capture_after: args.capture_after,
             keys: args.keys.clone(),
-        drag: args.drag.clone(),
+            drag: args.drag.clone(),
+            click: args.click.clone(),
             gpu: gpu.clone(),
             settings: args.settings,
             config: config.clone(),
@@ -653,6 +660,7 @@ fn main() -> anyhow::Result<()> {
         capture_after: args.capture_after,
         keys: args.keys.clone(),
         drag: args.drag.clone(),
+        click: args.click.clone(),
         gpu,
         settings: args.settings,
         config,

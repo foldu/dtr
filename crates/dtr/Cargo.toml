@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 dtr-sftp.workspace = true
+dtr-vfs.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true
 dirs.workspace = true

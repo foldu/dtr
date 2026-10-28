@@ -28,6 +28,9 @@ pub enum UserEvent {
     Destinations(Vec<(String, String)>),
     /// Something the SFTP worker finished.
     Sftp(SftpEvent),
+    /// A message for the user that no worker can put on screen itself: a link
+    /// that could not be opened, a path that is not what it claimed.
+    Notice(String),
 }
 
 /// What the SFTP worker is asked to do, and what it reports back.
@@ -61,6 +64,90 @@ pub enum SftpEvent {
     },
 }
 
+/// A link under the pointer: the cell it is on, and where it points.
+#[derive(Clone, Debug)]
+struct LinkHover {
+    x: u16,
+    y: u16,
+    uri: String,
+}
+
+/// The path a `file:` URI names, if it names one on this machine.
+///
+/// Percent escapes are decoded (`%20` is a space); an empty or `localhost`
+/// authority means this machine, and anything else is refused — resolving
+/// another host's path against this disk is the one mistake here that cannot be
+/// undone by pointing at the right file afterwards.
+fn local_path_of(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let at = rest.find('/')?;
+    let (authority, path) = (&rest[..at], &rest[at..]);
+    if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    if !path.starts_with('/') {
+        return None;
+    }
+    Some(PathBuf::from(percent_decode(path)))
+}
+
+/// `%20` and friends. An escape that is not valid hex stays literal rather than
+/// being dropped, so a path with a stray `%` survives.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[at + 1..at + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    at += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::local_path_of;
+
+    /// `file:` with no authority is this machine, and percent escapes are part
+    /// of the path rather than decoration.
+    #[test]
+    fn a_file_uri_names_a_path() {
+        assert_eq!(
+            local_path_of("file:///tmp/notes.txt"),
+            Some(std::path::PathBuf::from("/tmp/notes.txt"))
+        );
+        assert_eq!(
+            local_path_of("file://localhost/tmp/a%20b.png"),
+            Some(std::path::PathBuf::from("/tmp/a b.png"))
+        );
+        // A stray % is a literal: dropping it would silently change the path.
+        assert_eq!(
+            local_path_of("file:///tmp/100%"),
+            Some(std::path::PathBuf::from("/tmp/100%"))
+        );
+    }
+
+    /// Anything that is not this machine's file is refused rather than guessed:
+    /// reading another host's path off this disk is the one unrecoverable
+    /// mistake in the whole feature.
+    #[test]
+    fn another_machine_is_not_this_one() {
+        assert_eq!(local_path_of("file://jupyter/etc/hosts"), None);
+        assert_eq!(local_path_of("https://example.com/x"), None);
+        assert_eq!(local_path_of("/tmp/relative"), None);
+        assert_eq!(local_path_of("file://"), None);
+    }
+}
+
 /// Everything a fresh window needs that is decided on the command line.
 pub struct Startup {
     pub transport: Transport,
@@ -80,6 +167,10 @@ pub struct Startup {
     pub keys: Option<String>,
     /// A drag to perform once the window opens: `x1,y1,x2,y2` in pixels.
     pub drag: Option<String>,
+    /// A click to perform once the window opens: `x,y` in pixels. Two frames,
+    /// like a hand: move (which asks the pane what is under the pointer), then
+    /// press and release.
+    pub click: Option<String>,
     /// Close the window after this many milliseconds, to exercise shutdown.
     pub exit_after: Option<u64>,
     /// Adapter name to prefer, e.g. "nvidia".
@@ -376,6 +467,30 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 }
             }
         }),
+        click_script: startup.click.as_deref().and_then(|text| {
+            let parts: Vec<f64> = text
+                .split(',')
+                .filter_map(|part| part.trim().parse().ok())
+                .collect();
+            match parts.as_slice() {
+                [x, y] => Some(((*x, *y), false)),
+                _ => {
+                    tracing::warn!(text, "click expects x,y");
+                    None
+                }
+            }
+        }),
+        vfs: std::sync::Arc::new(dtr_vfs::Vfs::new()),
+        files_rt: tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("dtr-files")
+            .build()
+            .map_err(|err| tracing::warn!(%err, "no files runtime"))
+            .ok(),
+        hover_cell: None,
+        hover_link: None,
+        cursor_icon: None,
         script: startup
             .keys
             .as_deref()
@@ -741,6 +856,22 @@ struct App {
     pending_since: Option<std::time::Instant>,
     /// A drag still to perform, from `--drag`.
     drag_script: Option<(f64, f64, f64, f64)>,
+    /// A click still to perform, from `--click`: the position, and whether the
+    /// hover pass has run yet.
+    click_script: Option<((f64, f64), bool)>,
+    /// The machines this app can read files from.
+    vfs: std::sync::Arc<dtr_vfs::Vfs>,
+    /// The runtime files work runs on, separate from `worker`: the user asked
+    /// for scans to move elsewhere, and a directory walk must not queue behind
+    /// a serial-port enumeration.
+    files_rt: Option<tokio::runtime::Runtime>,
+    /// The cell the pointer is over, and the link it holds if the pane said so.
+    /// Kept together so a reply for an older cell can be dropped.
+    hover_cell: Option<(u16, u16)>,
+    hover_link: Option<LinkHover>,
+    /// The cursor this window was last told to show, so the icon is set when it
+    /// changes rather than on every frame.
+    cursor_icon: Option<winit::window::CursorIcon>,
     /// The keys still to type, from `--keys`.
     script: std::collections::VecDeque<crate::keys::KeyStroke>,
     /// Where to write a PNG of the live window, and when. Set by `--capture`.
@@ -983,6 +1114,88 @@ impl App {
                 }
                 }
 
+    /// The pointer moved: if it entered a different cell, ask the pane what
+    /// link is on it.
+    ///
+    /// Asked per cell rather than carried in the frame — `hyperlink_uri` is an
+    /// FFI call per cell, and on a dense screen that is another 30 µs on a
+    /// 41 µs publish for a link nobody is pointing at.
+    fn hover(&mut self, at: (f64, f64)) {
+        let cell = self.cell_xy(at.0, at.1);
+        if cell == self.hover_cell {
+            return;
+        }
+        self.hover_cell = cell;
+        self.hover_link = None;
+        if let (Some((x, y)), Some(session)) = (cell, self.session()) {
+            session
+                .pane
+                .send(crate::pane::Command::HyperlinkAt { x, y });
+        }
+    }
+
+    /// Open a hyperlink, resolving it the way this session would.
+    ///
+    /// Only `file:` is understood for now, and only on the machine dtr runs on.
+    /// A remote session's answer comes from the backend, which says plainly
+    /// that it is not wired up yet rather than reading one machine's path off
+    /// another's disk.
+    fn open_link(&mut self, uri: &str) {
+        let Some(path) = local_path_of(uri) else {
+            self.toast = Some((
+                format!("cannot open {uri}"),
+                std::time::Instant::now(),
+            ));
+            return;
+        };
+        let Some(session) = self.session() else {
+            return;
+        };
+        let backend = match (session.remote, session.alias.clone()) {
+            (false, _) => dtr_vfs::BackendId::Local,
+            (true, Some(alias)) => dtr_vfs::BackendId::Ssh(alias),
+            (true, None) => {
+                self.toast = Some((
+                    "this session has no host to ask".to_owned(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+        let location = dtr_vfs::Location { backend, path };
+        let described = location.describe();
+        tracing::info!(target = %described, "opening a link");
+
+        let (Some(runtime), vfs, proxy) = (
+            self.files_rt.as_ref(),
+            std::sync::Arc::clone(&self.vfs),
+            self.proxy.clone(),
+        ) else {
+            return;
+        };
+        runtime.spawn(async move {
+            let outcome = async {
+                let meta = vfs.stat(&location).await?;
+                if meta.kind.is_dir() {
+                    anyhow::bail!("{} is a directory", location.describe());
+                }
+                let path = location.path.clone();
+                let opened = tokio::task::spawn_blocking(move || dtr_vfs::open_externally(&path))
+                    .await
+                    .map_err(|err| anyhow::anyhow!("{err}"))?;
+                opened
+            }
+            .await;
+            // Silence is not success, and the failure belongs on screen: the
+            // worker that failed has no UI to say it with.
+            let note = match outcome {
+                Ok(()) => return,
+                Err(err) => format!("{err}"),
+            };
+            let _ = proxy.send_event(UserEvent::Notice(note));
+        });
+    }
+
     /// The pointer went down at `at`. A press focuses the pane under it and
     /// starts a selection anchor; the drag turns the anchor into a range.
     /// Put text on the system clipboard, by hand.
@@ -1022,6 +1235,16 @@ impl App {
     fn pointer_down(&mut self, at: (f64, f64)) {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
+        }
+        // A link is a click target, not a selection: pressing one opens it and
+        // starts no drag. Without a link under the pointer this falls straight
+        // through to the selection code below.
+        if let Some(link) = self.hover_link.clone() {
+            if self.cell_xy(at.0, at.1) == Some((link.x, link.y)) {
+                self.open_link(&link.uri);
+                self.dragging = false;
+                return;
+            }
         }
         let clicks = self.count_clicks(at);
         self.drag_moved = false;
@@ -2146,6 +2369,21 @@ impl ApplicationHandler<UserEvent> for App {
             self.pointer_up();
             self.repaint("scripted drag");
         }
+        // `--click`: hover first, then press and release on the next wake. A
+        // hand hovers before it clicks, and the link under the pointer only
+        // exists once the pane has answered, which is one frame later.
+        if let Some((at, hovered)) = self.click_script.take() {
+            self.cursor_position = Some(at);
+            if hovered {
+                self.pointer_down(at);
+                self.pointer_up();
+                self.repaint("scripted click");
+            } else {
+                self.hover(at);
+                self.click_script = Some((at, true));
+                self.repaint("scripted click: hover");
+            }
+        }
 
         // `--keys`: one stroke per wake-up, so the frame that follows each one
         // exists before the next arrives. This is the harness the user asked
@@ -2222,6 +2460,11 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Sftp(event) => {
                 self.sftp_event(event);
                 self.repaint("sftp");
+            }
+            UserEvent::Notice(text) => {
+                tracing::info!(%text, "notice");
+                self.toast = Some((text, std::time::Instant::now()));
+                self.repaint("notice");
             }
             UserEvent::Destinations(destinations) => {
                 self.destinations = destinations;
@@ -2327,6 +2570,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some((position.x, position.y));
                 self.pointer_move((position.x, position.y));
+                self.hover((position.x, position.y));
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == winit::event::MouseButton::Left {
@@ -2410,6 +2654,31 @@ impl ApplicationHandler<UserEvent> for App {
                 let captured = self
                     .session_mut()
                     .and_then(|session| session.pane.take_captured());
+                // The pane answered the hover question. Only accept it if the
+                // pointer is still on the cell it was asked about: a reply that
+                // arrives a frame late must not open the wrong link.
+                if let Some(reply) = self.session_mut().and_then(|session| session.pane.take_link())
+                {
+                    if self.hover_cell == Some((reply.x, reply.y)) {
+                        self.hover_link = reply.uri.map(|uri| LinkHover {
+                            x: reply.x,
+                            y: reply.y,
+                            uri,
+                        });
+                    }
+                }
+                // A pointing hand is the whole affordance: a link cell has no
+                // underline to draw, and the cursor says "this is clickable"
+                // everywhere else on the desktop too.
+                let wanted = if self.hover_link.is_some() {
+                    winit::window::CursorIcon::Pointer
+                } else {
+                    winit::window::CursorIcon::Default
+                };
+                if self.cursor_icon != Some(wanted) {
+                    self.cursor_icon = Some(wanted);
+                    gpu.window.set_cursor(wanted);
+                }
                 // A toast lives for 1.8 s and fades over its last 400 ms.
                 const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
                 // Owned, because the draw mutably borrows `self` further down.

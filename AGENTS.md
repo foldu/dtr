@@ -351,6 +351,43 @@ already handled, and `the_form_fish_sends_is_a_prompt` pins it so they stay
 handled. bash and zsh need the snippet from the shell-integration proposal
 sourced from their prompt.
 
+**Clicking a file is a VFS question, and the pane owns the answer.** `crates/dtr-vfs`
+has `Location { backend, path }`, a `Backend` trait (`stat`, `open`, `list`) and
+two implementations: `Local` and an in-memory one for tests. The rules baked into
+it are the ones that were argued about:
+
+- **A `Location` comes from the pane, not from a URI.** `file:///etc/hosts`
+  printed on `jupyter` means jupyter's file. `BackendId::Ssh` can only be built
+  from a session that *is* remote, and `Vfs::backend` refuses it outright rather
+  than falling back to local — a remote path must never be read off this disk.
+- **Listings are batches**, because `readdir` answers in chunks and a large
+  directory over a slow link is the normal case. Dropping the receiver cancels
+  the walk, which is the cancel.
+- **Capabilities are declared.** No remote watch, no directory size; the UI hides
+  what is not there instead of polling and pretending.
+
+**A hyperlink is asked about, not carried in the frame.** OSC 8 lives in the
+terminal, which never leaves the pane thread, so `Command::HyperlinkAt { x, y }`
+answers into a slot. It is *not* resolved per cell during publish: one
+`hyperlink_uri` call per cell is ~8 ns of FFI, and on a dense 3808-cell grid that
+is another 30 µs on a 41 µs publish for a link nobody is pointing at. The reply
+carries the cell it was asked about, so a frame-late answer is dropped instead of
+opening the wrong link — hover state without that is a race with a real mouse.
+
+Only `file:` is understood, with no authority or `localhost`, percent-decoded,
+`stat`ed through the VFS and handed to `xdg-open`/`open`/`explorer` — never a
+shell, because the path comes from a program's output. A directory, a remote
+session, or another scheme is said out loud in a toast. A press on a link opens
+it and starts no drag; everywhere else a press still selects.
+
+`--click x,y` exists because the hover has to happen before the press for a link
+to be known: it moves, waits one frame, then presses. That is what a hand does,
+and it means the scripted path exercises the real one.
+
+**Files work has its own runtime.** `App::files_rt` is separate from `App::worker`
+(which keeps scans): a directory walk must not queue behind serial-port
+enumeration, and the SFTP work that follows will need it.
+
 **A shell that exits closes its tab.** The pane cannot do it — the UI owns the
 tab — so the pty reader sets `Pane::ended` on EOF (the child closed the pty, so
 it has exited) and calls `wake`; `App::reap_ended` closes those tabs, highest

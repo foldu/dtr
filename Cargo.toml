@@ -25,6 +25,7 @@ libghostty-vt-sys = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "9e
 
 anyhow = "1"
 dtr-sftp = { path = "crates/dtr-sftp" }
+dtr-vfs = { path = "crates/dtr-vfs" }
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 dirs = "6"

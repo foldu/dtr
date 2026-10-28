@@ -1,0 +1,14 @@
+[package]
+name = "dtr-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Files, whichever machine they live on: one trait over local and remote"
+
+[dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
