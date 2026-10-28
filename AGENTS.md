@@ -285,6 +285,16 @@ wake rather than a hopeful one.
 This is the general shape of "the UI only updates when I touch it", and it is
 worth checking before blaming the work itself.
 
+**A shell that exits closes its tab.** The pane cannot do it — the UI owns the
+tab — so the pty reader sets `Pane::ended` on EOF (the child closed the pty, so
+it has exited) and calls `wake`; `App::reap_ended` closes those tabs, highest
+index first so the shifts do not invalidate the rest. The last tab closing takes
+the window with it, which is what `exit` does in any terminal.
+
+`ended` is a flag rather than a message because the reader is a plain thread and
+the UI polls the frames anyway; a channel would need its own arm in the loop for
+something that happens once.
+
 **Closing a tab is teardown, and teardown is slow.** Dropping a `Tab` drops a pty
 and the thread that owns it; the child has to notice and exit, which is not
 instant. `close_tab` therefore hands the dead tab to the worker runtime

@@ -600,6 +600,33 @@ impl App {
         }
     }
 
+    /// Close a session that has ended: `Ctrl-D`, `exit`, or a pty that would
+    /// not read again.
+    ///
+    /// The pane cannot close itself — the UI owns the tab — so it sets a flag
+    /// and wakes the loop, and this reaps it. The last tab closing still takes
+    /// the window with it, which is what a shell exiting does in any terminal:
+    /// there is nothing left to show.
+    fn reap_ended(&mut self) {
+        let ended: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| {
+                tab.leaves.values().any(|pane| match pane {
+                    Pane::Terminal(session) => session.pane.ended(),
+                    _ => false,
+                })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        // Highest first: closing shifts the indices after it.
+        for index in ended.into_iter().rev() {
+            tracing::debug!(tab = index, "session ended; closing its tab");
+            self.close_tab(index);
+        }
+    }
+
     /// Change the active tab, and say who asked.
     ///
     /// A tab that switches itself back is impossible to chase from the outside:
@@ -1813,6 +1840,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        self.reap_ended();
         if let Some(err) = self.session().and_then(|session| session.pane.error()) {
             tracing::error!(%err, "pane failed");
             self.fatal = Some(err);

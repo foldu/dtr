@@ -221,6 +221,9 @@ pub struct Pane {
     /// A fatal pane error. The pane thread owns the terminal, so a failure to
     /// open a port happens out of sight; this is how it reaches the UI.
     error: Arc<Mutex<Option<String>>>,
+    /// The child is gone: `Ctrl-D`, `exit`, or a pty that would not read again.
+    /// A shell that has ended has nothing left to show, so the UI closes it.
+    ended: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Pane {
@@ -242,6 +245,8 @@ impl Pane {
         let copy_sink = Arc::clone(&copied);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let failure = Arc::clone(&error);
+        let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended_flag = Arc::clone(&ended);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
@@ -268,6 +273,7 @@ impl Pane {
                         counted,
                         log,
                         copy_sink,
+                        Arc::clone(&ended_flag),
                         theme,
                     )
                     .await
@@ -287,6 +293,7 @@ impl Pane {
             stats,
             error,
             copied,
+            ended,
         })
     }
 
@@ -305,6 +312,11 @@ impl Pane {
     }
 
     /// The pane's fatal error, if it hit one.
+    /// True once the process behind this pane has gone away.
+    pub fn ended(&self) -> bool {
+        self.ended.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|slot| slot.clone())
     }
@@ -330,6 +342,7 @@ async fn run(
     stats: Arc<Stats>,
     log_path: Option<(PathBuf, serial::LogFormat)>,
     copied: Arc<Mutex<Option<String>>>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
     theme: Option<crate::theme::Theme>,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
@@ -471,13 +484,20 @@ async fn run(
             source_alive = true;
             let pty_log = log.clone();
             let pty_tx = bytes_tx.clone();
+            let pty_ended = Arc::clone(&ended);
+            let pty_wake = Arc::clone(&wake);
             std::thread::Builder::new()
                 .name("dtr-pty".into())
                 .spawn(move || {
                     let mut buf = [0u8; 8192];
                     loop {
                         match reader.read(&mut buf) {
-                            Ok(0) => break,
+                            // EOF: the child closed the pty, so it has exited.
+                            Ok(0) => {
+                                pty_ended.store(true, std::sync::atomic::Ordering::Relaxed);
+                                pty_wake();
+                                break;
+                            }
                             Ok(n) => {
                                 log_chunk(&pty_log, &buf[..n]);
                                 if pty_tx.send(buf[..n].to_vec()).is_err() {
@@ -486,6 +506,8 @@ async fn run(
                             }
                             Err(err) => {
                                 tracing::warn!(%err, "pty read");
+                                pty_ended.store(true, std::sync::atomic::Ordering::Relaxed);
+                                pty_wake();
                                 break;
                             }
                         }
