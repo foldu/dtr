@@ -1143,7 +1143,25 @@ impl App {
             self.quit = true;
             return;
         }
-        self.tabs.remove(index);
+        // Dropping a tab tears down a pty and the thread that owns it, which
+        // can take as long as the child takes to notice. That is not allowed to
+        // happen between two frames: the tab goes to the worker runtime and the
+        // UI thread moves on.
+        let dead = self.tabs.remove(index);
+        let at = std::time::Instant::now();
+        match self.worker.as_ref() {
+            Some(worker) => {
+                worker.spawn_blocking(move || {
+                    let started = std::time::Instant::now();
+                    drop(dead);
+                    tracing::debug!(ms = started.elapsed().as_millis(), "tab torn down");
+                });
+            }
+            None => {
+                drop(dead);
+                tracing::debug!(ms = at.elapsed().as_millis(), "tab torn down inline");
+            }
+        }
         // Focus the tab that took its place, or the one before it when the last
         // tab closed.
         if self.active > index {

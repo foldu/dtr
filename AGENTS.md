@@ -217,6 +217,12 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**Closing a tab is teardown, and teardown is slow.** Dropping a `Tab` drops a pty
+and the thread that owns it; the child has to notice and exit, which is not
+instant. `close_tab` therefore hands the dead tab to the worker runtime
+(`spawn_blocking`) and logs how long the teardown took, so a slow close is visible
+in `-v` instead of feeling like a stuck button.
+
 **The UI thread asks for slow work, it does not do it.** Enumerating serial ports
 touches udev or SetupAPI and reading the ssh config is a file read; both are
 milliseconds-to-tens-of-milliseconds, which on the drawing thread is a dropped
