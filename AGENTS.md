@@ -317,6 +317,32 @@ never adopted even if the remote host happens to share this machine's name.
 
 `+` → local shell starts in the focused tab's directory when that tab is local.
 
+**A prompt mark is a reference, not a row — and the core already knows where
+the prompts are.** OSC 133 (`A` prompt starts, `B` input starts, `C` output
+starts, `D;exit` command ends) is what shell integration emits, and libghostty
+parses it: `ScrollViewport::DeltaPrompt(n)` walks the viewport prompt to prompt,
+so `previous-prompt` (`ctrl-shift-up`) needs nothing from dtr at all.
+
+What dtr keeps is for *capture*: `PromptMarks` records each `A` as a
+`TrackedGridRef`, which follows the page list through scrolling, pruning and
+reflow — a row number would go stale the moment the block scrolled. The block
+is then `Selection::new(previous_prompt, cursor)`, formatted with trim and
+unwrap, so it includes the command line as well as its output.
+
+Two things measured while building it. `select_output` is the tempting API and
+is not what a pager wants: it returns `None` unless the grid reference is
+*inside* the output, and it covers the output only. And a sequence arrives in
+whatever pieces the pty hands over, so the introducer can end a read — a search
+for the whole `ESC ] 133 ;` finds nothing there, and writing those bytes loses
+the mark. The tail is held back unwritten (prefix included) until the
+terminator arrives, or flushed past `CARRY_MAX` so a bogus introducer cannot
+stall the session.
+
+`capture-block` (`ctrl-shift-o`) parks the text in the pane's `captured` slot
+and the UI says how much it took; the pager that will read it is not written
+yet. Without shell integration there are no marks, and the toast says so
+instead of inventing a block.
+
 **A shell that exits closes its tab.** The pane cannot do it — the UI owns the
 tab — so the pty reader sets `Pane::ended` on EOF (the child closed the pty, so
 it has exited) and calls `wake`; `App::reap_ended` closes those tabs, highest

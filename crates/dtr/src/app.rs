@@ -1174,6 +1174,26 @@ impl App {
                 });
                 true
             }
+            Action::PreviousPrompt | Action::NextPrompt => {
+                let Some(session) = self.session() else {
+                    return false;
+                };
+                session.pane.send(crate::pane::Command::ScrollPrompt(
+                    if matches!(action, Action::PreviousPrompt) {
+                        -1
+                    } else {
+                        1
+                    },
+                ));
+                true
+            }
+            Action::CaptureBlock => {
+                let Some(session) = self.session() else {
+                    return false;
+                };
+                session.pane.send(crate::pane::Command::CaptureBlock);
+                true
+            }
             Action::ModemDtr | Action::ModemRts | Action::ModemBreak => {
                 let Some(session) = self.session() else {
                     return false;
@@ -2310,6 +2330,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut copied_text = self
                     .session_mut()
                     .and_then(|session| session.pane.take_copied());
+                let captured = self
+                    .session_mut()
+                    .and_then(|session| session.pane.take_captured());
                 // A toast lives for 1.8 s and fades over its last 400 ms.
                 const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
                 // Owned, because the draw mutably borrows `self` further down.
@@ -2467,6 +2490,21 @@ impl ApplicationHandler<UserEvent> for App {
                     _ => {}
                 }
                 drop(toast_text);
+                if let Some(text) = captured {
+                    // The pager that will read this does not exist yet; for now
+                    // it says what it grabbed, which is also how a missing shell
+                    // integration shows up.
+                    let note = if text.is_empty() {
+                        "nothing to capture — the shell has not marked a prompt".to_owned()
+                    } else {
+                        format!(
+                            "captured {} lines, {} bytes",
+                            text.lines().count(),
+                            text.len()
+                        )
+                    };
+                    self.toast = Some((note, std::time::Instant::now()));
+                }
                 if let Some(text) = copied {
                     // Both paths: egui's, so its own paste and IME state agree,
                     // and ours, so the text reaches the desktop either way.

@@ -27,6 +27,11 @@ pub enum Action {
     ScrollPageDown,
     ScrollTop,
     ScrollBottom,
+    /// Walk the viewport to the previous prompt (the shell has to mark them).
+    PreviousPrompt,
+    NextPrompt,
+    /// Capture the last command's output block for the pager.
+    CaptureBlock,
     ModemDtr,
     ModemRts,
     ModemBreak,
@@ -51,6 +56,9 @@ impl Action {
             Self::ScrollPageDown => "scroll-page-down",
             Self::ScrollTop => "scroll-top",
             Self::ScrollBottom => "scroll-bottom",
+            Self::PreviousPrompt => "previous-prompt",
+            Self::NextPrompt => "next-prompt",
+            Self::CaptureBlock => "capture-block",
             Self::ModemDtr => "modem-dtr",
             Self::ModemRts => "modem-rts",
             Self::ModemBreak => "modem-break",
@@ -66,7 +74,7 @@ impl Action {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 18] = [
+pub const ALL: [Action; 21] = [
     Action::Palette,
     Action::Settings,
     Action::NewTab,
@@ -81,6 +89,9 @@ pub const ALL: [Action; 18] = [
     Action::ScrollPageDown,
     Action::ScrollTop,
     Action::ScrollBottom,
+    Action::PreviousPrompt,
+    Action::NextPrompt,
+    Action::CaptureBlock,
     Action::ModemDtr,
     Action::ModemRts,
     Action::ModemBreak,
@@ -108,6 +119,11 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("scroll-page-down", "shift-pagedown"),
     ("scroll-top", "shift-home"),
     ("scroll-bottom", "shift-end"),
+    // Only do anything when the shell emits OSC 133, which is what marks a
+    // prompt; without it the core has no prompts to walk to.
+    ("previous-prompt", "ctrl-shift-up"),
+    ("next-prompt", "ctrl-shift-down"),
+    ("capture-block", "ctrl-shift-o"),
     ("modem-dtr", "ctrl-shift-d"),
     ("modem-rts", "ctrl-shift-r"),
     ("modem-break", "ctrl-shift-b"),

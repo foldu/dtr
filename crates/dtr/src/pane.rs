@@ -15,6 +15,9 @@ use std::thread;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
+use libghostty_vt::screen::TrackedGridRef;
+use libghostty_vt::selection::{FormatOptions, Selection};
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use portable_pty::{Child, MasterPty};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
@@ -183,6 +186,12 @@ pub enum Command {
     /// Copy a cell range: `(start, end)` as linear indices, in either order.
     CopyRange(usize, usize),
     Paste(Vec<u8>),
+    /// Walk the viewport to the previous (negative) or next prompt mark, which
+    /// only exists when the shell emits OSC 133.
+    ScrollPrompt(isize),
+    /// Capture the block the last command produced — from the prompt before this
+    /// one through to the cursor — into the pane's captured slot.
+    CaptureBlock,
     /// Apply a theme to the live terminal. Cells are re-read from the terminal,
     /// so existing text takes the new palette too.
     SetTheme(Option<crate::theme::Theme>),
@@ -248,6 +257,9 @@ pub struct Pane {
     stats: Arc<Stats>,
     /// The last thing the pane copied, for the UI to put on the clipboard.
     copied: Arc<Mutex<Option<String>>>,
+    /// The block the last `CaptureBlock` read out of the terminal, waiting for
+    /// the UI to take it. The pager that will read it does not exist yet.
+    captured: Arc<Mutex<Option<String>>>,
     /// A fatal pane error. The pane thread owns the terminal, so a failure to
     /// open a port happens out of sight; this is how it reaches the UI.
     error: Arc<Mutex<Option<String>>>,
@@ -276,6 +288,8 @@ impl Pane {
         let counted = Arc::clone(&stats);
         let copied: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let copy_sink = Arc::clone(&copied);
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_sink = Arc::clone(&captured);
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let failure = Arc::clone(&error);
         let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -308,6 +322,7 @@ impl Pane {
                         counted,
                         log,
                         copy_sink,
+                        captured_sink,
                         Arc::clone(&ended_flag),
                         Arc::clone(&cwd_seen),
                         theme,
@@ -330,6 +345,7 @@ impl Pane {
             stats,
             error,
             copied,
+            captured,
             ended,
             cwd,
         })
@@ -347,6 +363,11 @@ impl Pane {
     /// Text the pane copied, if it has produced any since the last call.
     pub fn take_copied(&self) -> Option<String> {
         self.copied.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// The last command block the pane captured, if one is waiting.
+    pub fn take_captured(&self) -> Option<String> {
+        self.captured.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// The pane's fatal error, if it hit one.
@@ -385,6 +406,7 @@ async fn run(
     stats: Arc<Stats>,
     log_path: Option<(PathBuf, serial::LogFormat)>,
     copied: Arc<Mutex<Option<String>>>,
+    captured: Arc<Mutex<Option<String>>>,
     ended: Arc<std::sync::atomic::AtomicBool>,
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
@@ -583,6 +605,7 @@ async fn run(
     publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
 
     let mut sniffer = CwdSniffer::default();
+    let mut marks = PromptMarks::default();
     // Publishing is what a flood costs, not parsing: one frame rebuilds every
     // cell of the grid. So a pane publishes at most once per budget — and, when
     // it has to wait, a timer arm publishes the frame it owes rather than
@@ -615,7 +638,7 @@ async fn run(
                                     *slot = Some(dir);
                                 }
                             }
-                            term.vt_write(&bytes);
+                            marks.write(&mut term, &bytes)?;
                             if tokio::time::Instant::now() >= deadline {
                                 break;
                             }
@@ -808,6 +831,34 @@ async fn run(
                         // looks like a broken wheel.
                         publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
                         note_scrollback(&term, &stats);
+                    }
+                    Command::ScrollPrompt(delta) => {
+                        term.scroll_viewport(
+                            libghostty_vt::terminal::ScrollViewport::DeltaPrompt(delta),
+                        );
+                        // Forced, for the same reason as `Scroll`: a viewport
+                        // move does not necessarily dirty the render state.
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
+                        note_scrollback(&term, &stats);
+                    }
+                    Command::CaptureBlock => {
+                        match capture_block(&term, &marks) {
+                            Ok(Some(text)) => {
+                                tracing::info!(
+                                    bytes = text.len(),
+                                    lines = text.lines().count(),
+                                    "captured the last command block"
+                                );
+                                if let Ok(mut slot) = captured.lock() {
+                                    *slot = Some(text);
+                                }
+                                wake();
+                            }
+                            Ok(None) => tracing::info!(
+                                "nothing to capture: no prompt marks, or no command yet"
+                            ),
+                            Err(err) => tracing::warn!(%err, "could not capture the block"),
+                        }
                     }
                     Command::ScrollEdge { top } => {
                         term.scroll_viewport(if top {
@@ -1125,6 +1176,169 @@ fn publish(
     }
     wake();
     Ok(())
+}
+
+/// Where the shell's prompts are.
+///
+/// `OSC 133 ; A` (and `; N`) is emitted by shell integration *before* the prompt
+/// is drawn, so the cursor at that byte is the prompt's first cell. The position
+/// is kept as a [`TrackedGridRef`] rather than a row number: it follows the page
+/// list through scrolling, pruning and reflow, which is what a mark has to
+/// survive.
+///
+/// The sequence arrives in the byte stream ahead of the parser, so a chunk is
+/// written to the terminal in pieces around it. A sequence split across two
+/// reads is held back unwritten until its terminator arrives — writing a
+/// partial one and marking later would put the mark in the wrong place.
+#[derive(Default)]
+struct PromptMarks {
+    marks: std::collections::VecDeque<TrackedGridRef>,
+    /// An unterminated `ESC ] 133 ;` that has not been handed to the parser.
+    carry: Vec<u8>,
+}
+
+impl PromptMarks {
+    /// Prompts remembered; a jump and a capture only look at the last two, the
+    /// rest is for a future "go back N commands".
+    const KEEP: usize = 128;
+    /// A held-back sequence longer than this is not one this understands, so it
+    /// is flushed rather than stalling the session behind a bogus introducer.
+    const CARRY_MAX: usize = 64;
+    const INTRO: &'static [u8] = b"\x1b]133;";
+
+    /// Write `bytes` to the terminal, recording every prompt in them.
+    fn write(&mut self, term: &mut Terminal<'_, '_>, bytes: &[u8]) -> anyhow::Result<()> {
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.extend_from_slice(bytes);
+
+        let mut written = 0usize;
+        let mut at = 0usize;
+        while let Some(offset) = find(&buf[at..], Self::INTRO) {
+            let start = at + offset;
+            let body = start + Self::INTRO.len();
+            // The command letter, then the terminator. Either can be in the
+            // next read, and then the whole thing waits in the carry.
+            let Some(&kind) = buf.get(body) else { break };
+            let Some((offset, len)) = terminator(&buf[body..]) else {
+                break;
+            };
+            let end = body + offset + len;
+
+            term.vt_write(&buf[written..end]);
+            written = end;
+            if matches!(kind, b'A' | b'N') {
+                self.mark(term)?;
+            }
+            at = end;
+        }
+
+        // Whatever is left is ordinary output, except for an introducer whose
+        // sequence has not arrived yet — including one that has only partly
+        // arrived, which a search for the whole introducer cannot see.
+        let hold = find(&buf[written..], Self::INTRO)
+            .or_else(|| partial_tail(&buf[written..], Self::INTRO))
+            .map(|offset| written + offset);
+        match hold {
+            Some(start) if buf.len() - start <= Self::CARRY_MAX => {
+                term.vt_write(&buf[written..start]);
+                self.carry = buf[start..].to_vec();
+            }
+            _ => {
+                term.vt_write(&buf[written..]);
+                self.carry.clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the prompt that starts at the cursor.
+    fn mark(&mut self, term: &mut Terminal<'_, '_>) -> anyhow::Result<()> {
+        // The spec's fresh-line: a prompt starts a line even if the shell did
+        // not move there itself.
+        if term.cursor_x()? > 0 {
+            term.vt_write(b"\r\n");
+        }
+        let point = Point::Active(PointCoordinate {
+            x: term.cursor_x()?,
+            y: u32::from(term.cursor_y()?),
+        });
+        if let Ok(mark) = term.track_grid_ref(point) {
+            self.marks.push_back(mark);
+            while self.marks.len() > Self::KEEP {
+                self.marks.pop_front();
+            }
+        }
+        Ok(())
+    }
+
+    /// The prompt the last command started at: the current one when the cursor
+    /// is sitting at a prompt, the running command's own prompt otherwise.
+    fn block_start(&self, term: &Terminal<'_, '_>) -> Option<&TrackedGridRef> {
+        let back = if term.is_cursor_at_prompt().unwrap_or(false) {
+            2
+        } else {
+            1
+        };
+        let len = self.marks.len();
+        (len >= back).then(|| &self.marks[len - back])
+    }
+}
+
+/// Where a suffix that is a proper prefix of `needle` starts, if there is one.
+///
+/// A sequence arrives in whatever pieces the pty hands over, so `\x1b]1` can be
+/// the end of a read. Searching for the whole introducer finds nothing there,
+/// and writing the bytes would put the mark in the wrong place — or nowhere.
+fn partial_tail(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    (1..needle.len())
+        .rev()
+        .find(|len| bytes.ends_with(&needle[..*len]))
+        .map(|len| bytes.len() - len)
+}
+
+/// Offset of the first `BEL` or `ESC \\` terminator, and its length.
+fn terminator(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            0x07 => return Some((at, 1)),
+            0x1b if bytes.get(at + 1) == Some(&b'\\') => return Some((at, 2)),
+            // A bare ESC inside the sequence means it is malformed; scanning
+            // past it would only misread the next one.
+            0x1b => return None,
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// The text of the block the last command produced: from the prompt it started
+/// at to the cursor. `None` when the shell has not marked any prompt, or the
+/// block has been pruned out of the scrollback.
+fn capture_block(
+    term: &Terminal<'_, '_>,
+    marks: &PromptMarks,
+) -> anyhow::Result<Option<String>> {
+    let Some(start) = marks.block_start(term) else {
+        return Ok(None);
+    };
+    let Some(start) = start.snapshot(term)? else {
+        return Ok(None);
+    };
+    let end = term.grid_ref(Point::Active(PointCoordinate {
+        x: term.cursor_x()?,
+        y: u32::from(term.cursor_y()?),
+    }))?;
+
+    let selection = Selection::new(start, end, false);
+    let options = FormatOptions::new()
+        .with_selection(&selection)
+        .with_trim(true)
+        .with_unwrap(true);
+    let Some(bytes) = term.format_selection_alloc(None, options)? else {
+        return Ok(None);
+    };
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Watches the byte stream for OSC 7, the working-directory report.
@@ -1454,6 +1668,72 @@ mod cwd_tests {
     fn ordinary_output_is_not_a_directory() {
         assert_eq!(path_of(b"just a shell saying hello\x07"), None);
         assert_eq!(path_of(b"\x1b]0;a title\x07"), None);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::{PromptMarks, capture_block};
+    use libghostty_vt::Terminal;
+
+    fn terminal() -> Terminal<'static, 'static> {
+        Terminal::new(40, 6).unwrap()
+    }
+
+    /// A shell that emits the semantic-prompt sequence one byte at a time is the
+    /// normal case, not a corner: a pty hands over whatever the shell wrote, and
+    /// a prompt written in small pieces arrives that way.
+    #[test]
+    fn a_sequence_split_across_reads_is_still_a_mark() {
+        let mut term = terminal();
+        let mut marks = PromptMarks::default();
+        let bytes = b"$ \x1b]133;A\x07";
+        for byte in bytes {
+            marks.write(&mut term, &[*byte]).unwrap();
+        }
+        assert_eq!(marks.marks.len(), 1, "the prompt should have been marked");
+        assert!(term.is_cursor_at_prompt().unwrap());
+    }
+
+    /// The spec's fresh-line: a prompt begins a line even when the shell did
+    /// not move the cursor there itself.
+    #[test]
+    fn a_prompt_that_does_not_start_a_line_gets_one() {
+        let mut term = terminal();
+        let mut marks = PromptMarks::default();
+        marks.write(&mut term, b"abc").unwrap();
+        marks.write(&mut term, b"\x1b]133;A\x07").unwrap();
+        assert_eq!(term.cursor_x().unwrap(), 0);
+        assert_eq!(term.cursor_y().unwrap(), 1);
+    }
+
+    /// The block is the command, not just its output — that is what a pager
+    /// wants to show, and it is why `select_output` is not used.
+    #[test]
+    fn the_block_runs_from_the_previous_prompt_to_here() {
+        let mut term = terminal();
+        let mut marks = PromptMarks::default();
+        marks
+            .write(
+                &mut term,
+                b"$ \x1b]133;A\x07$ \x1b]133;B\x07echo hi\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+            )
+            .unwrap();
+
+        let block = capture_block(&term, &marks).unwrap().expect("a block");
+        assert!(block.contains("echo hi"), "no command line in {block:?}");
+        assert!(block.contains("hi"), "no output in {block:?}");
+        assert!(block.starts_with("$ "), "block does not start at the prompt: {block:?}");
+    }
+
+    /// Without shell integration there are no marks, and capture says so rather
+    /// than inventing a block.
+    #[test]
+    fn a_session_without_prompts_captures_nothing() {
+        let mut term = terminal();
+        let mut marks = PromptMarks::default();
+        marks.write(&mut term, b"just output\r\n").unwrap();
+        assert!(capture_block(&term, &marks).unwrap().is_none());
     }
 }
 
