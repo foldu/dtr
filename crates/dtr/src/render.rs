@@ -274,6 +274,12 @@ impl GridRenderer {
     /// Panes share one instance buffer and one draw: a per-pane draw would need
     /// the buffer rewritten between them, and the queue writes all land before
     /// the command buffer is submitted, so the last pane would win.
+    /// How many glyphs this frame rasterised: a large number means the frame is
+    /// paying for font work, not for drawing.
+    pub fn glyphs(&self) -> usize {
+        self.fonts.glyphs
+    }
+
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -282,6 +288,10 @@ impl GridRenderer {
         look: &Look,
         screen: (f32, f32),
     ) {
+        // What a frame actually costs, split where it can differ: glyph work
+        // (font resolution and rasterising) against everything else. A slow
+        // switch between tabs and a slow redraw look identical from outside.
+        self.fonts.glyphs = 0;
         self.screen = [screen.0, screen.1];
         queue.write_buffer(
             &self.uniform,
@@ -657,6 +667,8 @@ struct Fonts {
     /// Han character is found here instead of walking every family again.
     fallback_order: Vec<usize>,
     collection: Option<fontique::Collection>,
+    /// Glyphs rasterised in the current frame, for the frame log.
+    glyphs: usize,
     source_cache: fontique::SourceCache,
 }
 
@@ -717,6 +729,7 @@ impl Fonts {
             collection: Some(fontique::Collection::new(
                 fontique::CollectionOptions::default(),
             )),
+            glyphs: 0,
             source_cache: fontique::SourceCache::default(),
         }
     }
@@ -860,6 +873,7 @@ impl Fonts {
         glyph_id: u16,
         size: f32,
     ) -> Option<swash::scale::image::Image> {
+        self.glyphs += 1;
         // The font borrows the face's bytes, the context is a separate field:
         // split the borrow so both can be used at once.
         let loaded = self.faces.get(face)?;

@@ -1914,6 +1914,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .collect();
                 let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
                 let look = self.look.clone();
+                let frame_at = std::time::Instant::now();
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
@@ -1987,6 +1988,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.toast = None;
                 }
                 self.frames_drawn = self.frames_drawn.wrapping_add(1);
+                // A frame that took long enough to feel is worth a line: the
+                // glyph count says whether it was font work or drawing.
+                let frame_ms = frame_at.elapsed().as_secs_f32() * 1000.0;
+                if frame_ms > 8.0 {
+                    tracing::debug!(
+                        ms = format!("{frame_ms:.1}"),
+                        glyphs = gpu.grid.glyphs(),
+                        "slow frame"
+                    );
+                }
                 if let Err(err) = rendered {
                     tracing::error!(%err, "render");
                 }
