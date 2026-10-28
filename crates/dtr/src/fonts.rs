@@ -155,6 +155,27 @@ pub fn default_family(usable: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::usable_families;
+
+    /// The settings menu asks for this list when it opens, and the first call
+    /// builds a fontconfig collection and probes every family. That cost is why
+    /// the app warms it on a worker thread at startup; if the cache is ever
+    /// removed, the first `Ctrl+,` becomes a stall again - and this test says so.
+    #[test]
+    fn the_family_list_is_computed_once() {
+        let first = std::time::Instant::now();
+        let families = usable_families();
+        let cold = first.elapsed();
+        let second = std::time::Instant::now();
+        let again = usable_families();
+        let warm = second.elapsed();
+        assert_eq!(families, again, "the same list, not a re-probe");
+        assert!(
+            warm < std::time::Duration::from_millis(5),
+            "second call took {warm:?}; the cache is gone (cold was {cold:?})"
+        );
+    }
+
     use super::*;
 
     #[test]

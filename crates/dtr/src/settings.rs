@@ -140,12 +140,21 @@ impl Settings {
         self.row = 0;
         self.draft = config.clone();
         self.original = config.clone();
+        // The font list costs a fontconfig walk the first time; the app warms
+        // it off the drawing thread so opening this menu does not.
+        let started = std::time::Instant::now();
         if self.families.is_empty() {
             self.families = crate::fonts::usable_families();
         }
         if self.themes.is_empty() {
             self.themes = crate::theme::names();
         }
+        tracing::debug!(
+            elapsed_us = started.elapsed().as_micros() as u64,
+            families = self.families.len(),
+            themes = self.themes.len(),
+            "settings populated"
+        );
     }
 
     pub fn draft(&self) -> &Config {

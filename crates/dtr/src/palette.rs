@@ -71,7 +71,10 @@ impl Palette {
         );
     }
 
-    /// Which completion is highlighted. The tests read it to check the keys.
+    /// Which completion is highlighted. Read by the tests to check the keys,
+    /// and test-only on purpose: production draws the highlight, it does not ask
+    /// where it is.
+    #[cfg(test)]
     pub fn selected(&self) -> usize {
         self.selected
     }

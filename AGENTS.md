@@ -445,6 +445,18 @@ a list that had just been made test-only. Before believing a local build, run
 `git add` and `nix build .#dtr`; a dirty-tree `cargo build` can compile a stale
 file set in ways the release build will not.
 
+**A menu that opens slowly the first time is doing its work in the frame.**
+`Settings::show` fills two lists: the installed font families and the theme files.
+The families are the expensive one — `usable_families` builds a fontconfig
+collection and probes every family, which is the same `FcFontSort` cost that showed
+up in a profile at 16%. It is cached in a `OnceLock`, so the *second* open is
+instant, which is exactly the shape of "slow the first time, fine afterwards".
+
+The app now warms both on a `dtr-warm` thread at startup, and `-v` logs
+`warmed the settings lists` with the cost, plus `settings populated` on each open so
+a regression is a number rather than a feeling. `the_family_list_is_computed_once`
+fails if the cache is ever removed.
+
 **The settings menu is mouse-first.** Rows are click targets, the font size is a
 drag value, the family and the theme are combo boxes, the toggles are checkboxes;
 the keyboard still works but nothing needs it. `Settings::ui` takes `&self` (the
