@@ -2009,10 +2009,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // egui asks for another frame when something it drew needs one —
                 // opening a popup, an animation, a hover highlight. Nobody calls
-                // `repaint` for those, so the request has to be carried to the
-                // event loop here or the menu only appears when the mouse moves.
+                // `repaint` for those, so the request has to reach the event
+                // loop. It does **not** set the `wake` flag: a wake means "this
+                // is due now" and a zero-delay wait, and egui asks again every
+                // frame while anything animates, which spins the loop at 100% CPU
+                // instead of idling. A plain redraw request is enough — the
+                // compositor delivers it.
                 if gpu.egui_ctx.has_requested_repaint() {
-                    self.repaint("egui asked");
+                    gpu.window.request_redraw();
                 }
                 self.frames_drawn = self.frames_drawn.wrapping_add(1);
                 // A frame that took long enough to feel is worth a line: the

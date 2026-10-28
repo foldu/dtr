@@ -217,6 +217,13 @@ the rows of a taller area and the first prompt row was drawn underneath the stri
 Both now ask `App::top_inset`, so a strip can appear without moving a row under it —
 the same class of bug as the status bar covering the last row.
 
+**A wake flag set every frame is a busy loop.** Carrying egui's repaint request as a
+*wake* (a zero-delay `WaitUntil`) spun the loop at full CPU: egui asks for a frame
+again while anything animates, so the next `poll` timed out instantly and the
+cycle repeated — 77% of samples sat inside `polling::Poller::wait_impl` and only
+9% were frames. egui's request is a plain `request_redraw` now; the `wake` flag is
+kept for *our* state changes, which need an immediate frame exactly once.
+
 **egui's own repaint request has to be carried too.** Opening the `+` menu draws
 nothing until the mouse moves, because a popup appears on the *next* frame and
 nothing in dtr called `repaint` for it — the request was egui's. After each frame
