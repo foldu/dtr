@@ -16,7 +16,9 @@ use std::thread;
 use libghostty_vt::Terminal;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
 use libghostty_vt::screen::TrackedGridRef;
-use libghostty_vt::selection::{FormatOptions, Selection};
+use libghostty_vt::selection::{
+    FormatOptions, SelectLineOptions, SelectWordOptions, Selection,
+};
 use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
 use portable_pty::{Child, MasterPty};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -194,6 +196,10 @@ pub enum Command {
     SelectStart { x: u16, y: u16 },
     /// Move the selection's head to a viewport cell.
     SelectHead { x: u16, y: u16 },
+    /// A double-click: the word under a viewport cell.
+    SelectWord { x: u16, y: u16 },
+    /// A triple-click: the line under a viewport cell.
+    SelectLine { x: u16, y: u16 },
     /// Put the current selection on the clipboard.
     CopySelection,
     /// Walk the viewport to the previous (negative) or next prompt mark, which
@@ -937,6 +943,24 @@ async fn run(
                             )?;
                         }
                     }
+                    Command::SelectWord { x, y } => {
+                        if let Some(anchors) = select_word(&term, x, y) {
+                            selection = Some(anchors);
+                            publish(
+                                &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
+                                true, selection.as_ref(),
+                            )?;
+                        }
+                    }
+                    Command::SelectLine { x, y } => {
+                        if let Some(anchors) = select_line(&term, x, y) {
+                            selection = Some(anchors);
+                            publish(
+                                &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
+                                true, selection.as_ref(),
+                            )?;
+                        }
+                    }
                     Command::CopySelection => {
                         let text = selection
                             .as_ref()
@@ -1244,6 +1268,56 @@ impl SelectionAnchors {
         let bytes = term.format_selection_alloc(None, options).ok()??;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
+}
+
+/// Hold a selection the core derived — a word, a line — as anchors.
+///
+/// Both ends have to be on screen: a word or a line always is, and a selection
+/// that is not cannot be anchored to a viewport cell at all.
+fn anchors_from(term: &Terminal<'_, '_>, selection: &Selection<'_>) -> Option<SelectionAnchors> {
+    // Bound before the conversion: the grid references are borrowed, and a
+    // temporary from `selection.start()` would not outlive the call.
+    let (start, head) = (selection.start(), selection.end());
+    let start = term
+        .point_from_grid_ref(&start, PointSpace::Viewport)
+        .ok()??;
+    let head = term
+        .point_from_grid_ref(&head, PointSpace::Viewport)
+        .ok()??;
+    Some(SelectionAnchors {
+        start: term.track_grid_ref(Point::Viewport(start)).ok()?,
+        head: term.track_grid_ref(Point::Viewport(head)).ok()?,
+    })
+}
+
+/// The word under a viewport cell, per the core's idea of a word boundary.
+fn select_word(term: &Terminal<'_, '_>, x: u16, y: u16) -> Option<SelectionAnchors> {
+    let grid_ref = viewport_ref(term, x, y)?;
+    let options = SelectWordOptions::new(grid_ref);
+    let selection = term.select_word(options).ok()??;
+    anchors_from(term, &selection)
+}
+
+/// The line under a viewport cell, trimmed of the trailing blanks a terminal
+/// fills the rest of the row with.
+fn select_line(term: &Terminal<'_, '_>, x: u16, y: u16) -> Option<SelectionAnchors> {
+    let grid_ref = viewport_ref(term, x, y)?;
+    let options = SelectLineOptions::new(grid_ref);
+    let selection = term.select_line(options).ok()??;
+    anchors_from(term, &selection)
+}
+
+/// A grid reference at a viewport cell.
+fn viewport_ref<'t>(
+    term: &'t Terminal<'_, '_>,
+    x: u16,
+    y: u16,
+) -> Option<libghostty_vt::screen::GridRef<'t>> {
+    term.grid_ref(Point::Viewport(PointCoordinate {
+        x,
+        y: u32::from(y),
+    }))
+    .ok()
 }
 
 /// Where the viewport's first row sits in screen coordinates, which is the row
@@ -1863,6 +1937,39 @@ mod selection_tests {
             Some(1),
             "one row up: the same line, one row higher"
         );
+    }
+
+    /// A double-click takes the word, using the core's idea of a boundary —
+    /// not a split on spaces, so `--flag=value` and quoted words behave the way
+    /// every other terminal does.
+    #[test]
+    fn a_double_click_takes_the_word_under_it() {
+        let mut term = Terminal::new(30, 4).unwrap();
+        term.vt_write(b"echo hello-world again\r\n");
+        let cell = super::select_word(&term, 7, 0).expect("a word");
+        assert_eq!(cell.text(&term).as_deref(), Some("hello-world"));
+    }
+
+    /// ...and the word is an anchor like any other, so it survives a scroll.
+    #[test]
+    fn a_word_selection_survives_a_scroll() {
+        let mut term = terminal();
+        term.vt_write(b"one two three\r\n");
+        let cell = super::select_word(&term, 5, 3).expect("a word");
+        let before = cell.text(&term);
+        assert_eq!(before.as_deref(), Some("two"));
+        term.scroll_viewport(ScrollViewport::Delta(-2));
+        assert_eq!(cell.text(&term), before);
+    }
+
+    /// A triple-click takes the whole line, without the blanks that fill the
+    /// rest of the row.
+    #[test]
+    fn a_triple_click_takes_the_line() {
+        let mut term = Terminal::new(30, 4).unwrap();
+        term.vt_write(b"first line\r\nsecond line\r\n");
+        let cell = super::select_line(&term, 2, 0).expect("a line");
+        assert_eq!(cell.text(&term).as_deref(), Some("first line"));
     }
 
     /// A selection whose end has scrolled away still paints to the border it

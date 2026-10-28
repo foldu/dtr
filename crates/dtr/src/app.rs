@@ -343,6 +343,10 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         log: startup.log,
         dragging: false,
         drag_moved: false,
+        drag_origin: None,
+        drag_multi: false,
+        last_press: None,
+        clicks: 0,
         cursor_position: None,
         frames_drawn: 0,
         exit_after: startup.exit_after,
@@ -710,8 +714,14 @@ struct App {
     look: Look,
     dragging: bool,
     /// Whether the pointer moved to another cell while down: a press that never
-    /// moved is a click, and a click copies nothing.
+    /// moved is a click, and a click copies nothing — unless it was a
+    /// double-click, which is a word on purpose.
     drag_moved: bool,
+    /// The cell the press landed on, so a pixel of jitter does not turn a
+    /// double-click's word into a one-character range.
+    drag_origin: Option<(u16, u16)>,
+    /// The press that started this drag was the second or third in a row.
+    drag_multi: bool,
     cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
     frames_drawn: u64,
@@ -738,6 +748,11 @@ struct App {
     /// The key the menu thinks is down. A second press for the same key without
     /// a release in between is a duplicate the compositor sent, not a second
     /// keystroke, and acting on it moves the selection two rows.
+    /// The last press, and how many presses in a row it was: winit reports no
+    /// click count, so a double-click is a second press in the same place
+    /// within `DOUBLE_CLICK`.
+    last_press: Option<(std::time::Instant, (f64, f64))>,
+    clicks: u8,
     held: Option<winit::keyboard::Key>,
     /// The settings menu, and the config it edits.
     settings: crate::settings::Settings,
@@ -1008,14 +1023,38 @@ impl App {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
         }
+        let clicks = self.count_clicks(at);
         self.drag_moved = false;
+        self.drag_multi = clicks > 1;
         let cell = self.cell_xy(at.0, at.1);
+        self.drag_origin = cell;
         if let (Some((x, y)), Some(session)) = (cell, self.session()) {
-            session
-                .pane
-                .send(crate::pane::Command::SelectStart { x, y });
+            let command = match clicks {
+                2 => crate::pane::Command::SelectWord { x, y },
+                3 => crate::pane::Command::SelectLine { x, y },
+                _ => crate::pane::Command::SelectStart { x, y },
+            };
+            session.pane.send(command);
         }
         self.dragging = self.session().is_some();
+    }
+
+    /// How many presses in a row this is: one starts a selection, two take the
+    /// word under the pointer, three take the line.
+    ///
+    /// winit has no click count, so it is counted here — a press within
+    /// `DOUBLE_CLICK` and a few pixels of the last one continues the run, and
+    /// the fourth press starts over.
+    fn count_clicks(&mut self, at: (f64, f64)) -> u8 {
+        const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+        const SLOP: f64 = 4.0;
+        let again = self.last_press.is_some_and(|(when, (x, y))| {
+            when.elapsed() <= DOUBLE_CLICK && (x - at.0).abs() <= SLOP && (y - at.1).abs() <= SLOP
+        });
+        let clicks = if again { self.clicks % 3 + 1 } else { 1 };
+        self.clicks = clicks;
+        self.last_press = Some((std::time::Instant::now(), at));
+        clicks
     }
 
     /// The pointer moved while down: move the selection's head with it.
@@ -1026,6 +1065,11 @@ impl App {
         let Some((x, y)) = self.cell_xy(at.0, at.1) else {
             return;
         };
+        // A word or a line is a click, not a drag: a pixel of jitter while the
+        // button is down must not turn it into a one-character selection.
+        if self.drag_origin == Some((x, y)) {
+            return;
+        }
         self.drag_moved = true;
         if let Some(session) = self.session() {
             session.pane.send(crate::pane::Command::SelectHead { x, y });
@@ -1040,7 +1084,8 @@ impl App {
     fn pointer_up(&mut self) {
         let dragged = std::mem::take(&mut self.dragging);
         let moved = std::mem::take(&mut self.drag_moved);
-        if !dragged || !moved {
+        let multi = std::mem::take(&mut self.drag_multi);
+        if !dragged || !(moved || multi) {
             return;
         }
         if let Some(session) = self.session() {

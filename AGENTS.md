@@ -557,6 +557,20 @@ highlight does not vanish and half a selection still looks like half a
 selection. `the_selected_text_survives_a_scroll` is the test that would fail on
 the old representation by construction.
 
+**Double- and triple-click are counted, not reported.** winit has no click
+count, so `App::count_clicks` counts a press within 400 ms and four pixels of
+the last one. Two takes the word under the pointer and three the line, both via
+the core's `select_word`/`select_line` — its idea of a boundary, so
+`--flag=value` and quotes break where they do in every other terminal — and
+then converted to the same anchors, which is why a word or a line scrolls with
+its text too.
+
+Two details that are the difference between working and feeling broken: a drag
+that stays inside the press's own cell changes nothing (a pixel of jitter while
+clicking a word must not turn it into a one-character range), and a
+double-click copies on release *without* having moved, because the two-click
+was the point.
+
 The pointer now goes through `App::pointer_down/move/up`, which `--drag
 x1,y1,x2,y2` also calls: the copy path can be exercised without a mouse. That
 option is only verifiable where an X display is reachable — a headless shell has
