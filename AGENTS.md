@@ -459,6 +459,19 @@ name, and two nodes with one name are impossible to address from a test.
 translation belong to one serial device, so with a shell in front there is
 nothing to show: the rows are built per open, not baked into a fixed list.
 
+**A trailing space is a word break, not whitespace to trim.** The palette trimmed
+the end of the query before deciding which word was being completed, so `ssh `
+looked like the command `ssh` and offered *commands* where the hosts should be.
+The space is the signal that the argument has started; `Parsed::of` keeps it, and
+`ssh ` now lists the hosts while `ssh jup` narrows to one.
+
+The consequence for commands with no arguments: after the space there is nothing
+to complete, so the list is empty rather than offering the command back.
+
+**Reopening the palette starts a fresh sentence.** `toggle` clears the query, the
+selection and the completions; a palette that remembers the last command turns the
+next one into a correction.
+
 **A modal must ignore key releases.** The release of the keystroke that opened a
 modal arrives while it is open, so handling releases as well as presses closed
 the settings menu the instant `Ctrl+,` was let go — it flashed and vanished and

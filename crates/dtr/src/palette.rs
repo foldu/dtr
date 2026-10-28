@@ -71,9 +71,21 @@ impl Palette {
         );
     }
 
+    /// What has been typed. Read by the tests, and by anything that wants to
+    /// know what the palette is asking without looking at the screen.
+    pub fn text(&self) -> &str {
+        &self.input
+    }
+
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if self.open {
+            // Every open starts from nothing: a palette that remembers the last
+            // command makes the next one a correction rather than a sentence.
+            self.input.clear();
+            self.selected = 0;
+            self.completions.clear();
+            self.inline = None;
             self.refresh();
             self.recompute();
         }
@@ -132,6 +144,11 @@ impl Palette {
                     )
                 });
                 close = escape;
+                if escape {
+                    // What was abandoned, so `-v` can show whether a query was
+                    // cancelled or never typed.
+                    tracing::debug!(query = self.text(), "palette closed");
+                }
                 if down && !self.completions.is_empty() {
                     self.selected = (self.selected + 1) % self.completions.len();
                 }
@@ -379,6 +396,30 @@ mod kittest_tests {
             matches!(taken, Some(Action::Shell(_))),
             "expected a shell action, got something else"
         );
+    }
+
+    /// Reopening starts a fresh sentence: a palette that remembers the last
+    /// command makes the next one a correction.
+    #[test]
+    fn reopening_clears_what_was_typed() {
+        let palette = std::rc::Rc::new(std::cell::RefCell::new(Palette::new(false)));
+        palette.borrow_mut().toggle();
+        let look = Look::default();
+        let shared = std::rc::Rc::clone(&palette);
+        let mut harness = Harness::new_ui(move |ui| {
+            shared.borrow_mut().ui(ui, &look);
+        });
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("shell");
+        harness.run();
+        assert_eq!(palette.borrow().text(), "shell", "typing reached the field");
+
+        palette.borrow_mut().toggle();
+        palette.borrow_mut().toggle();
+        harness.run();
+        assert_eq!(palette.borrow().text(), "", "the field is empty on reopen");
     }
 
     /// The palette as the eye sees it: a query, the completions it filtered to,

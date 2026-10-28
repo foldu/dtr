@@ -281,7 +281,10 @@ struct Parsed<'a> {
 
 impl<'a> Parsed<'a> {
     fn of(input: &'a str) -> Self {
-        let trimmed = input.trim_end();
+        // The trailing space counts: `ssh ` is already asking about the
+        // *argument*, and trimming it away made the palette fall back to
+        // completing commands after the space where hosts should appear.
+        let trimmed = input.trim_start();
         match trimmed.split_once(char::is_whitespace) {
             None => Self {
                 word: Word::Command,
@@ -290,7 +293,7 @@ impl<'a> Parsed<'a> {
             },
             Some((name, rest)) => {
                 let needle = rest.trim_start();
-                let start = input.len() - needle.len();
+                let start = trimmed.len() - needle.len();
                 let command = COMMANDS.iter().find(|command| {
                     command.name.eq_ignore_ascii_case(name) || command.name.starts_with(&name.to_lowercase())
                 });
@@ -350,6 +353,28 @@ mod tests {
         engine.set_shells(["fish".to_owned(), "bash".to_owned()]);
         engine.set_themes(["kanagawa wave".to_owned(), "dracula".to_owned()]);
         engine
+    }
+
+    /// r#"The space is the signal."#;
+    #[test]
+    fn a_space_after_ssh_offers_hosts_rather_than_commands() {
+        let engine = engine();
+        let completions = engine.complete("ssh ");
+        assert!(!completions.is_empty(), "hosts should be offered");
+        assert!(
+            completions
+                .iter()
+                .all(|completion| completion.item.label.contains(".li")),
+            "every candidate is a host, not a command: {:?}",
+            completions
+                .iter()
+                .map(|completion| completion.item.label.clone())
+                .collect::<Vec<_>>()
+        );
+        // And a prefix narrows them.
+        let narrowed = engine.complete("ssh jup");
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].item.label, "jupiter.home.5kw.li");
     }
 
     #[test]
@@ -439,9 +464,10 @@ mod tests {
     #[test]
     fn a_command_without_arguments_offers_nothing() {
         assert!(engine().complete("logbook x").is_empty());
-        // A trailing space is trimmed, so the command word is still the word
-        // being completed — the palette keeps offering it back.
-        assert_eq!(engine().complete("logbook ")[0].item.label, "logbook");
+        // After the space the *argument* is the word being completed, and this
+        // command has none — offering the command back would be noise, and it
+        // is what made `ssh ` complete commands instead of hosts.
+        assert!(engine().complete("logbook ").is_empty());
     }
 
     #[test]
