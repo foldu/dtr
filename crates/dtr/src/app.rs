@@ -232,6 +232,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     }
 
     let mut app = App {
+        clipboard: None,
         tabs: vec![Tab::new(
             1,
             Pane::Terminal(Session {
@@ -480,6 +481,9 @@ impl Tab {
 
 struct App {
     tabs: Vec<Tab>,
+    /// The system clipboard, held for as long as the app runs: on X11 the owner
+    /// of the selection has to stay alive or the text goes with it.
+    clipboard: Option<arboard::Clipboard>,
     active: usize,
     next_leaf: crate::layout::LeafId,
     gpu: Option<Gpu>,
@@ -683,6 +687,32 @@ impl App {
 
     /// The pointer went down at `at`. A press focuses the pane under it and
     /// starts a selection anchor; the drag turns the anchor into a range.
+    /// Put text on the system clipboard, by hand.
+    ///
+    /// egui's own path goes through `egui-winit`, which falls back to an
+    /// in-app buffer when it cannot reach the display — the toast then says
+    /// "copied" while the clipboard is untouched. Writing it here as well
+    /// makes the copy real, and a failure is logged rather than assumed.
+    fn set_clipboard(&mut self, text: &str) {
+        let clipboard = match self.clipboard.as_mut() {
+            Some(clipboard) => clipboard,
+            None => match arboard::Clipboard::new() {
+                Ok(clipboard) => {
+                    self.clipboard = Some(clipboard);
+                    // Just created, so it is there.
+                    self.clipboard.as_mut().expect("just stored")
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "no system clipboard");
+                    return;
+                }
+            },
+        };
+        if let Err(err) = clipboard.set_text(text.to_owned()) {
+            tracing::warn!(%err, "could not write the clipboard");
+        }
+    }
+
     fn pointer_down(&mut self, at: (f64, f64)) {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
@@ -1793,6 +1823,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 drop(toast_text);
                 if let Some(text) = copied {
+                    // Both paths: egui's, so its own paste and IME state agree,
+                    // and ours, so the text reaches the desktop either way.
+                    self.set_clipboard(&text);
                     let chars = text.chars().count();
                     let bytes = text.len();
                     // An empty copy is not a success: "copied 0 chars" claims

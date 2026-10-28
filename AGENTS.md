@@ -259,6 +259,13 @@ the settings menu the instant `Ctrl+,` was let go — it flashed and vanished an
 read as "does not open". Key handling for overlays checks `ElementState::Pressed`
 first; the same trap as the doubled keystrokes, in a different disguise.
 
+**A toast that says "copied" is not a clipboard.** `ui.ctx().copy_text` goes through
+`egui-winit`, whose clipboard *falls back to an in-app buffer* when it cannot reach
+the display — so the copy looks successful and the desktop never sees it. dtr now
+also writes the clipboard itself with `arboard`, keeping the handle on `App` for
+the life of the process (on X11 the owner has to stay alive or the text disappears
+with it). Failures are logged; silence is not success.
+
 **Selecting with the mouse copies.** The drag's release sends
 `Command::CopyRange` for any selection wider than one cell; the pane builds the
 text from the terminal, parks it, and the next frame hands it to
