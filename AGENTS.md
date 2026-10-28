@@ -527,6 +527,36 @@ only parks the text in the pane's `copied` slot; the UI does the clipboard work
 and raises the toast. Replying `Err` for a non-text MIME is what tells the program
 the write was refused — returning without replying denies it silently.
 
+**A pty is cooked until somebody says otherwise.** `openpty` hands back a terminal
+in the kernel's default mode, which means a second line discipline sits in front of
+the VT core: every byte the session writes is scanned for output post-processing,
+`\n` becomes `\r\n` one character at a time, input is line-buffered and echoed by
+the kernel, and ^S stops the flow. dtr never set raw, and the cost was extreme — a
+32 MiB flood of two-byte lines drained in **3.9 s cooked against 37 ms raw**. What
+proved where the time went was the control: the same payload through `script`,
+which parses nothing at all, took 4.06 s, so the time was the *session's* syscalls
+and not dtr's. `pty::set_raw` runs before the child is spawned now, and
+`the_session_starts_raw` reads the termios back from the master and fails if any of
+it comes back cooked.
+
+`ISIG` is the one flag kept: ^C has to reach the foreground process, and a program
+that wants the byte (readline) turns it off itself for as long as it wants it.
+
+**A frame per read chunk is a thousand frames a second nobody sees.** The pane
+published from the read arm, so every chunk rebuilt the entire grid — cell by cell
+through the FFI, with a `String` per cell — at about 50 µs a frame. A flood arrives
+in chunks small enough that a 32 MiB payload became **1.1 million publishes and 57 s
+of CPU inside a 60 s run**, all of it thrown away because a screen shows sixty
+frames a second. The tell was a profile where 92% of the samples sat in
+`pane::fill_cells` and none of them in the parser.
+
+`FRAME_BUDGET` (8 ms) gates publishing now, with a timer arm that publishes the
+frame the pane owes, so a skipped publish cannot leave the picture stale — the same
+flood is 484 publishes and 31 ms. Two smaller traps came with it: `bytes_rx.recv()`
+returning `None` is not a no-op, because that arm is ready for ever and the pane
+spun at 100% after its child exited; and vtebench cannot see either of these,
+because what it times is the pty, not the frame.
+
 ## Profiling
 
 `./scripts/flamegraph.sh --demo` builds the `profiling` profile (release + debug
@@ -562,8 +592,9 @@ Reading the table:
 - **The previous run is the baseline**, so bench one change at a time, and
   rebuild first: a stale binary makes the number describe something else.
 - **vtebench records whole milliseconds**, so a 1 MiB sample from a fast
-  terminal quantises to 2 or 3 ms. The script's default is 8 MiB per sample; a
-  median of `<1 ms` is a failed measurement and it says so.
+  terminal quantises to 2 or 3 ms, and dtr now drains about a gigabyte a
+  second. The script's default is 32 MiB per sample, near 30 ms; a median of
+  `<1 ms` is a failed measurement and it says so.
 - **A sample is bounded by whichever is slower, reading or drawing**, so a
   renderer that cannot keep up shows up here as well. `--profile` writes
   `target/bench/profile.svg` for the same flood, and that is where to look once
@@ -576,6 +607,13 @@ sits in front of the VT core on every byte. The rest are upstream's.
 `scripts/bench.sh --check` validates the payloads without a window, a GPU or a
 network, and is what CI runs — a benchmark that silently produces nothing is
 worse than no benchmark.
+
+**The reader can be measured without a window.** `--screenshot PATH --screenshot-delay MS`
+spawns the session and pumps it with nothing on screen, so a payload can be timed
+and profiled on a machine with no display: point `--shell` at it and read the `.dat`
+it writes. Only the final image needs an adapter — a software Vulkan ICD
+(`WGPU_BACKEND=vulkan`, lavapipe) is enough when there is no GPU. That is how the
+pty's cooked mode and the per-chunk publishing were found.
 
 ## Gotchas that are real
 

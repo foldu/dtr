@@ -24,6 +24,16 @@ use crate::serial::{self, CrToCrlf};
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
+/// How long a burst of output may be parsed before a frame is published.
+///
+/// One publish rebuilds every cell of the grid, so it costs about 50 µs; a
+/// flood arrives in chunks small enough that a publish per chunk would spend
+/// the whole core rebuilding frames nobody can see. Half a frame at 60 Hz
+/// keeps the picture current and cuts the publishes by three orders of
+/// magnitude. A session with nothing queued publishes immediately, so a shell
+/// prompt is never delayed by this.
+const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
     pub text: String,
@@ -550,23 +560,63 @@ async fn run(
     publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true)?;
 
     let mut sniffer = CwdSniffer::default();
+    // Publishing is what a flood costs, not parsing: one frame rebuilds every
+    // cell of the grid. So a pane publishes at most once per budget — and, when
+    // it has to wait, a timer arm publishes the frame it owes rather than
+    // leaving the picture stale until the next byte arrives.
+    let mut next_publish = tokio::time::Instant::now();
+    let mut publish_pending = false;
     loop {
         tokio::select! {
             chunk = bytes_rx.recv(), if source_alive => {
                 match chunk {
                     Some(bytes) => {
-                        stats.add_rx(bytes.len());
-                        if let Some(dir) = sniffer.feed(&bytes) {
-                            if let Ok(mut slot) = cwd.lock() {
-                                *slot = Some(dir);
+                        // A flood arrives as thousands of small chunks — the pty
+                        // hands over only what is queued when the reader wakes.
+                        // Parse everything already queued, for at most one
+                        // budget's worth of time, then publish once; see the
+                        // `next_publish` gate below.
+                        let deadline = tokio::time::Instant::now() + FRAME_BUDGET;
+                        let mut bytes = bytes;
+                        let (mut chunks, mut total) = (0u32, 0usize);
+                        loop {
+                            chunks += 1;
+                            total += bytes.len();
+                            stats.add_rx(bytes.len());
+                            if let Some(dir) = sniffer.feed(&bytes) {
+                                if let Ok(mut slot) = cwd.lock() {
+                                    *slot = Some(dir);
+                                }
+                            }
+                            term.vt_write(&bytes);
+                            if tokio::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            match bytes_rx.try_recv() {
+                                Ok(next) => bytes = next,
+                                Err(_) => break,
                             }
                         }
-                        term.vt_write(&bytes);
                         flush_replies(&replies, &mut sink).await;
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                        tracing::debug!(chunks, bytes = total, "burst parsed");
+                        if tokio::time::Instant::now() >= next_publish {
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                            next_publish = tokio::time::Instant::now() + FRAME_BUDGET;
+                            publish_pending = false;
+                        } else {
+                            publish_pending = true;
+                        }
                     }
-                    None => {}
+                    // The reader is gone — the child closed the pty. This arm is
+                    // ready for ever once the channel is empty, so stop
+                    // selecting on it rather than spinning through it.
+                    None => source_alive = false,
                 }
+            }
+            _ = tokio::time::sleep_until(next_publish), if publish_pending => {
+                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false)?;
+                next_publish = tokio::time::Instant::now() + FRAME_BUDGET;
+                publish_pending = false;
             }
             _ = closed_rx.recv(), if source_alive => {
                 source_alive = false;

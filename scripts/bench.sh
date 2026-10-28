@@ -47,9 +47,9 @@ usage: scripts/bench.sh [--check | --report FILE] [--profile] [--only NAMES]
   --profile       build the `profiling` profile and pass --cpu-profile, so the
                   run also writes target/bench/profile.svg (Linux only).
   --only NAMES    run just those benchmarks, comma separated, from either set.
-  --min-bytes N   payload bytes per sample (default 8388608; vtebench's own
-                  default of 1 MiB is too coarse for a fast terminal, because
-                  samples are recorded in whole milliseconds).
+  --min-bytes N   payload bytes per sample (default 33554432; vtebench's own
+                  default of 1 MiB is far too coarse for a fast terminal,
+                  because samples are recorded in whole milliseconds).
   --max-secs N    sampling seconds per benchmark (vtebench default 10).
   -- ARGS         anything else is handed to vtebench, e.g. -- --max-samples 5
 EOF
@@ -58,12 +58,12 @@ EOF
 mode=run
 profile=
 only=
-# vtebench records each sample as whole milliseconds, so a 1 MiB sample from a
-# terminal that runs at a few hundred MiB/s lands on 2 or 3 ms and quantises the
-# answer. Eight MiB per sample puts the same terminal in the tens of
-# milliseconds, where the rounding is noise. Raise it further for a very fast
-# machine; the report says when a number was below the resolution.
-min_bytes=8388608
+# vtebench records each sample as whole milliseconds, so the sample has to be
+# long enough that a millisecond is noise. dtr drains about a gigabyte a second
+# on this machine, so 8 MiB would land on 7 ms and the whole table would be
+# rounding: 32 MiB puts a sample near 30 ms, where a percent is visible. The
+# report says when a number was still below the resolution.
+min_bytes=33554432
 max_secs=10
 report_file=
 
