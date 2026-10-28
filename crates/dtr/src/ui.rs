@@ -579,6 +579,24 @@ mod kittest_tests {
         );
     }
 
+    /// Hover is the strip's only feedback, and it is painted by hand: a
+    /// regression in the fill is invisible to every other test, because the
+    /// pointer is never over the strip in them.
+    #[test]
+    fn a_chip_lights_up_under_the_pointer() {
+        let look = Look::default();
+        let labels = vec!["demo".to_owned(), "shell".to_owned()];
+        let mut harness = Harness::new_ui(move |ui| {
+            tab_bar(ui, &labels, 1, &[], &look);
+        });
+        harness.run();
+
+        // Away from the strip entirely: the state every other snapshot has.
+        harness.get_by_label("1 demo").hover();
+        harness.run();
+        harness.snapshot("tab_bar_hover");
+    }
+
     /// The strip's whole contract, without a window: a chip switches, its cross
     /// closes, and a key that belongs to the terminal touches neither.
     ///

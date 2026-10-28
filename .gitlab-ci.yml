@@ -1,13 +1,3 @@
-# Linux CI. The Windows dtr.exe is built by GitHub Actions
-# (.github/workflows/ci.yml); this pipeline builds the Linux package only.
-#
-# It runs on the lab `nix` runner, which provides the host Nix daemon and
-# store: there is nothing to install and no cache action to configure — the
-# daemon's store (plus cache.nixos.org) is the cache.
-#
-# Deliberately not `nix flake check`: checks.single-exe asserts the *Windows*
-# exe's imports, which this pipeline does not build, so there it would be a
-# spin-up for nothing. GitHub Actions runs it next to the Windows build.
 workflow:
   rules:
     # The usual pair: run for a merge request, and for a branch with no merge request open.
@@ -18,14 +8,52 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
+  - test
   - build
 
-linux:
-  stage: build
-  tags: [nix]
+# Everything here needs the toolchain, which only the nix runner has: `nix` is
+# the single tag that gets a shell with nix and the host store.
+default:
+  tags:
+    - nix
+
+variables:
+  # The devShell is what puts cargo, rustc, zig and libghostty's pkg-config on
+  # PATH; nothing is installed globally on the runner.
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  CARGO_TARGET_DIR: $CI_PROJECT_DIR/target
+  RUST_BACKTRACE: "1"
+
+test:
+  stage: test
   script:
-    - nix --version
-    - nix build .#dtr --print-build-logs
-    - nix path-info -Sh ./result
-    # Proves the wrapper and its store closure actually start, headlessly.
-    - ./result/bin/dtr --version
+    - nix develop .#default --command cargo test --workspace
+  cache:
+    key:
+      files:
+        - Cargo.lock
+        - flake.lock
+    paths:
+      - .cargo/
+      - target/
+  artifacts:
+    when: on_failure
+    paths:
+      # A kittest snapshot failure writes the picture it drew next to the
+      # baseline; without it the log says only "images differ".
+      - crates/dtr/tests/snapshots/
+    expire_in: 1 week
+
+build:
+  stage: build
+  script:
+    # The one-file Windows executable is the artefact this project exists to
+    # produce; a Linux build alone would not catch a cross-compilation break.
+    - nix build .#windows
+    - ls -l result/bin
+  artifacts:
+    paths:
+      # `nix build` leaves `result` as a symlink; the runner archives what it
+      # points at.
+      - result/
+    expire_in: 1 week

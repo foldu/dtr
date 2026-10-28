@@ -119,12 +119,28 @@ per-pane draw would rewrite the buffer between panes and the last pane would win
 that is why `render::prepare` takes every visible pane at once. Cells outside a
 pane's rectangle are simply not emitted rather than scissored.
 
+**CI runs the tests, not the window.** `.gitlab-ci.yml` has two jobs, both on the
+`nix` runner because nothing is installed globally there: `test` runs
+`cargo test --workspace` in the devShell, and `build` produces `.#windows` — the
+one-file executable is the artifact, and a Linux-only build would not catch a
+cross-compilation break. A failed snapshot run uploads
+`crates/dtr/tests/snapshots/`, because the log otherwise says only that images
+differ.
+
+Snapshots are per-machine sensitive in the usual way: they are generated here and
+compared byte-exactly there. If a renderer or font difference ever makes CI
+disagree with a laptop, the answer is a threshold, not a regenerated baseline
+from whichever machine ran last.
+
 **The egui layer is tested with `egui_kittest`, not with a window.** `cargo test`
 drives a `Harness` — real egui layout and AccessKit, no event loop — so clicks,
 keys and rendering can be asserted. `crates/dtr/src/ui.rs` has the pattern: query
 a widget by its accessible label, `.click()`, `harness.run()`, assert what the
 widget reported. `UPDATE_SNAPSHOTS=1 cargo test` writes a baseline PNG under
-`crates/dtr/tests/snapshots/`; the plain run compares against it.
+`crates/dtr/tests/snapshots/`; the plain run compares against it. Each surface has
+one snapshot per state worth seeing — `tab_bar` away, `tab_bar_hover` with the
+pointer on a chip — because a hand-painted hover fill is invisible to every test
+where the pointer is elsewhere.
 
 Two things it taught, both real bugs: a widget painted by hand has **no
 accessibility node** unless `Response::widget_info` declares one (the tab chips
