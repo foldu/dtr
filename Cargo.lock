@@ -824,6 +824,7 @@ dependencies = [
  "redb",
  "rustc-demangle",
  "serialport",
+ "shlex",
  "swash",
  "tempfile",
  "tokio",

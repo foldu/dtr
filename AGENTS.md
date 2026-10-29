@@ -576,6 +576,75 @@ the window with it, which is what `exit` does in any terminal.
 the UI polls the frames anyway; a channel would need its own arm in the loop for
 something that happens once.
 
+**A dropped ssh connection is not a shell that exited, and the exit status is the
+only thing that tells them apart.** `ssh` exits 255 when ssh itself failed — the
+host is unreachable, the key was rejected, the connection died — and anything else
+is the remote command's own status, which means somebody typed `exit`.
+`pane::ending` is that rule, and `ending_tests` is the test that keeps it. A drop
+keeps the tab, says so on the screen and starts the client again after a backoff
+(1 s doubling to 30 s, reset once a connection has been up for 10 s); an `exit`
+closes the tab as it always did.
+
+**A client that never speaks is worse than one that fails.** Two different
+silences, and only one of them ends on its own. A connect that is *refused* or
+unresolvable fails in milliseconds; a connect into a blackhole sits in the
+kernel's `connect` for two minutes. And a connection that goes away without a
+reset — a lid closed, a route dropped — leaves an `ssh` that is still running and
+still looks alive, so the pane sits there showing a session that is not there and
+the reconnect never fires, because the child never exits. `pty::Config::ssh`
+therefore passes three options, all of them before the destination:
+`ConnectTimeout=10`, `ServerAliveInterval=20`, `ServerAliveCountMax=3`. Ten
+seconds to reach the host; a minute of unanswered keepalives before ssh calls the
+connection dead and exits 255. **ssh's own default is no keepalive at all**, which
+is why this is not optional. The options override `~/.ssh/config`, so a
+`ServerAliveInterval` there is ignored; the numbers live in one place in `pty.rs`
+and `the_timeouts_come_before_the_destination_and_survive_a_reopen` pins their
+position, because an option after the destination becomes a command for the far
+end.
+
+**Retries are bounded in rate, not in number.** There is no give-up count and no
+retry button: waits go 1, 2, 4, 8, 16, 30, 30, … seconds, so a host that is down
+is asked about twice a minute for as long as the pane exists, and closing the tab
+is how a person gives up. That is deliberate — a laptop can be shut for a day and
+the session it was holding is still worth reopening when the network returns,
+which a cap would turn into "closed while you were not looking". A flapping host
+keeps the long wait, because the reset needs ten seconds of *uptime*, not just a
+successful connect.
+
+Two consequences that are easy to get wrong. The child now belongs to the reader
+thread, not the pane: `wait` blocks, and the status is only available after EOF —
+so `start_shell` hands the child over and the pane hears how it ended on its own
+channel. And the first connection is opened *inside* the event loop by the same
+code as every reopen, because a host that is down at startup should be a pane that
+waits rather than an app that exits; that is why `--send` is held in
+`typed_early` until the first pty exists instead of being dropped at a `sink` of
+`None`.
+
+**A reconnected session is put back where it was by the remote command.** `ssh -t
+host` starts in `$HOME`, so the reopen is
+`ssh -t host 'cd <dir> ; exec "${SHELL:-/bin/sh}" -l'`: the directory quoted by
+`shlex` for the shell at the *other* end — a path can hold anything but `/` and
+NUL, and NUL is refused rather than quoted into something a different shell would
+split — `;` rather than `&&` so a directory that has been deleted still leaves a
+usable shell, and `exec`ed so the login shell is the session rather than a child of
+a wrapper. Quoting is not a place for hand-rolling:
+`a_hostile_directory_is_still_one_word` round-trips a dozen paths (`$(…)`,
+backticks, `;`, quotes, a newline) through `shlex::split` and asserts each arrives
+as one word.
+The directory is the session's own OSC 7 report, which is why the sniffer returns a
+report instead of a path: `file://build-host/srv/app` is not a local directory
+(nothing here may `cd` into it) but it is exactly where a session on `build-host`
+belongs. `pty::Config` carries the alias as `remote` so this stays a decision about
+a connection rather than a guess from the program string.
+
+**The modes outlive the program that set them.** A connection can drop while vim
+holds the alternate screen with the mouse modes on, and the shell that replaces it
+would start inside them. `reset_modes` clears them through the core before the
+reopen; the text is left alone, because the last screen before the drop is the
+first thing one wants to read. The notice (`-- reconnecting to jupyter in
+/srv/app --`) goes into the terminal, not the pty: nothing is running at the other
+end to read it, and a pane that simply stops looks like one waiting for a key.
+
 **Closing a tab is teardown, and teardown is slow.** Dropping a `Tab` drops a pty
 and the thread that owns it; the child has to notice and exit, which is not
 instant. `close_tab` therefore hands the dead tab to the worker runtime

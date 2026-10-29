@@ -566,6 +566,44 @@ scrolling, selection, copy and the logbook all work over ssh with no further cod
 dependency on the platform's client (fine on Linux, present on Windows 10+, and something to check on
 a machine that has none).
 
+**A dropped ssh connection reopens itself, in the directory the session was in.** The client exiting is
+not the end of the session it was hosting, and the exit status is what says which is which: `ssh` exits
+255 when ssh itself failed, so that is a connection that must be remade; any other status is the remote
+command's own, which means somebody typed `exit`, and the tab closes exactly as before. A drop keeps
+the tab and its scrollback, prints one yellow line of dtr's own (`-- reconnecting to jupyter in
+/srv/app --`, because the shell that died cannot say anything and a pane that stops looks like one
+waiting for a key) and starts the client again after a backoff — 1 s doubling to 30 s, reset once a
+connection has stayed up for 10 s, so a host that is down is not asked once a second and a session that
+comes back is not slow for the rest of the day. There is no give-up count: the wait is capped, the
+number of attempts is not, because a laptop can be shut for a day and the session it was holding is
+still worth reopening when the network returns — a cap would turn that into "closed while you were not
+looking". A host that is down at *startup* goes through the same path, which is why the first
+connection is opened inside the event loop and a failed `--ssh` is a pane that waits rather than an
+error that takes the window with it.
+
+Three things have to happen for any of that to fire, and two of them are not what an unconfigured
+`ssh` does. A connect that is refused or unresolvable fails on its own in milliseconds; one into a
+blackhole sits in the kernel's `connect` for about two minutes; and a connection that goes away
+*without a reset* leaves an `ssh` that is still running and still looking alive, so the pane shows a
+session that is not there and the reconnect never fires, because the child never exits.
+`pty::Config::ssh` therefore passes `ConnectTimeout=10`, `ServerAliveInterval=20` and
+`ServerAliveCountMax=3`, all before the destination: ten seconds to reach the host, a minute of
+unanswered keepalives before ssh calls the connection dead and exits 255. OpenSSH's own default is no
+keepalive at all, which is why this is not left to the config file; the values override
+`~/.ssh/config` and live in one place in `pty.rs`.
+
+Getting back to the directory needs a command, because a fresh `ssh -t host` starts in `$HOME`:
+the reopen is `ssh -t host 'cd <quoted> ; exec "${SHELL:-/bin/sh}" -l'`. Quoted for the shell at the
+*other* end, because a path may contain the quote the quoting is made of; `;` rather than `&&` so a
+directory that has been deleted still leaves a usable shell; `exec`ed so the login shell *is* the
+session rather than a child of a wrapper. The path is the session's own OSC 7 report, which is why the
+sniffer now returns a report instead of a path: `file://build-host/srv/app` is not a local directory
+(nothing here may `cd` into it) but it is exactly where a session on `build-host` belongs.
+
+The terminal modes are cleared on the way, for the case the whole feature exists for: a connection that
+drops while vim holds the alternate screen. The text is left alone — the last screen before the drop is
+the first thing one wants to read — but the shell that replaces it must not start inside vim's modes.
+
 **Tabs.** Every palette action now opens a *new* session instead of replacing the one you were looking at:
 `connect`, `ssh`, `shell`, `replay`, `demo` all push a tab. `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle,
 `Ctrl+Shift+W` closes (the last tab closes the window), and the status bar shows `2/3` only once there

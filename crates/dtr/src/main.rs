@@ -505,11 +505,9 @@ fn main() -> anyhow::Result<()> {
         Transport::Demo
     } else if let Some(host) = args.ssh.clone() {
         // The system client, in a pty: it already speaks the config file, the
-        // agent, jump hosts and known_hosts.
-        Transport::Shell(pty::Config {
-            program: Some(format!("ssh -t {host}")),
-            ..Default::default()
-        })
+        // agent, jump hosts and known_hosts. It is a connection, not a session,
+        // so the pane reopens it when it drops.
+        Transport::Shell(pty::Config::ssh(&host))
     } else if let Some(path) = args.replay.clone() {
         Transport::Replay(path)
     } else if let Some(port) = args.port.clone() {

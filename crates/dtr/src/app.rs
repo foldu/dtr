@@ -419,15 +419,14 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
-    let remote = matches!(&startup.transport, Transport::Shell(cfg)
-        if cfg.program.as_deref().is_some_and(|p| p.trim_start().starts_with("ssh")));
+    let startup_alias = ssh_alias(&startup.transport);
+    let remote = startup_alias.is_some();
     let counters = !matches!(startup.transport, Transport::Shell(_));
     let port = match &startup.transport {
         Transport::Serial(cfg) => Some(cfg.port.clone()),
         _ => None,
     };
 
-    let startup_alias = ssh_alias(&startup.transport);
     // The window does not exist yet, so this starts at the 60 Hz default and
     // `resumed` replaces it with the panel's own rate.
     let frame_budget: crate::pane::FrameBudget = std::sync::Arc::new(
@@ -700,16 +699,12 @@ fn save_target(source: &std::path::Path) -> PathBuf {
     dir.join(name)
 }
 
-/// The alias an `ssh -t <alias>` shell was started with.
+/// The alias an `ssh` pane is connected to, if it is remote at all.
 fn ssh_alias(transport: &Transport) -> Option<String> {
-    let Transport::Shell(config) = transport else {
-        return None;
-    };
-    let program = config.program.as_deref()?.trim();
-    let rest = program.strip_prefix("ssh")?.trim_start();
-    let rest = rest.strip_prefix("-t").map(str::trim)?;
-    let alias = rest.split_whitespace().next()?;
-    (!alias.is_empty()).then(|| alias.to_owned())
+    match transport {
+        Transport::Shell(config) => config.remote.clone(),
+        _ => None,
+    }
 }
 
 fn closed(active: usize, count: usize) -> Option<usize> {
@@ -1589,7 +1584,7 @@ impl App {
             dtr_vfs::BackendId::Ssh(alias) => Some(alias.clone()),
             dtr_vfs::BackendId::Local => None,
         };
-        Some((crate::thumb::Key { machine, path }, location))
+        Some((crate::thumb::Key::new(machine, path), location))
     }
 
     /// Ask for a preview of the picture `uri` names.
@@ -2160,6 +2155,7 @@ impl App {
         );
         match spawned {
             Ok(pane) => {
+                let alias = ssh_alias(&transport);
                 let session = Session {
                     pane,
                     port: match &transport {
@@ -2171,11 +2167,8 @@ impl App {
                     serial: matches!(transport, Transport::Serial(_)),
                     // A remote shell reports the *remote* directory; it must not
                     // be adopted as a local path by a new tab.
-                    remote: matches!(&transport, Transport::Shell(cfg)
-                        if cfg.program.as_deref().is_some_and(|p| {
-                            p.trim_start().starts_with("ssh")
-                        })),
-                    alias: ssh_alias(&transport),
+                    remote: alias.is_some(),
+                    alias,
                     counters: !matches!(transport, Transport::Shell(_)),
                     echo: false,
                     meter: Meter::new(),
@@ -2291,6 +2284,7 @@ impl App {
         if !tab.layout.split(target, axis, id, false) {
             return;
         }
+        let alias = ssh_alias(&transport);
         tab.leaves.insert(
             id,
             Pane::Terminal(Session {
@@ -2302,9 +2296,8 @@ impl App {
                 frame: None,
                 label: transport.describe(),
                 serial: matches!(transport, Transport::Serial(_)),
-                remote: matches!(&transport, Transport::Shell(cfg)
-                    if cfg.program.as_deref().is_some_and(|p| p.trim_start().starts_with("ssh"))),
-                alias: ssh_alias(&transport),
+                remote: alias.is_some(),
+                alias,
                 counters: !matches!(transport, Transport::Shell(_)),
                 echo: false,
                 meter: Meter::new(),
@@ -2748,11 +2741,10 @@ impl App {
             Action::Ssh(host) => {
                 // Delegating to the system's ssh client: it already knows about
                 // the config file, agent forwarding, jump hosts and known_hosts,
-                // and re-implementing those is a project, not a feature.
-                self.open(Transport::Shell(crate::pty::Config {
-                    program: Some(format!("ssh -t {host}")),
-                    ..Default::default()
-                }));
+                // and re-implementing those is a project, not a feature. The
+                // config also says that this is a connection, so the pane
+                // reopens it when it drops instead of closing the tab.
+                self.open(Transport::Shell(crate::pty::Config::ssh(&host)));
             }
             Action::Quit => self.quit = true,
         }
@@ -3451,10 +3443,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
                     Some(crate::ui::TabHit::New(host)) => match host {
-                        Some(host) => self.open(Transport::Shell(crate::pty::Config {
-                            program: Some(format!("ssh -t {host}")),
-                            ..Default::default()
-                        })),
+                        Some(host) => {
+                            self.open(Transport::Shell(crate::pty::Config::ssh(&host)))
+                        }
                                         None => {
                             let cwd = self
                                 .session()

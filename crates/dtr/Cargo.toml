@@ -34,6 +34,7 @@ redb.workspace = true
 fontique.workspace = true
 swash.workspace = true
 unicode-width.workspace = true
+shlex.workspace = true
 serialport.workspace = true
 tokio.workspace = true
 tokio-serial.workspace = true

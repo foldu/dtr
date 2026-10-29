@@ -6,6 +6,7 @@
 //! one and never touches the terminal or blocks the emulation thread.
 
 use std::cell::RefCell;
+use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,8 +20,8 @@ use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{
     FormatOptions, SelectLineOptions, SelectWordOptions, Selection,
 };
-use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
-use portable_pty::{Child, MasterPty};
+use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
+use portable_pty::MasterPty;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use crate::pty;
@@ -247,9 +248,12 @@ impl Transport {
                 config.baud,
                 if config.cr_to_crlf { " cr=crlf" } else { "" }
             ),
-            Transport::Shell(config) => match &config.program {
-                Some(program) => format!("shell {program}"),
-                None => "shell".to_owned(),
+            Transport::Shell(config) => match (&config.remote, &config.program) {
+                // The alias and not the command line: a tab says where it is
+                // connected, and `ssh -t jupyter` is three words of plumbing.
+                (Some(alias), _) => format!("ssh {alias}"),
+                (None, Some(program)) => format!("shell {program}"),
+                (None, None) => "shell".to_owned(),
             },
             Transport::Replay(path) => format!("replay {}", path.display()),
             Transport::Demo => "demo".to_owned(),
@@ -440,6 +444,180 @@ impl Pane {
     }
 }
 
+/// How the child behind a shell pane ended.
+struct ShellExit {
+    /// The exit status, or `None` when a signal took it — which is never a user
+    /// typing `exit`.
+    code: Option<u32>,
+    /// When it happened: a connection that stayed up for a while is not a flaky
+    /// one, and the next drop is worth retrying straight away.
+    at: std::time::Instant,
+}
+
+/// What the end of the program behind a shell pane means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// The user left: `exit`, `Ctrl-D`, or whatever status the shell chose.
+    Chose,
+    /// The connection failed under it.
+    Dropped,
+}
+
+/// `ssh` exits 255 when ssh itself failed — the host is unreachable, the key was
+/// rejected, the connection died — and anything else is the remote command's own
+/// status, which means the session ended rather than the transport. A signal is
+/// never a user.
+fn ending(code: Option<u32>) -> Ending {
+    match code {
+        Some(255) | None => Ending::Dropped,
+        Some(_) => Ending::Chose,
+    }
+}
+
+/// How long a connection has to stay up before a drop is retried at once.
+const BACKOFF_RESET: std::time::Duration = std::time::Duration::from_secs(10);
+/// The first wait after a connection drops. Not zero: a connection that has just
+/// died will not come back in the next millisecond, and a host that is down must
+/// not be asked once a second for ever.
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waiting longer after every failed attempt, up to a cap.
+#[derive(Default)]
+struct Backoff {
+    attempt: u32,
+}
+
+impl Backoff {
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
+
+    fn next(&mut self) -> std::time::Duration {
+        let step = self.attempt.min(5);
+        self.attempt = self.attempt.saturating_add(1);
+        (RETRY_FIRST * 2u32.pow(step)).min(RETRY_MAX)
+    }
+}
+
+/// The pieces of a running pty that the pane has to keep.
+struct Open {
+    /// Dropping it closes the pty, which is what ends the child.
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn std::io::Write + Send>,
+}
+
+/// Start a pty and the thread that reads it.
+///
+/// The child goes to that thread rather than staying in the pane: after EOF its
+/// status is the only thing that says whether the session ended or its
+/// connection dropped, and `wait` blocks, which the pane's own thread must not.
+fn start_shell(
+    config: &pty::Config,
+    bytes: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    exited: &tokio::sync::mpsc::UnboundedSender<ShellExit>,
+    log: &Option<Arc<LogWriter>>,
+) -> anyhow::Result<Open> {
+    let pty::Shell {
+        master,
+        child,
+        reader,
+        writer,
+    } = config.open()?;
+    let tx = bytes.clone();
+    let done = exited.clone();
+    let log = log.clone();
+    let mut reader = reader;
+    let mut child = child;
+    std::thread::Builder::new()
+        .name("dtr-pty".into())
+        .spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    // EOF: the child closed the pty, so it has exited.
+                    Ok(0) => break,
+                    Ok(n) => {
+                        log_chunk(&log, &buf[..n]);
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            // Nobody is listening any more: the pane is gone,
+                            // and so is any reason to wait for this child.
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "pty read");
+                        break;
+                    }
+                }
+            }
+            let code = match child.wait() {
+                Ok(status) => status.signal().is_none().then(|| status.exit_code()),
+                Err(err) => {
+                    tracing::warn!(%err, "pty wait");
+                    None
+                }
+            };
+            let _ = done.send(ShellExit {
+                code,
+                at: std::time::Instant::now(),
+            });
+        })?;
+    Ok(Open { master, writer })
+}
+
+/// Put the terminal back into a state a fresh session can start in.
+///
+/// A connection can drop while a full-screen program is running, and the shell
+/// that comes back would then start *inside* the alternate screen, with the dead
+/// program's mouse modes still on. The text is deliberately left alone: the last
+/// screen before the drop is the first thing one wants to read.
+fn reset_modes(term: &mut Terminal<'_, '_>) {
+    for mode in [
+        Mode::ALT_SCREEN_SAVE,
+        Mode::ALT_SCREEN,
+        Mode::ALT_SCREEN_LEGACY,
+        Mode::X10_MOUSE,
+        Mode::NORMAL_MOUSE,
+        Mode::BUTTON_MOUSE,
+        Mode::ANY_MOUSE,
+        Mode::UTF8_MOUSE,
+        Mode::SGR_MOUSE,
+        Mode::URXVT_MOUSE,
+        Mode::BRACKETED_PASTE,
+        Mode::KEYPAD_KEYS,
+    ] {
+        if let Err(err) = term.set_mode(mode, false) {
+            tracing::debug!(%err, "could not clear a terminal mode");
+        }
+    }
+}
+
+/// A line of dtr's own in the session's scrollback.
+///
+/// The shell cannot say this — it is gone — and a pane that simply stops looks
+/// exactly like one waiting for input. It is written into the terminal rather
+/// than the pty: nothing downstream is running that could read it.
+#[allow(clippy::too_many_arguments)]
+fn notice(
+    term: &mut Terminal<'static, '_>,
+    text: &str,
+    state: &mut RenderState<'static>,
+    rows: &mut RowIterator<'static>,
+    cells: &mut CellIterator<'static>,
+    out: &Mutex<Option<Frame>>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+    selection: &mut Option<SelectionAnchors>,
+) -> anyhow::Result<()> {
+    let mut line = String::with_capacity(text.len() + 16);
+    // CR LF, not LF: the session is raw, so nothing rewrites it for us.
+    line.push_str("\r\n\x1b[33m");
+    line.push_str(text);
+    line.push_str("\x1b[0m\r\n");
+    term.vt_write(line.as_bytes());
+    publish(term, state, rows, cells, out, wake, true, selection)
+}
+
 async fn run(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
     out: Arc<Mutex<Option<Frame>>>,
@@ -548,9 +726,40 @@ async fn run(
     let mut paste_at: Option<tokio::time::Instant> = None;
     let (reconnect_tx, mut reconnect_rx) =
         tokio::sync::mpsc::unbounded_channel::<tokio_serial::SerialStream>();
-    // The pty master and child must outlive the pane: dropping the master
-    // closes the terminal and takes the shell with it.
-    let mut pty_keep: Option<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> = None;
+    // Dropping the master closes the pty, which is what ends the child.
+    let mut pty_keep: Option<Box<dyn MasterPty + Send>> = None;
+    // A shell — local or ssh — is opened by one path, used at startup and after
+    // every dropped connection. `open_at` is when to try next.
+    let mut shell: Option<pty::Config> = None;
+    let mut open_at: Option<tokio::time::Instant> = None;
+    // Set when the next open is a reconnection, so the pane says so and puts the
+    // session back where it was rather than starting it at home.
+    let mut reopening = false;
+    let mut opened_at = std::time::Instant::now();
+    let mut backoff = Backoff::default();
+    // The pty is made at the default size and told the real one as soon as the
+    // UI resizes it. A connection that comes back needs the size the window has
+    // *now*, so the loop remembers it.
+    let mut pty_size = portable_pty::PtySize {
+        rows: ROWS,
+        cols: COLS,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    // Separate from `closed_rx` because a shell's exit says something a serial
+    // port's does not: how it exited, which is the difference between a session
+    // the user ended and a connection that dropped under it.
+    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<ShellExit>();
+    // The last directory the session reported, whichever machine it is on. Not
+    // `cwd`: a remote path is not a local directory, but it is where a reconnect
+    // belongs.
+    let mut last_dir: Option<String> = None;
+    // Bytes typed before the first connection opened. `--send` is the command
+    // line's "type this now", and it arrives before an ssh client has finished
+    // starting; only the first connection holds them, because typing at a
+    // session that is *reconnecting* is typing at a screen it never drew.
+    let mut typed_early: Vec<u8> = Vec::new();
+    let mut ever_opened = false;
 
     match transport {
         Transport::Serial(cfg) => {
@@ -584,48 +793,13 @@ async fn run(
                 reconnect = Some((cfg.clone(), identity));
             }
         }
-        Transport::Shell(cfg) => {
-            let shell = cfg.open()?;
-            let pty::Shell {
-                master,
-                child,
-                mut reader,
-                writer,
-            } = shell;
-            pty_keep = Some((master, child));
-            sink = Some(Sink::Pty(writer));
-            source_alive = true;
-            let pty_log = log.clone();
-            let pty_tx = bytes_tx.clone();
-            let pty_ended = Arc::clone(&ended);
-            let pty_wake = Arc::clone(&wake);
-            std::thread::Builder::new()
-                .name("dtr-pty".into())
-                .spawn(move || {
-                    let mut buf = [0u8; 8192];
-                    loop {
-                        match reader.read(&mut buf) {
-                            // EOF: the child closed the pty, so it has exited.
-                            Ok(0) => {
-                                pty_ended.store(true, std::sync::atomic::Ordering::Relaxed);
-                                pty_wake();
-                                break;
-                            }
-                            Ok(n) => {
-                                log_chunk(&pty_log, &buf[..n]);
-                                if pty_tx.send(buf[..n].to_vec()).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                tracing::warn!(%err, "pty read");
-                                pty_ended.store(true, std::sync::atomic::Ordering::Relaxed);
-                                pty_wake();
-                                break;
-                            }
-                        }
-                    }
-                })?;
+        Transport::Shell(config) => {
+            // Not opened here. An ssh session is a connection and a connection
+            // drops, so the first connection goes through the same path as the
+            // ones after it: a host that is not answering is a pane that waits,
+            // not an app that exits with an error nobody can act on.
+            shell = Some(config);
+            open_at = Some(tokio::time::Instant::now());
         }
             Transport::Replay(path) => {
             let bytes = std::fs::read(&path)?;
@@ -645,6 +819,9 @@ async fn run(
         }
         Transport::Demo => term.vt_write(DEMO),
     }
+
+    // The alias, when this pane is a connection rather than a shell of its own.
+    let alias = shell.as_ref().and_then(|config| config.remote.clone());
 
     // Always publish once, even if the terminal is still clean: a pane that
     // has produced no output yet still has an (empty) grid to show.
@@ -679,9 +856,21 @@ async fn run(
                             chunks += 1;
                             total += bytes.len();
                             stats.add_rx(bytes.len());
-                            if let Some(dir) = sniffer.feed(&bytes) {
-                                if let Ok(mut slot) = cwd.lock() {
-                                    *slot = Some(dir);
+                            if let Some(report) = sniffer.feed(&bytes) {
+                                // Where the session is, on whichever machine owns
+                                // it: this is what a dropped connection comes
+                                // back to.
+                                last_dir =
+                                    Some(report.path.to_string_lossy().into_owned());
+                                // Only a path on *this* machine is a local
+                                // directory. A remote session never adopts its
+                                // own, even when the far host happens to share
+                                // this machine's name.
+                                if alias.is_none() && crate::uri::is_local_host(&report.host)
+                                {
+                                    if let Ok(mut slot) = cwd.lock() {
+                                        *slot = Some(report.path);
+                                    }
                                 }
                             }
                             marks.write(&mut term, &bytes)?;
@@ -744,6 +933,124 @@ async fn run(
                             }
                         }
                     });
+                }
+            }
+            _ = tokio::time::sleep_until(
+                    open_at.unwrap_or_else(tokio::time::Instant::now)
+                ), if open_at.is_some() && shell.is_some() =>
+            {
+                open_at = None;
+                let config = shell.as_ref().expect("guarded by `shell.is_some()`");
+                let mut config = if reopening {
+                    config.reopened(last_dir.as_deref())
+                } else {
+                    config.clone()
+                };
+                // The size the window has now, not the one it had when the
+                // session first opened.
+                config.size = Some(pty_size);
+                if reopening {
+                    // The shell that died cannot say this, and a pane that
+                    // simply stops is indistinguishable from one waiting for a
+                    // key. Written before the attempt, so whatever ssh says
+                    // about it appears underneath.
+                    let where_ = match &last_dir {
+                        Some(dir) => format!(" in {dir}"),
+                        None => String::new(),
+                    };
+                    notice(
+                        &mut term,
+                        &format!(
+                            "-- reconnecting to {}{where_} --",
+                            alias.as_deref().unwrap_or("the session")
+                        ),
+                        &mut state,
+                        &mut rows,
+                        &mut cells,
+                        &out,
+                        &wake,
+                        &mut selection,
+                    )?;
+                }
+                match start_shell(&config, &bytes_tx, &exit_tx, &log) {
+                    Ok(open) => {
+                        pty_keep = Some(open.master);
+                        sink = Some(Sink::Pty(open.writer));
+                        source_alive = true;
+                        opened_at = std::time::Instant::now();
+                        ever_opened = true;
+                        tracing::info!(reconnecting = reopening, "session opened");
+                        if !typed_early.is_empty() {
+                            let bytes = std::mem::take(&mut typed_early);
+                            if let Some(sink) = sink.as_mut() {
+                                match sink.write(&bytes).await {
+                                    Ok(()) => stats.add_tx(bytes.len()),
+                                    Err(err) => {
+                                        tracing::warn!(%err, "write the early keystrokes")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // A local shell that will not start is a bug in the
+                        // installation, and saying so is better than a pane
+                        // retrying something that cannot work. A connection is
+                        // different: it is exactly what has to be retried.
+                        if alias.is_none() {
+                            return Err(err);
+                        }
+                        tracing::warn!(%err, alias = ?alias, "cannot reopen the session");
+                        notice(
+                            &mut term,
+                            &format!("-- cannot start ssh: {err} --"),
+                            &mut state,
+                            &mut rows,
+                            &mut cells,
+                            &out,
+                            &wake,
+                            &mut selection,
+                        )?;
+                        let wait = backoff.next();
+                        tracing::info!(ms = wait.as_millis() as u64, "retrying");
+                        open_at = Some(tokio::time::Instant::now() + wait);
+                        reopening = true;
+                    }
+                }
+            }
+            exit = exit_rx.recv() => {
+                // The loop holds a sender for as long as the pane exists, so the
+                // channel cannot end while anything is listening.
+                let Some(exit) = exit else { continue };
+                // The child is gone. What that means is the whole question: an
+                // ssh client that exits because the user typed `exit` is the end
+                // of the session, and one that exits because the network went
+                // away is a connection to reopen.
+                if alias.is_some() && ending(exit.code) == Ending::Dropped {
+                    if exit.at.duration_since(opened_at) >= BACKOFF_RESET {
+                        // It was up for a while, so this is not a flaky host:
+                        // the next drop is worth a prompt retry.
+                        backoff.reset();
+                    }
+                    let wait = backoff.next();
+                    tracing::warn!(
+                        code = exit.code,
+                        ms = wait.as_millis() as u64,
+                        "connection lost; reopening"
+                    );
+                    sink = None;
+                    pty_keep = None;
+                    // Whatever was on screen may have been a full-screen
+                    // program with its modes still set; the shell that comes
+                    // back must not start inside them.
+                    reset_modes(&mut term);
+                    reopening = true;
+                    open_at = Some(tokio::time::Instant::now() + wait);
+                } else {
+                    tracing::info!(code = exit.code, "session ended");
+                    source_alive = false;
+                    ended.store(true, std::sync::atomic::Ordering::Relaxed);
+                    wake();
                 }
             }
             _ = tokio::time::sleep_until(paste_at.unwrap_or_else(tokio::time::Instant::now)),
@@ -811,6 +1118,17 @@ async fn run(
                                 Ok(()) => stats.add_tx(bytes.len()),
                                 Err(err) => tracing::warn!(%err, "write to session"),
                             }
+                        } else if !ever_opened {
+                            // Nothing is open *yet*: `--send` arrives before the
+                            // first connection does, and an ssh client takes a
+                            // moment to start. Held, not dropped, or the flag
+                            // would work only when the host was fast.
+                            typed_early.extend_from_slice(&bytes);
+                        } else {
+                            // Typed at a connection that is not there. Dropped
+                            // rather than queued: a shell that comes back has no
+                            // idea what was typed at a screen it never drew.
+                            tracing::debug!("no session; the keystroke is dropped");
                         }
                         // Local echo is for devices that do not echo: the bytes
                         // are shown without being sent anywhere else.
@@ -855,15 +1173,18 @@ async fn run(
                             tracing::warn!(%err, "resize the grid");
                         }
                         // The shell needs the size too, or it wraps for the old
-                        // width and the terminal shows a staircase.
-                        if let Some((pty, _)) = pty_keep.as_mut() {
-                            let size = portable_pty::PtySize {
-                                rows: new_rows,
-                                cols: new_cols,
-                                pixel_width: u16::try_from(width_px).unwrap_or(u16::MAX),
-                                pixel_height: u16::try_from(height_px).unwrap_or(u16::MAX),
-                            };
-                            if let Err(err) = pty.resize(size) {
+                        // width and the terminal shows a staircase. The size is
+                        // remembered even with no pty behind it: a connection
+                        // that comes back is opened at the size the window has
+                        // *now*, not the one it had when the tab was opened.
+                        pty_size = portable_pty::PtySize {
+                            rows: new_rows,
+                            cols: new_cols,
+                            pixel_width: u16::try_from(width_px).unwrap_or(u16::MAX),
+                            pixel_height: u16::try_from(height_px).unwrap_or(u16::MAX),
+                        };
+                        if let Some(pty) = pty_keep.as_mut() {
+                            if let Err(err) = pty.resize(pty_size) {
                                 tracing::warn!(%err, "resize the pty");
                             }
                         }
@@ -1049,7 +1370,6 @@ async fn run(
         }
     }
 
-    let _ = &pty_keep;
     Ok(())
 }
 
@@ -1603,10 +1923,21 @@ struct CwdSniffer {
     buf: Vec<u8>,
 }
 
+/// One OSC 7 report: where the session says it is, and on which machine.
+///
+/// The host is kept rather than resolved away, because the two questions a path
+/// answers are different: "may I use this as a local directory?" needs the host,
+/// while "where does a reconnected session belong?" is a path on the session's
+/// own machine whatever it is called.
+struct CwdReport {
+    host: String,
+    path: PathBuf,
+}
+
 impl CwdSniffer {
     const MAX: usize = 8 * 1024;
 
-    fn feed(&mut self, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    fn feed(&mut self, bytes: &[u8]) -> Option<CwdReport> {
         self.buf.extend_from_slice(bytes);
         let mut found = None;
         while let Some(start) = find(&self.buf, b"\x1b]7;") {
@@ -1620,8 +1951,8 @@ impl CwdSniffer {
                 return found;
             };
             let payload = &self.buf[body..body + len];
-            if let Some(path) = parse_file_uri(payload) {
-                found = Some(path);
+            if let Some(report) = parse_file_uri(payload) {
+                found = Some(report);
             }
             let terminator = match self.buf[body + len] {
                 0x07 => 1,
@@ -1649,18 +1980,22 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// `file://host/path` to a local path.
+/// `file://host/path`, with the host kept so the caller can decide what the path
+/// means.
 ///
 /// The host decides whether the path means anything here: empty, `localhost` or
 /// this machine's own name is a local directory; anything else is a shell on
-/// another host, and a path from there is not a local directory — returning it
-/// would make "new tab here" try to `cd` into a path that happens to exist on the
-/// wrong machine. The rule itself is shared with the link opener, which had its
-/// own copy of it and did not know about the machine's name.
-fn parse_file_uri(payload: &[u8]) -> Option<std::path::PathBuf> {
+/// another host, and a path from there is not a local directory — using it would
+/// make "new tab here" try to `cd` into a path that happens to exist on the wrong
+/// machine. The rule itself is shared with the link opener, which had its own
+/// copy of it and did not know about the machine's name.
+fn parse_file_uri(payload: &[u8]) -> Option<CwdReport> {
     let text = std::str::from_utf8(payload).ok()?;
     let (host, path) = crate::uri::split(text)?;
-    crate::uri::is_local_host(host).then(|| std::path::PathBuf::from(path))
+    Some(CwdReport {
+        host: host.to_owned(),
+        path: PathBuf::from(path),
+    })
 }
 
 fn fill_cells(
@@ -1857,10 +2192,19 @@ mod tests {
 mod cwd_tests {
     use super::CwdSniffer;
 
+    /// The path, when the report names a directory on this machine.
     fn path_of(input: &[u8]) -> Option<String> {
+        let report = CwdSniffer::default().feed(input)?;
+        crate::uri::is_local_host(&report.host)
+            .then(|| report.path.display().to_string())
+    }
+
+    /// The path as the pane keeps it for a reconnect: on whichever machine the
+    /// session is, as text, because it is not a local path.
+    fn reported(input: &[u8]) -> Option<String> {
         CwdSniffer::default()
             .feed(input)
-            .map(|path| path.display().to_string())
+            .map(|report| report.path.display().to_string())
     }
 
     #[test]
@@ -1890,7 +2234,7 @@ mod cwd_tests {
         assert_eq!(
             sniffer
                 .feed(b"me/barnabas\x07")
-                .map(|path| path.display().to_string())
+                .map(|report| report.path.display().to_string())
                 .as_deref(),
             Some("/home/barnabas")
         );
@@ -1901,6 +2245,12 @@ mod cwd_tests {
         // A remote shell's path means nothing here; adopting it would make
         // "new tab here" cd into a directory on the wrong machine.
         assert_eq!(path_of(b"\x1b]7;file://build-host/home/x\x07"), None);
+        // It is still where the session is, and a connection that drops has to
+        // come back to it.
+        assert_eq!(
+            reported(b"\x1b]7;file://build-host/home/x\x07").as_deref(),
+            Some("/home/x")
+        );
     }
 
     #[test]
@@ -2199,5 +2549,186 @@ mod gate_tests {
         assert_eq!(frame_budget(Some(0)).as_micros(), 8_333);
         // And a very fast panel does not turn the gate into a busy loop.
         assert_eq!(frame_budget(Some(1_000_000)).as_micros(), 2_000);
+    }
+}
+
+#[cfg(test)]
+mod ending_tests {
+    use super::{Backoff, Ending, ending};
+
+    /// `exit` is the user ending the session; 255 is ssh saying the connection
+    /// failed. This is the whole distinction between closing a tab and reopening
+    /// one, and it is one line of code, so it is a test.
+    #[test]
+    fn ssh_s_255_is_a_drop_and_anything_else_is_the_user_leaving() {
+        assert_eq!(ending(Some(255)), Ending::Dropped);
+        // A signal is never somebody typing `exit`.
+        assert_eq!(ending(None), Ending::Dropped);
+        assert_eq!(ending(Some(0)), Ending::Chose);
+        assert_eq!(ending(Some(1)), Ending::Chose);
+    }
+
+    /// A host that is down must not be asked once a second for ever, and a
+    /// session that comes back must not stay slow for the rest of the day.
+    #[test]
+    fn the_backoff_grows_and_stops_growing() {
+        let mut backoff = Backoff::default();
+        let waits: Vec<u64> = (0..8).map(|_| backoff.next().as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30, 30]);
+        backoff.reset();
+        assert_eq!(backoff.next().as_secs(), 1);
+    }
+}
+
+/// A shell pane with a real pty behind it: the only way to see a reconnection,
+/// because the whole question is what the child's exit status means.
+///
+/// The "ssh" here is `/bin/sh -c`, and the config says it is remote — which is
+/// the part the pane acts on. That keeps the test to a script and no network.
+#[cfg(all(test, unix))]
+mod session_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::time::{Duration, Instant};
+
+    fn pane(script: String, remote: Option<&str>, args: Vec<String>) -> Pane {
+        let mut config = pty::Config {
+            program: Some("/bin/sh".to_owned()),
+            remote: remote.map(str::to_owned),
+            ..Default::default()
+        };
+        let mut all = vec!["-c".to_owned(), script];
+        all.extend(args);
+        config.args = all;
+        let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
+        Pane::spawn(Transport::Shell(config), None, None, budget, || {})
+            .expect("a shell pane")
+    }
+
+    /// Poll the published frames until `needle` is on screen, and hand back what
+    /// the screen said.
+    fn wait_for(pane: &Pane, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        let mut text = String::new();
+        loop {
+            if let Some(frame) = pane.take_frame() {
+                text = frame_text(&frame);
+                if text.contains(needle) {
+                    return text;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "`{needle}` never appeared; the screen said:\n{text}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_connection_that_drops_is_reopened_in_the_same_pane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let counter = dir.path().join("n");
+        let script = format!(
+            "n=$(cat {n} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {n}; \
+             if [ $n = 1 ]; then echo first; exit 255; fi; echo second; exec sleep 30",
+            n = counter.display()
+        );
+        let pane = pane(script, Some("test-host"), Vec::new());
+        let text = wait_for(&pane, "second", Duration::from_secs(20));
+        // It says what it is doing: the shell that dropped cannot.
+        assert!(
+            text.contains("reconnecting to test-host"),
+            "the pane never said it was reconnecting:\n{text}"
+        );
+        // And the pane is still there, which is the whole point: a tab that
+        // vanished on a dropped connection would take the scrollback with it.
+        assert!(!pane.ended(), "a dropped connection ended the pane");
+        assert!(pane.error().is_none(), "the pane failed: {:?}", pane.error());
+    }
+
+    /// A host that never answers: the pane stays, keeps trying, and grows the
+    /// wait. Closing the tab is how a person gives up, not the exit status of a
+    /// connection that was never made.
+    #[test]
+    fn a_connection_that_never_comes_back_keeps_the_pane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attempts = dir.path().join("attempts");
+        let script = format!("echo x >> {}; exit 255", attempts.display());
+        let pane = pane(script, Some("test-host"), Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let made = std::fs::read_to_string(&attempts)
+                .map(|log| log.lines().count())
+                .unwrap_or(0);
+            if made >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {made} attempts were made"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!pane.ended(), "a failed connection ended the pane");
+        let text = wait_for(&pane, "reconnecting", Duration::from_secs(5));
+        assert!(text.contains("reconnecting to test-host"), "{text}");
+    }
+
+    /// The directory the session reported comes back with it. The path is on the
+    /// other machine, so it cannot be `cwd`: it is a string handed to ssh.
+    #[test]
+    fn a_reconnect_puts_the_session_back_where_it_was() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("args");
+        let counter = dir.path().join("n");
+        let script = format!(
+            "n=$(cat {n} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {n}; \
+             if [ $n = 1 ]; then printf '\\033]7;file:///srv/app\\a'; exit 255; fi; \
+             printf '%s\\n' \"$@\" > {seen}; echo second; exec sleep 30",
+            n = counter.display(),
+            seen = seen.display()
+        );
+        // The placeholder is `$0`, so the command ssh would run arrives as `$1`.
+        let pane = pane(script, Some("test-host"), vec!["dtr".to_owned()]);
+        wait_for(&pane, "second", Duration::from_secs(20));
+        let args = std::fs::read_to_string(&seen).expect("the second connection recorded its argv");
+        // What the *remote shell* would parse, not the spelling: the directory
+        // has to arrive as one word, after a `cd`.
+        let words = shlex::split(args.trim()).expect("the reopen command parses");
+        assert_eq!(
+            words.first().map(String::as_str),
+            Some("cd"),
+            "the reconnect did not go back to a directory: {args}"
+        );
+        assert_eq!(words.get(1).map(String::as_str), Some("/srv/app"), "{args}");
+        // A shell, so the session is interactive rather than a dead `cd`.
+        assert!(words.iter().any(|word| word == "exec"), "{args}");
+    }
+
+    /// A local shell has no connection to put back: `exit` still closes the tab.
+    #[test]
+    fn a_local_shell_that_exits_ends_the_pane() {
+        let pane = pane("echo bye; exit 0".to_owned(), None, Vec::new());
+        wait_for(&pane, "bye", Duration::from_secs(10));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pane.ended() {
+            assert!(Instant::now() < deadline, "the pane never ended");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A program that died in the alternate screen must not leave the shell that
+    /// replaces it inside one.
+    #[test]
+    fn a_reconnect_leaves_the_alternate_screen_and_its_modes() {
+        let mut term = Terminal::new(COLS, ROWS).expect("a terminal");
+        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h");
+        assert!(term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
+        assert!(term.mode(Mode::NORMAL_MOUSE).expect("mode"));
+        reset_modes(&mut term);
+        assert!(!term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
+        assert!(!term.mode(Mode::NORMAL_MOUSE).expect("mode"));
+        assert!(!term.mode(Mode::BRACKETED_PASTE).expect("mode"));
     }
 }

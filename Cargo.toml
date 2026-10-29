@@ -57,6 +57,10 @@ rustc-demangle = "0.1"
 swash = "0.2"
 # Terminal cells are laid out on a wcwidth grid: a character is one cell or two.
 unicode-width = "0.2"
+# Quoting for the command a reconnected ssh session runs in the shell at the
+# *other* end. A path can hold anything but `/` and NUL, and hand-rolled quoting
+# is the kind of code that looks right until it meets a `'`.
+shlex = "2"
 fontique = "0.12"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "io-util", "macros"] }
