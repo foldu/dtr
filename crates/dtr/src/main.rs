@@ -233,6 +233,13 @@ struct Args {
     #[arg(long, value_name = "TEXT")]
     send: Option<String>,
 
+    /// Paste TEXT through the paste path once the session is attached, as if it
+    /// came from the clipboard: escapes are expanded, line endings are the
+    /// terminal's business, and a program that asked for bracketed paste gets
+    /// the markers. `--send` is typing; this is pasting.
+    #[arg(long, value_name = "TEXT")]
+    paste: Option<String>,
+
     /// Wait this long before capturing, so a session can produce output
     #[arg(long, default_value_t = 300, value_name = "MS")]
     screenshot_delay: u64,
@@ -565,6 +572,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let send = args.send.as_deref().map(input::unescape).unwrap_or_default();
+    let paste = args.paste.as_deref().map(input::unescape).unwrap_or_default();
     let files = args.files.as_deref().map(|path| {
         if path.is_empty() {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -612,6 +620,7 @@ fn main() -> anyhow::Result<()> {
         let startup = app::Startup {
             transport,
             send,
+            paste: paste.clone(),
             log: log.clone(),
             store: store.clone(),
             palette: args.palette,
@@ -648,6 +657,7 @@ fn main() -> anyhow::Result<()> {
     let startup = app::Startup {
         transport,
         send,
+        paste,
         log: log.clone(),
         store: store.clone(),
         palette: args.palette,

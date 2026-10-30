@@ -877,6 +877,27 @@ chars" with a selection on screen. `Command::Copy`/`CopySelection` rebuild the t
 from the terminal at copy time instead; the pane is the only place that still
 holds the cells.
 
+**A paste is not typing, and the pane decides what the program wants.**
+`Command::Paste` goes through `pane::pasted`, and everything that differs from
+typing lives there: line breaks become CR (a clipboard holds LF on Wayland and
+CRLF on Windows, while a pty calls the CR that Enter sends "line break" — a bare LF
+is a ctrl-J no program binds), with CRLF collapsing to one break; and a program
+that asked for bracketed paste (`ESC[?2004h` — nvim, vim, fish, zsh, readline)
+gets `ESC[200~ … ESC[201~` around the text, which is what makes it insert a block
+literally instead of running every byte through its input loop. The mode lives in
+the pane's terminal, so the UI cannot decide it, and it is read at paste time
+rather than cached, because a program turns it on when it starts.
+
+The other half was a chord that did nothing: egui-winit turns **its** paste command
+(ctrl+v) into `Event::Paste` and returns before the app sees a key, so the
+`ctrl-shift-v` binding could never fire — `Action::Paste` reads the clipboard itself
+now (`App::clipboard_text`), and both paths end in `Command::Paste`. The action is
+consumed even when the clipboard is empty: falling through would send `^V`, a
+program's own "insert the next character literally". `--paste 'a\nb'` drives this
+path without a clipboard, and
+`bracketed_paste_follows_the_program_that_asked_for_it` runs it against a real pty,
+once with the mode reported and once without.
+
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler
 only parks the text in the pane's `copied` slot; the UI does the clipboard work

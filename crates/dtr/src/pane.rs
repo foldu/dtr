@@ -760,6 +760,11 @@ async fn run(
     // session that is *reconnecting* is typing at a screen it never drew.
     let mut typed_early: Vec<u8> = Vec::new();
     let mut ever_opened = false;
+    // A paste that arrived before the program could answer whether it wants
+    // bracketed paste, and the deadline that stops it waiting for a program
+    // that never speaks.
+    let mut early_paste: Option<Vec<u8>> = None;
+    let mut early_at: Option<tokio::time::Instant> = None;
 
     match transport {
         Transport::Serial(cfg) => {
@@ -883,6 +888,22 @@ async fn run(
                             }
                         }
                         flush_replies(&replies, &mut sink).await;
+                        // The program has spoken, so whatever it wanted to say
+                        // about pasting is in the terminal now — which is the
+                        // answer a held paste was waiting for.
+                        if let Some(text) = early_paste.take() {
+                            early_at = None;
+                            write_paste(
+                                &mut term,
+                                &mut sink,
+                                &stats,
+                                paste_tick,
+                                &mut paste,
+                                &mut paste_at,
+                                text,
+                            )
+                            .await;
+                        }
                         tracing::debug!(chunks, bytes = total, "burst parsed");
                         if tokio::time::Instant::now() >= next_publish {
                             publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
@@ -1051,6 +1072,24 @@ async fn run(
                     source_alive = false;
                     ended.store(true, std::sync::atomic::Ordering::Relaxed);
                     wake();
+                }
+            }
+            _ = tokio::time::sleep_until(
+                    early_at.unwrap_or_else(tokio::time::Instant::now)
+                ), if early_at.is_some() =>
+            {
+                early_at = None;
+                if let Some(text) = early_paste.take() {
+                    write_paste(
+                        &mut term,
+                        &mut sink,
+                        &stats,
+                        paste_tick,
+                        &mut paste,
+                        &mut paste_at,
+                        text,
+                    )
+                    .await;
                 }
             }
             _ = tokio::time::sleep_until(paste_at.unwrap_or_else(tokio::time::Instant::now)),
@@ -1350,27 +1389,123 @@ async fn run(
                         }
                         wake();
                     }
-                    Command::Paste(bytes) => match paste_tick {
-                        // No pacing: hand the whole thing over at once.
-                        None => {
-                            if let Some(sink) = sink.as_mut() {
-                                match sink.write(&bytes).await {
-                                    Ok(()) => stats.add_tx(bytes.len()),
-                                    Err(err) => tracing::warn!(%err, "paste write"),
-                                }
-                            }
+                    Command::Paste(bytes) => {
+                        if sink.is_none() && !ever_opened {
+                            // A paste at a session that has not opened yet
+                            // (`--paste` is instant, and a tab can be pasted
+                            // into before its shell starts): held as *text*,
+                            // because the wrapping is the program's answer and
+                            // no program is running yet to give one.
+                            early_paste = Some(bytes);
+                            early_at = Some(tokio::time::Instant::now() + EARLY_PASTE);
+                            continue;
                         }
-                        Some(_) => {
-                            paste = bytes;
-                            paste_at = Some(tokio::time::Instant::now());
-                        }
-                    },
+                        write_paste(
+                            &mut term,
+                            &mut sink,
+                            &stats,
+                            paste_tick,
+                            &mut paste,
+                            &mut paste_at,
+                            bytes,
+                        )
+                        .await;
+                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// The bytes a paste puts on the wire.
+///
+/// Two things happen here, and both are the terminal's job rather than the
+/// clipboard's.
+///
+/// **Line breaks become CR.** A clipboard holds LF on Wayland and CRLF on
+/// Windows, while a pty reads the *CR* that the Enter key sends; a program that
+/// gets a bare LF sees a literal ctrl-J, which is not the key it has bound to
+/// "new line". egui-winit has already turned CRLF into LF by the time the text
+/// reaches us, so this is LF → CR, with CRLF collapsing to one break.
+///
+/// **A program that asked for bracketed paste gets markers around it.** `ESC [
+/// ? 2004 h` is how nvim, vim, fish, zsh and readline say "wrap a paste, so I
+/// can insert it literally instead of running every byte through my input
+/// loop" — which is what keeps the lines of a block without re-running
+/// autoindent, abbreviations or a one-key mapping on the way in. It is also what
+/// makes a paste into a *shell* not execute each line as a command. The mode is
+/// the program's, the terminal is the only thing that knows it, and so this
+/// decision belongs to the pane.
+/// How long a paste waits for a program that has not said anything yet.
+///
+/// A program can only ask for bracketed paste by writing to the terminal, so a
+/// paste that arrives before the program has *spoken* has no answer to honour.
+/// Any output at all flushes it sooner; this is the fallback for a program that
+/// stays silent (a `cat`), so a scripted paste is never silently dropped.
+const EARLY_PASTE: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn pasted(bracketed: bool, text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 16);
+    if bracketed {
+        out.extend_from_slice(b"\x1b[200~");
+    }
+    let mut bytes = text.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'\r' => {
+                out.push(b'\r');
+                // CRLF is one line break, not two.
+                if bytes.peek() == Some(&b'\n') {
+                    bytes.next();
+                }
+            }
+            b'\n' => out.push(b'\r'),
+            _ => out.push(byte),
+        }
+    }
+    if bracketed {
+        out.extend_from_slice(b"\x1b[201~");
+    }
+    out
+}
+
+/// Put a paste on the wire, honouring what the program asked for.
+///
+/// One place, because a paste can be written the moment it arrives and a held
+/// one is written later — and the answer to "bracketed?" has to be read from the
+/// terminal at the moment of writing, not at the moment of arriving.
+async fn write_paste(
+    term: &mut Terminal<'static, '_>,
+    sink: &mut Option<Sink>,
+    stats: &Stats,
+    paste_tick: Option<std::time::Duration>,
+    paste: &mut Vec<u8>,
+    paste_at: &mut Option<tokio::time::Instant>,
+    text: Vec<u8>,
+) {
+    // The program's own request, read from the terminal it was made on: only
+    // the pane has the terminal, and the UI has no business knowing what a
+    // program asked for.
+    let bracketed = term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
+    let bytes = pasted(bracketed, &text);
+    tracing::debug!(bracketed, bytes = bytes.len(), "paste");
+    match paste_tick {
+        // No pacing: hand the whole thing over at once.
+        None => {
+            if let Some(sink) = sink.as_mut() {
+                match sink.write(&bytes).await {
+                    Ok(()) => stats.add_tx(bytes.len()),
+                    Err(err) => tracing::warn!(%err, "paste write"),
+                }
+            }
+        }
+        Some(_) => {
+            *paste = bytes;
+            *paste_at = Some(tokio::time::Instant::now());
+        }
+    }
 }
 
 struct LogWriter {
@@ -2369,6 +2504,21 @@ mod selection_tests {
         assert_eq!(cell.text(&term), before);
     }
 
+    /// A selection over several lines is several lines. `unwrap` is set so that a
+    /// *soft*-wrapped line does not come back with a break in it; a row the
+    /// program ended on purpose is not a soft wrap, and flattening those turns a
+    /// copied block into one long line wherever it is pasted.
+    #[test]
+    fn a_selection_over_several_lines_keeps_its_line_breaks() {
+        let mut term = terminal();
+        // Two whole lines: the last rows of the scrollback are `line 36` and
+        // `line 37` (the terminal is 20x5 and 40 lines were written).
+        let start = SelectionAnchors::at(&term, 0, 0).unwrap();
+        let cell = head(&mut term, start, 9, 1);
+        let text = cell.text(&term).expect("a selection");
+        assert_eq!(text, "line 36\nline 37", "flattened to {text:?}");
+    }
+
     /// OSC 8 gives a cell a URI. It is answered on ask, from the cell under the
     /// pointer, and a cell outside the link has none.
     #[test]
@@ -2553,6 +2703,42 @@ mod gate_tests {
 }
 
 #[cfg(test)]
+mod paste_tests {
+    use super::pasted;
+
+    /// A pty calls CR "Enter"; a clipboard holds LF, and a program that gets LF
+    /// pasted into it sees a ctrl-J, which is not the same key. Every terminal
+    /// normalises this, and doing it in the paste path (not the copy path) is
+    /// what keeps a *copied* block byte-for-byte what was on screen.
+    #[test]
+    fn line_breaks_become_the_key_a_pty_calls_enter() {
+        assert_eq!(pasted(false, b"one\ntwo"), b"one\rtwo");
+        // CRLF is one break, not two: a paste that doubled every line would
+        // land a blank line between each.
+        assert_eq!(pasted(false, b"one\r\ntwo"), b"one\rtwo");
+        // A lone CR is already the right byte.
+        assert_eq!(pasted(false, b"one\rtwo"), b"one\rtwo");
+        // Nothing else is touched, control characters included: an escape the
+        // text uses on purpose is the text.
+        assert_eq!(pasted(false, b"a\tb\x1b[C"), b"a\tb\x1b[C");
+        assert_eq!(pasted(false, b""), b"");
+    }
+
+    /// The markers are what tell a program "this is a paste, not typing", so
+    /// they have to go around the whole thing — an empty paste included, or a
+    /// program that reads the start marker waits for an end that never comes.
+    #[test]
+    fn a_program_that_asked_for_bracketed_paste_gets_the_markers() {
+        assert_eq!(pasted(true, b"one\ntwo"), b"\x1b[200~one\rtwo\x1b[201~");
+        assert_eq!(pasted(true, b""), b"\x1b[200~\x1b[201~");
+        assert_eq!(
+            pasted(true, b"\x1b[31mred\x1b[0m"),
+            b"\x1b[200~\x1b[31mred\x1b[0m\x1b[201~"
+        );
+    }
+}
+
+#[cfg(test)]
 mod ending_tests {
     use super::{Backoff, Ending, ending};
 
@@ -2730,5 +2916,50 @@ mod session_tests {
         assert!(!term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
         assert!(!term.mode(Mode::NORMAL_MOUSE).expect("mode"));
         assert!(!term.mode(Mode::BRACKETED_PASTE).expect("mode"));
+    }
+
+    /// The wrapper is the *program's* request, so it has to be read from the
+    /// terminal rather than assumed: a program that never sent `?2004h` gets its
+    /// text bare, and one that did gets the markers. A paste that ignored the
+    /// mode would show the markers to a program that never asked for them.
+    #[test]
+    fn bracketed_paste_follows_the_program_that_asked_for_it() {
+        for (prologue, expected) in [
+            ("", "one\rtwo"),
+            (r"printf '\033[?2004h'; ", "\x1b[200~one\rtwo\x1b[201~"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("pasted");
+            // `cat` writes whatever reaches it, byte for byte, which is the only
+            // assertion that says what the program was actually handed.
+            let script = format!("{prologue}exec cat > {}", out.display());
+            let pane = pane(script, None, Vec::new());
+            // The program has started when it has said something (the mode
+            // report) and its redirection exists.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !out.exists() || (!prologue.is_empty() && pane.stats().rx() == 0) {
+                assert!(Instant::now() < deadline, "the program never started");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // The mode bytes are parsed by the pane's own loop, which is a frame
+            // behind the child that wrote them.
+            std::thread::sleep(Duration::from_millis(150));
+
+            pane.send(Command::Paste(b"one\ntwo".to_vec()));
+            let mut got = Vec::new();
+            while got.len() < expected.len() {
+                assert!(
+                    Instant::now() < deadline,
+                    "pasted {got:?}, expected {expected:?} (with {prologue:?})"
+                );
+                got = std::fs::read(&out).unwrap_or_default();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                String::from_utf8_lossy(&got),
+                expected,
+                "while the program said {prologue:?}"
+            );
+        }
     }
 }

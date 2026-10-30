@@ -224,6 +224,10 @@ mod link_tests {
 pub struct Startup {
     pub transport: Transport,
     pub send: Vec<u8>,
+    /// Bytes to put through the *paste* path, as if they came from the
+    /// clipboard: `--paste` exists so the bracketed and line-ending handling is
+    /// checkable against a real program.
+    pub paste: Vec<u8>,
     pub log: Option<(PathBuf, crate::serial::LogFormat)>,
     pub store: Option<Arc<dtr_store::Store>>,
     /// Open the palette on start (also how it gets into screenshots).
@@ -285,6 +289,12 @@ pub fn capture_headless(
     )?;
     if !startup.send.is_empty() {
         pane.write(startup.send.clone());
+    }
+    if !startup.paste.is_empty() {
+        // Through the paste path, not the typing one: a program that asked for
+        // bracketed paste has to see the markers here too, or `--paste` would
+        // test something other than what a clipboard does.
+        pane.send(crate::pane::Command::Paste(startup.paste.clone()));
     }
     if startup.scroll != 0 {
         // After the output has arrived: scrolling an empty screen clamps to
@@ -445,6 +455,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     })?;
     if !startup.send.is_empty() {
         pane.write(startup.send.clone());
+    }
+    if !startup.paste.is_empty() {
+        pane.send(crate::pane::Command::Paste(startup.paste.clone()));
     }
 
     let mut app = App {
@@ -1730,6 +1743,48 @@ impl App {
         }
     }
 
+    /// Read the system clipboard, by hand.
+    ///
+    /// The same reason as `set_clipboard`: egui owns its own handle and its own
+    /// shortcut, and a chord that only this app's keymap knows about never
+    /// reaches egui's paste path at all.
+    fn clipboard_text(&mut self) -> Option<String> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
+                Err(err) => {
+                    tracing::warn!(%err, "no system clipboard");
+                    return None;
+                }
+            }
+        }
+        match self.clipboard.as_mut()?.get_text() {
+            Ok(text) => {
+                tracing::debug!(chars = text.chars().count(), "clipboard read");
+                Some(text)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not read the clipboard");
+                None
+            }
+        }
+    }
+
+    /// Hand a paste to the focused session.
+    ///
+    /// The bytes here are the clipboard's, untouched: turning line breaks into
+    /// CR and wrapping the text for a program that asked for bracketed paste are
+    /// the pane's decisions, because the terminal it holds is the only place
+    /// that knows what the program requested.
+    fn paste(&mut self, text: String) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        session
+            .pane
+            .send(crate::pane::Command::Paste(text.into_bytes()));
+    }
+
     fn pointer_down(&mut self, at: (f64, f64)) {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
@@ -1928,9 +1983,37 @@ impl App {
                 }
                 true
             }
-            // The clipboard arrives as an egui paste event, which the render
-            // pass collects; there is nothing to do on the key itself.
-            Action::Paste => self.session().is_some(),
+            // egui turns *its* paste shortcut (ctrl+v) into an event and knows
+            // nothing about `ctrl-shift-v`, which is the binding this app
+            // documents — so the chord only this app can see has to read the
+            // clipboard itself. Both paths end in `Command::Paste`, which is
+            // where a program's bracketed paste is honoured.
+            Action::Paste => match self.clipboard_text() {
+                Some(text) if !text.is_empty() => {
+                    self.paste(text);
+                    true
+                }
+                // Consumed even when there is nothing to paste: the alternative
+                // is the chord falling through to the shell as a literal ^V,
+                // which is what "insert the next character literally" means to
+                // vim and emacs — a key nobody pressed.
+                Some(_) => {
+                    self.toast = Some((
+                        "the clipboard is empty".to_owned(),
+                        std::time::Instant::now(),
+                    ));
+                    self.repaint("paste");
+                    true
+                }
+                None => {
+                    self.toast = Some((
+                        "could not read the clipboard".to_owned(),
+                        std::time::Instant::now(),
+                    ));
+                    self.repaint("paste");
+                    true
+                }
+            },
             Action::ScrollPageUp | Action::ScrollPageDown => {
                 let page = self
                     .session()
