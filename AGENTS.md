@@ -877,26 +877,26 @@ chars" with a selection on screen. `Command::Copy`/`CopySelection` rebuild the t
 from the terminal at copy time instead; the pane is the only place that still
 holds the cells.
 
-**A paste is not typing, and the pane decides what the program wants.**
-`Command::Paste` goes through `pane::pasted`, and everything that differs from
-typing lives there: line breaks become CR (a clipboard holds LF on Wayland and
-CRLF on Windows, while a pty calls the CR that Enter sends "line break" — a bare LF
-is a ctrl-J no program binds), with CRLF collapsing to one break; and a program
-that asked for bracketed paste (`ESC[?2004h` — nvim, vim, fish, zsh, readline)
-gets `ESC[200~ … ESC[201~` around the text, which is what makes it insert a block
-literally instead of running every byte through its input loop. The mode lives in
-the pane's terminal, so the UI cannot decide it, and it is read at paste time
-rather than cached, because a program turns it on when it starts.
+**The program decides what a key and a paste mean, and only the pane knows.**
+Two things the UI sends are not things the UI can know:
 
-The other half was a chord that did nothing: egui-winit turns **its** paste command
-(ctrl+v) into `Event::Paste` and returns before the app sees a key, so the
-`ctrl-shift-v` binding could never fire — `Action::Paste` reads the clipboard itself
-now (`App::clipboard_text`), and both paths end in `Command::Paste`. The action is
-consumed even when the clipboard is empty: falling through would send `^V`, a
-program's own "insert the next character literally". `--paste 'a\nb'` drives this
-path without a clipboard, and
-`bracketed_paste_follows_the_program_that_asked_for_it` runs it against a real pty,
-once with the mode reported and once without.
+- **A paste** goes through `pane::pasted`: line breaks become CR (a clipboard holds
+  LF on Wayland and CRLF on Windows, while a pty calls the CR that Enter sends
+  "line break"), and a program that asked for bracketed paste (`?2004h` — nvim,
+  vim, fish, zsh, readline) gets `ESC[200~ … ESC[201~` around it, which is what
+  makes it insert a block literally instead of running every byte through its
+  input loop.
+- **An arrow key** is `ESC O A` when the program asked for application cursor keys
+  (`?1h` — ncurses' `smkx`, which is every program that calls `keypad()`: htop,
+  less, man, mc). A terminal that always sends `ESC [ A` types arrows those
+  programs cannot match, which is "the arrow keys don't work in htop". Only the
+  unmodified key changes form; `kUP5=\E[1;5A` is the one spelling ncurses knows.
+
+Both modes live in the pane's terminal, so `Pane::modes` is an atomic the pane
+stores after every burst and the UI reads per keystroke — a round trip would be a
+frame of latency and a frame of staleness.
+`an_arrow_key_is_encoded_for_the_program_that_asked` runs the whole chain against
+a real pty, once with each mode reported.
 
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler

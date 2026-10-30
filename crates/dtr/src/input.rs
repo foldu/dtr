@@ -8,6 +8,24 @@
 use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+/// The terminal state that changes what a key *means*, as opposed to what it
+/// types.
+///
+/// `DECCKM` is the one that matters in practice. ncurses turns it on with
+/// `smkx` (`ESC [ ? 1 h`) for every program that calls `keypad()` — htop, less,
+/// man, mc, aptitude — and from then on an unmodified arrow key is `ESC O A`,
+/// not `ESC [ A`: `kcud1=\EOB` in the terminfo entry, because the terminal is
+/// what is supposed to change. A terminal that ignores the mode types arrows the
+/// program cannot recognise, which is "the arrow keys don't work in htop".
+///
+/// The state lives in the pane's terminal, which is why it arrives here as a
+/// plain value rather than being asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modes {
+    /// `DECCKM`: application cursor keys.
+    pub cursor_keys: bool,
+}
+
 /// Encode a winit key event for the session, if it produces any bytes.
 ///
 /// Releases are dropped here rather than at the call site: a release event
@@ -15,15 +33,31 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 /// falls back to the character), so encoding both sends every keystroke twice.
 /// That is exactly what "typing `ls` shows `lsls`" was.
 #[allow(dead_code)]
-pub fn encode(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
+pub fn encode(event: &KeyEvent, mods: ModifiersState, modes: Modes) -> Option<Vec<u8>> {
     if event.state != winit::event::ElementState::Pressed {
         return None;
     }
-    encode_key(&event.logical_key, event.text.as_deref(), mods)
+    encode_with(&event.logical_key, event.text.as_deref(), mods, modes)
 }
 
-/// The testable core: key, resolved text, modifiers.
+/// The table's own spelling: a key with no modes set.
+///
+/// Test-only, because the app always has a terminal to ask — this is what makes
+/// the table itself readable in a test without repeating `Modes::default()`
+/// fifteen times.
+#[cfg(test)]
 pub fn encode_key(logical: &Key, text: Option<&str>, mods: ModifiersState) -> Option<Vec<u8>> {
+    encode_with(logical, text, mods, Modes::default())
+}
+
+/// The testable core: key, resolved text, modifiers, and what the terminal
+/// asked for.
+pub fn encode_with(
+    logical: &Key,
+    text: Option<&str>,
+    mods: ModifiersState,
+    modes: Modes,
+) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     // Alt is an ESC prefix in xterm; the modifiers are not stripped from what
     // follows, so Alt+letter arrives as ESC + letter.
@@ -32,7 +66,7 @@ pub fn encode_key(logical: &Key, text: Option<&str>, mods: ModifiersState) -> Op
     }
 
     match logical {
-        Key::Named(named) => out.extend_from_slice(&named_bytes(*named, mods)?),
+        Key::Named(named) => out.extend_from_slice(&named_bytes(*named, mods, modes)?),
         Key::Character(chars) => {
             let character = chars.chars().next()?;
             if mods.control_key() {
@@ -104,7 +138,21 @@ fn ss3(final_byte: u8, mods: ModifiersState) -> Vec<u8> {
     }
 }
 
-fn named_bytes(key: NamedKey, mods: ModifiersState) -> Option<Vec<u8>> {
+/// A cursor key: `SS3 <final>` in application mode, `CSI <final>` otherwise.
+///
+/// Only the *unmodified* key changes form. A modified one stays
+/// `CSI 1 ; <mods> <final>` in both modes — that is what xterm does, and what
+/// ncurses' own table expects (`kUP5=\E[1;5A`), so a shift-arrow keeps working
+/// in a `keypad()`ed program even while plain arrows have switched.
+fn cursor(final_byte: u8, mods: ModifiersState, modes: Modes) -> Vec<u8> {
+    if modes.cursor_keys && modifier_code(mods) == 1 {
+        vec![0x1b, b'O', final_byte]
+    } else {
+        csi(final_byte, mods)
+    }
+}
+
+fn named_bytes(key: NamedKey, mods: ModifiersState, modes: Modes) -> Option<Vec<u8>> {
     Some(match key {
         NamedKey::Enter => b"\r".to_vec(),
         // The terminal sends DEL, not BS; applications delete on DEL.
@@ -113,12 +161,12 @@ fn named_bytes(key: NamedKey, mods: ModifiersState) -> Option<Vec<u8>> {
         NamedKey::Tab => vec![b'\t'],
         NamedKey::Escape => vec![0x1b],
         NamedKey::Space => vec![b' '],
-        NamedKey::ArrowUp => csi(b'A', mods),
-        NamedKey::ArrowDown => csi(b'B', mods),
-        NamedKey::ArrowRight => csi(b'C', mods),
-        NamedKey::ArrowLeft => csi(b'D', mods),
-        NamedKey::Home => csi(b'H', mods),
-        NamedKey::End => csi(b'F', mods),
+        NamedKey::ArrowUp => cursor(b'A', mods, modes),
+        NamedKey::ArrowDown => cursor(b'B', mods, modes),
+        NamedKey::ArrowRight => cursor(b'C', mods, modes),
+        NamedKey::ArrowLeft => cursor(b'D', mods, modes),
+        NamedKey::Home => cursor(b'H', mods, modes),
+        NamedKey::End => cursor(b'F', mods, modes),
         NamedKey::Insert => csi_tilde(2, mods),
         NamedKey::Delete => csi_tilde(3, mods),
         NamedKey::PageUp => csi_tilde(5, mods),
@@ -170,11 +218,17 @@ pub fn unescape(input: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_key, unescape};
+    use super::{Modes, encode_key, encode_with, unescape};
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     fn ch(text: &'static str) -> Key {
         Key::Character(text.into())
+    }
+
+    fn application() -> Modes {
+        Modes {
+            cursor_keys: true,
+        }
     }
 
     #[test]
@@ -273,6 +327,77 @@ mod tests {
             encode_key(&Key::Named(NamedKey::Delete), None, ModifiersState::SHIFT),
             Some(b"\x1b[3;2~".to_vec())
         );
+    }
+
+    /// `DECCKM` is what ncurses asks for with `smkx`, and what makes an arrow
+    /// key `ESC O A`. htop, less, man and mc enable it; a terminal that always
+    /// sends `ESC [ A` types arrows they cannot match, which is a dead keyboard.
+    #[test]
+    fn application_cursor_keys_use_ss3() {
+        let none = ModifiersState::empty();
+        for (key, plain, app) in [
+            (NamedKey::ArrowUp, b"\x1b[A".as_slice(), b"\x1bOA".as_slice()),
+            (NamedKey::ArrowDown, b"\x1b[B", b"\x1bOB"),
+            (NamedKey::ArrowRight, b"\x1b[C", b"\x1bOC"),
+            (NamedKey::ArrowLeft, b"\x1b[D", b"\x1bOD"),
+            (NamedKey::Home, b"\x1b[H", b"\x1bOH"),
+            (NamedKey::End, b"\x1b[F", b"\x1bOF"),
+        ] {
+            let key = Key::Named(key);
+            assert_eq!(encode_with(&key, None, none, Modes::default()), Some(plain.to_vec()));
+            assert_eq!(encode_with(&key, None, none, application()), Some(app.to_vec()));
+        }
+    }
+
+    /// A *modified* cursor key keeps its CSI form in both modes: that is what
+    /// xterm sends, and ncurses' `kUP5=\E[1;5A` is the only spelling it knows,
+    /// so switching those to SS3 would break shift-arrow in the very programs
+    /// this fixes.
+    #[test]
+    fn modified_cursor_keys_stay_csi_in_application_mode() {
+        assert_eq!(
+            encode_with(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                ModifiersState::SHIFT,
+                application()
+            ),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+        assert_eq!(
+            encode_with(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                application()
+            ),
+            Some(b"\x1b\x1b[1;7D".to_vec())
+        );
+    }
+
+    /// The mode is about cursor keys only. Page keys and the function keys have
+    /// one form each, and a program that turned `DECCKM` on did not ask for
+    /// those to move.
+    #[test]
+    fn other_keys_ignore_the_cursor_mode() {
+        for key in [
+            NamedKey::PageUp,
+            NamedKey::PageDown,
+            NamedKey::Insert,
+            NamedKey::Delete,
+            NamedKey::F1,
+            NamedKey::F5,
+            NamedKey::Enter,
+            NamedKey::Tab,
+            NamedKey::Backspace,
+        ] {
+            let key = Key::Named(key);
+            assert_eq!(
+                encode_with(&key, None, ModifiersState::empty(), application()),
+                encode_with(&key, None, ModifiersState::empty(), Modes::default()),
+                "{key:?} changed with DECCKM"
+            );
+        }
     }
 
     #[test]

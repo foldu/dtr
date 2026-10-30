@@ -314,7 +314,15 @@ measured by the UI, not the pane: the pane counts bytes, the UI's clock decides 
 
 0.6 is deliberately legacy VT/xterm encoding. The kitty keyboard protocol that libghostty
 implements needs mode negotiation with the application, so it belongs with the renderer work in
-M2 rather than in a mapping table.
+M2 rather than in a mapping table — but legacy encoding is not stateless either, and pretending
+it was cost a real bug: `DECCKM` (`ESC [ ? 1 h`) is what ncurses sends for every program that
+calls `keypad()`, and from then on an unmodified arrow key is `ESC O A` rather than `ESC [ A`.
+htop, less, man and mc all ask for it, so every one of them had a dead keyboard until the mode
+was tracked. It lives in the pane's terminal — it is the program's state, not the UI's — so the
+pane publishes it as an atomic after each burst and `App::on_key` reads it per keystroke:
+`ESC O` for unmodified cursor keys, CSI-with-parameter for modified ones, because
+`kUP5=\E[1;5A` is the only spelling ncurses knows. A paste has the same shape — the program's
+`?2004h` decides whether the text is wrapped — which is why both decisions live in the pane.
 
 Two things worth recording from getting a shell to run:
 

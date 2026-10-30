@@ -1257,7 +1257,21 @@ impl App {
                         if stroke.state != winit::event::ElementState::Pressed {
                             return;
                         }
-                        if let Some(bytes) = crate::input::encode_key(&stroke.key, stroke.text.as_deref(), stroke.mods) {
+                        // A program that called `keypad()` — ncurses, and so
+                        // htop, less, man — asked for application cursor keys,
+                        // and then an arrow key is `ESC O A`. The mode is the
+                        // terminal's, so the pane owns the answer; reading it
+                        // here costs one atomic and cannot be a frame stale.
+                        let modes = self
+                            .session()
+                            .map(|session| session.pane.modes())
+                            .unwrap_or_default();
+                        if let Some(bytes) = crate::input::encode_with(
+                            &stroke.key,
+                            stroke.text.as_deref(),
+                            stroke.mods,
+                            modes,
+                        ) {
                             if let Some(session) = self.session() {
                                 session.pane.write(bytes);
                             }

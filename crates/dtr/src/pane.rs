@@ -38,6 +38,15 @@ pub const ROWS: u16 = 24;
 /// reads, rather than being baked into a pane at spawn time.
 pub type FrameBudget = std::sync::Arc<std::sync::atomic::AtomicU64>;
 
+/// What the terminal's key-related modes currently are, shared with the UI.
+///
+/// The UI is what turns a keystroke into bytes, so it needs to know whether the
+/// program asked for application cursor keys — and that is the *program's*
+/// state, held by the terminal on this side. An atomic read per keystroke costs
+/// nothing next to a round trip, and it is always current: the pane stores it
+/// after every burst of output, which is the only way a program can change it.
+pub type KeyModes = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 /// Half a refresh interval: how long a burst of output may be parsed before a
 /// frame is published.
 ///
@@ -305,6 +314,9 @@ pub struct Pane {
     ended: Arc<std::sync::atomic::AtomicBool>,
     /// The directory the session last reported with OSC 7.
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// Whether the program asked for application cursor keys (`DECCKM`), which
+    /// decides whether an arrow key is `ESC O A` or `ESC [ A`.
+    cursor_keys: KeyModes,
 }
 
 impl Pane {
@@ -335,6 +347,8 @@ impl Pane {
         let ended_flag = Arc::clone(&ended);
         let cwd = Arc::new(Mutex::new(None));
         let cwd_seen = Arc::clone(&cwd);
+        let cursor_keys: KeyModes = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let keys_seen = Arc::clone(&cursor_keys);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
@@ -367,6 +381,7 @@ impl Pane {
                         Arc::clone(&cwd_seen),
                         theme,
                         budget,
+                        keys_seen,
                     )
                     .await
                     {
@@ -389,7 +404,15 @@ impl Pane {
             link,
             ended,
             cwd,
+            cursor_keys,
         })
+    }
+
+    /// What the program has asked of the keyboard.
+    pub fn modes(&self) -> crate::input::Modes {
+        crate::input::Modes {
+            cursor_keys: self.cursor_keys.load(Ordering::Relaxed),
+        }
     }
 
     /// Take the newest frame, if the emulator produced one since the last call.
@@ -586,10 +609,31 @@ fn reset_modes(term: &mut Terminal<'_, '_>) {
         Mode::URXVT_MOUSE,
         Mode::BRACKETED_PASTE,
         Mode::KEYPAD_KEYS,
+        // In application mode a shell would be typed `ESC O A` for an arrow
+        // key, which readline happens to accept but is not what a shell asked
+        // for — the mode belonged to the program that just died.
+        Mode::DECCKM,
     ] {
         if let Err(err) = term.set_mode(mode, false) {
             tracing::debug!(%err, "could not clear a terminal mode");
         }
+    }
+}
+
+/// Keep the UI's copy of the key modes in step with the terminal's.
+///
+/// Only the pane holds the terminal, and only the program's output can change a
+/// mode, so this runs after every burst: the UI's read is then never more than
+/// one burst old, which is the interval between a program asking and a person
+/// being able to press the key.
+fn sync_key_modes(term: &Terminal<'_, '_>, flag: &KeyModes) {
+    let cursor_keys = term.mode(Mode::DECCKM).unwrap_or(false);
+    let was = flag.swap(cursor_keys, Ordering::Relaxed);
+    if was != cursor_keys {
+        // Only on a change, because a burst happens per read: this line is how
+        // "did htop actually ask for application cursor keys?" gets answered
+        // from a log instead of a guess.
+        tracing::debug!(cursor_keys, "key modes");
     }
 }
 
@@ -632,6 +676,7 @@ async fn run(
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
     budget: FrameBudget,
+    key_modes: KeyModes,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
     // which is what you want when the point is to find out what the device did.
@@ -888,6 +933,10 @@ async fn run(
                             }
                         }
                         flush_replies(&replies, &mut sink).await;
+                        // The program's answer to "how should a key look" is in
+                        // the terminal now, and the UI is about to need it for
+                        // the next keystroke.
+                        sync_key_modes(&term, &key_modes);
                         // The program has spoken, so whatever it wanted to say
                         // about pasting is in the terminal now — which is the
                         // answer a held paste was waiting for.
@@ -1065,6 +1114,7 @@ async fn run(
                     // program with its modes still set; the shell that comes
                     // back must not start inside them.
                     reset_modes(&mut term);
+                    sync_key_modes(&term, &key_modes);
                     reopening = true;
                     open_at = Some(tokio::time::Instant::now() + wait);
                 } else {
@@ -2960,6 +3010,87 @@ mod session_tests {
                 expected,
                 "while the program said {prologue:?}"
             );
+        }
+    }
+
+    /// The UI encodes keystrokes, so the pane has to tell it what the program
+    /// asked for: `ESC[?1h` is ncurses' `smkx`, and until the pane publishes it
+    /// an arrow key is typed as `ESC[A`, which a `keypad()`ed program — htop,
+    /// less, man — cannot match.
+    #[test]
+    fn the_cursor_key_mode_reaches_the_ui() {
+        let pane = pane(
+            "printf '\\033[?1h'; echo a; sleep 1; printf '\\033[?1l'; echo b; exec sleep 30"
+                .to_owned(),
+            None,
+            Vec::new(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // `a` proves the report was parsed (the text follows it in one burst),
+        // and the mode is stored by that same burst.
+        wait_for(&pane, "a", Duration::from_secs(10));
+        assert!(
+            pane.modes().cursor_keys,
+            "DECCKM was set but the UI would still type ESC[A"
+        );
+        // …and turning it off again has to travel too, or every key after
+        // `less` hurts in a new way.
+        wait_for(&pane, "b", Duration::from_secs(10));
+        while pane.modes().cursor_keys {
+            assert!(
+                Instant::now() < deadline,
+                "DECCKM was cleared but the UI still thinks it is on"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The whole chain, minus the two lines of UI glue: a program that asks for
+    /// application cursor keys gets `ESC O A` for an arrow, and one that does
+    /// not gets `ESC [ A`. This is the test that would have caught htop.
+    #[test]
+    fn an_arrow_key_is_encoded_for_the_program_that_asked() {
+        use crate::input;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        for (prologue, expected) in [
+            ("", "\x1b[A"),
+            (r"printf '\033[?1h'; ", "\x1bOA"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("keys");
+            let script = format!("{prologue}exec cat > {}", out.display());
+            let pane = pane(script, None, Vec::new());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Wait for the mode to be published, which is exactly what the UI
+            // would be waiting for: the program's answer, not a guess.
+            while !out.exists() || (!prologue.is_empty() && !pane.modes().cursor_keys) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the program never asked for anything (expected {expected:?})"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let bytes = input::encode_with(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                ModifiersState::empty(),
+                pane.modes(),
+            )
+            .expect("an arrow key");
+            pane.write(bytes);
+
+            let mut got = String::new();
+            while got.len() < expected.len() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the program got {got:?}, expected {expected:?} (with {prologue:?})"
+                );
+                got = std::fs::read_to_string(&out).unwrap_or_default();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(got, expected, "while the program said {prologue:?}");
         }
     }
 }
