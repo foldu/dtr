@@ -73,6 +73,10 @@ pub fn capture(
     files: Option<&crate::explorer::Explorer>,
     toast: Option<(&str, f32)>,
     settings: Option<&crate::settings::Settings>,
+    // A composition to draw above the caret, so the IME box can be reviewed in
+    // the same picture the window draws (`--preedit`). The window itself gets
+    // this from the platform; a headless run cannot.
+    preedit: Option<&crate::ime::Preedit>,
 ) -> anyhow::Result<()> {
     let instance = crate::app::instance();
     // Same preference as the window: a capture from a different adapter than
@@ -239,6 +243,40 @@ pub fn capture(
         }
         if let Some(settings) = settings {
             settings.ui(ui, look);
+        }
+        if let Some(preedit) = preedit {
+            if let Some(pane) = panes.iter().find(|pane| pane.cursor) {
+                if let Some((col, row)) = pane.frame.and_then(|frame| frame.cursor) {
+                    // The capture has no metrics of its own: the cell is the
+                    // pane divided by the grid it holds, which is the same
+                    // arithmetic the live path does with `Metrics`.
+                    let (cols, rows) = pane
+                        .frame
+                        .map(|frame| (f32::from(frame.cols), f32::from(frame.rows)))
+                        .unwrap_or((80.0, 24.0));
+                    let cell = crate::layout::Rect::new(
+                        pane.rect.x + col as f32 * pane.rect.width / cols.max(1.0),
+                        pane.rect.y + row as f32 * pane.rect.height / rows.max(1.0),
+                        pane.rect.width / cols.max(1.0),
+                        pane.rect.height / rows.max(1.0),
+                    );
+                    let points = ui.ctx().pixels_per_point();
+                    let to_points = |r: crate::layout::Rect| {
+                        egui::Rect::from_min_size(
+                            egui::pos2(r.x / points, r.y / points),
+                            egui::vec2(r.width / points, r.height / points),
+                        )
+                    };
+                    preedit.ui(
+                        ui,
+                        crate::ime::Anchor {
+                            caret: to_points(cell),
+                            pane: to_points(pane.rect),
+                        },
+                        look,
+                    );
+                }
+            }
         }
         if let Some((text, alpha)) = toast {
             crate::ui::toast(ui, look, text, alpha);

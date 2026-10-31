@@ -139,6 +139,54 @@ pub const FALLBACK: &[&str] = &[
     "Noto Sans",
 ];
 
+/// Bytes of an installed family that can draw CJK, for egui's UI text.
+///
+/// egui's bundled faces are latin-only and it **panics** on a missing glyph
+/// (`No glyph for "に" in Monospace`), and a terminal is exactly where CJK gets
+/// typed: the IME preedit above all, but also any query a person types into the
+/// palette. So the UI needs one CJK face, chosen by the same preference list the
+/// grid uses — both then agree about which face a Han character comes from.
+///
+/// Read once, at startup, because `set_fonts` rebuilds egui's atlas.
+pub fn ui_fallback() -> Option<(String, Vec<u8>)> {
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
+    let mut cache = fontique::SourceCache::default();
+    for name in FALLBACK {
+        let Some(id) = collection.family_id(name) else {
+            continue;
+        };
+        let Some(family) = collection.family(id) else {
+            continue;
+        };
+        // Upright regular: a fallback for UI text, not a style match.
+        let Some(font) = family.match_font(
+            fontique::FontWidth::NORMAL,
+            fontique::FontStyle::Normal,
+            fontique::FontWeight::NORMAL,
+            false,
+        ) else {
+            continue;
+        };
+        let Some(blob) = font.load(Some(&mut cache)) else {
+            continue;
+        };
+        let index = font.index() as usize;
+        let covers = swash::FontRef::from_index(blob.data(), index).is_some_and(|face| {
+            let map = face.charmap();
+            // Hiragana and a Han character: one family covers both, and testing
+            // both is what tells a CJK face from one that only has kana.
+            map.map('あ') != 0 && map.map('漢') != 0
+        });
+        if !covers {
+            continue;
+        }
+        // Reload to own the bytes: `load(Some(&mut cache))` borrows from it.
+        let owned = font.load(None)?;
+        return Some(((*name).to_owned(), owned.data().to_vec()));
+    }
+    None
+}
+
 /// The family to use when nothing is configured: the first preferred one that
 /// is installed, else the first usable family at all.
 ///
@@ -208,6 +256,22 @@ mod tests {
             .filter_map(|font| font.load(Some(&mut cache)))
             .any(|blob| works(blob.data(), 0));
         assert!(usable, "the grid font of last resort failed its own probe");
+    }
+
+    /// The UI needs a face egui can draw CJK with, or the preedit box panics on
+    /// the characters an IME exists to produce. Skipped when the machine has no
+    /// CJK family at all, like the font probes above.
+    #[test]
+    fn a_ui_fallback_covers_cjk_when_one_is_installed() {
+        let Some((name, bytes)) = super::ui_fallback() else {
+            eprintln!("no CJK family installed; nothing to check");
+            return;
+        };
+        assert!(!bytes.is_empty(), "{name} produced no bytes");
+        let face = swash::FontRef::from_index(&bytes, 0).expect("a face");
+        let map = face.charmap();
+        assert!(map.map('あ') != 0, "{name} has no kana");
+        assert!(map.map('漢') != 0, "{name} has no Han");
     }
 
     #[test]

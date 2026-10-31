@@ -264,6 +264,10 @@ pub struct Startup {
     pub split: Option<crate::layout::Axis>,
     /// Open a file pane beside the initial session, at this directory.
     pub files: Option<PathBuf>,
+    /// A composition to show before the platform has sent one, for the capture
+    /// path: the box's geometry is the half of IME support that a real input
+    /// method cannot be asked about in a headless run.
+    pub preedit: Option<String>,
 }
 
 /// Render one frame offscreen and write it to `path`, without a window.
@@ -353,6 +357,12 @@ pub fn capture_headless(
         settings.show(&startup.config);
         settings
     });
+    // The composition `--preedit` asked for, in the shape the window gives the
+    // box: the same type, so both paths cannot disagree about the layout.
+    let mut preedit = crate::ime::Preedit::default();
+    if let Some(text) = startup.preedit.clone() {
+        preedit.set(text, None);
+    }
     crate::screenshot::capture(
         frame.as_ref(),
         path,
@@ -369,6 +379,7 @@ pub fn capture_headless(
         files.as_ref(),
         None,
         settings.as_ref(),
+        Some(&preedit),
     )
 }
 
@@ -463,6 +474,18 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let mut app = App {
         frame_budget,
         scripted_selection: startup.select,
+        // `--preedit` is how the composition box gets into a screenshot: the
+        // platform cannot be asked for a preedit without a hand on a keyboard
+        // with an input method, and the box is the half that is easy to get
+        // wrong.
+        preedit: {
+            let mut preedit = crate::ime::Preedit::default();
+            if let Some(text) = startup.preedit.clone() {
+                preedit.set(text, None);
+            }
+            preedit
+        },
+        ime_caret: None,
         clipboard: None,
         watcher: crate::watch::Watcher::spawn({
             let proxy = proxy.clone();
@@ -997,6 +1020,13 @@ struct App {
     /// `--select START:END`, still waiting for a frame to say how wide the grid
     /// is: the pane wants viewport cells, the flag names linear ones.
     scripted_selection: Option<(usize, usize)>,
+    /// What the platform's input method is composing. While there is a preedit
+    /// the keystrokes belong to the composition — the commit carries the text,
+    /// so the keys must not — and the box is drawn above the caret.
+    preedit: crate::ime::Preedit,
+    /// The caret's physical rect as the input method was last told it, so a
+    /// frame that did not move the caret does not repeat itself.
+    ime_caret: Option<[f32; 4]>,
 }
 
 impl App {
@@ -1074,6 +1104,52 @@ impl App {
         }
         tracing::debug!(from = self.active, to = index, why, "active tab");
         self.active = index;
+    }
+
+    /// Whether keys belong to the terminal rather than to an overlay.
+    ///
+    /// The same surfaces `on_key` hands the keyboard to: a composition that
+    /// committed into the shell behind an open palette would type somewhere the
+    /// person is not looking. A new modal belongs in both places.
+    fn terminal_owns_keys(&self) -> bool {
+        !self.palette.open
+            && !self.settings.open
+            && !self.pager.is_open()
+            && !self.save.is_open()
+    }
+
+    /// Handle one event from the platform's input method.
+    ///
+    /// The preedit is only a picture — nothing reaches the pty until the commit,
+    /// which is what makes a composition cancelable. The keys typed during one
+    /// carry `composing` and are suppressed by the encoder for the same reason.
+    fn on_ime(&mut self, ime: winit::event::Ime) {
+        match ime {
+            winit::event::Ime::Preedit(text, caret) => {
+                if self.preedit.set(text, caret) {
+                    self.repaint("ime preedit");
+                }
+            }
+            winit::event::Ime::Commit(text) => {
+                self.preedit.clear();
+                self.repaint("ime commit");
+                if text.is_empty() || !self.terminal_owns_keys() {
+                    return;
+                }
+                // A commit is typed text, not a key: it goes through the same
+                // path `--send` and a paste's contents do, so the pane's
+                // scroll-to-bottom and held-before-connect rules apply.
+                if let Some(session) = self.session() {
+                    tracing::debug!(bytes = text.len(), "ime commit");
+                    session.pane.write(text.into_bytes());
+                }
+            }
+            winit::event::Ime::Enabled | winit::event::Ime::Disabled => {
+                if self.preedit.clear() {
+                    self.repaint("ime closed");
+                }
+            }
+        }
     }
 
     /// Handle one key event. Both the window and `--keys` come through here, so
@@ -2938,6 +3014,13 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        // A terminal is where CJK is typed, and without this the platform never
+        // offers its input method: no composition, no candidate window, and a
+        // pinyin keyboard types latin letters at the shell. Enabling it is not
+        // enough on its own — the caret has to be reported as it moves
+        // (`set_ime_cursor_area` in the redraw) or the candidate window lands in
+        // the corner of the screen.
+        window.set_ime_allowed(true);
 
         match Gpu::new(window, &self.look, self.gpu_hint.as_deref()) {
             Ok(gpu) => {
@@ -3194,10 +3277,14 @@ impl ApplicationHandler<UserEvent> for App {
                     text: event.text.as_ref().map(|text| text.to_string()),
                     state: event.state,
                     repeat: event.repeat,
+                    // A key pressed while composing belongs to the composition:
+                    // the commit will carry the text, so this one must not.
+                    composing: self.preedit.is_composing(),
                     mods: self.modifiers,
                 };
                 self.on_key(&stroke);
             }
+            WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::Resized(size) => {
                 gpu.resize(size);
                 // The surface is not the only thing that depends on the window
@@ -3438,10 +3525,18 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 };
                 let tab = &self.tabs[self.active];
+                // The focused pane's rectangle, kept while the views are built:
+                // the IME box hangs off its caret.
+                let mut focused_rect = None;
                 let panes: Vec<_> = self
                     .pane_views(tab, gpu.metrics(), screen, scale)
                     .into_iter()
-                    .map(|(_, pane)| pane)
+                    .map(|(id, pane)| {
+                        if id == tab.focus {
+                            focused_rect = Some(pane.rect);
+                        }
+                        pane
+                    })
                     .collect();
                 // File panes have no cells: they are painted with egui over
                 // the rectangle the grid pass reserved for them.
@@ -3472,6 +3567,61 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                     .collect();
                 let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
+                // The composition box hangs off the caret of the focused
+                // terminal, and the platform's candidate window is told the same
+                // place: one geometry, two consumers, so they cannot disagree
+                // about where the person is typing.
+                let mut ime_anchor = None;
+                // Not while an overlay owns the keyboard: a dialogue's text field
+                // shows the composition itself (egui-winit feeds it), and a box
+                // hanging off the terminal cursor would claim the composition
+                // belongs to a pane that is not receiving it.
+                if self.preedit.is_composing() && self.terminal_owns_keys() {
+                    if let (Some(rect), Some(session)) = (focused_rect, tab.focused_terminal()) {
+                        if let Some((col, row)) =
+                            session.frame.as_ref().and_then(|frame| frame.cursor)
+                        {
+                            let metrics = gpu.metrics();
+                            let cell = crate::layout::Rect::new(
+                                rect.x + f32::from(col) * metrics.cell_width,
+                                rect.y + f32::from(row) * metrics.cell_height,
+                                metrics.cell_width,
+                                metrics.cell_height,
+                            );
+                            // Physical pixels: winit's IME area is in them, and
+                            // repeating an unchanged one would send a request
+                            // per frame on Wayland.
+                            let key = [cell.x, cell.y, cell.width, cell.height];
+                            if self.ime_caret != Some(key) {
+                                self.ime_caret = Some(key);
+                                gpu.window.set_ime_cursor_area(
+                                    winit::dpi::PhysicalPosition::new(
+                                        cell.x as i32,
+                                        cell.y as i32,
+                                    ),
+                                    winit::dpi::PhysicalSize::new(
+                                        cell.width as u32,
+                                        cell.height as u32,
+                                    ),
+                                );
+                            }
+                            // egui draws in points; the grid is laid out in
+                            // physical pixels. One conversion, here.
+                            let points = gpu.egui_ctx.pixels_per_point();
+                            let to_points = |r: crate::layout::Rect| {
+                                egui::Rect::from_min_size(
+                                    egui::pos2(r.x / points, r.y / points),
+                                    egui::vec2(r.width / points, r.height / points),
+                                )
+                            };
+                            ime_anchor = Some(crate::ime::Anchor {
+                                caret: to_points(cell),
+                                pane: to_points(rect),
+                            });
+                        }
+                    }
+                }
+                let ime = ime_anchor.map(|anchor| (anchor, &self.preedit));
                 let look = self.look.clone();
                 // Taken out for the frame for the same reason the palette is: the
                 // pager mutates itself while it draws, and `self` is borrowed.
@@ -3512,6 +3662,7 @@ impl ApplicationHandler<UserEvent> for App {
                     &mut settings_change,
                     capture_path.as_deref(),
                     &look,
+                    ime,
                 );
                 self.palette = palette;
                 // The pager comes back with the scroll the frame measured, which is
@@ -3908,6 +4059,9 @@ impl Gpu {
         settings_change: &mut Option<crate::settings::Change>,
         capture: Option<&std::path::Path>,
         look: &Look,
+        // The composition being typed, and where its box belongs. Both are
+        // absent unless an input method is in the middle of something.
+        ime: Option<(crate::ime::Anchor, &crate::ime::Preedit)>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -3994,6 +4148,12 @@ impl Gpu {
                         look,
                         file.focused,
                     );
+                }
+                // The composition box goes over the grid and under the
+                // modals: it is part of typing, and a palette a composition
+                // could cover would be a palette nobody could read.
+                if let Some((anchor, preedit)) = ime {
+                    preedit.ui(ui, anchor, look);
                 }
                 // The palette is an overlay above the panes: a file listing
                 // must not cover the command line it sits beside.

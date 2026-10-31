@@ -3,6 +3,7 @@
 mod app;
 mod explorer;
 mod fonts;
+mod ime;
 mod input;
 mod keys;
 mod layout;
@@ -152,6 +153,10 @@ struct Args {
     /// Select cells START..=END (linear indices) in the screenshot
     #[arg(long, value_name = "START:END")]
     select: Option<String>,
+
+    /// Show an IME composition as if it were being typed (`--screenshot`)
+    #[arg(long, value_name = "TEXT")]
+    preedit: Option<String>,
 
     /// Show a canned screen instead of launching anything
     #[arg(long)]
@@ -640,6 +645,7 @@ fn main() -> anyhow::Result<()> {
             settings: args.settings,
             config: config.clone(),
             config_path: config_path.clone(),
+            preedit: args.preedit.clone(),
         };
         let result = app::capture_headless(startup, path, width, height, delay);
         if let (Some(path), Some(profiler)) = (args.cpu_profile.clone(), profiler) {
@@ -677,6 +683,7 @@ fn main() -> anyhow::Result<()> {
         settings: args.settings,
         config,
         config_path,
+        preedit: args.preedit.clone(),
     };
     let result = app::run(startup);
     if let Some(profiler) = profiler {

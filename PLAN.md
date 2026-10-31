@@ -297,6 +297,38 @@ does not exist), and **zig cc enables `-Werror=date-time` itself**, so the suppr
 appended after it — `CFLAGS_x86_64_pc_windows_gnu=-Wno-error=date-time`. The claim that mimalloc is
 faster on Windows is not measured here; it needs a Windows machine.
 
+**A frame per read chunk is a thousand frames a second nobody sees.** The pane
+published from the read arm, so every chunk rebuilt the entire grid — cell by cell
+through the FFI, with a `String` for each cell that has a grapheme in it — at
+about 50 µs a frame. A flood arrives
+in chunks small enough that a 32 MiB payload became **1.1 million publishes and 57 s
+of CPU inside a 60 s run**, all of it thrown away because a screen shows sixty
+frames a second. The tell was a profile where 92% of the samples sat in
+`pane::fill_cells` and none of them in the parser.
+
+The gate is now half a refresh interval — 8.3 ms on a 60 Hz panel, 2.1 ms on a
+240 Hz one — with a timer arm that publishes the frame the pane owes, so a skipped
+publish cannot leave the picture stale. Half an interval and not a fixed 8 ms,
+because the gate is a latency floor as much as a work cap: 8 ms would serve a
+240 Hz panel at 125 Hz and leave every other frame stale. It lives in an atomic
+the UI rewrites rather than a constant, because the panel changes under the
+window — on `Moved` and `ScaleFactorChanged`, and once a second from the loop
+report, since a Wayland move tells the client nothing at all. The same flood is
+484 publishes and 31 ms. Two smaller traps came with it: `bytes_rx.recv()`
+returning `None` is not a no-op, because that arm is ready for ever and the pane
+spun at 100% after its child exited; and vtebench cannot see either of these,
+because what it times is the pty, not the frame.
+
+**What the per-cell `String` actually costs.** The frame path allocates a `Cell` with a `String`
+for every cell, which looks like the obvious thing to fix and is not the big half. Measured by
+swapping the global allocator out: a flood of two-byte lines leaves only 34 cells a frame with
+text in them, and mimalloc against the system allocator is **53 µs against 54 µs** a frame —
+nothing. A payload that fills every cell, 3808 allocations a frame, is **41 µs against 50 µs**:
+about 2.4 ns an allocation, and the other 8 ns a cell are the five FFI crossings it takes to read
+one (graphemes, foreground, background, styling, and the iterator step). At sixty frames a second
+the whole publish is 0.25% of a core and the strings are 0.05% of it, so this is a number to know
+before refactoring, not a reason to.
+
 A finding from getting there: on Windows wgpu selects **dx12** first, and Wine's FXC cannot
 compile egui's shader (`Shader model 5.1+ resource array`). `WGPU_BACKEND` now overrides the
 backend set, which is both the Wine workaround and a useful escape hatch for broken drivers.
@@ -330,6 +362,22 @@ not hand its `text` to the encoder (it typed a literal `a` for ctrl+a), and the 
 *stack* that `reset_modes` has to pop (`CSI < 999 u`, then `CSI = 0 u`) or a dead program's push
 reaches the shell that replaces it. A paste follows the same rule — the program's `?2004h`
 decides the wrapping — which is why both live in the pane.
+
+**IME is a picture and a commit, not keys.** A composition arrives as `Ime::Preedit` (what is being
+composed) and `Ime::Commit` (what was decided). The preedit is drawn in a box hung above the
+terminal's caret (`crate::ime`), clamped into the pane, with the platform's candidate window told
+the same rectangle through `set_ime_cursor_area`; nothing reaches the pty until the commit, which
+is what makes Escape cancel a composition instead of typing half of it. The keystrokes *during* a
+composition are not keys either: they carry `composing`, and the encoder suppresses their text,
+because the commit will send it — without that, pinyin types the romaji and then the character.
+`set_ime_allowed(true)` is the switch that makes any of it happen at all; before it dtr had no IME,
+so a CJK keyboard typed latin letters at the shell.
+
+The half that is not obvious is the font. egui's bundled families are latin-only and it **panics**
+on a glyph none of them has (`No glyph for "に" in Monospace`), and a terminal is exactly where
+CJK gets typed. `Look::install` therefore appends one CJK face — the first family from the grid's
+own `FALLBACK` list that has kana *and* Han — to both egui families. That fixes the preedit box and
+every other UI surface a person can type into, the palette query included.
 
 Two things worth recording from getting a shell to run:
 

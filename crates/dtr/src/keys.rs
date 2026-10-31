@@ -157,6 +157,10 @@ pub struct KeyStroke {
     pub text: Option<String>,
     pub state: winit::event::ElementState,
     pub repeat: bool,
+    /// Whether this keystroke is part of an IME composition. The keys that build
+    /// a composition must not also send their text — the commit carries it, and
+    /// sending both types the character twice.
+    pub composing: bool,
     /// The modifiers that were down. A real event takes them from the window;
     /// a scripted one from the chord, because a script has no keyboard.
     pub mods: winit::keyboard::ModifiersState,
@@ -194,6 +198,7 @@ impl KeyStroke {
             text,
             state: winit::event::ElementState::Pressed,
             repeat: false,
+            composing: false,
             mods,
         }
     }
@@ -206,6 +211,7 @@ impl KeyStroke {
             text: Some(ch.to_string()),
             state: winit::event::ElementState::Pressed,
             repeat: false,
+            composing: false,
             mods: winit::keyboard::ModifiersState::empty(),
         }
     }

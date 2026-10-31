@@ -95,14 +95,12 @@ with no validation error and no log line. Solids now carry a negative uv and
 take their colour from the instance, and the shader branches. If a rectangle
 disappears, suspect the texture path before the blend state.
 
-**A key release carries the same `logical_key` as its press.** Only `text` differs,
-and `encode` falls back to the character when `text` is empty — so encoding every
-`KeyboardInput` sends each keystroke twice ("typing `ls` shows `lsls`"). `input::encode`
-drops anything whose state is not `Pressed`, and after the key handler moved into
-`App::on_key` the guard lives there instead — the send-to-shell branch returns
-early on any release. This regressed once already during that move: "ls" typed as
-"lsls". A scripted keystroke now sends press *and* release, so the harness can
-catch it.
+**A key release carries the same `logical_key` as its press**, so encoding both
+types every keystroke twice ("typing `ls` shows `lsls`"). That trap belongs to the
+encoder now rather than to a guard in the UI: a release encodes to nothing unless
+the program asked the kitty protocol for release events.
+`a_release_sends_nothing_unless_it_was_asked_for` is what keeps "ls" from being
+"lsls".
 
 **Feeding `RedrawRequested` to egui creates an infinite redraw loop.** egui replies
 "yes, repaint" to that event, we ask winit for another frame, and the app spins at
@@ -152,8 +150,8 @@ gives a hit target that Enter cannot activate.
 hints rendered as tofu: the harness panicked with "No glyph for U+2191 in
 Proportional", and the window had been drawing empty boxes in those hints all
 along. Hints are words now (`up/down`, `left/right`), which also reads better in a
-terminal. Any new UI text should assume Latin-1 only until dtr ships its own UI
-font.
+terminal. Arrows and other symbols are still missing: see the IME entry for the
+one fallback face the UI does have.
 
 **Keys can be typed at the window from a script.** `--keys "ctrl-shift-p;down;down"` applies one
 stroke per frame through the same handler a keyboard uses (`App::on_key`), and
@@ -899,6 +897,22 @@ for ctrl+a.
 A paste is the same story: `pane::pasted` turns line breaks into CR and wraps the
 text in `ESC[200~ … ESC[201~` when the program asked with `?2004h`.
 
+**IME text is not a keystroke, and egui has no CJK.** `winit::event::Ime` carries
+the composition: the preedit is only a picture — `crate::ime` draws it in a box
+above the caret, clamped into the pane — and nothing reaches the pty until the
+commit, which is what makes a composition cancelable. Keys typed *while composing*
+must not send their text either: the commit carries it, so `KeyStroke::composing`
+reaches the encoder, and without it a composition types the romaji as well as the
+kanji. `set_ime_allowed(true)` is what makes a pinyin keyboard stop typing latin
+letters at the shell, and `set_ime_cursor_area` (per caret cell, deduplicated) is
+what puts the candidate window next to the text instead of in a corner.
+
+The other half is a trap that costs a panic: **egui's bundled faces are latin-only
+and it panics on a missing glyph** (`No glyph for "に" in Monospace`). A terminal
+is exactly where CJK is typed — the preedit box, and any palette query — so
+`Look::install` appends `fonts::ui_fallback()` (the grid's own preference list,
+read once at startup, `swift`-checked to have kana *and* Han) to both families.
+
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler
 only parks the text in the pane's `copied` slot; the UI does the clipboard work
@@ -921,36 +935,9 @@ it comes back cooked.
 that wants the byte (readline) turns it off itself for as long as it wants it.
 
 **A frame per read chunk is a thousand frames a second nobody sees.** The pane
-published from the read arm, so every chunk rebuilt the entire grid — cell by cell
-through the FFI, with a `String` for each cell that has a grapheme in it — at
-about 50 µs a frame. A flood arrives
-in chunks small enough that a 32 MiB payload became **1.1 million publishes and 57 s
-of CPU inside a 60 s run**, all of it thrown away because a screen shows sixty
-frames a second. The tell was a profile where 92% of the samples sat in
-`pane::fill_cells` and none of them in the parser.
-
-The gate is now half a refresh interval — 8.3 ms on a 60 Hz panel, 2.1 ms on a
-240 Hz one — with a timer arm that publishes the frame the pane owes, so a skipped
-publish cannot leave the picture stale. Half an interval and not a fixed 8 ms,
-because the gate is a latency floor as much as a work cap: 8 ms would serve a
-240 Hz panel at 125 Hz and leave every other frame stale. It lives in an atomic
-the UI rewrites rather than a constant, because the panel changes under the
-window — on `Moved` and `ScaleFactorChanged`, and once a second from the loop
-report, since a Wayland move tells the client nothing at all. The same flood is
-484 publishes and 31 ms. Two smaller traps came with it: `bytes_rx.recv()`
-returning `None` is not a no-op, because that arm is ready for ever and the pane
-spun at 100% after its child exited; and vtebench cannot see either of these,
-because what it times is the pty, not the frame.
-
-The per-cell `String` is the obvious suspect and is not the big half. Measured by
-swapping the global allocator out: a flood of two-byte lines leaves only 34 cells a
-frame with text in them, and mimalloc against the system allocator is **53 µs
-against 54 µs** a frame — nothing. A payload that fills every cell, 3808
-allocations a frame, is **41 µs against 50 µs**: about 2.4 ns an allocation, and
-the other 8 ns a cell are the five FFI crossings it takes to read one (graphemes,
-foreground, background, styling, and the iterator step). At sixty frames a second
-the whole publish is 0.25% of a core and the strings are 0.05% of it, so this is a
-number to know before refactoring, not a reason to.
+publishes on a gate of half a refresh interval, with a timer arm so a skipped
+publish cannot leave the picture stale; the measurements behind that (1.1 million
+publishes and 57 s of CPU became 484 and 31 ms) are in PLAN.
 
 ## Profiling
 

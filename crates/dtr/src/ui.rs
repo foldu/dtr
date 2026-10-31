@@ -99,23 +99,48 @@ impl Look {
     /// glyph atlas when the set changes, so doing this per frame would be a
     /// stutter on every repaint.
     pub fn install(&self, ctx: &egui::Context) {
-        let Some(path) = self.path.as_ref() else { return };
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::warn!(path = %path.display(), %err, "cannot read the configured font; keeping the default");
-                return;
-            }
-        };
         let mut definitions = egui::FontDefinitions::default();
-        definitions
-            .font_data
-            .insert("dtr-mono".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-        definitions
-            .families
-            .entry(egui::FontFamily::Monospace)
-            .or_default()
-            .insert(0, "dtr-mono".to_owned());
+        if let Some(path) = self.path.as_ref() {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    definitions.font_data.insert(
+                        "dtr-mono".to_owned(),
+                        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                    );
+                    definitions
+                        .families
+                        .entry(egui::FontFamily::Monospace)
+                        .or_default()
+                        .insert(0, "dtr-mono".to_owned());
+                }
+                Err(err) => tracing::warn!(
+                    path = %path.display(),
+                    %err,
+                    "cannot read the configured font; keeping the default"
+                ),
+            }
+        }
+        // One CJK face for everything egui draws, appended so latin text keeps
+        // its own face: egui's bundled families are latin-only and it panics on
+        // a glyph none of them has, while the IME preedit and a palette query
+        // are both places a person can type one.
+        match crate::fonts::ui_fallback() {
+            Some((name, bytes)) => {
+                definitions.font_data.insert(
+                    name.clone(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    definitions
+                        .families
+                        .entry(family)
+                        .or_default()
+                        .push(name.clone());
+                }
+                tracing::debug!(family = %name, "ui fallback face");
+            }
+            None => tracing::debug!("no UI fallback face; CJK in the UI will panic"),
+        }
         ctx.set_fonts(definitions);
     }
 

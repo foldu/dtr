@@ -3313,8 +3313,45 @@ mod session_tests {
             text: None,
             state: winit::event::ElementState::Pressed,
             repeat: false,
+            composing: false,
             mods,
         }
+    }
+
+    /// A key typed *while composing* must not send its text: the commit carries
+    /// it. Sending both types the romaji as well as the kanji, and an IME is
+    /// useless — which is why `composing` reaches the encoder at all.
+    #[test]
+    fn a_composing_key_sends_nothing_and_the_commit_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!("exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        let mut composing = key(
+            winit::keyboard::Key::Character("n".into()),
+            KeyCode::KeyN,
+            ModifiersState::empty(),
+        );
+        composing.text = Some("n".to_owned());
+        composing.composing = true;
+        pane.send(Command::Key(Box::new(composing)));
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            std::fs::read_to_string(&out).unwrap_or_default().is_empty(),
+            "a composing key reached the program"
+        );
+
+        // What the composition decided on is typed text, not a key: it goes
+        // through the same path a paste's contents do.
+        pane.write("日本".as_bytes().to_vec());
+        wait_for_bytes(&pane, &out, "日本", "the committed text");
     }
 
     /// Wait until the program has written `expected`, or fail with what it got.

@@ -38,9 +38,11 @@ pub fn fill(event: &mut Event<'_>, stroke: &KeyStroke) {
         (ElementState::Pressed, true) => Action::Repeat,
         (ElementState::Pressed, false) => Action::Press,
     });
-    // dtr has no composition state of its own: a composed character arrives as
-    // text, and a composition still in progress produces no key event at all.
-    event.set_composing(false);
+    // While an IME is composing, the keys are part of the composition: the commit
+    // will carry the text, so the encoder must not send it as well. That is what
+    // `composing` means to it, and it is the difference between typing `é` and
+    // typing `é` *and* the dead-key sequence that produced it.
+    event.set_composing(stroke.composing);
     // The codepoint of the *key*, which is what a kitty report quotes: ctrl+a is
     // `CSI 97;5u`, not a control byte and not the text.
     if let Some(codepoint) = char_of_key(key) {
@@ -488,6 +490,7 @@ mod tests {
             text: None,
             state: ElementState::Pressed,
             repeat: false,
+            composing: false,
             mods: ModifiersState::empty(),
         }
     }
