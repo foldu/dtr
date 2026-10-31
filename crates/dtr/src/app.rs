@@ -2919,6 +2919,17 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("dtr")
             .with_inner_size(LogicalSize::new(900.0, 620.0));
+        // The desktop entry says `StartupWMClass=dtr` and `Icon=dtr`, so the
+        // window has to say it is called that. Without a name, X11 derives
+        // `WM_CLASS` from argv[0] — which under the nix wrapper is
+        // `.dtr-unwrapped` — and Wayland gets no `app_id` at all, so a running
+        // window lands in the dock as a second, iconless application. Both
+        // platforms read the same field, which is why one call is enough.
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland as _;
+            attrs.with_name("dtr", "dtr")
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {

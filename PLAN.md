@@ -345,6 +345,15 @@ Two things worth recording from getting a shell to run:
 editing; `nix build .#windows` produces `dtr.exe`; `--headless --screenshot` writes a PNG
 in CI with no display server.
 
+The Linux package is also *installable*, not just runnable: `assets/dtr.desktop` is installed to
+`$out/share/applications`, and the logo set goes to `$out/share/icons/hicolor` under the name the
+entry's `Icon=` looks up — the vector one plus the three sizes the set actually has. Both halves
+have to agree on a name (`dtr`), and so does the window: `App::resumed` sets the app id and
+`WM_CLASS` to `dtr`, because without a name X11 derives `WM_CLASS` from argv[0] — under the
+wrapper that is `.dtr-unwrapped` — and Wayland gets no app id at all, which is a second, iconless
+window in the dock. `checks.<system>.desktop-entry` validates the *installed* entry and asserts
+each size exists, because a menu shows a blank square rather than an error.
+
 ### M1 — usable serial workbench
 
 - Logbook in redb: every session recorded (port, full settings, start/end, exit reason, note,

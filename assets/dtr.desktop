@@ -1,0 +1,21 @@
+# The desktop entry, installed by the flake to $out/share/applications.
+#
+# `Icon=dtr` is not a path: the theme looks it up in hicolor, which is why the
+# package installs assets/logo/dtr-mark* there under that name. `StartupWMClass`
+# has to match what the window reports — dtr sets the app id and `WM_CLASS` to
+# `dtr` in `App::resumed` — or a running window gets a second, iconless entry in
+# the dock instead of joining this one.
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=dtr
+GenericName=Terminal
+Comment=A serial-first terminal emulator
+Exec=dtr
+TryExec=dtr
+Icon=dtr
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;serial;console;tty;ssh;pty;
+StartupNotify=true
+StartupWMClass=dtr

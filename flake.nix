@@ -135,6 +135,16 @@
           libXrandr
         ])} \
             --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib
+
+          # The desktop entry and the icons it names. `Icon=dtr` is a lookup in
+          # the theme, so the files have to land under hicolor as `dtr`; the
+          # sizes are the ones the logo set actually has, and the vector one
+          # covers everything a bitmap would be stretched for.
+          install -Dm644 ${./assets/dtr.desktop} $out/share/applications/dtr.desktop
+          install -Dm644 ${./assets/logo/dtr-mark.svg} $out/share/icons/hicolor/scalable/apps/dtr.svg
+          install -Dm644 ${./assets/logo/dtr-mark-512.png} $out/share/icons/hicolor/512x512/apps/dtr.png
+          install -Dm644 ${./assets/logo/dtr-mark-32.png} $out/share/icons/hicolor/32x32/apps/dtr.png
+          install -Dm644 ${./assets/logo/dtr-mark-16.png} $out/share/icons/hicolor/16x16/apps/dtr.png
         '';
       });
 
@@ -205,6 +215,31 @@
           cargoArtifacts = dtrDeps;
           cargoTestExtraArgs = "--workspace";
         });
+
+      # A desktop entry is only worth installing if it parses *and* the icon it
+      # names exists: a typo in `Icon=` is a blank square in every menu, and a
+      # `StartupWMClass` that disagrees with the window is a second, iconless
+      # entry in the dock. The package is the thing checked, not the source file,
+      # so a wrong install path fails here too.
+      desktop-entry = pkgs.runCommand "dtr-desktop-entry" {
+        nativeBuildInputs = [pkgs.desktop-file-utils pkgs.gnused];
+      } ''
+        entry=${dtr}/share/applications/dtr.desktop
+        desktop-file-validate "$entry"
+
+        icon=$(sed -n 's/^Icon=//p' "$entry")
+        test -n "$icon" || {
+          echo "the desktop entry names no icon" >&2
+          exit 1
+        }
+        for size in scalable 512x512 32x32 16x16; do
+          ls ${dtr}/share/icons/hicolor/"$size"/apps/"$icon".* >/dev/null || {
+            echo "Icon=$icon has no $size artwork" >&2
+            exit 1
+          }
+        done
+        touch $out
+      '';
 
       single-exe = pkgs.runCommand "dtr-single-exe" {
         nativeBuildInputs = [pkgs.binutils];

@@ -31,6 +31,10 @@ test:
     # The benchmark payloads are shell scripts, so nothing compiles them. This
     # proves they still produce bytes, without a window, a GPU or a network.
     - ./scripts/bench.sh --check
+    # The desktop entry is packaging, so `cargo test` cannot see it: validate it
+    # against the installed package, where a wrong path or a missing icon shows
+    # up as a menu with a blank square in it.
+    - nix build .#checks.x86_64-linux.desktop-entry
   cache:
     key:
       files:
