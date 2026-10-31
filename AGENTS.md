@@ -878,25 +878,26 @@ from the terminal at copy time instead; the pane is the only place that still
 holds the cells.
 
 **The program decides what a key and a paste mean, and only the pane knows.**
-Two things the UI sends are not things the UI can know:
+`Command::Key` carries a *stroke*, not bytes: `input::fill` maps winit's vocabulary
+onto `libghostty_vt::key`, and the pane's `key::Encoder` picks the sequence after
+`set_options_from_terminal`. A table in the UI cannot be right, because what a key
+sends is the terminal's state: `DECCKM` (`?1h`, ncurses' `smkx`, so htop, less, man
+and mc) makes an unmodified arrow `ESC O A`; `DECKPAM` moves the keypad; mode 1036
+makes alt an `ESC` prefix; `modifyOtherKeys` respells ctrl and alt; and the kitty
+protocol (`CSI > flags u`, a *stack*, not a mode) turns ctrl+a into `CSI 97;5u`
+and can report releases. fish asks for `kitty=5`, nvim for `kitty=3`, and the
+terminal answers their `CSI ? u`, which is why they switch over.
 
-- **A paste** goes through `pane::pasted`: line breaks become CR (a clipboard holds
-  LF on Wayland and CRLF on Windows, while a pty calls the CR that Enter sends
-  "line break"), and a program that asked for bracketed paste (`?2004h` — nvim,
-  vim, fish, zsh, readline) gets `ESC[200~ … ESC[201~` around it, which is what
-  makes it insert a block literally instead of running every byte through its
-  input loop.
-- **An arrow key** is `ESC O A` when the program asked for application cursor keys
-  (`?1h` — ncurses' `smkx`, which is every program that calls `keypad()`: htop,
-  less, man, mc). A terminal that always sends `ESC [ A` types arrows those
-  programs cannot match, which is "the arrow keys don't work in htop". Only the
-  unmodified key changes form; `kUP5=\E[1;5A` is the one spelling ncurses knows.
+Three consequences that are easy to get wrong. The *position* decides, not the
+character: a real event has `physical_key`, `--keys` only implies one from a US
+layout. A ctrl or super combination must not pass its `text` through — the encoder
+sent a literal `a` for ctrl+a — while a plain character must, or accents and CJK
+never arrive. And `reset_modes` clears the kitty stack as well (`CSI < 999 u` then
+`CSI = 0 u`): a dead program's push would have the next shell typed `CSI 97;5u`
+for ctrl+a.
 
-Both modes live in the pane's terminal, so `Pane::modes` is an atomic the pane
-stores after every burst and the UI reads per keystroke — a round trip would be a
-frame of latency and a frame of staleness.
-`an_arrow_key_is_encoded_for_the_program_that_asked` runs the whole chain against
-a real pty, once with each mode reported.
+A paste is the same story: `pane::pasted` turns line breaks into CR and wraps the
+text in `ESC[200~ … ESC[201~` when the program asked with `?2004h`.
 
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler

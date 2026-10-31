@@ -1248,33 +1248,17 @@ impl App {
                         self.repaint("file navigation");
                     } else if !self.palette.open && !self.settings.open {
                         // The palette and the menu own the keyboard while they
-                        // are open; otherwise the key belongs to the shell.
+                        // are open; otherwise the key belongs to the session.
                         //
-                        // Press only: a release carries the same key and the
-                        // same text, so encoding both sends every keystroke
-                        // twice — "ls" arrives as "lsls". `encode_key` is the
-                        // state-free half, so the guard has to live here.
-                        if stroke.state != winit::event::ElementState::Pressed {
-                            return;
-                        }
-                        // A program that called `keypad()` — ncurses, and so
-                        // htop, less, man — asked for application cursor keys,
-                        // and then an arrow key is `ESC O A`. The mode is the
-                        // terminal's, so the pane owns the answer; reading it
-                        // here costs one atomic and cannot be a frame stale.
-                        let modes = self
-                            .session()
-                            .map(|session| session.pane.modes())
-                            .unwrap_or_default();
-                        if let Some(bytes) = crate::input::encode_with(
-                            &stroke.key,
-                            stroke.text.as_deref(),
-                            stroke.mods,
-                            modes,
-                        ) {
-                            if let Some(session) = self.session() {
-                                session.pane.write(bytes);
-                            }
+                        // Releases go too, and that is not a doubled keystroke:
+                        // the encoder emits nothing for a release unless the
+                        // program asked for the kitty protocol's press and
+                        // release reporting — and when it did, the release is
+                        // exactly what it asked for.
+                        if let Some(session) = self.session() {
+                            session
+                                .pane
+                                .send(crate::pane::Command::Key(Box::new(stroke.clone())));
                         }
                     }
                 }
@@ -3188,6 +3172,13 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let stroke = crate::keys::KeyStroke {
+                    // The position is what a terminal reports; the character a
+                    // layout produces is `text`, and the encoder uses both for
+                    // different things.
+                    physical: match event.physical_key {
+                        winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                        winit::keyboard::PhysicalKey::Unidentified(_) => None,
+                    },
                     key: event.logical_key.clone(),
                     text: event.text.as_ref().map(|text| text.to_string()),
                     state: event.state,

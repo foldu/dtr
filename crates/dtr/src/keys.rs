@@ -149,6 +149,10 @@ pub enum Matched {
 /// both run the same code.
 #[derive(Clone, Debug)]
 pub struct KeyStroke {
+    /// The key's *position*, which is what a terminal reports and what the key
+    /// encoder wants: a layout decides the character, not the key. `None` for a
+    /// scripted stroke, which has no keyboard behind it.
+    pub physical: Option<winit::keyboard::KeyCode>,
     pub key: winit::keyboard::Key,
     pub text: Option<String>,
     pub state: winit::event::ElementState,
@@ -185,6 +189,7 @@ impl KeyStroke {
         mods.set(winit::keyboard::ModifiersState::SHIFT, chord.mods.shift);
         mods.set(winit::keyboard::ModifiersState::SUPER, chord.mods.sup);
         Self {
+            physical: None,
             key,
             text,
             state: winit::event::ElementState::Pressed,
@@ -196,6 +201,7 @@ impl KeyStroke {
     /// A typed character, as the shell should receive it.
     pub fn typed(ch: char) -> Self {
         Self {
+            physical: None,
             key: winit::keyboard::Key::Character(ch.to_string().into()),
             text: Some(ch.to_string()),
             state: winit::event::ElementState::Pressed,

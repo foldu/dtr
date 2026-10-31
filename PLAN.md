@@ -312,17 +312,24 @@ baud. A failed open of the database is never fatal.
 The status bar shows what the window is attached to, plus RX/TX totals and rates. Rates are
 measured by the UI, not the pane: the pane counts bytes, the UI's clock decides what a second is.
 
-0.6 is deliberately legacy VT/xterm encoding. The kitty keyboard protocol that libghostty
-implements needs mode negotiation with the application, so it belongs with the renderer work in
-M2 rather than in a mapping table — but legacy encoding is not stateless either, and pretending
-it was cost a real bug: `DECCKM` (`ESC [ ? 1 h`) is what ncurses sends for every program that
-calls `keypad()`, and from then on an unmodified arrow key is `ESC O A` rather than `ESC [ A`.
-htop, less, man and mc all ask for it, so every one of them had a dead keyboard until the mode
-was tracked. It lives in the pane's terminal — it is the program's state, not the UI's — so the
-pane publishes it as an atomic after each burst and `App::on_key` reads it per keystroke:
-`ESC O` for unmodified cursor keys, CSI-with-parameter for modified ones, because
-`kUP5=\E[1;5A` is the only spelling ncurses knows. A paste has the same shape — the program's
-`?2004h` decides whether the text is wrapped — which is why both decisions live in the pane.
+Encoding keys turned out not to be a table, and the table was wrong in a way a table cannot
+fix: what a key sends is the *terminal's* state, not a function of the key and its modifiers.
+`DECCKM` (`ESC [ ? 1 h`) is what ncurses sends for every program that calls `keypad()`, and from
+then on an unmodified arrow is `ESC O A`; htop, less, man and mc all ask for it, so all of them
+had a dead keyboard. On top of that comes `DECKPAM` for the keypad, mode 1036 for the alt
+prefix, `modifyOtherKeys`, and the kitty keyboard protocol (`CSI > flags u`), which turns
+ctrl+a into `CSI 97;5u` and can report releases.
+
+So the encoding runs in the pane, against `libghostty_vt::key::Encoder` configured from the
+terminal before each key: `Command::Key` carries a stroke, not bytes, and `input::fill` only maps
+winit's vocabulary onto the encoder's. The kitty protocol is now live rather than an M2 item —
+fish asks for `kitty=5`, nvim for `kitty=3`, the core answers their `CSI ? u`, and ctrl+a reaches
+them as `CSI 97;5u` with releases reported when asked. Three details that bit: the *physical*
+key decides (a real event has one, `--keys` only implies it), a ctrl or super combination must
+not hand its `text` to the encoder (it typed a literal `a` for ctrl+a), and the kitty flags are a
+*stack* that `reset_modes` has to pop (`CSI < 999 u`, then `CSI = 0 u`) or a dead program's push
+reaches the shell that replaces it. A paste follows the same rule — the program's `?2004h`
+decides the wrapping — which is why both live in the pane.
 
 Two things worth recording from getting a shell to run:
 

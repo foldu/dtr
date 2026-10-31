@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use libghostty_vt::Terminal;
+use libghostty_vt::key::{Encoder as KeyEncoder, Event as KeyEvent};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{
@@ -24,6 +25,7 @@ use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
 use portable_pty::MasterPty;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
+use crate::keys::KeyStroke;
 use crate::pty;
 use crate::serial::{self, CrToCrlf};
 
@@ -37,15 +39,6 @@ pub const ROWS: u16 = 24;
 /// moved. So the value lives in an atomic that the UI rewrites and every pane
 /// reads, rather than being baked into a pane at spawn time.
 pub type FrameBudget = std::sync::Arc<std::sync::atomic::AtomicU64>;
-
-/// What the terminal's key-related modes currently are, shared with the UI.
-///
-/// The UI is what turns a keystroke into bytes, so it needs to know whether the
-/// program asked for application cursor keys — and that is the *program's*
-/// state, held by the terminal on this side. An atomic read per keystroke costs
-/// nothing next to a round trip, and it is always current: the pane stores it
-/// after every burst of output, which is the only way a program can change it.
-pub type KeyModes = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 /// Half a refresh interval: how long a burst of output may be parsed before a
 /// frame is published.
@@ -182,7 +175,15 @@ impl Stats {
 /// Something the UI asks the pane to do. Keystrokes are only one of these:
 /// the modem lines and the viewport live on the pane side too.
 pub enum Command {
+    /// Raw bytes for the session, as though they had been typed.
     Write(Vec<u8>),
+    /// A keystroke, encoded here rather than by the UI.
+    ///
+    /// Not bytes, because the encoding depends on the terminal: `DECCKM`,
+    /// `DECKPAM`, the alt prefix, `modifyOtherKeys` and the kitty keyboard
+    /// protocol are all state the terminal holds, and a table in the UI can only
+    /// ever be wrong about them.
+    Key(Box<KeyStroke>),
     Dtr(bool),
     Rts(bool),
     Break,
@@ -314,9 +315,6 @@ pub struct Pane {
     ended: Arc<std::sync::atomic::AtomicBool>,
     /// The directory the session last reported with OSC 7.
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
-    /// Whether the program asked for application cursor keys (`DECCKM`), which
-    /// decides whether an arrow key is `ESC O A` or `ESC [ A`.
-    cursor_keys: KeyModes,
 }
 
 impl Pane {
@@ -347,8 +345,6 @@ impl Pane {
         let ended_flag = Arc::clone(&ended);
         let cwd = Arc::new(Mutex::new(None));
         let cwd_seen = Arc::clone(&cwd);
-        let cursor_keys: KeyModes = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let keys_seen = Arc::clone(&cursor_keys);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
@@ -381,7 +377,6 @@ impl Pane {
                         Arc::clone(&cwd_seen),
                         theme,
                         budget,
-                        keys_seen,
                     )
                     .await
                     {
@@ -404,15 +399,7 @@ impl Pane {
             link,
             ended,
             cwd,
-            cursor_keys,
         })
-    }
-
-    /// What the program has asked of the keyboard.
-    pub fn modes(&self) -> crate::input::Modes {
-        crate::input::Modes {
-            cursor_keys: self.cursor_keys.load(Ordering::Relaxed),
-        }
     }
 
     /// Take the newest frame, if the emulator produced one since the last call.
@@ -618,22 +605,35 @@ fn reset_modes(term: &mut Terminal<'_, '_>) {
             tracing::debug!(%err, "could not clear a terminal mode");
         }
     }
+    // The kitty keyboard protocol is not a mode: it is a stack of flag sets
+    // pushed with `CSI > … u`. A program that died while holding one would have
+    // the shell that replaces it typed `CSI 97;5u` for ctrl+a, which is bytes no
+    // shell has ever read as a control character. Pop the stack, then zero what
+    // is left.
+    term.vt_write(b"\x1b[<999u\x1b[=0u");
 }
 
-/// Keep the UI's copy of the key modes in step with the terminal's.
+/// Notice when the program changed how keys are spelled, and say so once.
 ///
-/// Only the pane holds the terminal, and only the program's output can change a
-/// mode, so this runs after every burst: the UI's read is then never more than
-/// one burst old, which is the interval between a program asking and a person
-/// being able to press the key.
-fn sync_key_modes(term: &Terminal<'_, '_>, flag: &KeyModes) {
+/// Only output can change a mode, so this runs after a burst and logs a change
+/// rather than a burst: it is how "did nvim ask for the kitty protocol?" gets
+/// answered from a log instead of a guess.
+#[derive(Default)]
+struct KeyModes {
+    cursor_keys: bool,
+    kitty: u8,
+}
+
+fn note_keys(term: &Terminal<'_, '_>, seen: &mut KeyModes) {
     let cursor_keys = term.mode(Mode::DECCKM).unwrap_or(false);
-    let was = flag.swap(cursor_keys, Ordering::Relaxed);
-    if was != cursor_keys {
-        // Only on a change, because a burst happens per read: this line is how
-        // "did htop actually ask for application cursor keys?" gets answered
-        // from a log instead of a guess.
-        tracing::debug!(cursor_keys, "key modes");
+    let kitty = term
+        .kitty_keyboard_flags()
+        .map(|flags| flags.bits())
+        .unwrap_or(0);
+    if seen.cursor_keys != cursor_keys || seen.kitty != kitty {
+        seen.cursor_keys = cursor_keys;
+        seen.kitty = kitty;
+        tracing::debug!(cursor_keys, kitty, "key modes");
     }
 }
 
@@ -676,7 +676,6 @@ async fn run(
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
     budget: FrameBudget,
-    key_modes: KeyModes,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
     // which is what you want when the point is to find out what the device did.
@@ -810,6 +809,23 @@ async fn run(
     // that never speaks.
     let mut early_paste: Option<Vec<u8>> = None;
     let mut early_at: Option<tokio::time::Instant> = None;
+    // The key encoder is the terminal's, not a table: what a key sends depends
+    // on modes only the terminal knows (`input::fill` explains which). One per
+    // pane, with one event reused, because both hold allocations and a keystroke
+    // is not the place to make them.
+    let (mut key_encoder, mut key_event) = match (KeyEncoder::new(), KeyEvent::new()) {
+        (Ok(encoder), Ok(event)) => (Some(encoder), Some(event)),
+        (encoder, event) => {
+            tracing::error!(
+                encoder = encoder.is_ok(),
+                event = event.is_ok(),
+                "no key encoder; keys will not be sent"
+            );
+            (None, None)
+        }
+    };
+    // What the program last asked of the keyboard, so a change is logged once.
+    let mut keys_seen = KeyModes::default();
 
     match transport {
         Transport::Serial(cfg) => {
@@ -934,9 +950,9 @@ async fn run(
                         }
                         flush_replies(&replies, &mut sink).await;
                         // The program's answer to "how should a key look" is in
-                        // the terminal now, and the UI is about to need it for
-                        // the next keystroke.
-                        sync_key_modes(&term, &key_modes);
+                        // the terminal now — the encoder reads it per key — and
+                        // a *change* is worth one line of log.
+                        note_keys(&term, &mut keys_seen);
                         // The program has spoken, so whatever it wanted to say
                         // about pasting is in the terminal now — which is the
                         // answer a held paste was waiting for.
@@ -949,6 +965,8 @@ async fn run(
                                 paste_tick,
                                 &mut paste,
                                 &mut paste_at,
+                                &mut typed_early,
+                                ever_opened,
                                 text,
                             )
                             .await;
@@ -1114,7 +1132,7 @@ async fn run(
                     // program with its modes still set; the shell that comes
                     // back must not start inside them.
                     reset_modes(&mut term);
-                    sync_key_modes(&term, &key_modes);
+                    note_keys(&term, &mut keys_seen);
                     reopening = true;
                     open_at = Some(tokio::time::Instant::now() + wait);
                 } else {
@@ -1137,6 +1155,8 @@ async fn run(
                         paste_tick,
                         &mut paste,
                         &mut paste_at,
+                        &mut typed_early,
+                        ever_opened,
                         text,
                     )
                     .await;
@@ -1196,35 +1216,60 @@ async fn run(
                             bytes = ?String::from_utf8_lossy(&bytes).escape_debug().to_string(),
                             "write"
                         );
-                        // Typing while scrolled back means you want the live
-                        // screen: follow the cursor rather than swallowing keys.
-                        if stats.scrollback() > 0 {
-                            term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Bottom);
-                            note_scrollback(&term, &stats);
-                        }
-                        if let Some(sink) = sink.as_mut() {
-                            match sink.write(&bytes).await {
-                                Ok(()) => stats.add_tx(bytes.len()),
-                                Err(err) => tracing::warn!(%err, "write to session"),
-                            }
-                        } else if !ever_opened {
-                            // Nothing is open *yet*: `--send` arrives before the
-                            // first connection does, and an ssh client takes a
-                            // moment to start. Held, not dropped, or the flag
-                            // would work only when the host was fast.
-                            typed_early.extend_from_slice(&bytes);
-                        } else {
-                            // Typed at a connection that is not there. Dropped
-                            // rather than queued: a shell that comes back has no
-                            // idea what was typed at a screen it never drew.
-                            tracing::debug!("no session; the keystroke is dropped");
-                        }
+                        deliver(
+                            &bytes,
+                            &mut term,
+                            &stats,
+                            &mut sink,
+                            &mut typed_early,
+                            ever_opened,
+                        )
+                        .await;
                         // Local echo is for devices that do not echo: the bytes
                         // are shown without being sent anywhere else.
                         if echo {
                             term.vt_write(&bytes);
                             publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
                         }
+                    }
+                    Command::Key(stroke) => {
+                        let (Some(encoder), Some(event)) =
+                            (key_encoder.as_mut(), key_event.as_mut())
+                        else {
+                            continue;
+                        };
+                        crate::input::fill(event, &stroke);
+                        // Per key, not once: a program can change its modes
+                        // between two keystrokes, and the encoder option that
+                        // matters is `DECCKM` as much as the kitty flags.
+                        encoder.set_options_from_terminal(&term);
+                        let mut bytes = Vec::new();
+                        if let Err(err) = encoder.encode_to_vec(event, &mut bytes) {
+                            tracing::warn!(%err, "could not encode a key");
+                            continue;
+                        }
+                        if bytes.is_empty() {
+                            // A release under legacy encoding, a modifier on its
+                            // own, a key the protocol has nothing to say about:
+                            // the encoder is not the least surprised, and neither
+                            // is this.
+                            tracing::debug!(key = ?stroke.key, "a key with no bytes");
+                            continue;
+                        }
+                        tracing::debug!(
+                            key = ?stroke.key,
+                            bytes = ?String::from_utf8_lossy(&bytes).escape_debug().to_string(),
+                            "key"
+                        );
+                        deliver(
+                            &bytes,
+                            &mut term,
+                            &stats,
+                            &mut sink,
+                            &mut typed_early,
+                            ever_opened,
+                        )
+                        .await;
                     }
                     Command::Dtr(level) => {
                         if let Some(modem) = modem.as_mut() {
@@ -1457,6 +1502,8 @@ async fn run(
                             paste_tick,
                             &mut paste,
                             &mut paste_at,
+                            &mut typed_early,
+                            ever_opened,
                             bytes,
                         )
                         .await;
@@ -1524,6 +1571,43 @@ fn pasted(bracketed: bool, text: &[u8]) -> Vec<u8> {
 /// Put a paste on the wire, honouring what the program asked for.
 ///
 /// One place, because a paste can be written the moment it arrives and a held
+/// Put bytes on the session, wherever the session happens to be.
+///
+/// Shared by typing, a key the encoder produced and a paste, because the rule is
+/// the same for all three: follow the cursor when the viewport is scrolled back
+/// (typing at the live screen is what a person means), hold what arrives before
+/// the first connection, and drop what is typed at a connection that is not
+/// there.
+async fn deliver(
+    bytes: &[u8],
+    term: &mut Terminal<'_, '_>,
+    stats: &Stats,
+    sink: &mut Option<Sink>,
+    typed_early: &mut Vec<u8>,
+    ever_opened: bool,
+) {
+    if stats.scrollback() > 0 {
+        term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Bottom);
+        note_scrollback(term, stats);
+    }
+    if let Some(sink) = sink.as_mut() {
+        match sink.write(bytes).await {
+            Ok(()) => stats.add_tx(bytes.len()),
+            Err(err) => tracing::warn!(%err, "write to session"),
+        }
+    } else if !ever_opened {
+        // Nothing is open *yet*: `--send` arrives before the first connection
+        // does, and an ssh client takes a moment to start. Held, not dropped, or
+        // the flag would work only when the host was fast.
+        typed_early.extend_from_slice(bytes);
+    } else {
+        // Typed at a connection that is not there. Dropped rather than queued: a
+        // shell that comes back has no idea what was typed at a screen it never
+        // drew.
+        tracing::debug!(bytes = bytes.len(), "no session; the keystroke is dropped");
+    }
+}
+
 /// one is written later — and the answer to "bracketed?" has to be read from the
 /// terminal at the moment of writing, not at the moment of arriving.
 async fn write_paste(
@@ -1533,6 +1617,8 @@ async fn write_paste(
     paste_tick: Option<std::time::Duration>,
     paste: &mut Vec<u8>,
     paste_at: &mut Option<tokio::time::Instant>,
+    typed_early: &mut Vec<u8>,
+    ever_opened: bool,
     text: Vec<u8>,
 ) {
     // The program's own request, read from the terminal it was made on: only
@@ -1544,12 +1630,15 @@ async fn write_paste(
     match paste_tick {
         // No pacing: hand the whole thing over at once.
         None => {
-            if let Some(sink) = sink.as_mut() {
-                match sink.write(&bytes).await {
-                    Ok(()) => stats.add_tx(bytes.len()),
-                    Err(err) => tracing::warn!(%err, "paste write"),
-                }
-            }
+            deliver(
+                &bytes,
+                term,
+                stats,
+                sink,
+                typed_early,
+                ever_opened,
+            )
+            .await
         }
         Some(_) => {
             *paste = bytes;
@@ -2826,6 +2915,7 @@ mod session_tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
     use std::time::{Duration, Instant};
+    use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
 
     fn pane(script: String, remote: Option<&str>, args: Vec<String>) -> Pane {
         let mut config = pty::Config {
@@ -2959,13 +3049,21 @@ mod session_tests {
     #[test]
     fn a_reconnect_leaves_the_alternate_screen_and_its_modes() {
         let mut term = Terminal::new(COLS, ROWS).expect("a terminal");
-        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h");
+        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?1h\x1b[>3u");
         assert!(term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
         assert!(term.mode(Mode::NORMAL_MOUSE).expect("mode"));
+        assert!(!term.kitty_keyboard_flags().expect("flags").is_empty());
         reset_modes(&mut term);
         assert!(!term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
         assert!(!term.mode(Mode::NORMAL_MOUSE).expect("mode"));
         assert!(!term.mode(Mode::BRACKETED_PASTE).expect("mode"));
+        assert!(!term.mode(Mode::DECCKM).expect("mode"));
+        // The kitty flags are a stack, not a mode, and a dead program's push
+        // must not reach the shell that replaces it.
+        assert!(
+            term.kitty_keyboard_flags().expect("flags").is_empty(),
+            "the kitty flags outlived the program that set them"
+        );
     }
 
     /// The wrapper is the *program's* request, so it has to be read from the
@@ -3013,46 +3111,11 @@ mod session_tests {
         }
     }
 
-    /// The UI encodes keystrokes, so the pane has to tell it what the program
-    /// asked for: `ESC[?1h` is ncurses' `smkx`, and until the pane publishes it
-    /// an arrow key is typed as `ESC[A`, which a `keypad()`ed program — htop,
-    /// less, man — cannot match.
-    #[test]
-    fn the_cursor_key_mode_reaches_the_ui() {
-        let pane = pane(
-            "printf '\\033[?1h'; echo a; sleep 1; printf '\\033[?1l'; echo b; exec sleep 30"
-                .to_owned(),
-            None,
-            Vec::new(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        // `a` proves the report was parsed (the text follows it in one burst),
-        // and the mode is stored by that same burst.
-        wait_for(&pane, "a", Duration::from_secs(10));
-        assert!(
-            pane.modes().cursor_keys,
-            "DECCKM was set but the UI would still type ESC[A"
-        );
-        // …and turning it off again has to travel too, or every key after
-        // `less` hurts in a new way.
-        wait_for(&pane, "b", Duration::from_secs(10));
-        while pane.modes().cursor_keys {
-            assert!(
-                Instant::now() < deadline,
-                "DECCKM was cleared but the UI still thinks it is on"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// The whole chain, minus the two lines of UI glue: a program that asks for
-    /// application cursor keys gets `ESC O A` for an arrow, and one that does
-    /// not gets `ESC [ A`. This is the test that would have caught htop.
+    /// The whole chain: a program that asks for application cursor keys gets
+    /// `ESC O A` for an arrow, and one that does not gets `ESC [ A`. This is the
+    /// test that would have caught htop's dead keyboard.
     #[test]
     fn an_arrow_key_is_encoded_for_the_program_that_asked() {
-        use crate::input;
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
-
         for (prologue, expected) in [
             ("", "\x1b[A"),
             (r"printf '\033[?1h'; ", "\x1bOA"),
@@ -3062,35 +3125,210 @@ mod session_tests {
             let script = format!("{prologue}exec cat > {}", out.display());
             let pane = pane(script, None, Vec::new());
             let deadline = Instant::now() + Duration::from_secs(10);
-            // Wait for the mode to be published, which is exactly what the UI
-            // would be waiting for: the program's answer, not a guess.
-            while !out.exists() || (!prologue.is_empty() && !pane.modes().cursor_keys) {
+            // The program has started when it has said something (its mode
+            // report) and its redirection exists.
+            while !out.exists() || (!prologue.is_empty() && pane.stats().rx() == 0) {
                 assert!(
                     Instant::now() < deadline,
-                    "the program never asked for anything (expected {expected:?})"
+                    "the program never started (expected {expected:?})"
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
+            // The mode bytes are parsed by the pane's loop, one step behind the
+            // child that wrote them.
+            std::thread::sleep(Duration::from_millis(150));
 
-            let bytes = input::encode_with(
-                &Key::Named(NamedKey::ArrowUp),
-                None,
+            pane.send(Command::Key(Box::new(key(
+                winit::keyboard::Key::Named(NamedKey::ArrowUp),
+                KeyCode::ArrowUp,
                 ModifiersState::empty(),
-                pane.modes(),
-            )
-            .expect("an arrow key");
-            pane.write(bytes);
-
-            let mut got = String::new();
-            while got.len() < expected.len() {
-                assert!(
-                    Instant::now() < deadline,
-                    "the program got {got:?}, expected {expected:?} (with {prologue:?})"
-                );
-                got = std::fs::read_to_string(&out).unwrap_or_default();
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            assert_eq!(got, expected, "while the program said {prologue:?}");
+            ))));
+            wait_for_bytes(&pane, &out, expected, &prologue);
         }
+    }
+
+    /// The kitty keyboard protocol, the reason this is an encoder rather than a
+    /// table. `CSI > 1 u` is an application asking for disambiguated escape
+    /// codes: from then on ctrl+letter is `CSI 97;5u` instead of a control byte,
+    /// while a plain character still arrives as text.
+    #[test]
+    fn a_kitty_application_gets_kitty_encodings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!(r"printf '\033[>1u'; exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() || pane.stats().rx() == 0 {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        // ctrl+a is the case the protocol exists for: `^A` and "insert a
+        // control byte" are the same bytes, and only a disambiguated report can
+        // tell them apart.
+        let mut ctrl_a = key(
+            winit::keyboard::Key::Character("a".into()),
+            KeyCode::KeyA,
+            ModifiersState::CONTROL,
+        );
+        ctrl_a.text = Some("a".to_owned());
+        pane.send(Command::Key(Box::new(ctrl_a)));
+        wait_for_bytes(&pane, &out, "\x1b[97;5u", "kitty, ctrl+a");
+
+        // A plain character is still text, not a report: the protocol does not
+        // make typing slower or unreadable for a program that only wants keys.
+        let mut typed = key(
+            winit::keyboard::Key::Character("b".into()),
+            KeyCode::KeyB,
+            ModifiersState::empty(),
+        );
+        typed.text = Some("b".to_owned());
+        pane.send(Command::Key(Box::new(typed)));
+        wait_for_bytes(&pane, &out, "\x1b[97;5ub", "kitty, plain b");
+    }
+
+    /// `CSI > 3 u` adds press *and release* reporting. A release is the one thing
+    /// legacy encoding has nothing to say about, so it is the sharpest test that
+    /// the flags reached the encoder.
+    #[test]
+    fn a_kitty_application_that_asks_for_events_gets_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!(r"printf '\033[>3u'; exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() || pane.stats().rx() == 0 {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        let mut release = key(
+            winit::keyboard::Key::Character("a".into()),
+            KeyCode::KeyA,
+            ModifiersState::empty(),
+        );
+        release.state = winit::event::ElementState::Released;
+        release.text = None;
+        pane.send(Command::Key(Box::new(release)));
+        wait_for_bytes(&pane, &out, "\x1b[97;1:3u", "kitty, release");
+    }
+
+    /// Without the kitty protocol a ctrl combination is a control byte, and the
+    /// text winit reports for it must not turn into a literal character: ctrl+a
+    /// once typed an "a" because the encoder trusted `text`.
+    #[test]
+    fn legacy_ctrl_and_alt_still_send_what_they_always_did() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!("exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        let mut ctrl_a = key(
+            winit::keyboard::Key::Character("a".into()),
+            KeyCode::KeyA,
+            ModifiersState::CONTROL,
+        );
+        ctrl_a.text = Some("a".to_owned());
+        pane.send(Command::Key(Box::new(ctrl_a)));
+        wait_for_bytes(&pane, &out, "\x01", "legacy ctrl+a");
+
+        let mut alt_b = key(
+            winit::keyboard::Key::Character("b".into()),
+            KeyCode::KeyB,
+            ModifiersState::ALT,
+        );
+        alt_b.text = Some("b".to_owned());
+        pane.send(Command::Key(Box::new(alt_b)));
+        wait_for_bytes(&pane, &out, "\x01\x1bb", "legacy alt+b");
+    }
+
+    /// A press and its release are one keystroke, not two. This is the "lsls"
+    /// bug: with legacy encoding a release has nothing to send, and the encoder
+    /// is what knows that.
+    #[test]
+    fn a_release_sends_nothing_unless_it_was_asked_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!("exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        let mut press = key(
+            winit::keyboard::Key::Character("l".into()),
+            KeyCode::KeyL,
+            ModifiersState::empty(),
+        );
+        press.text = Some("l".to_owned());
+        let mut release = press.clone();
+        release.state = winit::event::ElementState::Released;
+        release.text = None;
+        pane.send(Command::Key(Box::new(press)));
+        pane.send(Command::Key(Box::new(release)));
+        wait_for_bytes(&pane, &out, "l", "one l");
+        // And no second one: give the pane a moment to send something it should
+        // not have.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            "l",
+            "the release was typed as well"
+        );
+    }
+
+    /// An application *asks* before it uses the protocol (`CSI ? u`), and the
+    /// answer is what makes fish and nvim switch over at all. The core builds
+    /// the reply and dtr's job is not to lose it.
+    #[test]
+    fn the_kitty_query_is_answered() {
+        for (prologue, expected) in [
+            ("", "\x1b[?0u"),
+            (r"printf '\033[>1u'; ", "\x1b[?1u"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("reply");
+            let script = format!("{prologue}printf '\\033[?u'; exec cat > {}", out.display());
+            let pane = pane(script, None, Vec::new());
+            wait_for_bytes(&pane, &out, expected, &format!("query with {prologue:?}"));
+        }
+    }
+
+    /// A letter key with the text a keyboard would have produced.
+    fn key(logical: winit::keyboard::Key, code: KeyCode, mods: ModifiersState) -> KeyStroke {
+        KeyStroke {
+            physical: Some(code),
+            key: logical,
+            text: None,
+            state: winit::event::ElementState::Pressed,
+            repeat: false,
+            mods,
+        }
+    }
+
+    /// Wait until the program has written `expected`, or fail with what it got.
+    fn wait_for_bytes(pane: &Pane, path: &std::path::Path, expected: &str, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = String::new();
+        while !got.contains(expected) {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: the program got {got:?}, expected {expected:?}"
+            );
+            got = std::fs::read_to_string(path).unwrap_or_default();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = pane;
     }
 }
