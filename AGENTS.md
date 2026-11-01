@@ -537,6 +537,12 @@ reports as a decode error that reads like a rendering bug; `tests/snapshots.rs` 
 the signature and the size first, and also fails when a `snapshot("…")` has no baseline
 or a baseline has no test.
 
+**The rasteriser that writes a baseline has to be the one that reads it.** The devShell
+selects lavapipe — Vulkan in software — when the machine has no `/dev/dri`, and CI has
+no DRM node, so regenerate with `UPDATE_SNAPSHOTS=1 cargo test` *inside the devShell*
+(never with the variable unset on a GPU machine) or the next pipeline fails on a diff
+that is two rasterisers disagreeing rather than a rendering change.
+
 **A widget painted by hand has no accessibility node** unless `Response::widget_info`
 declares one; the tab chips were invisible to the harness *and* to a screen reader. And
 `Sense::click()` is **not pointer-only**: egui turns Enter into a click for any focused
