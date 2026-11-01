@@ -373,6 +373,17 @@ scaled uniformly into the two-cell box, centred, resting on the cell's bottom.
 **egui's default fonts have no arrows.** `↑↓` and `←→` panicked the harness and had
 been drawing empty boxes in the window; hints are words now (`up/down`).
 
+**`faint` arrives as a flag, and dropping it is how a ghost disappears.** The core
+parses SGR 2 into `style.faint` and `fill_cells` used to read only bold, italic and
+inverse, so a program's dimmed suggestion — fish's autosuggestion, an editor's inline
+completion — came out exactly as bright as the text it suggested against. Ghostty does
+not draw faint either: its renderer uses the flag as the foreground's alpha,
+`faint-opacity` (0.5 by default), over the cell's background, and that is what `faint()`
+now blends. There is no palette entry called "faint", so a blend is the only version
+that can be right on every theme; a fixed grey would not be grey on all of them.
+`style.invisible` is still ignored, and it is the same shape of bug: a program that
+hides a password field is currently shown it.
+
 ## Sessions: shell, ssh, serial
 
 **A shell that exits closes its tab.** The pane cannot — the UI owns the tab — so the

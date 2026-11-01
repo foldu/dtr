@@ -2597,6 +2597,11 @@ fn fill_cells(
                     std::mem::swap(&mut out.fg, &mut out.bg);
                     out.has_bg = true;
                 }
+                // After the swap, because faint dims what is drawn and an
+                // inverse cell has already changed which colour that is.
+                if style.faint {
+                    out.fg = faint(out.fg, out.bg);
+                }
             }
             frame.cells.push(out);
         }
@@ -2608,8 +2613,29 @@ fn rgb(c: libghostty_vt::style::RgbColor) -> [u8; 3] {
     [c.r, c.g, c.b]
 }
 
+/// How much of the foreground SGR 2 leaves behind, over the cell's background.
+///
+/// Ghostty does not draw faint either: its renderer turns the flag into the
+/// foreground's alpha, `faint-opacity` (0.5 by default), composited over the
+/// background — so a program that dims a ghost suggestion gets the same grey
+/// here as in Ghostty. Blending is also the only version that works on a
+/// palette: there is no "faint" colour to ask a theme for, and picking a fixed
+/// grey would be wrong on half of them.
+const FAINT_OPACITY: f32 = 0.5;
+
+/// The colour an SGR 2 cell is drawn in: `fg` laid over `bg` at
+/// [`FAINT_OPACITY`].
+fn faint(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+    std::array::from_fn(|i| {
+        let fg = f32::from(fg[i]);
+        let bg = f32::from(bg[i]);
+        fg.mul_add(FAINT_OPACITY, bg * (1.0 - FAINT_OPACITY))
+            .round() as u8
+    })
+}
+
 const DEMO: &[u8] = b"\x1b[32mdtr\x1b[0m \xe2\x80\x94 a serial-first terminal\r\n\r\n\
- normal  \x1b[1mbold\x1b[0m  \x1b[3mitalic\x1b[0m  \x1b[31mred\x1b[0m  \x1b[44m blue bg \x1b[0m  \x1b[7m inverse \x1b[0m\r\n\r\n\
+ normal  \x1b[1mbold\x1b[0m  \x1b[3mitalic\x1b[0m  \x1b[2mfaint\x1b[0m  \x1b[31mred\x1b[0m  \x1b[44m blue bg \x1b[0m  \x1b[7m inverse \x1b[0m\r\n\r\n\
  1  \xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x90\r\n\
  2  \xe2\x94\x82 box     \xe2\x94\x82\r\n\
  3  \xe2\x94\x94\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x98\r\n";
@@ -2755,6 +2781,59 @@ mod tests {
         }
         assert_eq!(per_cell[0], "O", "cells: {per_cell:?}");
         assert_eq!(per_cell[1], "K", "cells: {per_cell:?}");
+    }
+
+    /// Faint is drawn, not dropped.
+    ///
+    /// A program that dims a ghost suggestion — fish's autosuggestion, an
+    /// editor's inline completion — sends `\e[2m` and often nothing else, and a
+    /// terminal that ignores the flag shows the ghost exactly as bright as the
+    /// text it is suggesting against. The core parses it and hands back
+    /// `style.faint`; the renderer used to throw that away, so the proof is a
+    /// colour that is neither the default ink nor the ground.
+    #[test]
+    fn faint_text_is_a_dimmed_colour_and_not_the_default_ink() {
+        use super::{faint, fill_cells, rgb};
+        use libghostty_vt::render::{CellIterator, RowIterator};
+        use libghostty_vt::{RenderState, Terminal};
+
+        // `X` plain, `Y` faint, `Z` inverse and faint together.
+        let mut term = Terminal::new(8, 1).unwrap();
+        term.vt_write(b"X\x1b[2mY\x1b[0m\x1b[7;2mZ");
+        let mut state = RenderState::new().unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let snapshot = state.update(&term).unwrap();
+        let colors = snapshot.colors().unwrap();
+        let mut frame = Frame {
+            cols: snapshot.cols().unwrap(),
+            rows: snapshot.rows().unwrap(),
+            default_fg: rgb(colors.foreground),
+            default_bg: rgb(colors.background),
+            cursor: None,
+            selection: None,
+            cells: Vec::new(),
+        };
+        fill_cells(&snapshot, &mut rows, &mut cells, &mut frame).unwrap();
+
+        assert_eq!(frame.cells[0].text, "X");
+        assert_eq!(frame.cells[1].text, "Y");
+        assert_eq!(frame.cells[2].text, "Z");
+        // The plain cell keeps the default ink: faint must not leak past `0m`.
+        assert_eq!(frame.cells[0].fg, frame.default_fg);
+        assert_eq!(frame.cells[1].fg, faint(frame.default_fg, frame.default_bg));
+        assert_ne!(frame.cells[1].fg, frame.default_fg);
+        // Inverse swaps first, so faint dims the colour that is actually drawn
+        // — the background, which has become the foreground.
+        assert!(frame.cells[2].has_bg);
+        assert_eq!(frame.cells[2].fg, faint(frame.default_bg, frame.default_fg));
+
+        // And the numbers, so a change to the blend is a diff and not a mood:
+        // half of white over black, half of a mid colour, and the fixed point
+        // that keeps a cell on a same-coloured ground exactly as it was.
+        assert_eq!(faint([255, 255, 255], [0, 0, 0]), [128, 128, 128]);
+        assert_eq!(faint([200, 100, 0], [0, 0, 0]), [100, 50, 0]);
+        assert_eq!(faint([10, 20, 30], [10, 20, 30]), [10, 20, 30]);
     }
 
     #[test]
