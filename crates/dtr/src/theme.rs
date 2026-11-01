@@ -9,11 +9,54 @@
 //! Rewriting it is also cheap, which matters more: a theme file is small enough
 //! to keep by hand, and a format that one terminal already reads is a format
 //! another one can share.
+//!
+//! One theme ships inside the binary — Ghostty's `Kanagawa Wave`
+//! (`assets/themes`), whose colour lines are Ghostty's own and whose header
+//! records where it came from and under which licence. A file on disk with the
+//! same name wins, so a copy in `~/.config/dtr/themes` is how you tweak it, and
+//! the embedded one is what makes `theme = "Kanagawa Wave"` work on a machine
+//! that has no Ghostty install to read themes from.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use libghostty_vt::style::{Palette, PaletteIndex, RgbColor};
+
+/// The themes that ship inside the binary.
+///
+/// Ghostty keeps its themes in its own prefix (`share/ghostty/themes`), which on
+/// NixOS is a store path no search rule can guess, and the one-file Windows
+/// build has no prefix at all. Embedding is what the icons already do for the
+/// same reason: a feature that needs a data directory next to the exe is a
+/// feature that does not work in half the ways dtr is installed.
+///
+/// Exactly one, on purpose. `docs/themes.md` §9.1 is about why dtr reads themes
+/// instead of vendoring a corpus — 583 of the 860 schemes in the iTerm2
+/// collection carry no usable licence — and the rule it leaves is "vendor only
+/// from the documented-permissive ones, record source and SPDX per file, keep
+/// the count small enough to review". Kanagawa is MIT (§8.2 checked it), and
+/// this is one file.
+const BUNDLED: &[(&str, &str)] = &[(
+    "Kanagawa Wave",
+    include_str!("../assets/themes/Kanagawa Wave"),
+)];
+
+/// A theme's text from the copy compiled in, if one has that name.
+///
+/// Ghostty names themes the way its files are named — `Kanagawa Wave` — and
+/// people type `kanagawa wave`, so the fallback is case-insensitive. An exact
+/// match still wins, because two names differing only in case are two files.
+fn bundled(name: &str) -> Option<&'static str> {
+    BUNDLED
+        .iter()
+        .find(|(bundled, _)| *bundled == name)
+        .or_else(|| {
+            BUNDLED
+                .iter()
+                .find(|(bundled, _)| bundled.eq_ignore_ascii_case(name))
+        })
+        .map(|(_, text)| *text)
+}
 
 /// A complete-enough theme: sixteen ANSI colours, default foreground and
 /// background, and optionally a cursor colour.
@@ -539,25 +582,68 @@ pub fn search_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Resolve a theme name to a file.
-pub fn find(name: &str) -> Result<PathBuf, Error> {
-    for directory in search_paths() {
+/// Resolve a theme name to a file in `directories`, most specific first.
+fn find_in(directories: &[PathBuf], name: &str) -> Result<PathBuf, Error> {
+    for directory in directories {
         let candidate = directory.join(name);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
+    // Ghostty capitalises its theme names and people do not, so a name that
+    // matches a file except for case is that file. Exact matching ran first, so
+    // two files differing only in case stay distinguishable.
+    for directory in directories {
+        if let Some(path) = ignoring_case(directory, name) {
+            return Ok(path);
+        }
+    }
     Err(Error::NotFound {
         name: name.to_owned(),
-        searched: search_paths(),
+        searched: directories.to_vec(),
     })
 }
 
-/// Load a theme by name.
+/// The first file in `directory` whose name is `name` apart from case.
+fn ignoring_case(directory: &Path, name: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    // A directory can hold both spellings; name one rather than whichever the
+    // filesystem lists first.
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+/// Load a theme by name: a file if the search paths have one, else the copy
+/// compiled in.
 pub fn load(name: &str) -> Result<Theme, Error> {
-    let path = find(name)?;
-    let text =
-        std::fs::read_to_string(&path).map_err(|err| Error::Io(path.clone(), err.to_string()))?;
+    load_in(&search_paths(), name)
+}
+
+fn load_in(directories: &[PathBuf], name: &str) -> Result<Theme, Error> {
+    let text = match find_in(directories, name) {
+        Ok(path) => std::fs::read_to_string(&path)
+            .map_err(|err| Error::Io(path.clone(), err.to_string()))?,
+        Err(Error::NotFound { .. }) => match bundled(name) {
+            Some(text) => text.to_owned(),
+            None => {
+                return Err(Error::NotFound {
+                    name: name.to_owned(),
+                    searched: directories.to_vec(),
+                });
+            }
+        },
+        Err(err) => return Err(err),
+    };
     let theme = Theme::parse(name, &text)?;
 
     // A theme missing some of the sixteen is broken, but it is still more use
@@ -579,9 +665,10 @@ pub fn load(name: &str) -> Result<Theme, Error> {
     Ok(theme)
 }
 
-/// Theme names available in the search paths, for the palette.
+/// Theme names available, for the palette and the settings menu: what the
+/// search paths hold plus what is compiled in.
 pub fn names() -> Vec<String> {
-    let mut names = Vec::new();
+    let mut names: Vec<String> = BUNDLED.iter().map(|(name, _)| (*name).to_owned()).collect();
     for directory in search_paths() {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
@@ -1006,5 +1093,100 @@ palette = 15=#dcd7ba
             other => panic!("expected a name rejection, got {other:?}"),
         }
         assert!(!directory.path().join("escape").exists());
+    }
+
+    /// The theme that ships inside the binary is Ghostty's file, so these are
+    /// Ghostty's numbers: the ANSI sixteen, and the background/foreground pair
+    /// the whole palette is built around. Every colour line is `Kanagawa Wave`
+    /// from Ghostty 1.3.1's `share/ghostty/themes` unmodified, under a header
+    /// that says where it came from; strip the `#` lines and diff the rest
+    /// against your own Ghostty install to check it.
+    #[test]
+    fn the_bundled_theme_is_ghosttys_kanagawa_wave() {
+        let text = super::bundled("Kanagawa Wave").expect("a bundled theme");
+        let theme = Theme::parse("Kanagawa Wave", text).expect("parse");
+
+        assert_eq!(theme.background, Some([0x1f, 0x1f, 0x28]));
+        assert_eq!(theme.foreground, Some([0xdc, 0xd7, 0xba]));
+        assert_eq!(theme.cursor, Some([0xdc, 0xd7, 0xba]));
+        assert_eq!(theme.cursor_text, Some([0x1f, 0x1f, 0x28]));
+        assert_eq!(theme.selection_background, Some([0xdc, 0xd7, 0xba]));
+        assert_eq!(theme.selection_foreground, Some([0x1f, 0x1f, 0x28]));
+
+        // All sixteen, not most of them: a slot that falls back to the VT
+        // core's default is a colour that ignores the theme.
+        assert!(
+            theme.palette.iter().all(Option::is_some),
+            "every ANSI colour has to be set: {:?}",
+            theme.palette
+        );
+        // `sumiInk1`, `waveRed`, `autumnRed` and `fujiWhite`, the four the
+        // scheme is recognised by.
+        assert_eq!(theme.palette[0], Some([0x09, 0x06, 0x18]));
+        assert_eq!(theme.palette[1], Some([0xc3, 0x40, 0x43]));
+        assert_eq!(theme.palette[9], Some([0xe8, 0x24, 0x24]));
+        assert_eq!(theme.palette[15], Some([0xdc, 0xd7, 0xba]));
+    }
+
+    /// A bundled theme is a theme: it is listed for the palette and the settings
+    /// menu, and it is found by the spelling people type rather than only by
+    /// Ghostty's capitalisation.
+    #[test]
+    fn a_bundled_theme_is_listed_and_named_in_any_case() {
+        assert!(
+            super::names().iter().any(|name| name == "Kanagawa Wave"),
+            "the bundled theme has to be offered: {:?}",
+            super::names()
+        );
+        for spelling in ["Kanagawa Wave", "kanagawa wave", "KANAGAWA WAVE"] {
+            assert!(
+                super::bundled(spelling).is_some(),
+                "{spelling:?} should find the bundled theme"
+            );
+        }
+        // Not a prefix match: a theme's name is its file name.
+        assert!(super::bundled("kanagawa").is_none());
+    }
+
+    /// A file beats the copy in the binary, which is the whole point of shipping
+    /// one: point `theme` at a name you have edited and your file is the theme,
+    /// and it does not matter that its name is also a bundled one.
+    #[test]
+    fn a_file_wins_over_the_bundled_theme() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let edited = directory.path().join("kanagawa wave");
+        std::fs::write(&edited, "background = #000000\nforeground = #ffffff\n").unwrap();
+
+        let theme =
+            super::load_in(&[directory.path().to_path_buf()], "Kanagawa Wave").expect("load");
+        assert_eq!(
+            theme.background,
+            Some([0, 0, 0]),
+            "the file, not the bundle"
+        );
+        assert_eq!(theme.foreground, Some([0xff, 0xff, 0xff]));
+
+        // And with nothing on disk, the same name is the bundled theme.
+        let empty = tempfile::tempdir().expect("temp dir");
+        let theme = super::load_in(&[empty.path().to_path_buf()], "kanagawa wave").expect("load");
+        assert_eq!(theme.background, Some([0x1f, 0x1f, 0x28]));
+        assert_eq!(theme.foreground, Some([0xdc, 0xd7, 0xba]));
+    }
+
+    /// Ghostty writes `Kanagawa Wave`; a directory can hold both spellings, and
+    /// the exact one is what has to be picked.
+    #[test]
+    fn a_theme_name_matches_a_file_apart_from_case() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        std::fs::write(directory.path().join("Kanagawa Wave"), "").unwrap();
+        assert_eq!(
+            super::find_in(&[directory.path().to_path_buf()], "kanagawa wave").ok(),
+            Some(directory.path().join("Kanagawa Wave"))
+        );
+        assert_eq!(
+            super::ignoring_case(directory.path(), "KANAGAWA WAVE"),
+            Some(directory.path().join("Kanagawa Wave"))
+        );
+        assert_eq!(super::ignoring_case(directory.path(), "dracula"), None);
     }
 }

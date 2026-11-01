@@ -741,6 +741,13 @@ exactly, which is the round-trip test I would write first. The scheme is **MIT**
 (`rebelot/kanagawa.nvim`, per the hub's `licenses.yml`), so this example is safe to ship if a
 built-in ever happens.
 
+It did happen: `crates/dtr/assets/themes/Kanagawa Wave` is this file, `include_str!`-ed into the
+binary, under a three-line header naming the scheme, its SPDX id and the Ghostty release the bytes
+came from. Strip the `#` lines and the rest is byte-identical to
+`ghostty-1.3.1/share/ghostty/themes/Kanagawa Wave`. A file of the same name in `<config>/dtr/themes`
+still wins — the override story §1 promises — which is what keeps this one file inside §9.1's rule
+instead of becoming the vendored corpus that section forbids.
+
 Note the selection pair is the *inverted* fg/bg. That is what this scheme actually specifies (its
 `.itermcolors` has `Selection Color` = `#dcd7ba`), not a fallback artifact — worth knowing before
 someone "fixes" it. Kanagawa's own terminal palette uses `#2d4f67` for selection; if the owner
@@ -777,7 +784,10 @@ prefers that, it is a one-line edit to the file, which is exactly the override s
 
 **Do not vendor a corpus.** If a built-in set is ever wanted, vendor only from the documented-
 permissive 259, record source URL and SPDX id per file, and keep the count in single digits so the
-review stays possible. The one `builtin:default` should be dtr's own.
+review stays possible. dtr ships exactly one — `Kanagawa Wave` (§8.2) — which is that rule applied,
+not an exception to it: the count is a budget, and the next theme has to earn its own licence check
+the same way. There is no `builtin:default`: with no theme configured, the VT core's own colours are
+the default, and they are the one palette that cannot be wrong.
 
 ---
 

@@ -648,6 +648,18 @@ and two nodes with one name cannot be addressed from a test. Port rows exist onl
 a port is focused: baud and CR translation belong to one device, so the rows are built
 per open.
 
+**One theme is compiled in, and a file of the same name beats it.** `Kanagawa Wave` is
+Ghostty's own file under a three-line provenance header, `include_str!`-ed from
+`crates/dtr/assets/themes/`. Not because a theme corpus belongs in a terminal — the
+licence finding in `docs/themes.md` §9.1 is why there is exactly one — but because the
+places dtr runs have nothing to read: Ghostty's themes on NixOS are a store path, and
+the one-file Windows exe has no `share/` at all. `theme::load` asks the search paths
+first (exact name, then ignoring case: Ghostty capitalises its file names and people do
+not) and falls back to the compiled-in copy, so `~/.config/dtr/themes/Kanagawa Wave` is
+how you change it and `theme = "kanagawa wave"` is how you select it. `names()` merges
+both lists, which is why the palette and the settings combo offer it on a machine with
+no themes installed.
+
 **A menu that opens slowly the first time is doing its work in the frame.**
 `usable_families` builds a fontconfig collection and probes every family (the same
 `FcFontSort` cost that showed up in a profile at 16%); it is cached in a `OnceLock`, so

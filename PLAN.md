@@ -560,10 +560,18 @@ keeps a theme a document about the *terminal* while the window still looks like 
 Colours in the config file itself are deliberately not supported: a theme is a document with a name,
 and pointing at one beats duplicating sixteen hex triplets inline.
 
+One theme is compiled in — Ghostty's `Kanagawa Wave`, `include_str!`-ed from
+`crates/dtr/assets/themes/` — because the places dtr is installed do not have a theme directory to
+read: Ghostty's corpus on NixOS lives in a store path no search rule can guess, and the one-file
+Windows exe has no prefix at all. A file of the same name on disk still wins, so customising it is
+`cp` and an edit. The lookup is exact first and case-insensitive after — Ghostty writes
+`Kanagawa Wave` and people type `kanagawa wave`, and the memo's own example is the lowercase one.
+
 `docs/themes.md` is the research behind this and goes further than the implementation: it measured the
 corpora (819 Ghostty themes shipped, 463 already installed on this machine, 860 in the upstream hub),
 checked the licences (Ghostty is MIT, but the underlying iTerm2 corpus is only ~259/860
-redistributable — which is why dtr reads theme files instead of shipping them), and specifies an
+redistributable — which is why dtr reads theme files and ships one MIT-licensed theme rather than a
+corpus), and specifies an
 `.itermcolors` importer and a `[theme.overrides]` table. Two deliberate divergences: the config uses
 the owner's shape `theme = "kanagawa wave"` rather than a `[theme] name = ...` table, and the
 `[theme.overrides]` table is not implemented, so `dtr config set` never needs to walk a three-level
