@@ -171,16 +171,6 @@ enum Open {
 }
 
 impl Open {
-    fn keyword(self) -> &'static str {
-        match self {
-            Self::If => "if",
-            Self::While => "while",
-            Self::Until => "until",
-            Self::Do => "do",
-            Self::For => "for",
-        }
-    }
-
     fn closer(self) -> &'static str {
         match self {
             Self::If => "endif",

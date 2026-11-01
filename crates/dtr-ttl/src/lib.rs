@@ -26,6 +26,18 @@
 //!   label, an assignment, a command — and checks that every block of §6 is
 //!   closed by its own keyword.
 //!
+//! The start of the evaluator:
+//!
+//! * [`value`] is what a value can be: a 32-bit integer or a string, nothing
+//!   else (§4.1).
+//! * [`vars`] is the variable namespace of §4 — four kinds in four separate
+//!   budgets of 256, a type fixed at the first assignment, names that are
+//!   case-insensitive — and [`error`] is the run-time error set of §8.
+//! * [`expr`] parses and evaluates the operator table of §5.2, and writes down
+//!   the behaviour §5.5 leaves undefined: wrapping arithmetic, masked shift
+//!   counts, short-circuiting `&&`/`||`, and division that truncates toward
+//!   zero.
+//!
 //! Nothing evaluates yet: there is no expression parser, no command set, and no
 //! host interface for `send`, `wait` or the dialog boxes. The families of the
 //! manual's §7 are the intended module boundaries for that work, because a
@@ -41,6 +53,10 @@
 //! requires every one of them to decode, lex and nest correctly, so a change
 //! that would reject a real macro fails there.
 
+pub mod error;
+pub mod expr;
 pub mod lex;
 pub mod line;
 pub mod source;
+pub mod value;
+pub mod vars;
