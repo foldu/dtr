@@ -71,11 +71,13 @@
 pub mod commands;
 pub mod error;
 pub mod expr;
+pub mod files;
 pub mod host;
 pub mod interp;
 pub mod lex;
 pub mod line;
 pub mod program;
 pub mod source;
+pub mod time;
 pub mod value;
 pub mod vars;

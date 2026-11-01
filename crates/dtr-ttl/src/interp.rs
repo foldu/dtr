@@ -213,6 +213,13 @@ pub struct Interpreter<'h> {
     /// `random`'s state; a macro that wants two different numbers must not get
     /// the same one twice.
     seed: u32,
+    /// §7.5's password store, keyed by (file, name).
+    ///
+    /// Tera Term's file is encrypted and this one is not: what a macro needs is
+    /// that `setpassword` followed by `getpassword` returns what it stored, and
+    /// that a file survives between them, which is what this gives. The
+    /// encryption format is Tera Term's, not a thing a script can observe.
+    passwords: std::collections::BTreeMap<(String, String), String>,
 }
 
 impl<'h> Interpreter<'h> {
@@ -227,6 +234,7 @@ impl<'h> Interpreter<'h> {
             steps: 0,
             max_steps: DEFAULT_STEP_LIMIT,
             seed: 0x2545_f491,
+            passwords: std::collections::BTreeMap::new(),
         }
     }
 
@@ -441,10 +449,19 @@ impl<'h> Interpreter<'h> {
 
             Op::Loop { post, start } => {
                 let again = match &post {
-                    None => true,
+                    // `loop while`/`loop until` tests after the body (§6.3), so
+                    // it goes back to the body's first statement.
                     Some(test) => {
                         let value = self.eval_int(&test.cond)?;
                         if test.until { value == 0 } else { value != 0 }
+                    }
+                    // A bare `loop` belongs to `do while`/`do until`, where the
+                    // test is at the `do`: going back to the body instead would
+                    // never test it again. `do` … `loop` with no test at all is
+                    // an infinite loop by design, and this is what makes it one.
+                    None => {
+                        self.jump(start);
+                        return Ok(());
                     }
                 };
                 if again {
@@ -778,6 +795,31 @@ impl<'h> Interpreter<'h> {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let span = (max as u32).saturating_add(1);
         ((self.seed >> 8) % span) as i32
+    }
+
+    // -- §7.5's password store ----------------------------------------------
+
+    pub(crate) fn set_password(&mut self, file: &str, name: &str, password: &str) {
+        self.passwords
+            .insert((file.to_string(), name.to_string()), password.to_string());
+    }
+
+    pub(crate) fn password(&self, file: &str, name: &str) -> Option<String> {
+        self.passwords
+            .get(&(file.to_string(), name.to_string()))
+            .cloned()
+    }
+
+    pub(crate) fn forget_password(&mut self, file: &str, name: &str) -> bool {
+        if name.is_empty() {
+            // §7.5: an empty name removes every password in the file.
+            let before = self.passwords.len();
+            self.passwords.retain(|(path, _), _| path != file);
+            return self.passwords.len() != before;
+        }
+        self.passwords
+            .remove(&(file.to_string(), name.to_string()))
+            .is_some()
     }
 }
 

@@ -59,6 +59,135 @@ pub(crate) fn invoke(
         "mpause" => mpause(interp, args),
         "execcmnd" => execcmnd(interp, args),
 
+        // §7.1 the connection and the byte stream.
+        "connect" | "cygconnect" => connect(interp, args),
+        "testlink" => testlink(interp, args),
+        "disconnect" => {
+            interp.arity(args, "disconnect", 0, 1)?;
+            interp.host().disconnect();
+            Ok(())
+        }
+        "unlink" => {
+            interp.arity(args, "unlink", 0, 0)?;
+            interp.host().unlink();
+            Ok(())
+        }
+        "closett" => {
+            interp.arity(args, "closett", 0, 0)?;
+            interp.host().close_terminal();
+            Ok(())
+        }
+        "send" | "sendtext" | "sendbinary" => send(interp, args, false),
+        "sendln" => send(interp, args, true),
+        "sendbroadcast" => send(interp, args, false),
+        "sendlnbroadcast" => send(interp, args, true),
+        "sendmulticast" => send_multicast(interp, args, false),
+        "sendlnmulticast" => send_multicast(interp, args, true),
+        "sendfile" => sendfile(interp, args),
+        "sendbreak" => {
+            interp.arity(args, "sendbreak", 0, 0)?;
+            interp.host().note_setting("break", "sent");
+            Ok(())
+        }
+        "setecho" | "enablekeyb" | "setsync" | "setmulticastname" | "setserialdelaychar"
+        | "setserialdelayline" | "setserialdelay" | "changedir" | "logopen" | "logclose"
+        | "logwrite" | "logwritebinary" | "logrotate" | "loginfo" | "getfileattr"
+        | "setfileattr" | "sendkcode" | "folderdelete" | "setflowctrl"
+        | "setcomport" | "setbaud" => setting(interp, name, args),
+        "recvln" => recvln(interp, args),
+        "wait" => wait(interp, args, Wait::Any),
+        "waitln" => wait(interp, args, Wait::Line),
+        "waitregex" => wait(interp, args, Wait::Regex),
+        "waitn" => waitn(interp, args),
+        "waitrecv" => waitrecv(interp, args),
+        "flushrecv" => {
+            interp.arity(args, "flushrecv", 0, 0)?;
+            interp.host().flush_recv();
+            Ok(())
+        }
+        // File transfer needs a link layer this host does not have. The
+        // commands are accepted and report success so that a corpus macro's
+        // control flow is the one it wrote; the corpus README says so.
+        "xmodemsend" | "xmodemrecv" | "ymodemsend" | "ymodemrecv" | "zmodemsend" | "zmodemrecv"
+        | "kermitsend" | "kermitrecv" | "quickvansend" | "quickvanrecv" => {
+            interp.set_result(0);
+            Ok(())
+        }
+        "callmenu" => {
+            interp.arity(args, "callmenu", 1, 1)?;
+            interp.set_result(0);
+            Ok(())
+        }
+
+        // §7.4 files.
+        "fileopen" => fileopen(interp, args),
+        "filecreate" => filecreate(interp, args),
+        "fileclose" => fileclose(interp, args),
+        "filereadln" => filereadln(interp, args),
+        "fileread" => fileread(interp, args),
+        "filewrite" => filewrite(interp, args, false),
+        "filewriteln" => filewrite(interp, args, true),
+        "fileseek" => fileseek(interp, args),
+        "filemarkptr" => filemarkptr(interp, args),
+        "fileseekback" => fileseekback(interp, args),
+        "filetruncate" => filetruncate(interp, args),
+        "filedelete" => filedelete(interp, args),
+        "filesearch" => filesearch(interp, args),
+        "filecopy" => filecopy(interp, args, Copy::Copy),
+        "filerename" => filecopy(interp, args, Copy::Rename),
+        "fileconcat" => filecopy(interp, args, Copy::Concat),
+        "findfirst" => findfirst(interp, args),
+        "findnext" => findnext(interp, args),
+        "findclose" => findclose(interp, args),
+        "foldersearch" => foldersearch(interp, args),
+        "filestat" => filestat(interp, args),
+        "makepath" => makepath(interp, args),
+        "basename" => basename(interp, args),
+        "dirname" => dirname(interp, args),
+        "foldercreate" => foldercreate(interp, args),
+
+        // §7.6 time and environment.
+        "gettime" => gettime(interp, args, false),
+        "getdate" => gettime(interp, args, true),
+        "uptime" => {
+            interp.arity(args, "uptime", 1, 1)?;
+            let target = interp.name_param(args, 0)?;
+            // The manual is explicit: it wraps at 49.7 days, which is exactly
+            // what an i32 of milliseconds does.
+            let millis = interp.host().uptime_millis() as i32;
+            interp.assign_int(&target, millis)
+        }
+        "getenv" => getenv(interp, args),
+        "setenv" => setenv(interp, args),
+        "setpassword" | "setpassword2" => setpassword(interp, args),
+        "getpassword" | "getpassword2" => getpassword(interp, args),
+        "ispassword" | "ispassword2" => ispassword(interp, args),
+        "delpassword" | "delpassword2" => delpassword(interp, args),
+        "getdir" => {
+            interp.arity(args, "getdir", 1, 1)?;
+            let target = interp.name_param(args, 0)?;
+            let dir = interp.host().get_dir();
+            interp.assign_str(&target, &dir)
+        }
+        "getttdir" => {
+            // §7.6: the macro interpreter's own directory, which is where it
+            // was started from unless `setdir` moved it.
+            interp.arity(args, "getttdir", 1, 1)?;
+            let target = interp.name_param(args, 0)?;
+            let dir = interp.host().get_dir();
+            interp.assign_str(&target, &dir)
+        }
+        "setdir" => {
+            interp.arity(args, "setdir", 1, 1)?;
+            let dir = interp.str_param(args, 0)?;
+            interp.host().set_dir(&dir);
+            Ok(())
+        }
+        "getver" => getver(interp, args),
+        "getspecialfolder" => getspecialfolder(interp, args),
+        "expandenv" => expandenv(interp, args),
+        "exec" => exec(interp, args),
+
         // §7.3 strings.
         "sprintf" => sprintf_command(interp, args),
         "sprintf2" => sprintf2(interp, args),
@@ -311,7 +440,12 @@ fn execcmnd(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error
 // -- strings ----------------------------------------------------------------
 
 fn sprintf_command(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
-    interp.arity(args, "sprintf", 1, usize::MAX)?;
+    // §7.3: an empty `sprintf` is not a syntax error, it is result 1 — "no
+    // format" — which is how a macro tests whether it built one.
+    if args.is_empty() {
+        interp.set_result(1);
+        return Ok(());
+    }
     let format = interp.str_param(args, 0)?;
     let values = arguments(interp, args, 1)?;
     let (text, code) = format_string(&format, &values);
@@ -418,6 +552,7 @@ struct Spec {
     plus: bool,
     space: bool,
     zero: bool,
+    alternate: bool,
     width: Option<usize>,
     width_star: bool,
     precision: Option<usize>,
@@ -431,6 +566,7 @@ fn parse_spec(chars: &[char], at: &mut usize) -> Option<Spec> {
         plus: false,
         space: false,
         zero: false,
+        alternate: false,
         width: None,
         width_star: false,
         precision: None,
@@ -446,7 +582,7 @@ fn parse_spec(chars: &[char], at: &mut usize) -> Option<Spec> {
             Some('+') => spec.plus = true,
             Some(' ') => spec.space = true,
             Some('0') => spec.zero = true,
-            Some('#') => {}
+            Some('#') => spec.alternate = true,
             _ => break,
         }
         *at += 1;
@@ -517,9 +653,31 @@ fn render(spec: &Spec, value: &Value) -> Option<String> {
             format!("{sign}{digits}")
         }
         'u' => integer(value)?.unsigned_abs().to_string(),
-        'o' => format!("{:o}", integer(value)?),
-        'x' => format!("{:x}", integer(value)?),
-        'X' => format!("{:X}", integer(value)?),
+        'o' => {
+            let text = format!("{:o}", integer(value)?);
+            // `#` asks for the prefix C uses to make the radix obvious.
+            if spec.alternate && !text.starts_with('0') {
+                format!("0{text}")
+            } else {
+                text
+            }
+        }
+        'x' | 'X' => {
+            let number = integer(value)?;
+            let text = if spec.conversion == 'x' {
+                format!("{number:x}")
+            } else {
+                format!("{number:X}")
+            };
+            let prefix = if !spec.alternate || number == 0 {
+                ""
+            } else if spec.conversion == 'x' {
+                "0x"
+            } else {
+                "0X"
+            };
+            format!("{prefix}{text}")
+        }
         'c' => {
             let code = integer(value)?;
             char::from_u32(u32::try_from(code).ok()?)?.to_string()
@@ -961,9 +1119,24 @@ fn redim(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
 
 fn ifdefined(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
     interp.arity(args, "ifdefined", 1, 1)?;
-    let name = interp.name_param(args, 0)?;
-    // §7.6: 0 undefined, 1 integer, 3 string, 4 label, 5 integer array,
-    // 6 string array.
+    // §7.6: the parameter is a *name*, and the corpus passes literals
+    // (`ifdefined 1`, `ifdefined '2'`) to show that they are not defined.
+    // `c[0]` asks about the array `c`, not about an element.
+    let name = match &args[0][..] {
+        [first, ..] => match &first.kind {
+            crate::lex::Token::Ident(name) => name.clone(),
+            _ => {
+                interp.set_result(0);
+                return Ok(());
+            }
+        },
+        [] => {
+            interp.set_result(0);
+            return Ok(());
+        }
+    };
+    // 0 undefined, 1 integer, 3 string, 4 label, 5 integer array, 6 string
+    // array.
     let result = if interp.vars().defined(&name) == 0 && interp.has_label(&name) {
         4
     } else {
@@ -1013,4 +1186,736 @@ fn checksum(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], width: usize) -> Re
         _ => sum,
     };
     interp.assign_int(&target, value as i32)
+}
+
+// -- the connection ---------------------------------------------------------
+
+fn testlink(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "testlink", 0, 0)?;
+    let state = interp.host().link_state();
+    interp.set_result(state);
+    Ok(())
+}
+
+fn connect(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    // The parameters are Tera Term's own command line, so they are joined back
+    // into the one string the host understands rather than interpreted here.
+    let mut parameters = String::new();
+    for index in 0..args.len() {
+        if index > 0 {
+            parameters.push(' ');
+        }
+        parameters.push_str(&interp.str_param(args, index)?);
+    }
+    interp.host().connect(&parameters);
+    // §7.1: 0 unlinked, 1 linked only, 2 connected.
+    let state = interp.host().link_state();
+    interp.set_result(state);
+    Ok(())
+}
+
+fn setting(
+    interp: &mut Interpreter<'_>,
+    name: &str,
+    args: &[Vec<Tok>],
+) -> Result<(), Error> {
+    interp.arity(args, name, 0, 8)?;
+    let mut value = String::new();
+    for index in 0..args.len() {
+        if index > 0 {
+            value.push(' ');
+        }
+        value.push_str(&interp.str_param(args, index)?);
+    }
+    interp.host().note_setting(name, &value);
+    Ok(())
+}
+
+fn send(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], newline: bool) -> Result<(), Error> {
+    let bytes = payload(interp, args, 0)?;
+    let mut bytes = bytes;
+    if newline {
+        // §7.1: `sendln` appends the terminal's newline, which Tera Term spells
+        // CR LF.
+        bytes.extend_from_slice(b"\r\n");
+    }
+    interp.host().send(&bytes);
+    Ok(())
+}
+
+fn send_multicast(
+    interp: &mut Interpreter<'_>,
+    args: &[Vec<Tok>],
+    newline: bool,
+) -> Result<(), Error> {
+    interp.arity(args, "sendmulticast", 2, usize::MAX)?;
+    // Parameter 1 is the multicast name; a host with one session ignores it.
+    let _name = interp.str_param(args, 0)?;
+    let mut bytes = payload(interp, args, 1)?;
+    if newline {
+        bytes.extend_from_slice(b"\r\n");
+    }
+    interp.host().send(&bytes);
+    Ok(())
+}
+
+/// The parameters from `from` on, as bytes: a string is its bytes, an integer
+/// is one byte — the low 8 bits, truncated rather than refused (§7.1).
+fn payload(
+    interp: &Interpreter<'_>,
+    args: &[Vec<Tok>],
+    from: usize,
+) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    for index in from..args.len() {
+        let expr = interp.param(args, index)?;
+        match interp.eval(&expr)? {
+            Value::Int(number) => bytes.push((number & 0xff) as u8),
+            Value::Str(text) => bytes.extend_from_slice(text.as_bytes()),
+        }
+    }
+    Ok(bytes)
+}
+
+fn sendfile(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "sendfile", 1, 2)?;
+    let path = interp.str_param(args, 0)?;
+    // `<binary>` non-zero sends the bytes unchanged; zero converts newlines,
+    // which this host leaves to the terminal and does not do here.
+    let _binary = if args.len() > 1 {
+        interp.int_param(args, 1)? != 0
+    } else {
+        false
+    };
+    let opened = interp.host().files().open(&path, false, true);
+    let Ok(handle) = opened else {
+        interp.set_result(-1);
+        return Ok(());
+    };
+    let mut bytes = Vec::new();
+    loop {
+        match interp.host().files().read(handle, 4096) {
+            Some(chunk) if !chunk.is_empty() => bytes.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    interp.host().files().close(handle);
+    interp.host().send(&bytes);
+    interp.set_result(0);
+    Ok(())
+}
+
+fn recvln(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "recvln", 0, 0)?;
+    match interp.host().read_line() {
+        Some(line) => {
+            interp.system_mut().inputstr = line;
+            interp.set_result(1);
+        }
+        None => interp.set_result(0),
+    }
+    Ok(())
+}
+
+/// §7.1: `waitn` waits for a number of bytes rather than for a string.
+fn waitn(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "waitn", 1, 1)?;
+    let count = interp.int_param(args, 0)?.max(0) as usize;
+    let millis = wait_millis(interp);
+    match interp.host().wait_bytes(count, millis) {
+        Some(bytes) => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            interp.system_mut().inputstr = truncate(&text);
+            interp.set_result(1);
+        }
+        None => interp.set_result(0),
+    }
+    Ok(())
+}
+
+/// §7.1: `waitrecv` waits for a fixed-size chunk with a string at a position.
+fn waitrecv(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "waitrecv", 3, 3)?;
+    let pattern = interp.str_param(args, 0)?;
+    let len = interp.int_param(args, 1)?.max(0) as usize;
+    let position = interp.int_param(args, 2)?.max(1) as usize;
+    let millis = wait_millis(interp);
+    match interp.host().wait_recv(&pattern, len, position, millis) {
+        Some(bytes) => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            interp.system_mut().inputstr = truncate(&text);
+            interp.set_result(1);
+        }
+        None => interp.set_result(0),
+    }
+    Ok(())
+}
+
+/// §7.1: `timeout` seconds plus `mtimeout` milliseconds; zero or less means the
+/// wait never times out, which is why -1 stands for "infinite".
+fn wait_millis(interp: &Interpreter<'_>) -> i64 {
+    let millis = i64::from(interp.system().timeout) * 1000 + i64::from(interp.system().mtimeout);
+    if millis <= 0 { -1 } else { millis }
+}
+
+fn truncate(text: &str) -> String {
+    text.chars().take(crate::vars::MAX_STRING_CHARS).collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// `wait`: any of the patterns, anywhere in the stream.
+    Any,
+    /// `waitln`: a whole line containing one of them; the line goes to
+    /// `inputstr`.
+    Line,
+    /// `waitregex`: a line matching one of them, with `matchstr` filled too.
+    Regex,
+}
+
+fn wait(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], kind: Wait) -> Result<(), Error> {
+    let name = match kind {
+        Wait::Any => "wait",
+        Wait::Line => "waitln",
+        Wait::Regex => "waitregex",
+    };
+    interp.arity(args, name, 1, 10)?;
+    let mut patterns = Vec::new();
+    for index in 0..args.len() {
+        patterns.push(interp.str_param(args, index)?);
+    }
+    // §7.1: `timeout` in seconds plus `mtimeout` in milliseconds; zero or less
+    // means the wait never times out, which is why -1 is "infinite" here.
+    let millis = i64::from(interp.system().timeout) * 1000 + i64::from(interp.system().mtimeout);
+    let millis = if millis <= 0 { -1 } else { millis };
+    let answer = interp
+        .host()
+        .wait_for(&patterns, millis, kind != Wait::Any);
+    match answer {
+        Some((index, text)) => {
+            // §7.1: the result is which pattern matched, counted from 1.
+            interp.set_result(index as i32 + 1);
+            match kind {
+                Wait::Any => {}
+                Wait::Line => interp.system_mut().inputstr = text,
+                Wait::Regex => {
+                    interp.system_mut().inputstr = text.clone();
+                    interp.system_mut().matchstr = text;
+                }
+            }
+        }
+        None => interp.set_result(0),
+    }
+    Ok(())
+}
+
+// -- files ------------------------------------------------------------------
+
+/// §7.4's file commands report 0 for success, the opposite of the connection
+/// commands — which is the single most common way a file macro checks the wrong
+/// thing, so every one of these says so where it sets `result`.
+fn fileopen(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "fileopen", 3, 4)?;
+    let target = interp.name_param(args, 0)?;
+    let path = interp.str_param(args, 1)?;
+    let append = interp.int_param(args, 2)? != 0;
+    let read_only = if args.len() > 3 {
+        interp.int_param(args, 3)? != 0
+    } else {
+        false
+    };
+    match interp.host().files().open(&path, append, read_only) {
+        Ok(handle) => {
+            interp.assign_int(&target, handle)?;
+            interp.set_result(0);
+        }
+        Err(()) => {
+            interp.assign_int(&target, -1)?;
+            interp.set_result(-1);
+        }
+    }
+    Ok(())
+}
+
+fn filecreate(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filecreate", 2, 2)?;
+    let target = interp.name_param(args, 0)?;
+    let path = interp.str_param(args, 1)?;
+    match interp.host().files().create(&path) {
+        Ok(handle) => {
+            interp.assign_int(&target, handle)?;
+            interp.set_result(0);
+        }
+        Err(()) => {
+            interp.assign_int(&target, -1)?;
+            interp.set_result(-1);
+        }
+    }
+    Ok(())
+}
+
+fn fileclose(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "fileclose", 1, 1)?;
+    let handle = interp.int_param(args, 0)?;
+    let closed = interp.host().files().close(handle);
+    interp.set_result(if closed { 0 } else { -1 });
+    Ok(())
+}
+
+fn filereadln(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filereadln", 2, 2)?;
+    let handle = interp.int_param(args, 0)?;
+    let target = interp.name_param(args, 1)?;
+    match interp.host().files().read_line(handle) {
+        Some(line) => {
+            interp.assign_str(&target, &line)?;
+            interp.set_result(0);
+        }
+        // §7.4 inverts the convention: 1 means the read hit the end.
+        None => interp.set_result(1),
+    }
+    Ok(())
+}
+
+fn fileread(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "fileread", 3, 3)?;
+    let handle = interp.int_param(args, 0)?;
+    let bytes = interp.int_param(args, 1)?.clamp(1, crate::vars::MAX_STRING_CHARS as i32) as usize;
+    let target = interp.name_param(args, 2)?;
+    match interp.host().files().read(handle, bytes) {
+        Some(data) => {
+            interp.assign_str(&target, &String::from_utf8_lossy(&data))?;
+            interp.set_result(0);
+        }
+        None => interp.set_result(1),
+    }
+    Ok(())
+}
+
+fn filewrite(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], newline: bool) -> Result<(), Error> {
+    interp.arity(args, if newline { "filewriteln" } else { "filewrite" }, 2, 2)?;
+    let handle = interp.int_param(args, 0)?;
+    let mut bytes = payload(interp, args, 1)?;
+    if newline {
+        bytes.extend_from_slice(b"\r\n");
+    }
+    let written = interp.host().files().write(handle, &bytes);
+    interp.set_result(if written { 0 } else { -1 });
+    Ok(())
+}
+
+fn fileseek(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "fileseek", 3, 3)?;
+    let handle = interp.int_param(args, 0)?;
+    let offset = i64::from(interp.int_param(args, 1)?);
+    let origin = interp.int_param(args, 2)?;
+    let moved = interp.host().files().seek(handle, offset, origin);
+    interp.set_result(if moved { 0 } else { -1 });
+    Ok(())
+}
+
+fn filemarkptr(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filemarkptr", 1, 1)?;
+    let handle = interp.int_param(args, 0)?;
+    let marked = interp.host().files().mark(handle);
+    interp.set_result(if marked { 0 } else { -1 });
+    Ok(())
+}
+
+fn fileseekback(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "fileseekback", 1, 1)?;
+    let handle = interp.int_param(args, 0)?;
+    let moved = interp.host().files().seek_mark(handle);
+    interp.set_result(if moved { 0 } else { -1 });
+    Ok(())
+}
+
+fn filetruncate(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filetruncate", 2, 2)?;
+    let path = interp.str_param(args, 0)?;
+    let size = interp.int_param(args, 1)?.max(0) as u64;
+    let truncated = interp.host().files().truncate(&path, size);
+    interp.set_result(if truncated { 0 } else { -1 });
+    Ok(())
+}
+
+fn filedelete(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filedelete", 1, 1)?;
+    let path = interp.str_param(args, 0)?;
+    let deleted = interp.host().files().delete(&path);
+    interp.set_result(if deleted { 0 } else { -1 });
+    Ok(())
+}
+
+fn filesearch(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filesearch", 1, 1)?;
+    let path = interp.str_param(args, 0)?;
+    let found = interp.host().files().exists(&path);
+    interp.set_result(if found { 1 } else { 0 });
+    Ok(())
+}
+
+fn foldersearch(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    // A memory file system has no directories; asking is answered with "no".
+    interp.arity(args, "foldersearch", 1, 1)?;
+    let _path = interp.str_param(args, 0)?;
+    interp.set_result(0);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Copy {
+    Copy,
+    Rename,
+    Concat,
+}
+
+fn filecopy(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], which: Copy) -> Result<(), Error> {
+    let name = match which {
+        Copy::Copy => "filecopy",
+        Copy::Rename => "filerename",
+        Copy::Concat => "fileconcat",
+    };
+    interp.arity(args, name, 2, 2)?;
+    let from = interp.str_param(args, 0)?;
+    let to = interp.str_param(args, 1)?;
+    let done = match which {
+        Copy::Copy => interp.host().files().copy(&from, &to),
+        Copy::Rename => interp.host().files().rename(&from, &to),
+        Copy::Concat => interp.host().files().concat(&from, &to),
+    };
+    interp.set_result(if done { 0 } else { -1 });
+    Ok(())
+}
+
+fn findfirst(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "findfirst", 3, 3)?;
+    let handle_target = interp.name_param(args, 0)?;
+    let pattern = interp.str_param(args, 1)?;
+    let name_target = interp.name_param(args, 2)?;
+    match interp.host().files().find_start(&pattern) {
+        Some(handle) => {
+            interp.assign_int(&handle_target, handle)?;
+            // The first match comes back from `findfirst` itself.
+            match interp.host().files().find_next(handle) {
+                Some(name) => {
+                    interp.assign_str(&name_target, &name)?;
+                    interp.set_result(1);
+                }
+                None => interp.set_result(0),
+            }
+        }
+        None => {
+            interp.assign_int(&handle_target, -1)?;
+            interp.set_result(0);
+        }
+    }
+    Ok(())
+}
+
+fn findnext(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "findnext", 2, 2)?;
+    let handle = interp.int_param(args, 0)?;
+    let name_target = interp.name_param(args, 1)?;
+    match interp.host().files().find_next(handle) {
+        Some(name) => {
+            interp.assign_str(&name_target, &name)?;
+            interp.set_result(1);
+        }
+        None => interp.set_result(0),
+    }
+    Ok(())
+}
+
+fn findclose(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "findclose", 1, 1)?;
+    let handle = interp.int_param(args, 0)?;
+    interp.host().files().find_close(handle);
+    interp.set_result(0);
+    Ok(())
+}
+
+fn filestat(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "filestat", 2, 4)?;
+    let path = interp.str_param(args, 0)?;
+    let size_target = interp.name_param(args, 1)?;
+    // The outputs are assigned either way: a macro that reads them after a
+    // failed `filestat` is reading zeroes, not an uninitialised variable.
+    let size = interp.host().files().size(&path);
+    interp.assign_int(
+        &size_target,
+        size.unwrap_or(0).min(i32::MAX as u64) as i32,
+    )?;
+    // The modification time and drive number need a real file system's
+    // metadata; the parameters are accepted and left at zero.
+    for index in 2..args.len() {
+        let target = interp.name_param(args, index)?;
+        interp.assign_int(&target, 0)?;
+    }
+    interp.set_result(if size.is_some() { 0 } else { -1 });
+    Ok(())
+}
+
+fn foldercreate(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "foldercreate", 1, 1)?;
+    let path = interp.str_param(args, 0)?;
+    let created = interp.host().files().create_dir(&path);
+    interp.set_result(if created { 0 } else { -1 });
+    Ok(())
+}
+
+/// §7.4: join a directory and a name, inserting a separator if needed. **It
+/// creates nothing**, which is why the name is `makepath` and not `mkdir`.
+fn makepath(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "makepath", 3, 3)?;
+    let target = interp.name_param(args, 0)?;
+    let dir = interp.str_param(args, 1)?;
+    let name = interp.str_param(args, 2)?;
+    let joined = if dir.is_empty() || dir.ends_with(['\\', '/']) {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}\\{name}")
+    };
+    interp.assign_str(&target, &joined)
+}
+
+fn basename(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "basename", 2, 2)?;
+    let target = interp.name_param(args, 0)?;
+    let path = interp.str_param(args, 1)?;
+    let name = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path.as_str())
+        .to_string();
+    interp.assign_str(&target, &name)
+}
+
+fn dirname(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "dirname", 2, 2)?;
+    let target = interp.name_param(args, 0)?;
+    let path = interp.str_param(args, 1)?;
+    let dir = match path.rfind(['\\', '/']) {
+        Some(at) => path[..at].to_string(),
+        None => String::new(),
+    };
+    interp.assign_str(&target, &dir)
+}
+
+// -- time and environment ---------------------------------------------------
+
+/// §7.6: `gettime` and `getdate` differ only in their default format.
+fn gettime(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], date: bool) -> Result<(), Error> {
+    interp.arity(args, if date { "getdate" } else { "gettime" }, 1, 3)?;
+    let target = interp.name_param(args, 0)?;
+    let default = if date { "%Y-%m-%d" } else { "%H:%M:%S" };
+    let format = if args.len() > 1 {
+        interp.str_param(args, 1)?
+    } else {
+        default.to_string()
+    };
+    // `<timezone>` (4.105+) would need a time-zone database; the host's local
+    // clock is what a macro gets, and the parameter is recorded rather than
+    // silently dropped.
+    if args.len() > 2 {
+        let zone = interp.str_param(args, 2)?;
+        interp.host().note_setting("timezone", &zone);
+    }
+    let text = crate::time::strftime(&format, interp.host().now());
+    if text.chars().count() > crate::vars::MAX_STRING_CHARS {
+        // §7.6: result 1 is "the result was too long".
+        interp.set_result(1);
+        return Ok(());
+    }
+    interp.assign_str(&target, &text)?;
+    interp.set_result(0);
+    Ok(())
+}
+
+fn getenv(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "getenv", 2, 2)?;
+    let name = interp.str_param(args, 0)?;
+    let target = interp.name_param(args, 1)?;
+    match interp.host().getenv(&name) {
+        Some(value) => {
+            interp.assign_str(&target, &value)?;
+            interp.set_result(0);
+        }
+        None => interp.set_result(-1),
+    }
+    Ok(())
+}
+
+fn setenv(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "setenv", 2, 2)?;
+    let name = interp.str_param(args, 0)?;
+    let value = interp.str_param(args, 1)?;
+    interp.host().setenv(&name, &value);
+    interp.set_result(0);
+    Ok(())
+}
+
+/// The Tera Term version this interpreter answers for (§7.6 `getver`).
+///
+/// A macro asks to find out whether a command exists, so the answer has to be
+/// the version whose command set [`crate::commands`] implements — 5.8, where
+/// `delvar` and `redim` arrived.
+pub const VERSION: &str = "5.8.0";
+
+fn getver(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "getver", 1, 2)?;
+    let target = interp.name_param(args, 0)?;
+    interp.assign_str(&target, VERSION)?;
+    if args.len() < 2 {
+        return Ok(());
+    }
+    let wanted = interp.str_param(args, 1)?;
+    let ours = version(VERSION);
+    let theirs = version(&wanted);
+    let result = match (ours, theirs) {
+        (Some(ours), Some(theirs)) => match ours.cmp(&theirs) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+        _ => -2,
+    };
+    interp.set_result(result);
+    Ok(())
+}
+
+/// A version string as comparable numbers; `None` when it is not one.
+fn version(text: &str) -> Option<Vec<u32>> {
+    let mut parts = Vec::new();
+    for part in text.split('.') {
+        if part.is_empty() {
+            return None;
+        }
+        parts.push(part.parse().ok()?);
+    }
+    Some(parts)
+}
+
+fn getspecialfolder(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "getspecialfolder", 2, 2)?;
+    let target = interp.name_param(args, 0)?;
+    let name = interp.str_param(args, 1)?;
+    match interp.host().special_folder(&name) {
+        Some(path) => {
+            interp.assign_str(&target, &path)?;
+            interp.set_result(0);
+        }
+        None => interp.set_result(-1),
+    }
+    Ok(())
+}
+
+/// `expandenv`: `%NAME%` references, resolved through the host's environment.
+fn expandenv(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "expandenv", 1, 2)?;
+    let target = interp.name_param(args, 0)?;
+    let source = if args.len() > 1 {
+        interp.str_param(args, 1)?
+    } else {
+        as_string(interp.get(&target)?)
+    };
+    let mut out = String::with_capacity(source.len());
+    let chars: Vec<char> = source.chars().collect();
+    let mut at = 0usize;
+    while at < chars.len() {
+        if chars[at] != '%' {
+            out.push(chars[at]);
+            at += 1;
+            continue;
+        }
+        // `%NAME%`; an unpaired or unknown name is copied through unchanged.
+        let close = chars[at + 1..].iter().position(|&ch| ch == '%');
+        let Some(close) = close else {
+            out.push('%');
+            at += 1;
+            continue;
+        };
+        let name: String = chars[at + 1..at + 1 + close].iter().collect();
+        match interp.host().getenv(&name) {
+            Some(value) => out.push_str(&value),
+            None => {
+                out.push('%');
+                out.push_str(&name);
+                out.push('%');
+            }
+        }
+        at += close + 2;
+    }
+    interp.assign_str(&target, &out)
+}
+
+fn exec(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "exec", 1, 4)?;
+    let command_line = interp.str_param(args, 0)?;
+    // `<show>` is a window instruction; `<wait>` non-zero blocks and puts the
+    // child's exit code in `result` (§7.6).
+    let wait = if args.len() > 2 {
+        interp.int_param(args, 2)? != 0
+    } else {
+        false
+    };
+    let code = interp.host().exec(&command_line, wait);
+    interp.set_result(code);
+    Ok(())
+}
+
+// -- §7.5 passwords ---------------------------------------------------------
+
+fn setpassword(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    // The `2` family adds `<encrypt str>`, which the store here does not use.
+    interp.arity(args, "setpassword", 3, 4)?;
+    let file = interp.str_param(args, 0)?;
+    let name = interp.str_param(args, 1)?;
+    let password = interp.str_param(args, 2)?;
+    interp.set_password(&file, &name, &password);
+    interp.set_result(0);
+    Ok(())
+}
+
+fn getpassword(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "getpassword", 3, 4)?;
+    let file = interp.str_param(args, 0)?;
+    let name = interp.str_param(args, 1)?;
+    let target = interp.name_param(args, 2)?;
+    if let Some(password) = interp.password(&file, &name) {
+        interp.assign_str(&target, &password)?;
+        interp.set_result(0);
+        return Ok(());
+    }
+    // §7.5: a name that is not in the file is asked for and then stored, which
+    // is what makes the first run of an unattended script interactive and the
+    // rest not.
+    let prompt = format!("{name}");
+    match interp.host().passwordbox(&prompt, &file) {
+        Some(password) => {
+            interp.set_password(&file, &name, &password);
+            interp.assign_str(&target, &password)?;
+            interp.set_result(0);
+        }
+        None => interp.set_result(-1),
+    }
+    Ok(())
+}
+
+fn ispassword(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "ispassword", 2, 3)?;
+    let file = interp.str_param(args, 0)?;
+    let name = interp.str_param(args, 1)?;
+    let present = interp.password(&file, &name).is_some();
+    interp.set_result(if present { 1 } else { 0 });
+    Ok(())
+}
+
+fn delpassword(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
+    interp.arity(args, "delpassword", 2, 3)?;
+    let file = interp.str_param(args, 0)?;
+    let name = interp.str_param(args, 1)?;
+    let removed = interp.forget_password(&file, &name);
+    interp.set_result(if removed { 0 } else { -1 });
+    Ok(())
 }

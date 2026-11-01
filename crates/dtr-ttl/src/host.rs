@@ -14,6 +14,8 @@
 //! cancelled, `inputbox` `None` when cancelled. The command that called it
 //! turns that into `result` and `inputstr` (§7.6), which is the layer above.
 
+use crate::files::Files;
+
 /// A date and time for `gettime`/`getdate` (§7.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DateTime {
@@ -90,8 +92,97 @@ pub trait Host {
     /// Read a file for `include`. `None` is `Can't open file.` (§8).
     fn read(&mut self, path: &str) -> Option<Vec<u8>>;
 
+    /// `flushrecv`: throw away what is already in the macro's receive queue.
+    fn flush_recv(&mut self);
+
+    /// A session setting a macro can change without the macro caring what it
+    /// does: `setecho`, `enablekeyb`, `setsync`, `setmulticastname`.
+    fn note_setting(&mut self, name: &str, value: &str);
+
     /// The local clock for `gettime`/`getdate`.
-    fn now(&self) -> DateTime;
+    fn now(&self) -> DateTime {
+        crate::time::now_utc().unwrap_or(DateTime {
+            year: 1970,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            weekday: 4,
+            utc_offset_minutes: 0,
+        })
+    }
+
+    // -- §7.1, the link and the byte stream ---------------------------------
+
+    /// `testlink`'s answer, and what `connect` leaves behind: 0 unlinked,
+    /// 1 linked but disconnected, 2 connected.
+    fn link_state(&mut self) -> i32;
+
+    /// `connect '<parameters>'` — the parameters are Tera Term's own command
+    /// line, so the host decides what a serial port or a host name means.
+    fn connect(&mut self, parameters: &str) -> bool;
+
+    fn disconnect(&mut self);
+
+    fn unlink(&mut self);
+
+    /// `closett`: the terminal itself goes away.
+    fn close_terminal(&mut self);
+
+    /// `send`/`sendln`/the broadcast family: bytes for the far end.
+    fn send(&mut self, bytes: &[u8]);
+
+    /// `recvln`: one line from the macro's own receive queue (§7.1 — the
+    /// commands read that queue, not the wire). `None` is a timeout.
+    fn read_line(&mut self) -> Option<String>;
+
+    /// `wait`/`waitln`: which of `patterns` matched (0-based) and the text
+    /// that matched, or `None` when the wait timed out. `line` asks for a whole
+    /// line rather than the first occurrence anywhere.
+    fn wait_for(
+        &mut self,
+        patterns: &[String],
+        millis: i64,
+        line: bool,
+    ) -> Option<(usize, String)>;
+
+    /// The file system the §7.4 commands work on.
+    fn files(&mut self) -> &mut dyn Files;
+
+    fn getenv(&mut self, name: &str) -> Option<String>;
+
+    fn setenv(&mut self, name: &str, value: &str);
+
+    /// `uptime`: milliseconds since the machine started.
+    fn uptime_millis(&mut self) -> i64;
+
+    // -- §7.1/§7.4 things a macro asks the machine ---------------------------
+
+    /// `getdir`: the working directory `fileopen` resolves relative paths in.
+    fn get_dir(&mut self) -> String;
+
+    /// `setdir`.
+    fn set_dir(&mut self, dir: &str);
+
+    /// `exec`: run a command line and return its exit code (`result`).
+    fn exec(&mut self, command_line: &str, wait: bool) -> i32;
+
+    /// `getspecialfolder`: a shell folder such as `MyDocuments`.
+    fn special_folder(&mut self, name: &str) -> Option<String>;
+
+    /// `waitn`: wait for `count` bytes from the macro's receive queue.
+    fn wait_bytes(&mut self, count: usize, millis: i64) -> Option<Vec<u8>>;
+
+    /// `waitrecv`: wait for a chunk of `len` bytes with `pattern` at the
+    /// 1-origin position `position`.
+    fn wait_recv(
+        &mut self,
+        pattern: &str,
+        len: usize,
+        position: usize,
+        millis: i64,
+    ) -> Option<Vec<u8>>;
 }
 
 /// What one macro did to its host, in the order it did it.
@@ -147,6 +238,20 @@ pub enum Event {
     Pause {
         millis: u64,
     },
+    Connect {
+        parameters: String,
+    },
+    Disconnect,
+    Unlink,
+    CloseTerminal,
+    Setting {
+        name: String,
+        value: String,
+    },
+    Exec {
+        command_line: String,
+        wait: bool,
+    },
 }
 
 /// A host that answers from script and remembers everything.
@@ -167,16 +272,43 @@ pub struct RecordingHost {
     /// What the next `listbox` answers; `None` is cancelled.
     pub choice: Option<i32>,
     /// Files `include` can find, by the path the macro writes.
-    pub files: Vec<(String, Vec<u8>)>,
+    pub sources: Vec<(String, Vec<u8>)>,
     /// Total time the macro asked to wait.
     pub waited_ms: u64,
     /// The clock `gettime` reads, when a test cares what it says.
     pub clock: Option<DateTime>,
+    /// `testlink`'s answer. Two is connected, which is what a macro that never
+    /// calls `connect` should see if it sends something.
+    pub link: i32,
+    /// Everything the macro sent, in order.
+    pub sent: Vec<u8>,
+    /// Lines `recvln` hands out, oldest first.
+    pub queue: Vec<String>,
+    /// What `wait`/`waitln` matches; `None` is a timeout.
+    pub wait_answer: Option<(usize, String)>,
+    /// The file system `fileopen` and its relatives share.
+    pub fs: crate::files::MemoryFiles,
+    /// The environment `getenv` reads.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// What `uptime` reports.
+    pub uptime_ms: i64,
+    /// What `getdir` answers, and where `setdir` puts it.
+    pub dir: String,
+    /// The exit code `exec` reports.
+    pub exit_code: i32,
+    /// `getspecialfolder`'s table, by folder name.
+    pub special_folders: Vec<(String, String)>,
 }
 
 impl RecordingHost {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            // A macro that never calls `connect` should still be able to send:
+            // Tera Term's own tests assume the terminal is linked.
+            link: 2,
+            uptime_ms: 1_000,
+            ..Self::default()
+        }
     }
 
     /// Answer `yesnobox` with Yes.
@@ -199,8 +331,38 @@ impl RecordingHost {
 
     /// Make a file visible to `include`.
     pub fn with_file(mut self, path: &str, bytes: &[u8]) -> Self {
-        self.files.push((path.to_string(), bytes.to_vec()));
+        self.sources.push((path.to_string(), bytes.to_vec()));
         self
+    }
+
+    /// Put a file where `fileopen` can find it.
+    pub fn with_disk_file(mut self, path: &str, bytes: &[u8]) -> Self {
+        self.fs.add(path, bytes);
+        self
+    }
+
+    /// Queue a line for `recvln` to hand out.
+    pub fn with_line(mut self, line: &str) -> Self {
+        self.queue.push(line.to_string());
+        self
+    }
+
+    /// Make `getspecialfolder` know a folder.
+    pub fn with_folder(mut self, name: &str, path: &str) -> Self {
+        self.special_folders
+            .push((name.to_string(), path.to_string()));
+        self
+    }
+
+    /// Make `wait`/`waitln` match pattern `index` (0-based) with `text`.
+    pub fn matching(mut self, index: usize, text: &str) -> Self {
+        self.wait_answer = Some((index, text.to_string()));
+        self
+    }
+
+    /// Everything the macro has sent so far, as text.
+    pub fn sent_text(&self) -> String {
+        String::from_utf8_lossy(&self.sent).into_owned()
     }
 
     pub fn events(&self) -> &[Event] {
@@ -357,10 +519,136 @@ impl Host for RecordingHost {
     }
 
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {
-        self.files
+        self.sources
             .iter()
             .find(|(name, _)| name == path)
             .map(|(_, bytes)| bytes.clone())
+    }
+
+    fn flush_recv(&mut self) {
+        self.queue.clear();
+    }
+
+    fn note_setting(&mut self, name: &str, value: &str) {
+        self.events.push(Event::Setting {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    fn link_state(&mut self) -> i32 {
+        self.link
+    }
+
+    fn connect(&mut self, parameters: &str) -> bool {
+        self.events.push(Event::Connect {
+            parameters: parameters.to_string(),
+        });
+        self.link = 2;
+        true
+    }
+
+    fn disconnect(&mut self) {
+        if self.link == 2 {
+            self.link = 1;
+        }
+        self.events.push(Event::Disconnect);
+    }
+
+    fn unlink(&mut self) {
+        self.link = 0;
+        self.events.push(Event::Unlink);
+    }
+
+    fn close_terminal(&mut self) {
+        self.link = 0;
+        self.events.push(Event::CloseTerminal);
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        self.sent.extend_from_slice(bytes);
+    }
+
+    fn read_line(&mut self) -> Option<String> {
+        if self.queue.is_empty() {
+            return None;
+        }
+        Some(self.queue.remove(0))
+    }
+
+    fn wait_for(
+        &mut self,
+        _patterns: &[String],
+        _millis: i64,
+        _line: bool,
+    ) -> Option<(usize, String)> {
+        self.wait_answer.clone()
+    }
+
+    fn files(&mut self) -> &mut dyn crate::files::Files {
+        &mut self.fs
+    }
+
+    fn getenv(&mut self, name: &str) -> Option<String> {
+        self.env.get(name).cloned()
+    }
+
+    fn setenv(&mut self, name: &str, value: &str) {
+        self.env.insert(name.to_string(), value.to_string());
+    }
+
+    fn uptime_millis(&mut self) -> i64 {
+        self.uptime_ms
+    }
+
+    fn get_dir(&mut self) -> String {
+        self.dir.clone()
+    }
+
+    fn set_dir(&mut self, dir: &str) {
+        self.dir = dir.to_string();
+    }
+
+    fn exec(&mut self, command_line: &str, wait: bool) -> i32 {
+        self.events.push(Event::Exec {
+            command_line: command_line.to_string(),
+            wait,
+        });
+        // The shell the macro asked for is not run: a recorder has no business
+        // starting processes. Its exit code is the canned one.
+        self.exit_code
+    }
+
+    fn special_folder(&mut self, name: &str) -> Option<String> {
+        // A recorder answers rather than refusing: a macro that asks for a
+        // folder and is told there is none takes a path its author never
+        // exercised, and the transcript it produces is about a different macro.
+        Some(
+            self.special_folders
+                .iter()
+                .find(|(folder, _)| folder.eq_ignore_ascii_case(name))
+                .map(|(_, path)| path.clone())
+                .unwrap_or_else(|| format!("C:/Users/macro/{name}")),
+        )
+    }
+
+    fn wait_bytes(&mut self, count: usize, _millis: i64) -> Option<Vec<u8>> {
+        let text = self.wait_answer.as_ref()?.1.clone();
+        let bytes = text.into_bytes();
+        let take = count.min(bytes.len());
+        Some(bytes[..take].to_vec())
+    }
+
+    fn wait_recv(
+        &mut self,
+        _pattern: &str,
+        _len: usize,
+        _position: usize,
+        _millis: i64,
+    ) -> Option<Vec<u8>> {
+        self.wait_answer
+            .as_ref()
+            .map(|(_, text)| text.clone().into_bytes())
     }
 
     fn now(&self) -> DateTime {
