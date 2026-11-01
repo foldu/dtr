@@ -67,6 +67,25 @@
     };
 
     rustHost = pkgs.rust-bin.stable.latest.default;
+
+    # Fonts a machine needs to lay out text: a monospaced Latin face for the
+    # grid, and a CJK face for the fallback the terminal installs at startup so
+    # that Han and kana are not egui's missing-glyph box. A developer's machine
+    # has these in /usr/share/fonts; a devShell and a CI runner do not.
+    fontPackages = with pkgs; [dejavu_fonts noto-fonts-cjk-sans];
+
+    # `FONTCONFIG_FILE` is read before fontconfig's compiled-in default, which is
+    # what a devShell without /etc/fonts needs. The stock `conf.d` is included on
+    # purpose: it is where `monospace` and `sans-serif` are aliased to real
+    # families, and without those aliases asking for `monospace` matches nothing.
+    fontsConf = pkgs.writeText "dtr-fonts.conf" ''
+      <?xml version="1.0"?>
+      <fontconfig>
+        <include ignore_missing="yes">${pkgs.fontconfig}/etc/fonts/conf.d</include>
+        ${lib.concatMapStrings (package: "<dir>${package}</dir>\n") fontPackages}
+        <cachedir>/tmp/dtr-fonts-cache</cachedir>
+      </fontconfig>
+    '';
     craneLib = (crane.mkLib pkgs).overrideToolchain rustHost;
 
     # Everything the two halves of the build agree on. `cargoArtifacts` is
@@ -210,10 +229,20 @@
     };
 
     checks.${system} = {
+      # The tests render through wgpu and lay out real text, and the sandbox has
+      # neither a GPU nor /usr/share/fonts. The same software paths the devShell
+      # picks for a machine with no /dev/dri are selected here, so `nix flake
+      # check` runs the real suite rather than nine failures about adapters.
       tests = craneLib.cargoTest (cargoCommon
         // {
           cargoArtifacts = dtrDeps;
           cargoTestExtraArgs = "--workspace";
+          nativeBuildInputs = cargoCommon.nativeBuildInputs ++ [pkgs.mesa fontPackages];
+          FONTCONFIG_FILE = fontsConf;
+          DTR_SHELL = "${pkgs.bash}/bin/bash";
+          VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
+          WGPU_BACKEND = "vulkan";
+          LIBGL_ALWAYS_SOFTWARE = "1";
         });
 
       # A desktop entry is only worth installing if it parses *and* the icon it
@@ -275,10 +304,43 @@
         # drives it. The in-process fallback (`--cpu-profile`) needs neither.
         pkgs.perf
         pkgs.cargo-flamegraph
+        # What a headless machine lacks and a desktop already has: a Vulkan
+        # implementation that is not a GPU, and fonts for fontconfig to find.
+        # The UI tests render through wgpu and lay out real text, so without
+        # these a runner fails nine of them with "No adapter found" and a
+        # smaller set with an empty grid face.
+        pkgs.mesa
+        fontPackages
       ];
 
       shellHook = ''
         export PKG_CONFIG_PATH="${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
+        # fontconfig reads the store, not /usr/share/fonts, and its compiled-in
+        # defaults point at a system a devShell does not have.
+        export FONTCONFIG_FILE=${fontsConf}
+
+        # The pane tests start a shell. On a runner `$SHELL` may be unset and
+        # `/bin/bash` may not exist — the failure reads as "the pane said
+        # nothing", which is what it did.
+        export DTR_SHELL=${pkgs.bash}/bin/bash
+
+        # A runner has no /dev/dri, so wgpu enumerates no adapter and every
+        # snapshot test panics before it compares anything. Lavapipe is Vulkan in
+        # software; selecting it only when there is no DRM node leaves a
+        # developer's machine on its GPU, which is also the rasteriser the
+        # baselines were made with. The same trick `--screenshot` documents.
+        if [ ! -e /dev/dri ]; then
+          VK_DRIVER_FILES="$(ls ${pkgs.mesa}/share/vulkan/icd.d/*lvp*.json 2>/dev/null | head -n1)"
+          if [ -n "$VK_DRIVER_FILES" ]; then
+            export VK_DRIVER_FILES
+            export WGPU_BACKEND=vulkan
+            export LIBGL_ALWAYS_SOFTWARE=1
+            echo "dtr: no /dev/dri, rendering through lavapipe ($VK_DRIVER_FILES)" >&2
+          else
+            echo "dtr: no /dev/dri and no lavapipe ICD; snapshot tests will find no adapter" >&2
+          fi
+        fi
       '';
 
       # winit resolves these with dlopen; make them visible to `cargo run`.
