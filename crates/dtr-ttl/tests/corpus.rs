@@ -11,12 +11,14 @@
 //!
 //! What this test asserts is that the reading half of the interpreter accepts all
 //! of it: every file decodes, every line lexes, every line is one of the four
-//! kinds, and every block is closed. That is a weaker claim than "the macros
-//! run", and deliberately so — it is the claim this crate can currently keep.
+//! kinds, every block is closed, and the whole file compiles to a program with
+//! every jump resolved. That is a weaker claim than "the macros run", and
+//! deliberately so — it is the claim this crate can currently keep.
 
 use std::path::{Path, PathBuf};
 
 use dtr_ttl::line::{self, LineKind};
+use dtr_ttl::program::{BuildError, LoadError, Program};
 use dtr_ttl::source::{self, Encoding};
 
 fn corpus_dir() -> PathBuf {
@@ -146,6 +148,69 @@ fn the_corpus_is_the_one_that_was_vendored() {
         (36, 15, 1, 1),
         "36 UTF-8, 15 CP932, one each of UTF-16BE and UTF-16LE"
     );
+}
+
+/// One vendored macro is a test *of* errors rather than a working macro:
+/// `oneline-if.ttl` is a list of single-line `if`s whose dialogs say which of
+/// them Tera Term rejects, and it opens with `if 0` and nothing after it — a
+/// branch with no statement — which is a syntax error. So it is the one file
+/// expected not to compile, and expected to fail at that line.
+const EXPECTED_BUILD_FAILURES: &[(&str, usize)] = &[("oneline-if.ttl", 2)];
+
+/// Every macro compiles: statements become ops, every block is resolved, and
+/// every `goto`/`call` finds its label. This is where a construct the language
+/// has and this crate does not shows up as a file and a line rather than as a
+/// surprise later.
+#[test]
+fn every_upstream_macro_builds_a_program() {
+    let files = corpus_files();
+    let mut failures: Vec<String> = Vec::new();
+    let mut ops = 0usize;
+    let mut labels = 0usize;
+    let mut expected = 0usize;
+
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let bytes = std::fs::read(path).expect("the file is in the repository");
+        let (text, _) = source::decode(&bytes).expect("decoding is tested above");
+        let wanted = EXPECTED_BUILD_FAILURES
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, line)| *line);
+
+        match (Program::parse(&text), wanted) {
+            (Ok(program), None) => {
+                ops += program.len();
+                labels += program.labels.len();
+            }
+            (Ok(_), Some(line)) => failures.push(format!(
+                "{name}: expected a syntax error at line {line}, but it compiled"
+            )),
+            (Err(LoadError::Build(BuildError::Syntax { line, .. })), Some(want))
+                if line == want =>
+            {
+                expected += 1;
+            }
+            (Err(error), Some(_)) => {
+                failures.push(format!("{name}: expected a syntax error, got {error}"))
+            }
+            (Err(error), None) => failures.push(format!("{name}: {error}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} macro(s) did not compile:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert_eq!(
+        expected,
+        EXPECTED_BUILD_FAILURES.len(),
+        "every known-bad macro still fails for the documented reason"
+    );
+    assert!(ops > 1000, "the corpus compiles to {ops} ops");
+    assert!(labels >= 40, "and carries {labels} labels");
 }
 
 /// A macro that a person would write, in the idioms the corpus uses, to show

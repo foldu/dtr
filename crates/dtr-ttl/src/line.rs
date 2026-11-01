@@ -92,7 +92,9 @@ pub fn scan(text: &str) -> Result<Vec<Line>, ScanError> {
     Ok(out)
 }
 
-fn classify(toks: &[Tok], line: usize) -> Result<LineKind, ScanError> {
+/// Classify one line's tokens. Shared with [`crate::program`], which has to
+/// classify the statement that follows the condition of a single-line `if`.
+pub(crate) fn classify(toks: &[Tok], line: usize) -> Result<LineKind, ScanError> {
     let Some(first) = toks.first() else {
         return Ok(LineKind::Blank);
     };
@@ -137,7 +139,9 @@ fn classify(toks: &[Tok], line: usize) -> Result<LineKind, ScanError> {
             }
 
             _ => Ok(LineKind::Command {
-                name: name.clone(),
+                // Command names are case-insensitive (§3.5), so the name is
+                // folded here and nobody downstream has to think about it.
+                name: name.to_ascii_lowercase(),
                 args: groups(&toks[1..]),
             }),
         },
@@ -267,7 +271,7 @@ fn opens_if(args: &[Vec<Tok>]) -> bool {
     args.iter().any(|group| {
         group
             .iter()
-            .any(|tok| matches!(&tok.kind, Token::Ident(word) if word == "then"))
+            .any(|tok| matches!(&tok.kind, Token::Ident(word) if word.eq_ignore_ascii_case("then")))
     })
 }
 

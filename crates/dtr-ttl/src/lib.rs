@@ -37,11 +37,16 @@
 //!   the behaviour §5.5 leaves undefined: wrapping arithmetic, masked shift
 //!   counts, short-circuiting `&&`/`||`, and division that truncates toward
 //!   zero.
+//! * [`program`] turns lines into executable ops and resolves every jump §6
+//!   only names: the branch table of an `if`, the end of each loop, the target
+//!   of every `break`/`continue`, and the label of every `goto`/`call` — so a
+//!   missing `endif` or a `goto` to nowhere is refused before the macro starts,
+//!   as Tera Term refuses it.
 //!
-//! Nothing evaluates yet: there is no expression parser, no command set, and no
-//! host interface for `send`, `wait` or the dialog boxes. The families of the
-//! manual's §7 are the intended module boundaries for that work, because a
-//! parameter's meaning is the command's business and not the scanner's.
+//! Nothing executes yet: there is no command set and no host interface for
+//! `send`, `wait` or the dialog boxes. The families of the manual's §7 are the
+//! intended module boundaries for that work, because a parameter's meaning is
+//! the command's business and not the scanner's.
 //!
 //! # The corpus
 //!
@@ -50,13 +55,15 @@
 //! BSD-3-Clause notice in `tests/corpus/NOTICE`. They are regression recipes
 //! rather than an automated suite — most report by showing a dialog box — but
 //! they are real TTL, which is what makes them worth having: `tests/corpus.rs`
-//! requires every one of them to decode, lex and nest correctly, so a change
-//! that would reject a real macro fails there.
+//! requires 52 of them to decode, lex, nest and compile to a program, and
+//! records the one that is a test of errors (`oneline-if.ttl`), so a change that
+//! would reject a real macro fails there.
 
 pub mod error;
 pub mod expr;
 pub mod lex;
 pub mod line;
+pub mod program;
 pub mod source;
 pub mod value;
 pub mod vars;
