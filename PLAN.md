@@ -1026,6 +1026,10 @@ which is a small argument for serial-first.
 - `tests`: `cargo test --workspace` in the sandbox, with lavapipe and the store's fonts.
 - `bench-payloads`: `scripts/bench.sh --check`, because the benchmark payloads are shell
   scripts that nothing compiles.
+- `fmt`: `cargo fmt --all -- --check` with the toolchain's own rustfmt. It took a
+  54-file commit of pure layout to make this gate possible (`f46bf48`): the tree had
+  never been formatted, and `just fmt` was the only thing that would have said so —
+  halfway through somebody else's change, as two thousand lines of diff.
 - `desktop-entry`: the installed entry parses and every icon it names exists.
 - `just-fmt`: `just --fmt --check`, because the task list is part of the interface now.
 - `deny`: `cargo deny` against `deny.toml` — licences (a permissive allowlist, because

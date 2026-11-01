@@ -51,13 +51,20 @@ both forges: `.gitlab-ci.yml` has two jobs on the `nix` runner (`check` runs it,
 `build` produces `.#windows` for download), and `.github/workflows/ci.yml` runs
 the same command on the GitHub mirror. Everything worth failing a branch over is a
 `checks.x86_64-linux` entry — `tests` (the whole suite, through lavapipe and the
-store's fonts), `bench-payloads` (`scripts/bench.sh --check`), `desktop-entry`,
-`just-fmt`, `deny` and `single-exe` — so a local `nix flake check` runs the same gates
+store's fonts), `bench-payloads` (`scripts/bench.sh --check`), `fmt` (`cargo fmt
+--all -- --check`, with the toolchain's own rustfmt), `desktop-entry`, `just-fmt`,
+`deny` and `single-exe` — so a local `nix flake check` runs the same gates
 as either pipeline. `single-exe` also cross-compiles `.#windows`, because a Linux-only
 build would not catch a cross-compilation break. Put a new gate there, not in YAML.
 Snapshots are generated here and compared byte-exactly there; if a font or renderer
 ever disagrees, the answer is a threshold, not a baseline regenerated from
 whichever machine ran last.
+
+`fmt` exists because the tree had never been `cargo fmt`ed: the only way to find out
+was `just fmt`, which rewrote two thousand lines in the middle of a change, and the
+first commit after the gate was 54 files of pure layout (`f46bf48`). Run `just fmt`
+before committing; if you forget, this is what tells you, seconds after the build
+starts rather than after the suite.
 
 `deny` is the supply-chain half of that: [`deny.toml`](deny.toml) allows a permissive
 licence set (the Windows exe is statically linked and handed out as a download),

@@ -300,10 +300,30 @@
         touch $out
       '';
 
+      # `cargo fmt --check` is a layout gate rather than a build: rustfmt reads
+      # the sources and writes nothing, so it needs neither the linker, libudev
+      # nor the VT core — only the files, and seconds instead of a build. It
+      # uses the toolchain's own rustfmt, the one the devShell hands you, so a
+      # local `cargo fmt` and this check cannot disagree about what formatted
+      # means.
+      #
+      # Before this existed the tree had never been formatted (`just fmt` was
+      # the only way to find out, and it rewrites two thousand lines in the
+      # middle of whatever you were doing), so the first run of it was a commit
+      # of 54 files with no behaviour in them.
+      fmt = craneLib.cargoFmt {
+        inherit src version;
+        pname = "dtr-fmt";
+        # The whole workspace. `cargo fmt` on its own formats the root package,
+        # and this is a virtual workspace: it has no root package, so a bare
+        # `cargo fmt` would check nothing and always pass.
+        cargoExtraArgs = "--all";
+      };
+
       # `just --fmt` rewrites the file in place, and a task list that nobody
       # formats is a diff waiting to happen in every later commit. `just fmt`
-      # formats the Rust sources and this file together; the check only asks
-      # whether they would change.
+      # formats the Rust sources and this file together; `fmt` above is the
+      # Rust half, and this is the file half.
       just-fmt = pkgs.runCommand "dtr-just-fmt" {
         nativeBuildInputs = [pkgs.just];
       } ''

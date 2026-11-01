@@ -24,7 +24,9 @@ deny:
 test *args:
     {{ dev }} cargo test --workspace {{ args }}
 
-# Format the Rust sources and this justfile.
+# Format the Rust sources and this justfile. The flake checks both halves
+# (`fmt` and `just-fmt`), so forgetting this is a red `nix flake check` rather
+# than a two-thousand-line diff in the middle of your next change.
 fmt:
     {{ dev }} cargo fmt --all
     just --fmt
