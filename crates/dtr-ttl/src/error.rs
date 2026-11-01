@@ -38,6 +38,34 @@ pub enum Error {
     /// `intdim` on a name that is already a scalar or an array of the other
     /// kind. Reported as a type mismatch, which is what it is.
     AlreadyAnotherKind(String),
+
+    /// §8 `Unknown command.` — including a command from a newer Tera Term than
+    /// the interpreter claims to be.
+    UnknownCommand(String),
+
+    /// §8 `Can't open file.` — an `include` target that is missing, or includes
+    /// nested past nine levels.
+    CannotOpenFile(String),
+
+    /// §8 `Stack overflow.` — subroutines nested deeper than the interpreter
+    /// allows.
+    StackOverflow,
+
+    /// §8 `Syntax error.` — a statement that parses as neither one thing nor
+    /// another, including a command whose parameters do not fit it.
+    Syntax(String),
+
+    /// §8 `Can't call sub.` — a `call` to a label that belongs to another file.
+    CannotCallSub(String),
+
+    /// §8 `Link macro first. Use 'connect' macro.` — a communication command
+    /// before any link existed.
+    NotLinked,
+
+    /// Not one of §8's: this interpreter stops a macro that runs too long
+    /// rather than hanging the test that started it. Real Tera Term would run
+    /// until a person closed the window.
+    StepLimit,
 }
 
 impl fmt::Display for Error {
@@ -50,6 +78,13 @@ impl fmt::Display for Error {
             Self::TooManyVariables(_) => f.write_str("Too many variables."),
             Self::InvalidArraySize(_) => f.write_str("Invalid array size."),
             Self::AlreadyAnotherKind(_) => f.write_str("Type mismatch."),
+            Self::UnknownCommand(_) => f.write_str("Unknown command."),
+            Self::CannotOpenFile(_) => f.write_str("Can't open file."),
+            Self::StackOverflow => f.write_str("Stack overflow."),
+            Self::Syntax(_) => f.write_str("Syntax error."),
+            Self::CannotCallSub(_) => f.write_str("Can't call sub."),
+            Self::NotLinked => f.write_str("Link macro first. Use 'connect' macro."),
+            Self::StepLimit => f.write_str("Step limit reached."),
         }
     }
 }

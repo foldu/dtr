@@ -103,8 +103,11 @@ pub enum Op {
     },
     Return,
 
-    /// `end`, or `exit` — which one it acts like depends on the file it is in.
+    /// `end`: the macro ends, closing its window.
     End,
+    /// `exit`: in an included file, return to the includer; in the main file,
+    /// the same as [`Op::End`] (§6.7).
+    Exit,
     SetExitCode { value: Expr },
     Include { path: Expr },
 }
@@ -422,8 +425,12 @@ impl Builder {
                 self.push(Op::Return, number);
                 Ok(())
             }
-            "end" | "exit" => {
+            "end" => {
                 self.push(Op::End, number);
+                Ok(())
+            }
+            "exit" => {
+                self.push(Op::Exit, number);
                 Ok(())
             }
             "setexitcode" => {
@@ -1186,7 +1193,9 @@ mod tests {
         let p = program("setexitcode 2\nend\nexit\n");
         assert!(matches!(&p.ops[0], Op::SetExitCode { .. }));
         assert!(matches!(p.ops[1], Op::End));
-        assert!(matches!(p.ops[2], Op::End));
+        // `exit` differs from `end` only in an included file (§6.7), but they
+        // are separate ops because that difference is the whole point.
+        assert!(matches!(p.ops[2], Op::Exit));
     }
 
     #[test]

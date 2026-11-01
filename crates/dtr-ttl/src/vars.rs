@@ -177,13 +177,23 @@ impl Vars {
         Err(Error::VariableNotInitialized(name.to_owned()))
     }
 
+    /// How many elements an array has: what `listbox` walks and what
+    /// `ifdefined`'s code 5 or 6 implies. `None` for a scalar or a name that
+    /// was never declared.
+    pub fn array_len(&self, name: &str) -> Option<i32> {
+        let key = key(name);
+        self.int_arrays
+            .get(&key)
+            .map(|array| array.len() as i32)
+            .or_else(|| self.str_arrays.get(&key).map(|array| array.len() as i32))
+    }
+
     /// The `ifdefined` code for a name (§7.6).
     ///
     /// 0 undefined, 1 integer, 3 string, 5 integer array, 6 string array. Code 4
     /// is a label, which lives in the program rather than in this namespace and
     /// is answered by the interpreter.
-    pub fn defined(&self, name: &str) -> i32 {
-        match self.kind(&key(name)) {
+    pub fn defined(&self, name: &str) -> i32 {        match self.kind(&key(name)) {
             Some(Kind::Int) => 1,
             Some(Kind::Str) => 3,
             Some(Kind::IntArray) => 5,

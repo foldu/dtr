@@ -42,11 +42,20 @@
 //!   of every `break`/`continue`, and the label of every `goto`/`call` — so a
 //!   missing `endif` or a `goto` to nowhere is refused before the macro starts,
 //!   as Tera Term refuses it.
+//! * [`interp`] runs those ops: the program counter, `call`/`return` with its
+//!   loop and branch nesting, `include` as a stack of files, the system
+//!   variables of §4.7, and `result` as the error channel §8 describes.
+//! * [`host`] is everything the interpreter does not own — the dialogs of §7.6,
+//!   `pause`, `include`'s file reads — so a macro can run against a real window
+//!   or against [`host::RecordingHost`], which answers from script and records
+//!   what it was told. That is what makes a bug-report macro assertable.
+//! * [`commands`] is the command table of §7, dispatched by name with the
+//!   families the manual groups them by. It is the one module expected to grow
+//!   as the communication and file families land; everything else is done.
 //!
-//! Nothing executes yet: there is no command set and no host interface for
-//! `send`, `wait` or the dialog boxes. The families of the manual's §7 are the
-//! intended module boundaries for that work, because a parameter's meaning is
-//! the command's business and not the scanner's.
+//! Nothing here talks to a serial port or a window yet: the connection family
+//! (`connect`, `send`, `wait`, …) and the file family are the next step, and
+//! they change [`commands`] and [`host`] and nothing else.
 //!
 //! # The corpus
 //!
@@ -59,8 +68,11 @@
 //! records the one that is a test of errors (`oneline-if.ttl`), so a change that
 //! would reject a real macro fails there.
 
+pub mod commands;
 pub mod error;
 pub mod expr;
+pub mod host;
+pub mod interp;
 pub mod lex;
 pub mod line;
 pub mod program;
