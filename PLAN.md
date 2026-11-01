@@ -363,8 +363,15 @@ not hand its `text` to the encoder (it typed a literal `a` for ctrl+a), and the 
 reaches the shell that replaces it. A fourth, found later still: a shifted character the platform
 resolved *is* that character. `input::consumed_mods` says so, or the encoder reports `;` with the
 shift bit and leaves the program to apply the shift — and nvim uppercases letters and nothing
-else, so `:` and `#` never arrived while `A` did. A paste follows the same rule — the program's
-`?2004h` decides the wrapping — which is why both live in the pane.
+else, so `:` and `#` never arrived while `A` did. A fifth: the position does not always
+decide. `caps:escape` — what everybody does to Caps Lock — reports the position `CapsLock` with
+the logical key `Escape`, and the encoder has no bytes for `CapsLock` at all, so the keystroke
+vanished: dtr's own menus closed on it (they read the logical key) and the shell never saw it.
+`input::key_of` now takes the layout's word for the keys that only ever carry a legend
+(`CapsLock`, `NumLock`, `ScrollLock`, `Fn`, `FnLock`) and keeps the position for everything else
+— a keypad key is the counter-example, because `DECKPAM` spells `Numpad8` differently from
+`ArrowUp`. A paste follows the same rule — the program's `?2004h` decides the wrapping — which is
+why both live in the pane.
 
 **IME is a picture and a commit, not keys.** A composition arrives as `Ime::Preedit` (what is being
 composed) and `Ime::Commit` (what was decided). The preedit is drawn in a box hung above the

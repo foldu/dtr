@@ -3589,6 +3589,63 @@ mod session_tests {
         assert_eq!(got, ":#A", "a shifted character has to arrive as itself");
     }
 
+    /// Caps Lock is not a key a program ever asks for: everybody turns it into
+    /// something else, and `caps:escape` is the common one. winit then reports
+    /// the position `CapsLock` with the logical key `Escape`, and the position
+    /// alone is a key the encoder has no bytes for — so the whole keystroke
+    /// disappeared instead of cancelling whatever was on screen.
+    #[test]
+    fn the_layout_can_make_caps_lock_into_escape() {
+        // Legacy encoding spells Escape as one byte.
+        assert_eq!(
+            remapped_escape_at_a_program(""),
+            b"\x1b",
+            "caps:escape has to arrive as ESC, not vanish"
+        );
+        // And the kitty protocol, which Neovim switches on, as a functional key
+        // report. The key that went missing is a key in both encodings.
+        assert_eq!(
+            remapped_escape_at_a_program(r"printf '\033[>1u'; "),
+            b"\x1b[27u",
+            "a kitty program has to be told Escape too"
+        );
+    }
+
+    /// Start a program that records its input, press the Caps Lock key as a
+    /// layout with `caps:escape` reports it, and answer what the program saw.
+    fn remapped_escape_at_a_program(prologue: &str) -> Vec<u8> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!("{prologue}exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        // The physical key is where the finger is, the logical key is what XKB
+        // made of it.
+        pane.send(Command::Key(Box::new(key(
+            winit::keyboard::Key::Named(NamedKey::Escape),
+            KeyCode::CapsLock,
+            ModifiersState::empty(),
+        ))));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the remapped key sent nothing; the program should have seen ESC"
+            );
+            got = std::fs::read(&out).unwrap_or_default();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        got
+    }
+
     /// `CSI > 3 u` adds press *and release* reporting. A release is the one thing
     /// legacy encoding has nothing to say about, so it is the sharpest test that
     /// the flags reached the encoder.

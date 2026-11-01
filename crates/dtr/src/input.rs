@@ -124,10 +124,18 @@ pub fn mods_of(mods: ModifiersState) -> Mods {
 ///
 /// A scripted stroke has no physical key (`--keys text:;` is a character, not a
 /// position), so the logical key is the fallback.
+///
+/// The exception is the keys a layout exists to rewrite. `caps:escape` — the
+/// thing everybody does to Caps Lock — reports the position `CapsLock` and the
+/// logical key `Escape`, and the position is a key no program has ever asked
+/// for: the encoder has no bytes for it, so the keystroke vanished instead of
+/// sending `ESC`. A keypad key is the opposite case (`DECKPAM` spells `Numpad8`
+/// differently from `ArrowUp`), which is why this is a short list of legends
+/// and not "the logical key wins".
 pub fn key_of(stroke: &KeyStroke) -> Key {
     if let Some(code) = stroke.physical {
         let key = key_of_code(code);
-        if key != Key::Unidentified {
+        if key != Key::Unidentified && !is_layout_legend(code) {
             return key;
         }
     }
@@ -139,6 +147,19 @@ pub fn key_of(stroke: &KeyStroke) -> Key {
             .map_or(Key::Unidentified, key_of_char),
         _ => Key::Unidentified,
     }
+}
+
+/// Keys whose position means nothing to a program.
+///
+/// These are the keys a layout rewrites in place — `caps:escape`, `caps:ctrl`,
+/// `compose:caps` — and the ones the encoder has no bytes for at all. A keypad
+/// key is deliberately not here: `DECKPAM` spells it differently from the
+/// character its legend carries.
+fn is_layout_legend(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::CapsLock | KeyCode::NumLock | KeyCode::ScrollLock | KeyCode::Fn | KeyCode::FnLock
+    )
 }
 
 /// The names the two libraries agree on.
@@ -532,6 +553,48 @@ mod tests {
             composing: false,
             mods: ModifiersState::empty(),
         }
+    }
+
+    /// Encode one stroke the way a pane does, through the real encoder, so a
+    /// test asserts bytes and not a mapping nobody's program ever sees.
+    fn encoded(stroke: &KeyStroke) -> Vec<u8> {
+        use libghostty_vt::key::{Encoder, Event};
+        let mut encoder = Encoder::new().expect("an encoder");
+        let mut event = Event::new().expect("an event");
+        super::fill(&mut event, stroke);
+        let mut bytes = Vec::new();
+        encoder.encode_to_vec(&event, &mut bytes).expect("encode");
+        bytes
+    }
+
+    /// A layout can turn one key into a different *named* key, and Caps Lock
+    /// remapped to Escape is the one people actually do (`caps:escape`). The
+    /// position is then CapsLock, which no program has ever asked for, so the
+    /// layout's answer is the key.
+    #[test]
+    fn a_key_the_layout_remapped_is_the_key_it_became() {
+        let remapped = stroke(Some(KeyCode::CapsLock), LogicalKey::Named(NamedKey::Escape));
+        assert_eq!(
+            encoded(&remapped),
+            b"\x1b",
+            "caps:escape has to send Escape"
+        );
+
+        // The same key, before anybody remapped it, is still nothing.
+        let plain = stroke(
+            Some(KeyCode::CapsLock),
+            LogicalKey::Named(NamedKey::CapsLock),
+        );
+        assert_eq!(encoded(&plain), b"", "a Caps Lock press sends no bytes");
+    }
+
+    /// …but only where the position carries nothing of its own. A keypad key is
+    /// not the arrow its legend names with Num Lock off, and `DECKPAM` wants the
+    /// keypad spelling, so the physical key still wins there.
+    #[test]
+    fn a_keypad_key_is_not_the_key_its_legend_names() {
+        let keypad = stroke(Some(KeyCode::Numpad8), LogicalKey::Named(NamedKey::ArrowUp));
+        assert_eq!(key_of(&keypad), Key::Numpad8);
     }
 
     /// The physical key decides, and a letter is a *position*: `Key` names the

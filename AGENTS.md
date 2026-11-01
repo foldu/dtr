@@ -258,6 +258,17 @@ Two more: the *position* decides, not the character (a real event has `physical_
 `--keys` implies one from a US layout), and a ctrl or super combination must not pass
 its `text` through while a plain character must, or accents and CJK never arrive.
 
+**…except where the position is a legend and not a key.** A layout exists to rewrite
+keys, and `caps:escape` is the one everybody uses: winit then reports the position
+`CapsLock` with the logical key `Escape`, and the encoder has no bytes for `CapsLock`
+at all — so the keystroke vanished. It read as "Caps Lock does not work in dtr" while
+every dtr menu still closed on it, because those look at the logical key. `input::key_of`
+takes the layout's answer for the keys that only ever carry a legend (`CapsLock`,
+`NumLock`, `ScrollLock`, `Fn`, `FnLock`) and keeps the position for everything else; a
+keypad key is the counter-example, because `DECKPAM` spells `Numpad8` differently from
+`ArrowUp`. The test drives a pty in *both* encodings (`ESC` and kitty's `CSI 27 u`),
+because the bug was silence and a test on the mapping alone would have called it fixed.
+
 **A click is encoded where the modes are.** `Command::Mouse` carries a pane-relative
 position, the button, modifiers and whether one is held; the pane's `mouse::Encoder`
 reads tracking mode and output format per event — `?9h` presses only, `?1000h`
@@ -742,6 +753,7 @@ enough.
 | `cargo test` does not refresh the binary | build first; `target/debug/dtr` is what you run, tests do not rebuild it |
 | A removed pane takes two panes with it | the recursive remove returned "delete me" and the grandparent deleted the collapsed subtree; only the direct parent may collapse |
 | Line height is far too small | swash reports `descent` as a *positive* distance below the baseline; negating it halves the cell |
+| Caps Lock remapped to Escape does nothing, while every menu still closes on it | the physical key is `CapsLock` and the encoder has no bytes for it; `input::key_of` trusts the layout for legend keys, and menus read the logical key so they never noticed |
 
 ## Where to look
 
