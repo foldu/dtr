@@ -30,7 +30,11 @@ test:
     - nix develop .#default --command cargo test --workspace
     # The benchmark payloads are shell scripts, so nothing compiles them. This
     # proves they still produce bytes, without a window, a GPU or a network.
-    - ./scripts/bench.sh --check
+    #
+    # Through the devShell like the tests: the runner is alpine and the script
+    # starts with `#!/usr/bin/env bash`, so the bare container answers
+    # "env: can't execute 'bash'" — which is what it did.
+    - nix develop .#default --command ./scripts/bench.sh --check
     # The desktop entry is packaging, so `cargo test` cannot see it: validate it
     # against the installed package, where a wrong path or a missing icon shows
     # up as a menu with a blank square in it.
