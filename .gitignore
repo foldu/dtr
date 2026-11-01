@@ -3,10 +3,14 @@
 /result-*
 
 # Screenshots are outputs, not sources: `dtr --screenshot out.png` run in the
-# repo must never end up in a commit. Logo renders are the deliberate exception
-# (and they still go through LFS).
+# repo must never end up in a commit. Logo renders and the kittest baselines are
+# the deliberate exceptions (both go through LFS).
 *.png
 !assets/**/*.png
+# A kittest baseline is an input: egui_kittest fails with "Missing snapshot"
+# when it is not there, so these being untracked meant CI compared against
+# nothing. The failure artefacts stay ignored, below.
+!crates/dtr/tests/snapshots/*.png
 *.jpg
 *.jpeg
 *.webp
