@@ -148,18 +148,18 @@ gives a hit target that Enter cannot activate.
 
 **egui's default fonts have no arrows.** `↑↓` and `←→` in the palette and settings
 hints rendered as tofu: the harness panicked with "No glyph for U+2191 in
-Proportional", and the window had been drawing empty boxes in those hints all
-along. Hints are words now (`up/down`, `left/right`), which also reads better in a
-terminal. Arrows and other symbols are still missing: see the IME entry for the
-one fallback face the UI does have.
+Proportional", and the window had been drawing empty boxes there all along. Hints are
+words now (`up/down`, `left/right`), which reads better in a terminal anyway. Arrows
+and other symbols are still missing: see the IME entry for the one fallback face the
+UI does have.
 
 **Keys can be typed at the window from a script.** `--keys "ctrl-shift-p;down;down"` applies one
 stroke per frame through the same handler a keyboard uses (`App::on_key`), and
 `--capture PATH --capture-after MS` photographs the window afterwards. `;`
 separates tokens because a chord may be a comma; `+` joins the chords of one
 binding; `text:` types characters (only meaningful with a real shell, not
-`--demo`). Together those two flags are how a human-free run checks that a menu
-opens, that a chord is wired, or that a font renders in the window.
+`--demo`). Together they check that a menu opens, a chord is wired, or a font
+renders in the window.
 
 **A missing glyph is not a missing character.** The grid face covers Latin; CJK,
 emoji and the rest come from another installed family. `Fonts::face_for` asks the
@@ -699,9 +699,7 @@ close cross were two sensors over the same rectangle, with the icon added as a
 third `ui.put` widget on top. egui gives the press to the topmost widget that
 senses clicks, so which one won depended on allocation order — the cross closed
 sometimes and selected the tab otherwise, and the `+` lost its press to its own
-icon. The fix is disjoint rects: the chip only reserves space (`Sense::hover`),
-the label and the cross are separate `interact` regions that do not overlap, and
-icons are drawn with `Image::paint_at`, which cannot sense anything.
+icon. The fix is disjoint rects and `Image::paint_at`, which cannot sense anything.
 
 **A switch that appears on the next keystroke is a stale frame.** `Ctrl+Tab` was
 reported as "switch to the other tab, press Enter, and it goes back" — the log
@@ -714,11 +712,10 @@ Every tab switch now goes through `App::set_active`, which logs `active tab
 from=… to=… why=…`. Five call sites can do it and only one is the mouse; the log
 names the one that did.
 
-**Hover is worth a redraw.** Skipping the repaint for pointer motion that cannot
-change anything was tried and rejected: the strip lights up under the pointer, and
-that is worth a frame per refresh. So a terminal redraws while the mouse moves over
-it — expected, not a leak. The chips and the `+` lighten on hover for exactly this
-reason; a chip that looks identical under the pointer reads as decoration.
+**Hover is worth a redraw.** Skipping the repaint for pointer motion was tried and
+rejected: the chips and the `+` lighten under the pointer, and a chip that looks
+identical there reads as decoration. So a terminal redraws while the mouse moves —
+expected, not a leak.
 
 **A chip has two hit targets.** The label switches tabs, a cross on the right closes
 that tab — whichever tab is active. Both are `Sense::click` regions with
@@ -912,6 +909,26 @@ and it panics on a missing glyph** (`No glyph for "に" in Monospace`). A termin
 is exactly where CJK is typed — the preedit box, and any palette query — so
 `Look::install` appends `fonts::ui_fallback()` (the grid's own preference list,
 read once at startup, `swift`-checked to have kana *and* Han) to both families.
+
+**A click is encoded where the modes are, and the UI has to ask first.**
+`Command::Mouse` carries a pane-relative pixel position, the button, the modifiers and
+whether one is held; the pane's `mouse::Encoder` reads tracking mode and output format
+from the terminal per event, as the key encoder does — `?9h` presses only, `?1000h`
+presses and releases, `?1002h`/`?1003h` motion with or without a button held, `?1006h`
+the SGR form. nvim asks `?1002h?1006h`, and `a_click_moves_a_real_editor_cursor` puts a
+click through it.
+
+The UI cannot know what a press means without knowing whether the program tracked the
+mouse, and that mode lives in a `!Send` terminal, so `Stats::mouse()` is an atomic
+published by `note_modes` after each parsed burst. Without it a click in vim starts a
+*selection*, and the gesture the program wanted is the one it never gets. Shift hands the
+mouse back (`mouse_goes_to_program`), or `set mouse=a` would make text impossible to copy.
+
+Two traps. **`Terminal::resize`'s pixel arguments are the cell's, not the pane's** — the
+pane size put every click in the top-left cell, which is how that was found. And a press
+outside the pane is not the program's, while a drag that leaves it still is, so
+`pane_pixels` clamps and only presses are refused. A wheel notch is buttons 4 and 5 as a
+press *and* a release, because X10 has no wheel event; shift sends it to the scrollback.
 
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler

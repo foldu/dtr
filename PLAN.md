@@ -717,6 +717,49 @@ overlay so it cannot be covered by a listing. Ordering, selection clamping, pare
 **SFTP is deliberately not here.** The owner's plan is a small file-explorer pane later on, not a
 transfer command; `docs/sftp.md` has the measurements for when that happens.
 
+**The mouse is the program's when the program said so, and the terminal's otherwise.** Three gestures
+collide in a terminal: this one selects text, a program that asked for the mouse expects clicks, and the
+wheel either scrolls the scrollback or is buttons 4 and 5 for the far end. Which one a press means is a
+mode (`?9h`, `?1000h`, `?1002h`, `?1003h`, plus `?1005h`/`?1006h`/`?1015h` for the byte form), and a
+mode is state of the terminal — so the *encoding* belongs in the pane
+(`libghostty_vt::mouse::Encoder`, configured from the terminal per event exactly as the key encoder is)
+and the *decision* belongs in the UI. That is the split `Command::Mouse` and `Stats::mouse()` make.
+
+The decision needs one bit the UI cannot read for itself: the terminal is `!Send` and lives on the pane's
+thread. `Stats::mouse()` is that bit, published by the same pass that parses a burst of output, so a
+click one frame after `set mouse=a` is already the program's. The reverse direction is the same story as
+keys: a press the UI handled as a selection can never be handed back, so the flag has to be right
+*before* the press, not after it.
+
+Shift is the escape hatch every terminal has, and it is the only reason `set mouse=a` is not a trap:
+`mouse_goes_to_program` refuses a captured mouse while shift is held, so a selection inside vim still
+works — and a *gesture already started* stays with the program even if shift goes down mid-drag, because
+a release the program never hears leaves it dragging for ever.
+
+Three details that are easy to get wrong, all found by test rather than by reading:
+
+- **`Terminal::resize`'s pixel arguments are the *cell's*, not the pane's.** Handing it the pane's size
+  made `width_px()` eighty times too large, so the encoder divided every pointer position by 800 and put
+  every click in the top-left cell. The command still carries screen pixels (that is what the UI knows
+  and what the pty is told), and the pane divides before calling the core.
+- **The cell, not the pixel, is what a program can see**, so `set_track_last_cell(true)` makes a drag
+  across a row one report per cell instead of one per pixel of motion.
+- **X10's release is byte 3, and only normal tracking has one.** `?9h` is presses only, which is why a
+  click in `htop` does something and a drag does not; the test pins both, so "the wheel works but the
+  click does not" is a five-second diagnosis instead of an afternoon.
+
+The wheel is a press *and* a release of button 4 or 5, because X10 has no wheel event; with shift, or
+with nobody tracking, it scrolls the scrollback as it always did. A press outside the pane is not the
+program's (a clamped click at the edge would land on the last cell), while a drag that leaves the pane
+is — the difference between a wrong click and a selection in vim that freezes at the border.
+
+Verified end to end with nvim rather than only with a byte dump: `a_click_moves_a_real_editor_cursor`
+starts `nvim --clean -n -i NONE -c 'set mouse=a'` on a pty, waits for the program to *ask* for the mouse,
+clicks the second line five cells in, and asserts the cursor ended up there. That is the test that would
+catch a mode the encoder honours but the editor spells differently — and it caught two mistakes of my own
+in the test: a click past the end of a short line is clamped by the editor, and nvim's state directory has
+to point at the tempdir or it sits at a hit-enter prompt where a click answers the prompt.
+
 ### M3 — the rest — the rest of a terminal
 
 - ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.

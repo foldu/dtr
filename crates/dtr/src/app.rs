@@ -14,6 +14,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+use libghostty_vt::mouse::{Action as MouseAction, Button as MouseButton};
+
 use crate::explorer::{Explorer, PaneView as FilePaneView};
 use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane as TermPane, Transport};
@@ -544,6 +546,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         drag_moved: false,
         drag_origin: None,
         drag_multi: false,
+        mouse_button: None,
         last_press: None,
         clicks: 0,
         cursor_position: None,
@@ -741,6 +744,16 @@ fn ssh_alias(transport: &Transport) -> Option<String> {
         Transport::Shell(config) => config.remote.clone(),
         _ => None,
     }
+}
+
+/// Whether a mouse gesture belongs to the program or to this terminal.
+///
+/// Two bits decide it, and only one of them is about the program: shift is the
+/// exception every terminal makes, so a program that grabbed the mouse still
+/// lets a selection be dragged. Without it, a click in vim is unrecoverable —
+/// the program has the mouse until it gives it back.
+fn mouse_goes_to_program(captured: bool, shift: bool) -> bool {
+    captured && !shift
 }
 
 fn closed(active: usize, count: usize) -> Option<usize> {
@@ -952,6 +965,9 @@ struct App {
     drag_origin: Option<(u16, u16)>,
     /// The press that started this drag was the second or third in a row.
     drag_multi: bool,
+    /// The button a program is holding, if it is holding one: a motion report
+    /// has to name the button, and a release has to know which one ended.
+    mouse_button: Option<libghostty_vt::mouse::Button>,
     cursor_position: Option<(f64, f64)>,
     theme: Option<crate::theme::Theme>,
     frames_drawn: u64,
@@ -1340,6 +1356,129 @@ impl App {
                 }
                 }
 
+    /// Whether the program in the focused pane asked for the mouse.
+    ///
+    /// Read from the pane rather than kept here: the modes belong to the
+    /// terminal, which never leaves the pane's thread, so the pane publishes the
+    /// one bit that decides where a click goes.
+    fn mouse_captured(&self) -> bool {
+        self.session()
+            .is_some_and(|session| session.pane.stats().mouse())
+    }
+
+    /// Hand a mouse event to the program, remembering which button is held.
+    ///
+    /// A press is the program's mouse when it asked for it; a motion reports the
+    /// button that is down, if any; a release ends it. Nothing here reaches the
+    /// terminal's own selection, because a program that tracks the mouse has its
+    /// own idea of what a drag does.
+    fn forward_mouse(
+        &mut self,
+        action: MouseAction,
+        button: Option<MouseButton>,
+        at: (f64, f64),
+    ) -> bool {
+        let held = self.mouse_button;
+        // A release is only ever sent for a press the program heard: a button
+        // coming up that it never saw go down is worse than no event at all, and
+        // a right-click menu never sends a press to begin with.
+        if action == MouseAction::Release {
+            self.mouse_button = None;
+            if held.is_none() {
+                return false;
+            }
+        }
+        // A gesture that has already started belongs to the program until it
+        // ends. Shift pressed half way through a drag must not start a selection
+        // in the middle of a report the program is following.
+        let ongoing = action != MouseAction::Press && held.is_some();
+        if !ongoing && !mouse_goes_to_program(self.mouse_captured(), self.modifiers.shift_key()) {
+            return false;
+        }
+        // A press that is not in the pane (the status bar, the tab strip) is not
+        // a click for the program — it would land on a clamped cell at the edge.
+        // A drag that leaves the pane *is*: the program is following it, and a
+        // report of nothing is how a selection in vim freezes at the edge.
+        if action == MouseAction::Press
+            && self.pane_at(at.0, at.1) != Some(self.tabs[self.active].focus)
+        {
+            return false;
+        }
+        if action == MouseAction::Press {
+            self.mouse_button = button;
+        }
+        let down = self.mouse_button.is_some();
+        let Some((x, y)) = self.pane_pixels(at.0, at.1) else {
+            return false;
+        };
+        self.send_mouse(action, button, (x, y), down)
+    }
+
+    /// The bytes side of a mouse event: nothing remembered, nothing decided.
+    ///
+    /// Split from `forward_mouse` because a wheel notch is a press and a release
+    /// that hold nothing between them, and it must not leave a button down.
+    fn send_mouse(
+        &mut self,
+        action: MouseAction,
+        button: Option<MouseButton>,
+        at: (f32, f32),
+        down: bool,
+    ) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        session.pane.send(crate::pane::Command::Mouse {
+            action,
+            button,
+            mods: crate::input::mods_of(self.modifiers),
+            x: at.0,
+            y: at.1,
+            down,
+        });
+        true
+    }
+
+    /// One wheel notch to the program: buttons 4 and 5, as a press and a release.
+    ///
+    /// That pair is what X10 reporting has — there is no "wheel" event in it —
+    /// and it is how vim, less and every pager over ssh scroll.
+    fn scroll_to_program(&mut self, up: bool, notches: usize) {
+        let Some(at) = self.cursor_position.and_then(|(x, y)| self.pane_pixels(x, y)) else {
+            return;
+        };
+        let button = if up {
+            MouseButton::Four
+        } else {
+            MouseButton::Five
+        };
+        for _ in 0..notches {
+            // `down` is false for both: a notch is not a button being held.
+            self.send_mouse(MouseAction::Press, Some(button), at, false);
+            self.send_mouse(MouseAction::Release, Some(button), at, false);
+        }
+    }
+
+    /// The pointer in pixels from the focused pane's top-left corner.
+    ///
+    /// Clamped into the pane rather than dropped: a drag that leaves the grid is
+    /// still a drag for the program, and a report of nothing is how a selection
+    /// in vim freezes at the edge.
+    fn pane_pixels(&self, x: f64, y: f64) -> Option<(f32, f32)> {
+        let gpu = self.gpu.as_ref()?;
+        let tab = &self.tabs[self.active];
+        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        let rect = self
+            .pane_views(tab, gpu.metrics(), screen, gpu.scale())
+            .into_iter()
+            .find(|(id, _)| *id == tab.focus)
+            .map(|(_, pane)| pane.rect)?;
+        Some((
+            (x as f32 - rect.x).clamp(0.0, (rect.width - 1.0).max(0.0)),
+            (y as f32 - rect.y).clamp(0.0, (rect.height - 1.0).max(0.0)),
+        ))
+    }
+
     /// The pointer moved: if it entered a different cell, ask the pane what
     /// link is on it.
     ///
@@ -1347,6 +1486,14 @@ impl App {
     /// FFI call per cell, and on a dense screen that is another 30 µs on a
     /// 41 µs publish for a link nobody is pointing at.
     fn hover(&mut self, at: (f64, f64)) {
+        // A program that owns the mouse owns its links too: a pointing hand and a
+        // thumbnail are an invitation to click, and that click is the program's.
+        if self.mouse_captured() {
+            self.hover_cell = None;
+            self.hover_link = None;
+            self.thumb_pending = None;
+            return;
+        }
         let cell = self.cell_xy(at.0, at.1);
         if cell == self.hover_cell {
             return;
@@ -1457,6 +1604,16 @@ impl App {
     /// Nothing else gets a menu — a right-click on ordinary output has no target,
     /// and a menu of nothing is worse than no menu.
     fn right_click(&mut self, at: (f64, f64)) {
+        // Focus first: the cell under the pointer is computed against the focused
+        // pane, and a right-click in a split is a right-click on *that* pane.
+        if let Some(id) = self.pane_at(at.0, at.1) {
+            self.tabs[self.active].focus = id;
+        }
+        // A program that asked for the mouse gets the right button too. A menu
+        // about a link is this terminal's idea, and it is not the program's.
+        if self.forward_mouse(MouseAction::Press, Some(MouseButton::Right), at) {
+            return;
+        }
         let Some(link) = self.hover_link.clone() else {
             return;
         };
@@ -1492,6 +1649,15 @@ impl App {
             location,
         });
         self.repaint("link menu");
+    }
+
+    /// A middle press: nothing of this terminal's, but a program that grabbed
+    /// the mouse wants it — in a terminal it usually means "paste" at the far end.
+    fn middle_click(&mut self, at: (f64, f64)) {
+        if let Some(id) = self.pane_at(at.0, at.1) {
+            self.tabs[self.active].focus = id;
+        }
+        self.forward_mouse(MouseAction::Press, Some(MouseButton::Middle), at);
     }
 
     /// A left press, with the overlays given first refusal.
@@ -1863,6 +2029,12 @@ impl App {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
         }
+        // A program that asked for the mouse gets the click. Selection is what is
+        // left when nobody did — or when shift says the user meant to select.
+        if self.forward_mouse(MouseAction::Press, Some(MouseButton::Left), at) {
+            self.dragging = false;
+            return;
+        }
         // A link is a click target, not a selection: pressing one opens it and
         // starts no drag. Without a link under the pointer this falls straight
         // through to the selection code below.
@@ -1909,6 +2081,13 @@ impl App {
 
     /// The pointer moved while down: move the selection's head with it.
     fn pointer_move(&mut self, at: (f64, f64)) {
+        // The program first: `?1003h` wants motion with nothing held and
+        // `?1002h` only while a button is, which the encoder decides from
+        // whether one is down — and it drops motion inside the same cell, so a
+        // drag across a row is a report per cell, not per pixel.
+        if self.forward_mouse(MouseAction::Motion, self.mouse_button, at) {
+            return;
+        }
         if !self.dragging {
             return;
         }
@@ -1932,6 +2111,18 @@ impl App {
     /// the drag ends, the text is there. A single-cell selection is a click,
     /// not a selection, and copying one blank cell is the "0 chars" bug again.
     fn pointer_up(&mut self) {
+        // A release the program is waiting for ends nothing on this side: the
+        // gesture was never a selection, so there is nothing to copy.
+        let button = self.mouse_button;
+        if let (Some(at), Some(button)) = (self.cursor_position, button) {
+            if self.forward_mouse(MouseAction::Release, Some(button), at) {
+                self.dragging = false;
+                self.drag_moved = false;
+                self.drag_multi = false;
+                return;
+            }
+        }
+        self.mouse_button = None;
         let dragged = std::mem::take(&mut self.dragging);
         let moved = std::mem::take(&mut self.drag_moved);
         let multi = std::mem::take(&mut self.drag_multi);
@@ -3327,23 +3518,30 @@ impl ApplicationHandler<UserEvent> for App {
                 self.thumb_pending = None;
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                use winit::event::{ElementState, MouseButton as WinitButton};
                 if self.pager.is_open() {
                     // The pager owns the pointer while it is open; the wheel and
                     // the drag belong to it.
-                } else if button == winit::event::MouseButton::Right {
-                    if state == winit::event::ElementState::Pressed {
-                        if let Some(at) = self.cursor_position {
-                            self.right_click(at);
+                } else if let Some(at) = self.cursor_position {
+                    match (button, state) {
+                        (WinitButton::Left, ElementState::Pressed) => self.left_press(at),
+                        (WinitButton::Right, ElementState::Pressed) => self.right_click(at),
+                        (WinitButton::Middle, ElementState::Pressed) => self.middle_click(at),
+                        // The two side buttons have terminal numbers: X11 calls
+                        // them 8 and 9 and the protocol is X11's. `Other` carries
+                        // a platform button number with no terminal meaning, so
+                        // it is not invented into one.
+                        (WinitButton::Back, ElementState::Pressed) => {
+                            self.forward_mouse(MouseAction::Press, Some(MouseButton::Eight), at);
                         }
-                    }
-                } else if button == winit::event::MouseButton::Left {
-                    match state {
-                        winit::event::ElementState::Pressed => {
-                            if let Some(at) = self.cursor_position {
-                                self.left_press(at);
-                            }
+                        (WinitButton::Forward, ElementState::Pressed) => {
+                            self.forward_mouse(MouseAction::Press, Some(MouseButton::Nine), at);
                         }
-                        winit::event::ElementState::Released => {
+                        (WinitButton::Other(_), _) => {}
+                        // Every release, whichever button pressed: the program
+                        // that heard the press is waiting for the one that ends
+                        // it, and a drag it is following does not end without it.
+                        (_, ElementState::Released) => {
                             // A press that dismissed a menu started no drag, so
                             // there is no drag to end.
                             if !self.link_menu.is_open() && !self.save.is_open() {
@@ -3362,12 +3560,21 @@ impl ApplicationHandler<UserEvent> for App {
                 // stream, and sending the same wheel to the shell's scrollback
                 // would move a view the pager is covering.
                 if lines != 0.0 && !self.pager.is_open() {
-                    // Wheel up shows older lines, which the terminal calls a
-                    // negative delta. Only a focused terminal scrolls.
-                    if let Some(session) = self.session() {
-                        session
-                            .pane
-                            .send(crate::pane::Command::Scroll(-lines.round() as isize));
+                    // A program that tracks the mouse gets the wheel as buttons 4
+                    // and 5, which is how vim and every pager over ssh scroll.
+                    // Shift is the selection key again, so it still scrolls the
+                    // scrollback, as does a terminal nobody grabbed.
+                    if mouse_goes_to_program(self.mouse_captured(), self.modifiers.shift_key()) {
+                        let notches = lines.abs().round().max(1.0) as usize;
+                        self.scroll_to_program(lines > 0.0, notches);
+                    } else {
+                        // Wheel up shows older lines, which the terminal calls a
+                        // negative delta. Only a focused terminal scrolls.
+                        if let Some(session) = self.session() {
+                            session
+                                .pane
+                                .send(crate::pane::Command::Scroll(-lines.round() as isize));
+                        }
                     }
                 }
             }
@@ -4353,7 +4560,19 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed, cycled};
+    use super::{closed, cycled, mouse_goes_to_program};
+
+    /// A program that grabbed the mouse still lets go of it for a selection.
+    ///
+    /// The alternative is a terminal where `set mouse=a` makes text impossible to
+    /// copy, and there is no key that gets it back.
+    #[test]
+    fn shift_hands_the_mouse_back_to_the_terminal() {
+        assert!(mouse_goes_to_program(true, false), "a captured mouse");
+        assert!(!mouse_goes_to_program(true, true), "shift in a captured pane");
+        assert!(!mouse_goes_to_program(false, false), "nobody asked for it");
+        assert!(!mouse_goes_to_program(false, true), "shift changes nothing");
+    }
 
     #[test]
     fn cycling_wraps_both_ways() {

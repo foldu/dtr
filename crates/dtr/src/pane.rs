@@ -16,6 +16,7 @@ use std::thread;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::key::{Encoder as KeyEncoder, Event as KeyEvent};
+use libghostty_vt::mouse;
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{
@@ -102,6 +103,14 @@ pub struct Stats {
     scrollback: AtomicU64,
     dtr: std::sync::atomic::AtomicBool,
     rts: std::sync::atomic::AtomicBool,
+    /// The program asked for the mouse.
+    ///
+    /// Here rather than asked for on demand because the UI has to know *before*
+    /// it decides what a press means: a click in a program that tracks the mouse
+    /// is a click for the program, and starting a selection instead swallows it.
+    /// The modes live in the terminal on the pane's thread, so this is the one
+    /// part of them that crosses over.
+    mouse: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Stats {
@@ -116,6 +125,7 @@ impl Default for Stats {
             scrollback: AtomicU64::new(0),
             dtr: std::sync::atomic::AtomicBool::new(false),
             rts: std::sync::atomic::AtomicBool::new(false),
+            mouse: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -170,6 +180,18 @@ impl Stats {
     fn set_rts(&self, level: bool) {
         self.rts.store(level, Ordering::Relaxed);
     }
+
+    /// True while the program is tracking the mouse — X10, normal, button or
+    /// any-event. Which of them it is stays in the terminal: the encoder reads
+    /// it per event, and the UI only needs to know whether the mouse is the
+    /// program's or this terminal's.
+    pub fn mouse(&self) -> bool {
+        self.mouse.load(Ordering::Relaxed)
+    }
+
+    fn set_mouse(&self, on: bool) {
+        self.mouse.store(on, Ordering::Relaxed);
+    }
 }
 
 /// Something the UI asks the pane to do. Keystrokes are only one of these:
@@ -184,6 +206,24 @@ pub enum Command {
     /// protocol are all state the terminal holds, and a table in the UI can only
     /// ever be wrong about them.
     Key(Box<KeyStroke>),
+    /// A mouse event for the program, encoded here for the same reason a key is:
+    /// what a click means is the terminal's state. `?1000h` reports presses and
+    /// nothing else, `?1002h` adds motion while a button is held, `?1003h` adds
+    /// motion always, and `?1006h` turns the X10 byte form into SGR.
+    ///
+    /// `x` and `y` are pixels from the pane's top-left corner, because a cell is
+    /// what the encoder converts them into and the pane's rectangle is where its
+    /// grid starts. `down` is whether a button is held: it is how the encoder
+    /// tells a drag from plain motion, which is the whole difference between
+    /// `?1002h` reporting and staying quiet.
+    Mouse {
+        action: mouse::Action,
+        button: Option<mouse::Button>,
+        mods: libghostty_vt::key::Mods,
+        x: f32,
+        y: f32,
+        down: bool,
+    },
     Dtr(bool),
     Rts(bool),
     Break,
@@ -613,18 +653,24 @@ fn reset_modes(term: &mut Terminal<'_, '_>) {
     term.vt_write(b"\x1b[<999u\x1b[=0u");
 }
 
-/// Notice when the program changed how keys are spelled, and say so once.
+/// Notice when the program changed how keys are spelled or what the mouse means,
+/// and say so once.
 ///
 /// Only output can change a mode, so this runs after a burst and logs a change
 /// rather than a burst: it is how "did nvim ask for the kitty protocol?" gets
 /// answered from a log instead of a guess.
+///
+/// The key modes are only logged — the encoder reads them per keystroke. The
+/// mouse flag is different: the UI decides what a press means before the pane
+/// ever sees it, so this is the one that has to cross threads.
 #[derive(Default)]
 struct KeyModes {
     cursor_keys: bool,
     kitty: u8,
+    mouse: bool,
 }
 
-fn note_keys(term: &Terminal<'_, '_>, seen: &mut KeyModes) {
+fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) {
     let cursor_keys = term.mode(Mode::DECCKM).unwrap_or(false);
     let kitty = term
         .kitty_keyboard_flags()
@@ -634,6 +680,15 @@ fn note_keys(term: &Terminal<'_, '_>, seen: &mut KeyModes) {
         seen.cursor_keys = cursor_keys;
         seen.kitty = kitty;
         tracing::debug!(cursor_keys, kitty, "key modes");
+    }
+    let mouse = term.is_mouse_tracking().unwrap_or(false);
+    if seen.mouse != mouse {
+        seen.mouse = mouse;
+        stats.set_mouse(mouse);
+        // Which tracking mode, not just that there is one: the byte form of the
+        // reports depends on it, and "nvim does not see my clicks" is a question
+        // about 1000 versus 1002 versus no mode at all.
+        tracing::debug!(mouse, "mouse tracking");
     }
 }
 
@@ -826,6 +881,20 @@ async fn run(
     };
     // What the program last asked of the keyboard, so a change is logged once.
     let mut keys_seen = KeyModes::default();
+    // The mouse encoder, for the same reason: a click is a press, a release, or
+    // motion, and which of those the program is told about depends on modes only
+    // the terminal knows. The event holds the position, so it is reused too.
+    let (mut mouse_encoder, mut mouse_event) = match (mouse::Encoder::new(), mouse::Event::new()) {
+        (Ok(encoder), Ok(event)) => (Some(encoder), Some(event)),
+        (encoder, event) => {
+            tracing::error!(
+                encoder = encoder.is_ok(),
+                event = event.is_ok(),
+                "no mouse encoder; clicks will not be reported"
+            );
+            (None, None)
+        }
+    };
 
     match transport {
         Transport::Serial(cfg) => {
@@ -949,10 +1018,11 @@ async fn run(
                             }
                         }
                         flush_replies(&replies, &mut sink).await;
-                        // The program's answer to "how should a key look" is in
-                        // the terminal now — the encoder reads it per key — and
-                        // a *change* is worth one line of log.
-                        note_keys(&term, &mut keys_seen);
+                        // The program's answer to "how should a key look" and
+                        // "what does the mouse mean" is in the terminal now — the
+                        // encoders read it per event — and a *change* is worth one
+                        // line of log.
+                        note_modes(&term, &mut keys_seen, &stats);
                         // The program has spoken, so whatever it wanted to say
                         // about pasting is in the terminal now — which is the
                         // answer a held paste was waiting for.
@@ -1132,7 +1202,7 @@ async fn run(
                     // program with its modes still set; the shell that comes
                     // back must not start inside them.
                     reset_modes(&mut term);
-                    note_keys(&term, &mut keys_seen);
+                    note_modes(&term, &mut keys_seen, &stats);
                     reopening = true;
                     open_at = Some(tokio::time::Instant::now() + wait);
                 } else {
@@ -1271,6 +1341,67 @@ async fn run(
                         )
                         .await;
                     }
+                    // Same argument as a key: what a click means is the
+                    // terminal's state, and only the terminal has it. The encoder
+                    // drops what the modes do not report — a release in X10 mode,
+                    // motion nobody asked for — so an event with no bytes is the
+                    // normal case and not an error.
+                    Command::Mouse {
+                        action,
+                        button,
+                        mods,
+                        x,
+                        y,
+                        down,
+                    } => {
+                        let (Some(encoder), Some(event)) =
+                            (mouse_encoder.as_mut(), mouse_event.as_mut())
+                        else {
+                            continue;
+                        };
+                        encoder
+                            // Per event, not once: a program can turn tracking on
+                            // between two clicks, and nvim does exactly that when
+                            // it enters a window that maps the mouse.
+                            .set_options_from_terminal(&term)
+                            .set_size(mouse_size(&term))
+                            .set_any_button_pressed(down)
+                            // A cell, not a pixel: the grid is all the program
+                            // can see, so one report per pixel of a drag is
+                            // thousands of reports of the same cell.
+                            .set_track_last_cell(true);
+                        event
+                            .set_action(action)
+                            .set_button(button)
+                            .set_mods(mods)
+                            .set_position(mouse::Position { x, y });
+                        let mut bytes = Vec::new();
+                        if let Err(err) = encoder.encode_to_vec(event, &mut bytes) {
+                            tracing::warn!(%err, "could not encode a mouse event");
+                            continue;
+                        }
+                        if bytes.is_empty() {
+                            tracing::debug!(?action, ?button, "a mouse event with no bytes");
+                            continue;
+                        }
+                        tracing::debug!(
+                            ?action,
+                            ?button,
+                            x,
+                            y,
+                            bytes = ?String::from_utf8_lossy(&bytes).escape_debug().to_string(),
+                            "mouse"
+                        );
+                        deliver(
+                            &bytes,
+                            &mut term,
+                            &stats,
+                            &mut sink,
+                            &mut typed_early,
+                            ever_opened,
+                        )
+                        .await;
+                    }
                     Command::Dtr(level) => {
                         if let Some(modem) = modem.as_mut() {
                             match modem.set_dtr(level) {
@@ -1303,7 +1434,16 @@ async fn run(
                         if new_cols == 0 || new_rows == 0 {
                             continue;
                         }
-                        if let Err(err) = term.resize(new_cols, new_rows, width_px, height_px) {
+                        // The core's pixel arguments are the *cell* size, not the
+                        // screen's: it multiplies by the grid for the size it
+                        // reports (CSI 18 t, image protocols) and divides a
+                        // pointer by it to reach a cell. Handing it the pane's own
+                        // size made every report 80× too wide and put every click
+                        // in the top-left cell — which is how this was found.
+                        let cell_width = width_px / u32::from(new_cols).max(1);
+                        let cell_height = height_px / u32::from(new_rows).max(1);
+                        if let Err(err) = term.resize(new_cols, new_rows, cell_width, cell_height)
+                        {
                             tracing::warn!(%err, "resize the grid");
                         }
                         // The shell needs the size too, or it wraps for the old
@@ -1695,6 +1835,33 @@ fn copy_text(
     };
     fill_cells(&snapshot, rows, cells, &mut frame)?;
     Ok(frame_text(&frame))
+}
+
+/// The geometry the mouse encoder needs, read from the terminal itself.
+///
+/// `resize` is what set both the cell count and the pixel size, so the division
+/// here is the same arithmetic the renderer did — one cell size, not a second
+/// copy of it that can fall out of step with the first.
+fn mouse_size(term: &Terminal<'_, '_>) -> mouse::EncoderSize {
+    let cols = u32::from(term.cols().unwrap_or(COLS)).max(1);
+    let rows = u32::from(term.rows().unwrap_or(ROWS)).max(1);
+    let width = term.width_px().unwrap_or(0);
+    let height = term.height_px().unwrap_or(0);
+    mouse::EncoderSize {
+        screen_width: width,
+        screen_height: height,
+        // Never zero: the encoder divides by these, and a pane that has not been
+        // resized yet still has to answer a click instead of panicking.
+        cell_width: (width / cols).max(1),
+        cell_height: (height / rows).max(1),
+        // The grid is its own rectangle: the tab strip and the status bar are
+        // outside the pixels the pane was resized to, so there is nothing to
+        // subtract.
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    }
 }
 
 /// Record how far the viewport is from the live screen.
@@ -3367,5 +3534,310 @@ mod session_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = pane;
+    }
+
+    /// A pane-sized grid and the program's `cat`, with or without the modes it
+    /// asks for first.
+    ///
+    /// `cat` is the assertion that matters: whatever reaches it is what the pane
+    /// sent, byte for byte, and a program that read a click can be asked what it
+    /// looked like.
+    fn mouse_pane(prologue: &str, out: &std::path::Path) -> Pane {
+        let script = format!("{prologue}exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        // A grid of 80x24 in 800x480 pixels: a ten-pixel cell, so the pointer
+        // positions below are whole cells and the arithmetic is checkable by eye.
+        pane.send(Command::Resize {
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        });
+        // The modes are parsed by the pane's loop, which runs a step behind the
+        // child that wrote them; the flag flipping is the signal the UI uses, so
+        // the test waits on the same one.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (!prologue.is_empty() && !pane.stats().mouse()) || !out.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the program never started (prologue {prologue:?})"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pane
+    }
+
+    fn click(pane: &Pane, action: mouse::Action, button: mouse::Button, x: f32, y: f32) {
+        pane.send(Command::Mouse {
+            action,
+            button: Some(button),
+            mods: libghostty_vt::key::Mods::empty(),
+            x,
+            y,
+            down: action != mouse::Action::Release,
+        });
+    }
+
+    /// A click reaches the program in the form it asked for, at the cell it
+    /// happened in.
+    ///
+    /// `?1002h` is button-event tracking — press, release, and motion while a
+    /// button is held — and `?1006h` is the SGR form: readable, and what every
+    /// modern full-screen program asks for. The cell is as important as the
+    /// bytes, because a click reported one cell off is a click on the wrong
+    /// character, which in an editor changes the wrong text.
+    ///
+    /// Ctrl is the other half: `Ctrl+click` is how nvim jumps to a definition, so
+    /// the modifier has to reach the report as the 16 the protocol reserves for
+    /// it.
+    #[test]
+    fn a_click_is_reported_where_it_happened() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("mouse");
+        let pane = mouse_pane(r"printf '\033[?1002h\033[?1006h'; ", &out);
+        // Column 3, row 3: two cells in from the top-left corner.
+        let at = (25.0, 45.0);
+        click(&pane, mouse::Action::Press, mouse::Button::Left, at.0, at.1);
+        wait_for_bytes(&pane, &out, "\x1b[<0;3;3M", "a left press");
+        click(&pane, mouse::Action::Release, mouse::Button::Left, at.0, at.1);
+        wait_for_bytes(&pane, &out, "\x1b[<0;3;3m", "a left release");
+
+        let mut ctrl = libghostty_vt::key::Mods::empty();
+        ctrl.set(libghostty_vt::key::Mods::CTRL, true);
+        pane.send(Command::Mouse {
+            action: mouse::Action::Press,
+            button: Some(mouse::Button::Left),
+            mods: ctrl,
+            x: at.0,
+            y: at.1,
+            down: true,
+        });
+        wait_for_bytes(&pane, &out, "\x1b[<16;3;3M", "a ctrl press");
+        // And nothing else: a press is one report, not a press and a phantom
+        // release, and the release is the lowercase `m` of the same button.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            "\x1b[<0;3;3M\x1b[<0;3;3m\x1b[<16;3;3M",
+        );
+    }
+
+    /// The original X10 form: one `ESC [ M` and three bytes, each 32 plus a
+    /// number. `htop` and `less` still ask this way, and bytes a program did not
+    /// expect become characters on its screen.
+    ///
+    /// Mode 9 is X10 tracking proper — presses and nothing else — and mode 1000
+    /// is what everything has used since: the same bytes, but the release is one
+    /// too, with button 3 in place of the button that came up.
+    #[test]
+    fn an_x10_report_is_the_bytes_and_the_release_its_mode_allows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("mouse");
+        let pane = mouse_pane(r"printf '\033[?9h'; ", &out);
+        // Column 3, row 3: 32 + button 0, 32 + 3, 32 + 3.
+        click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
+        wait_for_bytes(&pane, &out, "\x1b[M\x20##", "an X10 press");
+        click(&pane, mouse::Action::Release, mouse::Button::Left, 25.0, 45.0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            "\x1b[M\x20##",
+            "an X10 program was sent a release it never asked for"
+        );
+
+        // The same bytes under normal tracking, where the release is part of it:
+        // X10 spells a release as "no button", which is the 3 in the low bits.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("mouse");
+        let pane = mouse_pane(r"printf '\033[?1000h'; ", &out);
+        click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
+        wait_for_bytes(&pane, &out, "\x1b[M\x20##", "a normal press");
+        click(&pane, mouse::Action::Release, mouse::Button::Left, 25.0, 45.0);
+        wait_for_bytes(&pane, &out, "\x1b[M##", "a normal release");
+    }
+
+    /// Motion is what `?1003h` adds and `?1002h` only reports while a button is
+    /// held, which is the difference between a hover effect in an editor and a
+    /// hundred reports a second for a pointer nobody is pressing.
+    #[test]
+    fn motion_is_reported_only_to_a_program_that_asked_for_it() {
+        for (prologue, expected) in [
+            // Any-event tracking: a pointer that has not been clicked is still
+            // motion, and button 3 in the report means "no button".
+            (r"printf '\033[?1003h\033[?1006h'; ", Some("\x1b[<35;11;6M")),
+            // Button-event tracking without a button down: nothing to report.
+            (r"printf '\033[?1002h\033[?1006h'; ", None),
+            // Normal tracking: presses only, so motion is not its business.
+            (r"printf '\033[?1000h\033[?1006h'; ", None),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("mouse");
+            let pane = mouse_pane(prologue, &out);
+            pane.send(Command::Mouse {
+                action: mouse::Action::Motion,
+                button: None,
+                mods: libghostty_vt::key::Mods::empty(),
+                x: 105.0,
+                y: 105.0,
+                down: false,
+            });
+            match expected {
+                Some(bytes) => wait_for_bytes(&pane, &out, bytes, prologue),
+                None => {
+                    std::thread::sleep(Duration::from_millis(300));
+                    assert_eq!(
+                        std::fs::read_to_string(&out).unwrap_or_default(),
+                        "",
+                        "motion reached a program that did not ask for it ({prologue:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A drag is motion *with* the button named: `?1002h` reports nothing for a
+    /// pointer that is only hovering, and reports the button it is holding when
+    /// it is not — which is how a program tells a drag from a hover.
+    #[test]
+    fn a_drag_names_the_button_it_is_holding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("mouse");
+        let pane = mouse_pane(r"printf '\033[?1002h\033[?1006h'; ", &out);
+        click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
+        wait_for_bytes(&pane, &out, "\x1b[<0;3;3M", "the press that starts the drag");
+        pane.send(Command::Mouse {
+            action: mouse::Action::Motion,
+            button: Some(mouse::Button::Left),
+            mods: libghostty_vt::key::Mods::empty(),
+            x: 105.0,
+            y: 105.0,
+            down: true,
+        });
+        // 32 for motion plus the left button's own 0; column 11, row 6 is the
+        // cell a ten-pixel-wide, twenty-pixel-tall grid puts (105, 105) in.
+        wait_for_bytes(&pane, &out, "\x1b[<32;11;6M", "a drag");
+    }
+
+    /// The wheel is buttons 4 and 5, as a press and a release, because X10
+    /// reporting has no wheel event of its own. That pair is how vim, less and
+    /// every pager over ssh scroll when the mouse is theirs.
+    #[test]
+    fn the_wheel_is_buttons_four_and_five() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("mouse");
+        let pane = mouse_pane(r"printf '\033[?1000h\033[?1006h'; ", &out);
+        for (button, code) in [(mouse::Button::Four, 64), (mouse::Button::Five, 65)] {
+            let down = format!("\x1b[<{code};3;3M");
+            let up = format!("\x1b[<{code};3;3m");
+            click(&pane, mouse::Action::Press, button, 25.0, 45.0);
+            wait_for_bytes(&pane, &out, &down, "a wheel press");
+            click(&pane, mouse::Action::Release, button, 25.0, 45.0);
+            wait_for_bytes(&pane, &out, &up, "a wheel release");
+        }
+    }
+
+    /// The whole chain through a real program: nvim with `set mouse=a` asks for
+    /// button-event tracking in the SGR form, and a click puts its cursor where
+    /// the click was.
+    ///
+    /// This is the assertion a person cares about — not the bytes, but that the
+    /// editor moved — and it is the one that would catch a mode the encoder
+    /// honours but nvim actually spells differently. nvim is not in every
+    /// sandbox, so without it the test returns rather than fails: the bytes above
+    /// are the pinned part, and this is the extra mile.
+    #[test]
+    fn a_click_moves_a_real_editor_cursor() {
+        let Some(editor) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("nvim"))
+            .find(|path| path.is_file())
+        else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("text");
+        // A line long enough that the column is unambiguous: a click past the end
+        // of a short line is clamped by the editor itself, which is not what this
+        // is testing.
+        std::fs::write(&file, "one\nabcdefghijklmnopqrst\nthree\n").expect("the file nvim opens");
+        // Through `sh -c` so the editor's state directories can be pointed at the
+        // tempdir: this sandbox has a read-only `$HOME`, and an editor that stops
+        // to complain about its log file sits at a hit-enter prompt where a click
+        // is an answer to the prompt rather than a click in the buffer.
+        let command = format!(
+            "XDG_STATE_HOME={dir}/state XDG_DATA_HOME={dir}/data \
+             XDG_CACHE_HOME={dir}/cache exec {editor} --clean -n -i NONE \
+             -c 'set mouse=a' {file}",
+            dir = dir.path().display(),
+            editor = editor.display(),
+            file = file.display()
+        );
+        let config = pty::Config {
+            program: Some("/bin/sh".to_owned()),
+            args: vec!["-c".to_owned(), command],
+            ..Default::default()
+        };
+        let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
+        let pane = Pane::spawn(Transport::Shell(config), None, None, budget, || {})
+            .expect("an nvim pane");
+        pane.send(Command::Resize {
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        });
+        // Ready when it has asked for the mouse, which is `set mouse=a` taking
+        // effect rather than a guess about how long nvim takes to draw.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !pane.stats().mouse() {
+            assert!(
+                Instant::now() < deadline,
+                "nvim never asked for the mouse: {:?}",
+                pane.take_frame().map(|frame| frame_text(&frame))
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The second line of the file, four cells in: a ten by twenty pixel cell
+        // puts that at (45, 25).
+        click(&pane, mouse::Action::Press, mouse::Button::Left, 45.0, 25.0);
+        click(&pane, mouse::Action::Release, mouse::Button::Left, 45.0, 25.0);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen: Option<(Option<(u16, u16)>, String)> = None;
+        loop {
+            if let Some(frame) = pane.take_frame() {
+                let cursor = frame.cursor;
+                let text = frame_text(&frame);
+                if cursor == Some((4, 1)) {
+                    break;
+                }
+                seen = Some((cursor, text));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nvim put the cursor at {:?}, not at the cell clicked; the screen \
+                 said:\n{}",
+                seen.as_ref().and_then(|(cursor, _)| *cursor),
+                seen.as_ref().map(|(_, text)| text.as_str()).unwrap_or("")
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A program that never asked for the mouse hears nothing about it. This is
+    /// the other half of the UI's gate: the click is a selection there, and the
+    /// shell must not be sent bytes it would print as gibberish.
+    #[test]
+    fn a_click_goes_nowhere_when_the_program_never_asked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("mouse");
+        let pane = mouse_pane("", &out);
+        assert!(!pane.stats().mouse(), "tracking was on with no program asking");
+        click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
+        click(&pane, mouse::Action::Release, mouse::Button::Left, 25.0, 45.0);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap_or_default(),
+            "",
+            "a click reached a program that did not ask for the mouse"
+        );
     }
 }
