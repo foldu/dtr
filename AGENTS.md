@@ -683,6 +683,9 @@ enough.
   `tests/run_corpus.rs` runs them against a recording host and
   `tests/corpus/corpus-dialogs.txt` is what they said — regenerate it with
   `UPDATE_CORPUS_DIALOGS=1` and read the diff.
+- `docs/ttl-gaps.md` — what the TTL interpreter still does not do, and the order
+  worth doing it in. `crates/dtr-ttl/tests/field/` is where real macros go: the
+  corpus is upstream's bug reports, and nobody's job depends on them.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.

@@ -1312,6 +1312,10 @@ it; the terminal's own text is UTF-8 everywhere.
 Nothing in `dtr` calls this crate yet: `Host` has one implementation, the recording one, so the
 terminal cannot run a macro until a `Host` over a live pane exists.
 
+The full gap — the 48 commands that do not exist, the 23 that are recorded and ignored, the
+places where an implemented command is shorter than the manual, and the order worth doing them
+in — is `docs/ttl-gaps.md`, kept separate because it is a work list rather than design.
+
 ### The corpus
 
 Tera Term's own macro tests are vendored at `crates/dtr-ttl/tests/corpus/`: 53 macros, mostly
