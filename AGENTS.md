@@ -529,6 +529,14 @@ per state worth seeing — `tab_bar` away and `tab_bar_hover` with the pointer o
 because a hand-painted hover fill is invisible to every test where the pointer is
 elsewhere.
 
+**A baseline is an input, so it is committed — through LFS.** `.gitignore` ignores
+`*.png` (a `--screenshot` must never be committed) with an exception for this directory,
+and `.gitattributes` sends it through LFS like every other image. A checkout whose
+`git-lfs` did not smudge them holds 130-byte pointers instead, which `egui_kittest`
+reports as a decode error that reads like a rendering bug; `tests/snapshots.rs` checks
+the signature and the size first, and also fails when a `snapshot("…")` has no baseline
+or a baseline has no test.
+
 **A widget painted by hand has no accessibility node** unless `Response::widget_info`
 declares one; the tab chips were invisible to the harness *and* to a screen reader. And
 `Sense::click()` is **not pointer-only**: egui turns Enter into a click for any focused
