@@ -360,8 +360,11 @@ them as `CSI 97;5u` with releases reported when asked. Three details that bit: t
 key decides (a real event has one, `--keys` only implies it), a ctrl or super combination must
 not hand its `text` to the encoder (it typed a literal `a` for ctrl+a), and the kitty flags are a
 *stack* that `reset_modes` has to pop (`CSI < 999 u`, then `CSI = 0 u`) or a dead program's push
-reaches the shell that replaces it. A paste follows the same rule — the program's `?2004h`
-decides the wrapping — which is why both live in the pane.
+reaches the shell that replaces it. A fourth, found later still: a shifted character the platform
+resolved *is* that character. `input::consumed_mods` says so, or the encoder reports `;` with the
+shift bit and leaves the program to apply the shift — and nvim uppercases letters and nothing
+else, so `:` and `#` never arrived while `A` did. A paste follows the same rule — the program's
+`?2004h` decides the wrapping — which is why both live in the pane.
 
 **IME is a picture and a commit, not keys.** A composition arrives as `Ime::Preedit` (what is being
 composed) and `Ime::Commit` (what was decided). The preedit is drawn in a box hung above the

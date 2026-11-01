@@ -244,6 +244,16 @@ every keystroke twice ("typing `ls` shows `lsls`"). A release encodes to nothing
 unless the program asked the kitty protocol for releases — that is the encoder's
 rule, not a guard in the UI.
 
+**A shifted character the platform resolved is that character, not the key plus a
+shift bit.** `input::fill` has to tell the encoder which modifiers the *text* already
+accounts for (`consumed_mods`), or shift+`;` goes out as `CSI 59;2u` and the program is
+left to apply the shift itself. Neovim uppercases letters and nothing else, so `:` and
+`#` never arrived while `A` did. winit has no such notion — GTK's
+`getConsumedModifiers` is what ghostty uses — so it is derived: shift went into the
+character when the text is one character that is not the key's unshifted one. A key
+with no unshifted character keeps its shift, because `<S-CR>` is a key a program can
+ask for.
+
 Two more: the *position* decides, not the character (a real event has `physical_key`;
 `--keys` implies one from a US layout), and a ctrl or super combination must not pass
 its `text` through while a plain character must, or accents and CJK never arrive.

@@ -3542,6 +3542,53 @@ mod session_tests {
         wait_for_bytes(&pane, &out, "\x1b[97;5ub", "kitty, plain b");
     }
 
+    /// A character the platform resolved after a shift is *that character*, not
+    /// a report of the key plus a shift bit for the program to apply. `:` is
+    /// shift+`;` and `#` is shift+`3`; Neovim uppercases letters and nothing
+    /// else, so those two vanished while `A` arrived.
+    #[test]
+    fn a_kitty_application_gets_shifted_punctuation_as_a_character() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let script = format!(r"printf '\033[>1u'; exec cat > {}", out.display());
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !out.exists() || pane.stats().rx() == 0 {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+
+        for (typed, code) in [
+            (":", KeyCode::Semicolon),
+            ("#", KeyCode::Digit3),
+            ("A", KeyCode::KeyA),
+        ] {
+            let mut stroke = key(
+                winit::keyboard::Key::Character(typed.into()),
+                code,
+                ModifiersState::SHIFT,
+            );
+            stroke.text = Some(typed.to_owned());
+            pane.send(Command::Key(Box::new(stroke)));
+        }
+
+        // Exactly those three characters, in order: a `CSI 59;2u` report, or a
+        // key that never arrived, shows up as a mismatch rather than as silence
+        // on a screen nobody is looking at.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = String::new();
+        while got.len() < 3 {
+            assert!(
+                Instant::now() < deadline,
+                "the program got {got:?}, expected \":#A\""
+            );
+            got = std::fs::read_to_string(&out).unwrap_or_default();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(got, ":#A", "a shifted character has to arrive as itself");
+    }
+
     /// `CSI > 3 u` adds press *and release* reporting. A release is the one thing
     /// legacy encoding has nothing to say about, so it is the sharpest test that
     /// the flags reached the encoder.

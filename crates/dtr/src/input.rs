@@ -59,7 +59,46 @@ pub fn fill(event: &mut Event<'_>, stroke: &KeyStroke) {
         }
         _ => None,
     };
+    // Which modifiers the text already accounts for — the encoder uses it to
+    // recognise the text as the key rather than a report to build from it.
+    event.set_consumed_mods(consumed_mods(stroke.mods.shift_key(), text.as_deref(), key));
     event.set_utf8(text);
+}
+
+/// The modifiers the text has already accounted for.
+///
+/// A real frontend gets this from the platform — GTK's `getConsumedModifiers` —
+/// and it is the difference between "shift+`;`" and "`:`". With shift *consumed*
+/// the encoder sees plain text and sends it as it is; with shift left over it
+/// reports `;` with the shift bit and leaves the program to apply the shift
+/// itself. Neovim uppercases letters and nothing else, so `A` arrived and `:`
+/// and `#` did not.
+///
+/// winit does not have the notion, so it is derived: shift went into the
+/// character when the text is a single character that is not the one this key
+/// produces unshifted.
+fn consumed_mods(shift: bool, text: Option<&str>, key: Key) -> Mods {
+    let mut out = Mods::empty();
+    if !shift {
+        return out;
+    }
+    let Some(typed) = single_char(text) else {
+        return out;
+    };
+    // A key with no unshifted character (Enter, the arrows, a function key)
+    // proves nothing: `<S-CR>` is a key a program can want, and consuming the
+    // shift there would take it away.
+    if char_of_key(key).is_some_and(|unshifted| unshifted != typed) {
+        out.set(Mods::SHIFT, true);
+    }
+    out
+}
+
+/// The character a text is, when it is exactly one.
+fn single_char(text: Option<&str>) -> Option<char> {
+    let mut chars = text?.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
 }
 
 /// The modifiers, as the encoder counts them.
@@ -575,5 +614,29 @@ mod tests {
         assert_eq!(unescape(r"ls\r"), b"ls\r".to_vec());
         assert_eq!(unescape(r"a\tb\e"), b"a\tb\x1b".to_vec());
         assert_eq!(unescape(r"keep\z"), b"keep\\z".to_vec());
+    }
+
+    /// Shift is part of the character when the platform resolved one: `:` is
+    /// shift+`;`, and a program must not be asked to apply the shift itself.
+    #[test]
+    fn shift_is_consumed_when_it_made_the_character() {
+        use super::consumed_mods;
+
+        // Punctuation: the case that was broken — the encoder reported `;` with
+        // shift set, and Neovim only uppercases letters.
+        assert_eq!(consumed_mods(true, Some(":"), Key::Semicolon), Mods::SHIFT);
+        assert_eq!(consumed_mods(true, Some("#"), Key::Digit3), Mods::SHIFT);
+
+        // Uppercase worked by luck, for the same reason in reverse.
+        assert_eq!(consumed_mods(true, Some("A"), Key::A), Mods::SHIFT);
+
+        // Nothing was consumed without a shift, without text, or by a key with
+        // no unshifted character to compare against.
+        assert_eq!(consumed_mods(false, Some(";"), Key::Semicolon), Mods::empty());
+        assert_eq!(consumed_mods(true, None, Key::ArrowUp), Mods::empty());
+        assert_eq!(consumed_mods(true, Some("\r"), Key::Enter), Mods::empty());
+
+        // More than one character is not one key's text.
+        assert_eq!(consumed_mods(true, Some(":x"), Key::Semicolon), Mods::empty());
     }
 }
