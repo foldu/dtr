@@ -1227,3 +1227,46 @@ Bumping the wrapper rev means recomputing that hash
 (`nix hash path $(nix eval --raw --impure --expr 'builtins.fetchGit { url = …; rev = …; }')`) and
 updating three places: `Cargo.toml`, and both derivations. Worth a `just bump-wrapper` when it
 starts to annoy.
+
+## 13. Tera Term Language (TTL)
+
+dtr is serial-first, and the terminal people actually use around serial hardware is Tera Term —
+not for its VT emulation, but for TTL: a small line-oriented language that dials a port, waits for
+a prompt, sends a command, parses the answer, logs it and sets an exit status. A terminal that
+replaces Tera Term without running TTL inherits none of the scripts. So TTL is a requirement, and
+the first deliverable is not an interpreter but the **specification** one can be written against:
+`crates/dtr-ttl/MANUAL.md`.
+
+The crate `dtr-ttl` exists with that manual and its design intent in `src/lib.rs`. No interpreter
+yet. The manual is distilled from the Tera Term 5 macro reference (196 commands, eight syntax
+chapters, five appendices), reorganised into a single narrative: the execution model first, then
+lexical structure, types, expressions, statements, and the command reference grouped the way the
+upstream index groups it. Every version gate is kept, and §5.5 lists what upstream leaves
+*undefined* — division rounding on negatives, 32-bit overflow, `&&` short-circuiting, string
+overflow — because those are exactly the places an independent implementation drifts silently.
+
+The families in the manual are the intended module boundaries: a lexer and parser producing a
+statement tree, an evaluator owning the four 256-entry variable budgets and the 512 labels, and a
+host interface the terminal implements. Five facts shape that interface and are easy to get wrong:
+
+- **`result` is the error channel, and it is not checked for you.** A timed-out wait or a failed
+  transfer is a number the next line is expected to read; only interpreter errors stop the run.
+  The two mechanisms are separate and the manual keeps them separate (§8).
+- **Strings are 511 bytes of UTF-8 with no NUL; a line is 1023 characters and the rest is
+  silently dropped.** A `send` of a long line is the usual way to meet the limit.
+- **There is no floating point anywhere.** `sprintf` will format floats, but the number arrives
+  as a string.
+- **`groupmatchstr1`…`9` is the language's only array of fields.** `strsplit` writes it,
+  `strjoin` reads it, `strmatch` fills it and `strreplace` clears it.
+- **`execcmnd` re-enters the parser with a statement built at run time**, so the parser has to be
+  callable from the evaluator, and a macro that pastes device output into it has given the device
+  control of the host.
+
+What does not map onto dtr is the interesting part, and it is a list of decisions rather than
+work: `connect` and `cygconnect` take a *Tera Term command line* (`connect '/C=1 /BAUD=115200'`),
+so dtr needs either that vocabulary or a translation; `callmenu`, `sendkcode`, `loadkeymap` and
+`restoresetup` address Tera Term's menus and keyboard setup file, which dtr does not have; and
+`getttpos`, `showtt` and `getspecialfolder` are window and shell concepts with no equivalent yet.
+They are separable, though: nothing else in the language depends on them, so the first
+implementation can refuse them explicitly — a macro that reaches such a command should be told
+so, not left to conclude that its menu command worked.
