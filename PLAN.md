@@ -760,6 +760,17 @@ catch a mode the encoder honours but the editor spells differently — and it ca
 in the test: a click past the end of a short line is clamped by the editor, and nvim's state directory has
 to point at the tempdir or it sits at a hit-enter prompt where a click answers the prompt.
 
+**A cursor is a mode, and a mode is not a dirty row.** The core reports both halves: `cursor_viewport`
+is *where* the cursor would be, `cursor().visible` is whether it is showing. Drawing the first without
+the second put a block in the middle of btop's own screen, because every full-screen program hides the
+cursor (`?25l`) and then paints the whole grid itself. Two things followed from fixing that, both found
+by test rather than by reading. The render state does not consider a mode change dirty, so a program that
+hides the cursor *after* drawing — or a search box that shows it again with `?25h` — produced no frame at
+all, and the old picture, cursor included, stayed up; `note_modes` therefore returns whether visibility
+changed and the burst publishes in spite of the gate, which is cheap because a mode change is rare. And
+`reset_modes` turns the cursor back *on*: every other mode in that list is switched off, but the one a
+reconnect has to restore is the one a dead program hid.
+
 ### M3 — the rest — the rest of a terminal
 
 - ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.

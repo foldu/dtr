@@ -651,10 +651,17 @@ fn reset_modes(term: &mut Terminal<'_, '_>) {
     // shell has ever read as a control character. Pop the stack, then zero what
     // is left.
     term.vt_write(b"\x1b[<999u\x1b[=0u");
+    // The cursor is the one mode that has to come *back*, and the loop above
+    // cannot do it: a program that hid the cursor and then lost its connection
+    // would leave the shell that replaces it with no cursor at all, which reads
+    // as a frozen terminal.
+    if let Err(err) = term.set_mode(Mode::CURSOR_VISIBLE, true) {
+        tracing::debug!(%err, "could not show the cursor again");
+    }
 }
 
-/// Notice when the program changed how keys are spelled or what the mouse means,
-/// and say so once.
+/// Notice when the program changed how keys are spelled, what the mouse means or
+/// whether the cursor is showing, and say so once.
 ///
 /// Only output can change a mode, so this runs after a burst and logs a change
 /// rather than a burst: it is how "did nvim ask for the kitty protocol?" gets
@@ -662,15 +669,22 @@ fn reset_modes(term: &mut Terminal<'_, '_>) {
 ///
 /// The key modes are only logged — the encoder reads them per keystroke. The
 /// mouse flag is different: the UI decides what a press means before the pane
-/// ever sees it, so this is the one that has to cross threads.
+/// ever sees it, so that one has to cross threads. The cursor is different
+/// again: it is the return value, because a cursor appearing or disappearing is
+/// a change to the *picture* that the render state does not count as dirty.
 #[derive(Default)]
 struct KeyModes {
     cursor_keys: bool,
     kitty: u8,
     mouse: bool,
+    /// Visible until something says otherwise: `?25` starts enabled, and the
+    /// first read must not look like a change.
+    cursor_visible: bool,
 }
 
-fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) {
+/// Returns whether the cursor's visibility changed, which the caller has to force
+/// a frame for.
+fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) -> bool {
     let cursor_keys = term.mode(Mode::DECCKM).unwrap_or(false);
     let kitty = term
         .kitty_keyboard_flags()
@@ -690,6 +704,13 @@ fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) {
         // about 1000 versus 1002 versus no mode at all.
         tracing::debug!(mouse, "mouse tracking");
     }
+    let visible = term.mode(Mode::CURSOR_VISIBLE).unwrap_or(true);
+    if seen.cursor_visible != visible {
+        seen.cursor_visible = visible;
+        tracing::debug!(visible, "cursor visibility");
+        return true;
+    }
+    false
 }
 
 /// A line of dtr's own in the session's scrollback.
@@ -880,7 +901,11 @@ async fn run(
         }
     };
     // What the program last asked of the keyboard, so a change is logged once.
-    let mut keys_seen = KeyModes::default();
+    // The cursor starts visible, because that is what a fresh terminal is.
+    let mut keys_seen = KeyModes {
+        cursor_visible: true,
+        ..KeyModes::default()
+    };
     // The mouse encoder, for the same reason: a click is a press, a release, or
     // motion, and which of those the program is told about depends on modes only
     // the terminal knows. The event holds the position, so it is reused too.
@@ -1018,11 +1043,16 @@ async fn run(
                             }
                         }
                         flush_replies(&replies, &mut sink).await;
-                        // The program's answer to "how should a key look" and
-                        // "what does the mouse mean" is in the terminal now — the
-                        // encoders read it per event — and a *change* is worth one
-                        // line of log.
-                        note_modes(&term, &mut keys_seen, &stats);
+                        // The program's answer to "how should a key look",
+                        // "what does the mouse mean" and "is the cursor showing"
+                        // is in the terminal now — the encoders read it per event
+                        // — and a *change* is worth one line of log.
+                        //
+                        // The cursor is the one that has to reach the frame by
+                        // force: the render state does not count a mode as dirty,
+                        // so a program that hides it after painting would keep
+                        // the last frame, cursor and all, on screen.
+                        let cursor_changed = note_modes(&term, &mut keys_seen, &stats);
                         // The program has spoken, so whatever it wanted to say
                         // about pasting is in the terminal now — which is the
                         // answer a held paste was waiting for.
@@ -1042,8 +1072,11 @@ async fn run(
                             .await;
                         }
                         tracing::debug!(chunks, bytes = total, "burst parsed");
-                        if tokio::time::Instant::now() >= next_publish {
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
+                        // A cursor change publishes now rather than waiting for
+                        // the gate: it is a rare event, and the frame it owes is
+                        // one the dirty check would otherwise swallow.
+                        if cursor_changed || tokio::time::Instant::now() >= next_publish {
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, cursor_changed, &mut selection)?;
                             next_publish = tokio::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
@@ -1986,12 +2019,23 @@ fn publish(
     }
 
     let colors = snapshot.colors()?;
+    // Hidden is not somewhere else. A program that draws the whole screen itself
+    // — btop, vim in the alternate screen, anything using a full-screen UI —
+    // sends `?25l` and leaves a position behind, and `cursor_viewport` answers
+    // *where* the cursor is rather than whether it is showing: drawing that
+    // stray block puts a cursor in the middle of a monitor that has none.
+    let cursor = snapshot.cursor()?;
+    let cursor = cursor
+        .visible
+        .then_some(cursor.viewport)
+        .flatten()
+        .map(|at| (at.x, at.y));
     let mut frame = Frame {
         cols: snapshot.cols()?,
         rows: snapshot.rows()?,
         default_fg: rgb(colors.foreground),
         default_bg: rgb(colors.background),
-        cursor: snapshot.cursor_viewport()?.map(|c| (c.x, c.y)),
+        cursor,
         selection: None,
         cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
     };
@@ -3216,15 +3260,22 @@ mod session_tests {
     #[test]
     fn a_reconnect_leaves_the_alternate_screen_and_its_modes() {
         let mut term = Terminal::new(COLS, ROWS).expect("a terminal");
-        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?1h\x1b[>3u");
+        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?1h\x1b[>3u\x1b[?25l");
         assert!(term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
         assert!(term.mode(Mode::NORMAL_MOUSE).expect("mode"));
+        assert!(!term.mode(Mode::CURSOR_VISIBLE).expect("mode"));
         assert!(!term.kitty_keyboard_flags().expect("flags").is_empty());
         reset_modes(&mut term);
         assert!(!term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
         assert!(!term.mode(Mode::NORMAL_MOUSE).expect("mode"));
         assert!(!term.mode(Mode::BRACKETED_PASTE).expect("mode"));
         assert!(!term.mode(Mode::DECCKM).expect("mode"));
+        // And the one mode that comes back rather than going away: a shell with
+        // no cursor at all reads as a terminal that has frozen.
+        assert!(
+            term.mode(Mode::CURSOR_VISIBLE).expect("mode"),
+            "the cursor stayed hidden after a reconnect"
+        );
         // The kitty flags are a stack, not a mode, and a dead program's push
         // must not reach the shell that replaces it.
         assert!(
@@ -3839,5 +3890,62 @@ mod session_tests {
             "",
             "a click reached a program that did not ask for the mouse"
         );
+    }
+
+    /// A hidden cursor is not somewhere else.
+    ///
+    /// A program that paints the whole screen itself — btop, vim in the
+    /// alternate screen, anything with a full-screen UI — sends `?25l` and
+    /// leaves the position behind, and the terminal reports *where* the cursor
+    /// is whether or not it is showing. Drawing that position puts a block in
+    /// the middle of a picture that deliberately has none.
+    #[test]
+    fn a_hidden_cursor_is_not_drawn() {
+        for (prologue, expected) in [("", true), (r"printf '\033[?25l'; ", false)] {
+            let script = format!("{prologue}printf 'btop'; exec cat > /dev/null");
+            let pane = pane(script, None, Vec::new());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let seen = loop {
+                if let Some(frame) = pane.take_frame() {
+                    if frame_text(&frame).contains("btop") {
+                        break frame.cursor;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the program never said anything (with {prologue:?})"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(
+                seen.is_some(),
+                expected,
+                "the cursor under {prologue:?} was {seen:?}"
+            );
+        }
+    }
+
+    /// Hiding the cursor after drawing is a change of its own.
+    ///
+    /// A frame is only published when the render state is dirty, so a mode that
+    /// changes nothing else has to dirty it too — otherwise the last frame, with
+    /// its cursor, stays on screen for as long as the program is up.
+    #[test]
+    fn hiding_the_cursor_republishes_by_itself() {
+        let script = r"printf 'btop'; sleep 0.3; printf '\033[?25l'; exec cat > /dev/null";
+        let pane = pane(script.to_owned(), None, Vec::new());
+        wait_for(&pane, "btop", Duration::from_secs(10));
+        // Long enough for the mode to arrive and be parsed.
+        std::thread::sleep(Duration::from_millis(500));
+        let mut last = None;
+        while let Some(frame) = pane.take_frame() {
+            last = Some(frame.cursor);
+        }
+        assert!(
+            last.is_some(),
+            "hiding the cursor published no frame at all, so the screen kept the \
+             cursor the last one had"
+        );
+        assert_eq!(last.flatten(), None, "a cursor survived ?25l: {last:?}");
     }
 }

@@ -712,11 +712,6 @@ Every tab switch now goes through `App::set_active`, which logs `active tab
 from=… to=… why=…`. Five call sites can do it and only one is the mouse; the log
 names the one that did.
 
-**Hover is worth a redraw.** Skipping the repaint for pointer motion was tried and
-rejected: the chips and the `+` lighten under the pointer, and a chip that looks
-identical there reads as decoration. So a terminal redraws while the mouse moves —
-expected, not a leak.
-
 **A chip has two hit targets.** The label switches tabs, a cross on the right closes
 that tab — whichever tab is active. Both are `Sense::click` regions with
 declared accessibility names (`2 shell`, `close tab 2`), and both are gated on a
@@ -929,6 +924,12 @@ pane size put every click in the top-left cell, which is how that was found. And
 outside the pane is not the program's, while a drag that leaves it still is, so
 `pane_pixels` clamps and only presses are refused. A wheel notch is buttons 4 and 5 as a
 press *and* a release, because X10 has no wheel event; shift sends it to the scrollback.
+
+**A hidden cursor is not a dirty frame.** `?25l` changes nothing but the cursor, and the render
+state does not count a mode as dirty, so `publish` skipped and the frame with the block on it stayed
+while btop painted its own screen. A position is not a cursor: `publish` reads
+`snapshot.cursor().visible`, `note_modes` forces one frame when it changes (a search box's `?25h`
+then appears), and `reset_modes` turns it back on.
 
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler
