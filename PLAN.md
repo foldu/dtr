@@ -1009,12 +1009,19 @@ which is a small argument for serial-first.
 - `bench-payloads`: `scripts/bench.sh --check`, because the benchmark payloads are shell
   scripts that nothing compiles.
 - `desktop-entry`: the installed entry parses and every icon it names exists.
+- `just-fmt`: `just --fmt --check`, because the task list is part of the interface now.
 - `packages.default` build (through `desktop-entry`), and `packages.windows` through
   `single-exe`.
 - `single-exe`: DLL allowlist assertion on the Windows binary (§7).
 - Still to come: `clippy`, and a `screenshot` check — `--headless --replay fixture
   --screenshot $out.png` under lavapipe, asserting a non-blank image, with the PNG as the
   artifact.
+
+**Release:** `just release X.Y.Z` bumps the version in `Cargo.toml` (the only copy —
+`flake.nix` imports it), commits, tags and pushes; `.github/workflows/release.yml` builds
+`dtr.exe` on the tag, runs the check suite first, and publishes a GitHub release with the
+exe and its checksum. The tag has to agree with `Cargo.toml`, so the bump cannot be
+forgotten.
 
 ---
 

@@ -46,16 +46,41 @@ script',pty,raw,echo=0` — killable mid-session to exercise reconnect. Kill it 
 `pkill -x socat`; `pkill -f "socat pty"` matches the shell running it and kills
 your own test.
 
-**The CI gates live in the flake.** `.gitlab-ci.yml` has two jobs on the `nix`
-runner: `check` runs `nix flake check`, and `build` produces `.#windows` for
-download. Everything worth failing a branch over is a `checks.x86_64-linux` entry —
-`tests` (the whole suite, through lavapipe and the store's fonts), `bench-payloads`
-(`scripts/bench.sh --check`), `desktop-entry` and `single-exe` — so a local `nix
-flake check` runs the same gates as the pipeline. `single-exe` also cross-compiles
-`.#windows`, because a Linux-only build would not catch a cross-compilation break.
-Put a new gate there, not in YAML. Snapshots are generated here and compared
-byte-exactly there; if a font or renderer ever disagrees, the answer is a threshold,
-not a baseline regenerated from whichever machine ran last.
+**The CI gates live in the flake.** `nix flake check` is the whole pipeline, on
+both forges: `.gitlab-ci.yml` has two jobs on the `nix` runner (`check` runs it,
+`build` produces `.#windows` for download), and `.github/workflows/ci.yml` runs
+the same command on the GitHub mirror. Everything worth failing a branch over is a
+`checks.x86_64-linux` entry — `tests` (the whole suite, through lavapipe and the
+store's fonts), `bench-payloads` (`scripts/bench.sh --check`), `desktop-entry`,
+`just-fmt` and `single-exe` — so a local `nix flake check` runs the same gates as
+either pipeline. `single-exe` also cross-compiles `.#windows`, because a Linux-only
+build would not catch a cross-compilation break. Put a new gate there, not in YAML.
+Snapshots are generated here and compared byte-exactly there; if a font or renderer
+ever disagrees, the answer is a threshold, not a baseline regenerated from
+whichever machine ran last.
+
+The lab runner is the fast one — its store is already warm — and GitHub is the
+public one; both run the same command, so a red job means the same thing on
+either. `just --list` is the short list of tasks; `just check` is `nix flake
+check`, and `just test` is the suite without the sandbox.
+
+## Releasing
+
+`just release X.Y.Z` is the whole thing: it refuses a dirty tree or a branch other
+than `master`, rewrites the workspace version in `Cargo.toml` (the only place it
+lives — `flake.nix` imports it, so the package, the exe and the tag cannot
+disagree), refreshes `Cargo.lock` through `cargo metadata`, proves the flake
+reports the same number, then commits, tags `vX.Y.Z` and pushes.
+
+`.github/workflows/release.yml` does the rest on the tag: it refuses a tag that
+disagrees with `Cargo.toml`, runs the full `nix flake check`, builds `dtr.exe`,
+and publishes it with `--generate-notes` (a `-suffix` in the version makes it a
+pre-release). Re-running it replaces the assets rather than failing on names that
+already exist.
+
+**The tag is what triggers the release**, and the repository is mirrored GitLab →
+GitHub: if the mirror does not copy tags, nothing publishes — push it by hand
+(`git push github vX.Y.Z`) or turn tag mirroring on.
 
 ## The house rules
 

@@ -1,0 +1,116 @@
+# A tag is the release, and `just release X.Y.Z` makes one: it bumps Cargo.toml,
+# commits, tags and pushes. The tag has to agree with Cargo.toml — flake.nix
+# reads the version from there, so there is one number and not two — and the
+# whole check suite has to be green before anything is published.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Re-publishing an existing tag (a flaky runner, a rebuilt exe) without
+  # pushing the tag again.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing vX.Y.Z tag to (re)publish"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  # A release is not a check: never cancel one half-done.
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the release and upload dtr.exe
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    # The check suite plus the cross build; the cache from the branch run that
+    # produced this commit usually carries most of it.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `--generate-notes` wants history, and so would anything that reads
+          # the log between the last tag and this one.
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+          diagnostic-endpoint: ""
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable the Nix binary cache
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          use-gha-cache: enabled
+          use-flakehub: "false"
+          diagnostic-endpoint: ""
+
+      # Fail on a mismatched tag in seconds rather than after the suite. The
+      # version is Cargo.toml's, which flake.nix imports; `just release` proves
+      # the two agree, and this is the independent check that it did.
+      - name: The tag is the version
+        env:
+          # Empty on a tag push, where the tag is in GITHUB_REF_NAME instead.
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          case "$tag" in
+            v*) ;;
+            *) echo "release: '$tag' is not a vX.Y.Z tag" >&2; exit 1 ;;
+          esac
+          version="$(nix eval --raw .#packages.x86_64-linux.dtr.version)"
+          if [ "$tag" != "v$version" ]; then
+            echo "release: tag $tag disagrees with Cargo.toml's $version" >&2
+            exit 1
+          fi
+          echo "TAG=$tag" >>"$GITHUB_ENV"
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+          {
+            echo "### dtr $version"
+            echo
+            echo "Tag \`$tag\`, committing \`$(git rev-parse --short HEAD)\`."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Check
+        run: nix flake check -L
+
+      - name: Build dtr.exe
+        run: |
+          set -euo pipefail
+          out="$(nix build .#windows --no-link --print-out-paths)"
+          rm -rf dist
+          mkdir -p dist
+          cp "$out/bin/dtr.exe" dist/dtr.exe
+          test "$(head -c 2 dist/dtr.exe)" = "MZ"
+          file dist/dtr.exe
+          (cd dist && sha256sum dtr.exe > dtr.exe.sha256 && cat dtr.exe.sha256)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A suffix marks a pre-release: `--prerelease` keeps it out of the
+          # "Latest" slot while still attaching the exe to it.
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A re-run replaces the assets instead of failing on names that
+            # already exist.
+            gh release upload "$TAG" --clobber dist/dtr.exe dist/dtr.exe.sha256
+          else
+            gh release create "$TAG" \
+              --title "dtr $VERSION" \
+              --generate-notes \
+              --verify-tag \
+              "${prerelease[@]}" \
+              dist/dtr.exe dist/dtr.exe.sha256
+          fi

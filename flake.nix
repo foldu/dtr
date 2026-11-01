@@ -66,6 +66,12 @@
       ];
     };
 
+    # The version is Cargo's, and only Cargo's. The manifest is imported so the
+    # package, the Windows exe and the release tag cannot disagree; `just
+    # release X.Y.Z` is the one thing that edits it, and the release workflow
+    # refuses a tag that does not match.
+    version = (lib.importTOML ./Cargo.toml).workspace.package.version;
+
     rustHost = pkgs.rust-bin.stable.latest.default;
 
     # Fonts a machine needs to lay out text: a monospaced Latin face for the
@@ -94,7 +100,7 @@
     cargoCommon = {
       inherit src;
       pname = "dtr";
-      version = "0.1.0";
+      inherit version;
       strictDeps = true;
       buildInputs = [
         pkgs.udev
@@ -169,7 +175,7 @@
 
     dtr-windows = pkgs.stdenv.mkDerivation {
       pname = "dtr";
-      version = "0.1.0";
+      inherit version;
       src = src;
       cargoDeps = pkgs.rustPlatform.importCargoLock {
         lockFile = ./Cargo.lock;
@@ -291,6 +297,18 @@
         # Through bash, not the shebang: the script asks for `/usr/bin/env`,
         # which a sandbox does not have (the devShell runner's alpine does).
         bash ./scripts/bench.sh --check
+        touch $out
+      '';
+
+      # `just --fmt` rewrites the file in place, and a task list that nobody
+      # formats is a diff waiting to happen in every later commit. `just fmt`
+      # formats the Rust sources and this file together; the check only asks
+      # whether they would change.
+      just-fmt = pkgs.runCommand "dtr-just-fmt" {
+        nativeBuildInputs = [pkgs.just];
+      } ''
+        cp ${./justfile} justfile
+        just --fmt --check
         touch $out
       '';
 
