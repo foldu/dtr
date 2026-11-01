@@ -349,7 +349,11 @@ impl GridRenderer {
 
         // Then the glyphs.
         for (index, cell) in frame.cells.iter().enumerate() {
-            if cell.text.trim().is_empty() || !visible(index) {
+            // A concealed cell keeps its characters and loses its ink: xterm
+            // and Ghostty skip the glyph and still draw the background, which
+            // is what makes a password field a field and not an absence. The
+            // text stays in the frame, because a copy still has to have it.
+            if cell.concealed || cell.text.trim().is_empty() || !visible(index) {
                 continue;
             }
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);

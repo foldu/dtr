@@ -72,6 +72,12 @@ pub struct Cell {
     pub has_bg: bool,
     pub bold: bool,
     pub italic: bool,
+    /// SGR 8: the glyph is not drawn, but the character is still here.
+    ///
+    /// xterm and Ghostty drop the ink and keep the text, because a copy and a
+    /// capture still have to hand back what the program wrote; hiding it in the
+    /// frame instead would quietly lose it.
+    pub concealed: bool,
 }
 
 /// What a cursor is drawn as.
@@ -2593,6 +2599,7 @@ fn fill_cells(
                 let style = cell.style()?;
                 out.bold = style.bold;
                 out.italic = style.italic;
+                out.concealed = style.invisible;
                 if style.inverse {
                     std::mem::swap(&mut out.fg, &mut out.bg);
                     out.has_bg = true;
@@ -2695,6 +2702,7 @@ mod tests {
                     has_bg: false,
                     bold: false,
                     italic: false,
+                    concealed: false,
                 });
             }
         }
@@ -2783,23 +2791,18 @@ mod tests {
         assert_eq!(per_cell[1], "K", "cells: {per_cell:?}");
     }
 
-    /// Faint is drawn, not dropped.
+    /// The frame a pane would publish for `bytes`.
     ///
-    /// A program that dims a ghost suggestion — fish's autosuggestion, an
-    /// editor's inline completion — sends `\e[2m` and often nothing else, and a
-    /// terminal that ignores the flag shows the ghost exactly as bright as the
-    /// text it is suggesting against. The core parses it and hands back
-    /// `style.faint`; the renderer used to throw that away, so the proof is a
-    /// colour that is neither the default ink nor the ground.
-    #[test]
-    fn faint_text_is_a_dimmed_colour_and_not_the_default_ink() {
-        use super::{faint, fill_cells, rgb};
+    /// Written at a real `Terminal` and filled from its snapshot, which is the
+    /// path a program's output takes: a style the core parses and the renderer
+    /// forgets shows up here as the wrong colour rather than being assumed.
+    fn published(bytes: &[u8]) -> Frame {
+        use super::{fill_cells, rgb};
         use libghostty_vt::render::{CellIterator, RowIterator};
         use libghostty_vt::{RenderState, Terminal};
 
-        // `X` plain, `Y` faint, `Z` inverse and faint together.
-        let mut term = Terminal::new(8, 1).unwrap();
-        term.vt_write(b"X\x1b[2mY\x1b[0m\x1b[7;2mZ");
+        let mut term = Terminal::new(16, 1).unwrap();
+        term.vt_write(bytes);
         let mut state = RenderState::new().unwrap();
         let mut rows = RowIterator::new().unwrap();
         let mut cells = CellIterator::new().unwrap();
@@ -2815,6 +2818,23 @@ mod tests {
             cells: Vec::new(),
         };
         fill_cells(&snapshot, &mut rows, &mut cells, &mut frame).unwrap();
+        frame
+    }
+
+    /// Faint is drawn, not dropped.
+    ///
+    /// A program that dims a ghost suggestion — fish's autosuggestion, an
+    /// editor's inline completion — sends `\e[2m` and often nothing else, and a
+    /// terminal that ignores the flag shows the ghost exactly as bright as the
+    /// text it is suggesting against. The core parses it and hands back
+    /// `style.faint`; the renderer used to throw that away, so the proof is a
+    /// colour that is neither the default ink nor the ground.
+    #[test]
+    fn faint_text_is_a_dimmed_colour_and_not_the_default_ink() {
+        use super::faint;
+
+        // `X` plain, `Y` faint, `Z` inverse and faint together.
+        let frame = published(b"X\x1b[2mY\x1b[0m\x1b[7;2mZ");
 
         assert_eq!(frame.cells[0].text, "X");
         assert_eq!(frame.cells[1].text, "Y");
@@ -2834,6 +2854,38 @@ mod tests {
         assert_eq!(faint([255, 255, 255], [0, 0, 0]), [128, 128, 128]);
         assert_eq!(faint([200, 100, 0], [0, 0, 0]), [100, 50, 0]);
         assert_eq!(faint([10, 20, 30], [10, 20, 30]), [10, 20, 30]);
+    }
+
+    /// SGR 8 hides the glyph and keeps the character.
+    ///
+    /// A program that conceals input — a password field, a `read -s` prompt —
+    /// sends `\e[8m` and expects the terminal to draw nothing where the text is.
+    /// The ink goes, not the text: xterm and Ghostty keep the characters in the
+    /// buffer so a copy still hands them back, and clearing the cell's string
+    /// instead would make "select all, copy" quietly lose what the program
+    /// wrote. The renderer skips the glyph, and the background is still drawn,
+    /// which is what makes a password field a field and not an absence.
+    #[test]
+    fn concealed_text_keeps_its_characters_and_loses_its_ink() {
+        // `X` plain, `secret` concealed, `!` plain again, `Z` inverse too.
+        let frame = published(b"X\x1b[8msecret\x1b[0m!\x1b[7;8mZ");
+
+        assert_eq!(frame.cells[0].text, "X");
+        assert!(
+            !frame.cells[0].concealed,
+            "concealment must not leak past `0m`"
+        );
+        let hidden: String = frame.cells[1..7].iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(hidden, "secret", "the characters are still in the frame");
+        assert!(frame.cells[1..7].iter().all(|cell| cell.concealed));
+        // The reset brings the ink back, and the flag with it.
+        assert_eq!(frame.cells[7].text, "!");
+        assert!(!frame.cells[7].concealed);
+        // Inverse and concealed together is still concealed: no glyph is
+        // drawn, and the swapped background is, which is xterm's rule.
+        assert_eq!(frame.cells[8].text, "Z");
+        assert!(frame.cells[8].concealed);
+        assert!(frame.cells[8].has_bg);
     }
 
     #[test]

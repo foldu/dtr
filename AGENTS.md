@@ -381,8 +381,13 @@ not draw faint either: its renderer uses the flag as the foreground's alpha,
 `faint-opacity` (0.5 by default), over the cell's background, and that is what `faint()`
 now blends. There is no palette entry called "faint", so a blend is the only version
 that can be right on every theme; a fixed grey would not be grey on all of them.
-`style.invisible` is still ignored, and it is the same shape of bug: a program that
-hides a password field is currently shown it.
+
+**`invisible` is the same bug with the opposite fix.** A program that conceals input —
+a password field, a `read -s` prompt — sends `\e[8m`, and `fill_cells` used to ignore
+that flag too. `Cell::concealed` now carries it to `render::prepare`, which skips the
+glyph and still draws the background: xterm's rule, and Ghostty's. The characters stay
+in the cell because a copy and a capture are built from the frame's text — clearing the
+string would hide the text on screen and quietly lose it everywhere else.
 
 ## Sessions: shell, ssh, serial
 
