@@ -27,7 +27,7 @@ pub enum UserEvent {
     /// A watched file changed: `~/.ssh/config` was edited.
     Files,
     /// A background scan finished: the destinations to offer now.
-    Destinations(Vec<(String, String)>),
+    Destinations(Vec<crate::sources::Destination>),
     /// Something the SFTP worker finished.
     Sftp(SftpEvent),
     /// A link pointed at a directory, so the UI should show it — locally, or in a
@@ -975,9 +975,10 @@ struct App {
     /// The system clipboard, held for as long as the app runs: on X11 the owner
     /// of the selection has to stay alive or the text goes with it.
     clipboard: Option<arboard::Clipboard>,
-    /// Destinations the new-tab menu offers: ssh hosts from `~/.ssh/config`
-    /// and the serial ports that exist now.
-    destinations: Vec<(String, String)>,
+    /// Destinations the new-tab menu offers: the serial ports that exist now,
+    /// then the hosts in `~/.ssh/config`. Typed, so the menu can group them and
+    /// the click can open the right kind of session.
+    destinations: Vec<crate::sources::Destination>,
     /// The watcher for destination files. Held so the watch stays alive.
     #[allow(dead_code)]
     watcher: Option<crate::watch::Watcher>,
@@ -3957,11 +3958,18 @@ impl ApplicationHandler<UserEvent> for App {
                         self.repaint("tab clicked");
                     }
                     Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
-                    Some(crate::ui::TabHit::New(host)) => match host {
-                        Some(host) => {
-                            self.open(Transport::Shell(crate::pty::Config::ssh(&host)))
+                    Some(crate::ui::TabHit::New(destination)) => match destination {
+                        // A port goes through the palette's own connect, because
+                        // somebody may have set a baud rate or CR translation for
+                        // this device and it is remembered per port. Opening a
+                        // bare `Transport::Serial` here would ignore both.
+                        Some(crate::sources::Destination::Serial { path, .. }) => {
+                            self.apply(Action::Connect(path))
                         }
-                                        None => {
+                        Some(crate::sources::Destination::Ssh { alias, .. }) => {
+                            self.open(Transport::Shell(crate::pty::Config::ssh(&alias)))
+                        }
+                        None => {
                             let cwd = self
                                 .session()
                                 .filter(|session| !session.remote)
@@ -4326,7 +4334,7 @@ impl Gpu {
         settings: Option<&crate::settings::Settings>,
         tabs: &[String],
         active_tab: usize,
-        destinations: &[(String, String)],
+        destinations: &[crate::sources::Destination],
         tab_click: &mut Option<crate::ui::TabHit>,
         status_visible: bool,
         settings_change: &mut Option<crate::settings::Change>,

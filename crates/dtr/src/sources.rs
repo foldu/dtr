@@ -69,20 +69,60 @@ fn ssh_config_path() -> PathBuf {
         .join("config")
 }
 
-/// The ssh hosts the new-tab menu offers: `~/.ssh/config`'s aliases, with the
-/// detail line each one shows.
-pub fn ssh_destinations() -> Vec<(String, String)> {
-    ssh_hosts(&ssh_config_path())
+/// One thing the new-tab menu can open.
+///
+/// Typed, rather than a `(String, String)` pair whose kind is guessed from the
+/// shape of the first field. The guess was "starts with `/` means serial", and
+/// although that is true of every device path it is also true of an ssh alias
+/// someone spelled `prod/db` — while the app opened *every* entry as `ssh`, so
+/// picking a port ran `ssh /dev/ttyUSB0`. The kind is what the menu groups by,
+/// so it belongs in the type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Destination {
+    /// A serial device path, which is what a port is opened with.
+    Serial { path: String, detail: String },
+    /// An alias in `~/.ssh/config`.
+    Ssh { alias: String, detail: String },
 }
 
-/// Serial ports the new-tab menu offers, as `(path, detail)`.
+impl Destination {
+    /// What the menu says. The kind is in the text as well as in the grouping:
+    /// "serial /dev/ttyUSB0" and "ssh web" are different verbs, and a row that
+    /// only said `web` would not tell you which one it was going to do.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Serial { path, detail } if detail.is_empty() => format!("serial {path}"),
+            Self::Serial { path, detail } => format!("serial {path}  {detail}"),
+            Self::Ssh { alias, detail } if detail.is_empty() => format!("ssh {alias}"),
+            Self::Ssh { alias, detail } => format!("ssh {alias}  {detail}"),
+        }
+    }
+
+    pub fn is_serial(&self) -> bool {
+        matches!(self, Self::Serial { .. })
+    }
+}
+
+/// The ssh hosts the new-tab menu offers: `~/.ssh/config`'s aliases, with the
+/// detail line each one shows.
+pub fn ssh_destinations() -> Vec<Destination> {
+    ssh_hosts(&ssh_config_path())
+        .into_iter()
+        .map(|(alias, detail)| Destination::Ssh { alias, detail })
+        .collect()
+}
+
+/// Serial ports the new-tab menu offers.
 ///
 /// Polled rather than watched: `available_ports` is cross-platform, while udev
 /// is Linux-only and would give Windows a second, different behaviour.
-pub fn serial_destinations() -> Vec<(String, String)> {
+pub fn serial_destinations() -> Vec<Destination> {
     serial_ports()
         .into_iter()
-        .map(|port| (port.path, port.detail))
+        .map(|port| Destination::Serial {
+            path: port.path,
+            detail: port.detail,
+        })
         .collect()
 }
 

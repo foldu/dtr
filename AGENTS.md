@@ -467,7 +467,7 @@ checks the pixel at the computed position is the texture's colour and the far co
 is not — a mesh that never reached the screen fails there, which no amount of
 geometry testing would catch.
 
-**Right-clicking a link is a menu, and "Save as" is a path field.** Three things
+**Right-clicking a link is a menu.** Three things
 can be done with a link that names a file: `Open` (exactly what a left click does —
 it goes through `open_link` with the URI, so a remote one still opens a copy),
 `Save as...`, and `Copy path`. Only a link *under the pointer* gets a menu: a
@@ -669,13 +669,13 @@ Files are different — `~/.ssh/config` is watched with `notify` (inotify on Lin
 
 
 
-**The new-tab button is a menu, not a chord.** The `+` at the end of the strip opens
-`egui::Popup::menu`: the local shell first, then every alias in `~/.ssh/config`
-with the detail line the palette shows. It returns `TabHit::New(Option<String>)` —
-`None` is local, `Some(alias)` is `ssh -t <alias>` through the system client, so
-jump hosts and agent forwarding keep working. The destination list is read once at
-startup into `App::destinations`; reading `~/.ssh/config` per frame would be a
-syscall per redraw.
+**The new-tab button is a menu, not a chord.** The `+` opens `egui::Popup::menu`:
+the local shell, then the serial ports, then the hosts from `~/.ssh/config`, each
+group behind a separator, and each row says which it is. The answer is
+`TabHit::New(Option<Destination>)` — typed, because the menu used to guess "serial"
+from a leading `/` while the app opened *every* entry as `ssh`, so picking a port
+ran `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers the
+baud rate and CR translation set for it; a host is `ssh -t <alias>`.
 
 **Lucide's `currentColor` is black, and a tint multiplies.** An icon fetched
 verbatim disappeared on a dark chip: the rasteriser resolves `currentColor` to

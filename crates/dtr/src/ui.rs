@@ -312,15 +312,18 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
 pub enum TabHit {
     Select(usize),
     Close(usize),
-    /// Open a new tab: `None` is the local shell, `Some(alias)` an ssh host.
-    New(Option<String>),
+    /// Open a new tab: `None` is the local shell, `Some(destination)` is a
+    /// serial port or an ssh host. The destination travels *typed*: the app
+    /// used to open every non-`None` answer as `ssh`, which ran
+    /// `ssh /dev/ttyUSB0` when the entry picked was a serial port.
+    New(Option<crate::sources::Destination>),
 }
 
 pub fn tab_bar(
     ui: &mut Ui,
     labels: &[String],
     active: usize,
-    destinations: &[(String, String)],
+    destinations: &[crate::sources::Destination],
     look: &Look,
 ) -> Option<TabHit> {
     // Idempotent, and here rather than only at startup so every caller — the
@@ -433,8 +436,9 @@ pub fn tab_bar(
         }
 
         // The new-tab button. Its menu is where a terminal's destinations live:
-        // the local shell first, then whatever `~/.ssh/config` offers. Pointer
-        // only, like the chips, so Enter in the shell never opens a menu.
+        // the local shell first, then the serial ports and the ssh hosts, each
+        // group behind a separator. Pointer only, like the chips, so Enter in
+        // the shell never opens a menu.
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
             egui::Sense::click(),
@@ -469,34 +473,34 @@ pub fn tab_bar(
                 clicked = Some(TabHit::New(None));
                 ui.close();
             }
+            // The groups are separated, not just prefixed. `serial …` and
+            // `ssh …` are different verbs that lead to different panes, and a
+            // run of `/dev/tty…` rows with an `ssh` row in the middle is one
+            // where the pointer lands on the wrong half of the menu. A group
+            // that is empty takes its separator with it, so a machine with no
+            // serial ports looks like it always did.
+            for serial in [true, false] {
+                let group: Vec<&crate::sources::Destination> = destinations
+                    .iter()
+                    .filter(|destination| destination.is_serial() == serial)
+                    .collect();
+                if group.is_empty() {
+                    continue;
+                }
+                ui.separator();
+                for destination in group {
+                    if ui.button(destination.label()).clicked() {
+                        clicked = Some(TabHit::New(Some(destination.clone())));
+                        ui.close();
+                    }
+                }
+            }
             if destinations.is_empty() {
                 ui.label(
-                    egui::RichText::new("no hosts in ~/.ssh/config")
+                    egui::RichText::new("no serial ports and no ssh hosts")
                         .size(11.0)
                         .color(Look::colour(look.dim)),
                 );
-            }
-            for (alias, detail) in destinations.iter().filter(|(path, _)| path.starts_with('/')) {
-                let text = if detail.is_empty() {
-                    alias.clone()
-                } else {
-                    format!("serial {alias}  {detail}")
-                };
-                if ui.button(text).clicked() {
-                    clicked = Some(TabHit::New(Some(alias.clone())));
-                    ui.close();
-                }
-            }
-            for (alias, detail) in destinations.iter().filter(|(path, _)| !path.starts_with('/')) {
-                let text = if detail.is_empty() {
-                    format!("ssh {alias}")
-                } else {
-                    format!("ssh {alias}  {detail}")
-                };
-                if ui.button(text).clicked() {
-                    clicked = Some(TabHit::New(Some(alias.clone())));
-                    ui.close();
-                }
             }
         });
         let _ = menu;
@@ -589,17 +593,38 @@ mod kittest_tests {
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
-    /// The new-tab button offers the destinations a terminal has: the local
-    /// shell, and the hosts from `~/.ssh/config`.
+    /// The new-tab button offers the destinations a terminal has, each kind
+    /// behind its own separator: the local shell, the serial ports, the hosts.
+    ///
+    /// The grouping is also the *type*, and that is the point. The menu used to
+    /// decide "serial" by whether the destination began with `/`, and the app
+    /// then opened every entry as `ssh` — so picking a port ran
+    /// `ssh /dev/ttyUSB0`, and a `Host` someone spelled `prod/db` would have
+    /// been run as a port. Both are checked here.
     #[test]
-    fn the_new_tab_menu_offers_the_local_shell_and_the_ssh_hosts() {
+    fn the_new_tab_menu_offers_the_local_shell_and_each_kind_of_destination() {
+        use crate::sources::Destination;
+
         let look = Look::default();
         let clicked = std::rc::Rc::new(std::cell::RefCell::new(None));
         let sink = clicked.clone();
         let labels = vec!["demo".to_owned()];
-        let hosts = vec![("web".to_owned(), "alice@10.0.0.2".to_owned())];
+        let destinations = vec![
+            Destination::Serial {
+                path: "/dev/ttyUSB0".to_owned(),
+                detail: "FTDI".to_owned(),
+            },
+            Destination::Ssh {
+                alias: "web".to_owned(),
+                detail: "alice@10.0.0.2".to_owned(),
+            },
+            Destination::Ssh {
+                alias: "prod/db".to_owned(),
+                detail: String::new(),
+            },
+        ];
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 0, &hosts, &look) {
+            if let Some(hit) = tab_bar(ui, &labels, 0, &destinations, &look) {
                 *sink.borrow_mut() = Some(hit);
             }
         });
@@ -618,13 +643,78 @@ mod kittest_tests {
         *clicked.borrow_mut() = None;
         harness.get_by_label("new tab").click();
         harness.run();
+        harness.get_by_label("serial /dev/ttyUSB0  FTDI").click();
+        harness.run();
+        assert_eq!(
+            clicked.borrow().clone(),
+            Some(TabHit::New(Some(Destination::Serial {
+                path: "/dev/ttyUSB0".to_owned(),
+                detail: "FTDI".to_owned(),
+            }))),
+            "a serial port opens that port"
+        );
+
+        *clicked.borrow_mut() = None;
+        harness.get_by_label("new tab").click();
+        harness.run();
         harness.get_by_label("ssh web  alice@10.0.0.2").click();
         harness.run();
         assert_eq!(
             clicked.borrow().clone(),
-            Some(TabHit::New(Some("web".to_owned()))),
+            Some(TabHit::New(Some(Destination::Ssh {
+                alias: "web".to_owned(),
+                detail: "alice@10.0.0.2".to_owned(),
+            }))),
             "a host opens that host"
         );
+
+        *clicked.borrow_mut() = None;
+        harness.get_by_label("new tab").click();
+        harness.run();
+        harness.get_by_label("ssh prod/db").click();
+        harness.run();
+        assert!(
+            matches!(
+                clicked.borrow().clone(),
+                Some(TabHit::New(Some(Destination::Ssh { .. })))
+            ),
+            "an alias with a slash in it is still an ssh host, not a port"
+        );
+    }
+
+    /// The menu with both groups in it: local shell, the ports, the hosts.
+    ///
+    /// A separator is a painted line — no accessibility node, nothing the
+    /// queries above can see — so a picture is the only proof the grouping is
+    /// drawn at all rather than merely decided. `UPDATE_SNAPSHOTS=true cargo
+    /// test` writes the baseline; the plain run compares against it.
+    #[test]
+    fn the_new_tab_menu_separates_its_groups() {
+        use crate::sources::Destination;
+        let look = Look::default();
+        let labels = vec!["demo".to_owned()];
+        let destinations = vec![
+            Destination::Serial {
+                path: "/dev/ttyUSB0".to_owned(),
+                detail: "FTDI".to_owned(),
+            },
+            Destination::Ssh {
+                alias: "web".to_owned(),
+                detail: "alice@10.0.0.2".to_owned(),
+            },
+            Destination::Ssh {
+                alias: "prod/db".to_owned(),
+                detail: String::new(),
+            },
+        ];
+        let mut harness = Harness::new_ui(move |ui| {
+            tab_bar(ui, &labels, 0, &destinations, &look);
+        });
+        harness.run();
+
+        harness.get_by_label("new tab").click();
+        harness.run();
+        harness.snapshot("new_tab_menu");
     }
 
     /// Enter belongs to the terminal, even after a chip was clicked.

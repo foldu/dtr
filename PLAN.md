@@ -808,6 +808,21 @@ The explorer's per-file download still lands in `~/Downloads` without asking, be
 "take it" rather than "put it somewhere", and both paths still share the directory so the two ways of
 taking a remote file agree.
 
+**Two verbs in one menu, and the type that was missing.** The new-tab menu had grown a run of
+`/dev/ttyUSB0` rows and a run of `ssh` rows with nothing between them but a word prefix, so on a machine
+with two adapters and three hosts it was a list of five things where two of them opened a serial console
+and three opened a shell. They are now grouped behind separators — local shell, ports, hosts — and a group
+that is empty takes its separator with it, so nothing changes for a machine with no serial hardware.
+
+Grouping them meant naming them, and that found a bug worth the refactor on its own: the destinations were
+`(String, String)` pairs and both the menu *and* the app decided what an entry was by looking at whether
+the first field began with `/`. The menu called that "serial"; the app did not look at all — it opened
+every entry as `ssh`. So picking a port ran `ssh /dev/ttyUSB0`, and a `Host prod/db` in `~/.ssh/config`
+would have been run as a device path. `Destination` is an enum now (`Serial { path, .. }`,
+`Ssh { alias, .. }`), which the menu groups by and the app matches on, and a port opens through the
+palette's `Action::Connect` so the baud rate and CR translation someone set for that device are the ones
+it is opened with.
+
 ### M3 — the rest — the rest of a terminal
 
 - ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.
