@@ -1273,16 +1273,35 @@ so, not left to conclude that its menu command worked.
 
 ### Where it stands
 
-The reading half is implemented: `source` decodes a file (§3.1) and cuts it into lines
-(§3.2); `lex` turns a line into tokens (§3.3–§3.7); `line` classifies each line as one of the
-four kinds and checks that every block is closed by its own keyword (§6). There is no
-expression parser, no command set and no host interface yet, so nothing executes.
+The whole reading half and most of the running half are implemented. `source` decodes a file
+(§3.1) and cuts it into lines (§3.2); `lex` turns a line into tokens (§3.3–§3.7); `line`
+classifies each line as one of the four kinds; `program` turns the lines into a flat list of ops
+with every jump resolved, which is what §6 needs because `goto` can land in the middle of
+anything and a tree cannot express that; `interp` runs the ops with the four 256-entry variable
+budgets, the 512 labels, `call`/`return`, `include` as a stack of files, and the system variables
+of §4.7; `host` is everything the interpreter does not own — the dialogs of §7.6, `pause`, the
+file system, the receive queue §7.1's waits read from — so the same interpreter drives a window
+and a recording host.
 
 That boundary was chosen because it is the largest part of the task that can be *checked*
-against real macros without running them, and because it is where a TTL implementation usually
-gets things subtly wrong: `'abc'#13#10'def'` is one string (§3.7), a sign is an operator and
-therefore `for i 5 -1` has two parameters rather than three (§5.4), a `;` inside a quoted string
-is not a comment, and a `/* */` comment can end mid-line with code after it (§3.3).
+against real macros, and because it is where a TTL implementation usually gets things subtly
+wrong: `'abc'#13#10'def'` is one string (§3.7), a sign is an operator and therefore `for i 5 -1`
+has two parameters rather than three (§5.4), a `;` inside a quoted string is not a comment, a
+`/* */` comment can end mid-line with code after it (§3.3), and `until` repeats while the
+condition is *zero* (§6.3).
+
+Two decisions are ours rather than Tera Term's and are written down where they happen: a macro
+that executes two million ops stops with `Step limit reached.` instead of running until somebody
+closes the window, and `return` with nothing to return from ends the file rather than inventing a
+message §8 does not have.
+
+What is left is honest rather than structural: the settings a macro sets and never reads back
+(`setbaud`, `logrotate`, `sendkcode`) are recorded and ignored, file transfer is a stub that
+reports success, `gettime`'s `<timezone>` parameter is recorded rather than honoured, and the
+password store keeps its passwords in memory instead of in Tera Term's encrypted file. The one
+that shows up in the data is decoding: a CP932 file's string literals reach the dialogs as the
+bytes they are, so `code_cp932.ttl` shows mojibake where Tera Term shows Japanese. That needs a
+code-page decoder and is the next thing this crate should grow.
 
 ### The corpus
 
@@ -1293,10 +1312,14 @@ and two thirds end in `messagebox`, so they are a checklist rather than a suite 
 real TTL, written for Tera Term, and they contain what a synthetic test would not think of: 15
 CP932 files, one UTF-16BE, one UTF-16LE, Windows drive letters, `ls` against a live host.
 
-What `tests/corpus.rs` asserts is that all 53 decode, lex and nest, and it pins the totals — 53
-files, 2 485 lines, 1 621 commands — so a scanner change that silently stops seeing something
-fails. What it cannot assert is that they *run*. They were kept for that reason: the expected
-answers are already written in the files, so a host interface that records `messagebox`
-arguments instead of displaying them turns most of the corpus into assertions without editing a
-single macro. That is the argument for making the dialog commands host calls from the start
-rather than drawing them from the evaluator.
+`tests/corpus.rs` asserts that all 53 decode, lex and nest, and that 52 compile to a program with
+every jump resolved, pinning the totals — 53 files, 2 485 lines, 1 621 commands — so a scanner
+change that silently stops seeing something fails. `tests/run_corpus.rs` goes further: it *runs*
+them against a recording host. 47 run to completion, four stop where their own comments say they
+should (they are reproductions of Tera Term errors), and one is skipped as too heavy — 110,000
+samples for each of 100 buckets. `tests/corpus-dialogs.txt` is the result: every `messagebox` in
+the corpus as `title :: message`, generated and then reviewed as data, so a macro that prints a
+different number or stops talking is a diff.
+
+That is the argument for making the dialog commands host calls from the start rather than drawing
+them from the evaluator: the expected answers were already written in the files.

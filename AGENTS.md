@@ -19,7 +19,7 @@ window, one OS thread per pane. `crates/` holds the workspace:
 | `dtr-sshconfig` | the ssh config parser |
 | `dtr-sftp` | the SFTP client |
 | `dtr-vfs` | file backends: local, in-memory, ssh |
-| `dtr-ttl` | the Tera Term macro language — manual, corpus, and the reading half of an interpreter |
+| `dtr-ttl` | the Tera Term macro language — manual, corpus, and an interpreter that runs the corpus |
 
 ## Building and testing
 
@@ -680,6 +680,9 @@ enough.
 - `crates/dtr-ttl/tests/corpus/` — Tera Term's own 53 macro tests, vendored under
   their BSD-3 notice; its README says what they pin and what they cannot. The
   totals asserted in `tests/corpus.rs` move only when the corpus is re-vendored.
+  `tests/run_corpus.rs` runs them against a recording host and
+  `tests/corpus/corpus-dialogs.txt` is what they said — regenerate it with
+  `UPDATE_CORPUS_DIALOGS=1` and read the diff.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
