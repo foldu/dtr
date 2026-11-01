@@ -1,7 +1,7 @@
 //! Completion and ranking for the command palette.
 //!
 //! The palette is one input line that means different things depending on its
-//! first word: `connect /dev/ttyUSB0`, `ssh jupiter.home`, `shell fish`. That
+//! first word: `connect /dev/ttyUSB0`, `ssh jupiter.home`, `exec fish`. That
 //! shape decides the design here — a *command* completes against a fixed list,
 //! an *argument* completes against whatever that command knows about, and both
 //! need to answer two different questions:
@@ -70,6 +70,17 @@ struct Command {
     argument: Argument,
 }
 
+/// The palette's commands.
+///
+/// **Every one starts with a different letter**, and that is not a coincidence
+/// to preserve: the first letter is the accelerator, so `s` is `ssh` and Tab on
+/// one letter finishes the word. `every_command_starts_with_a_different_letter`
+/// fails when a new command breaks it — rename the new one, do not merge the
+/// two into a shared prefix.
+///
+/// A command that `palette::action_for` has no arm for belongs here only after
+/// it has one: the list is an offer, and an offer that does nothing is worse
+/// than a shorter list.
 const COMMANDS: &[Command] = &[
     Command {
         name: "connect",
@@ -82,7 +93,7 @@ const COMMANDS: &[Command] = &[
         argument: Argument::Hosts,
     },
     Command {
-        name: "shell",
+        name: "exec",
         summary: "launch a local shell",
         argument: Argument::Shells,
     },
@@ -94,16 +105,6 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "files",
         summary: "open a file browser pane",
-        argument: Argument::None,
-    },
-    Command {
-        name: "log",
-        summary: "append raw bytes to a file",
-        argument: Argument::None,
-    },
-    Command {
-        name: "logbook",
-        summary: "list recorded sessions",
         argument: Argument::None,
     },
     Command {
@@ -449,7 +450,7 @@ mod tests {
 
     #[test]
     fn shells_complete() {
-        let completions = engine().complete("shell fi");
+        let completions = engine().complete("exec fi");
         assert_eq!(completions[0].item.label, "fish");
         assert_eq!(completions[0].item.kind, Kind::Shell);
     }
@@ -463,16 +464,54 @@ mod tests {
 
     #[test]
     fn a_command_without_arguments_offers_nothing() {
-        assert!(engine().complete("logbook x").is_empty());
+        assert!(engine().complete("demo x").is_empty());
         // After the space the *argument* is the word being completed, and this
         // command has none — offering the command back would be noise, and it
         // is what made `ssh ` complete commands instead of hosts.
-        assert!(engine().complete("logbook ").is_empty());
+        assert!(engine().complete("demo ").is_empty());
     }
 
     #[test]
     fn empty_input_ranks_every_command() {
         let completions = engine().complete("");
         assert_eq!(completions.len(), super::COMMANDS.len());
+    }
+
+    /// The palette's rule: the first letter is the accelerator, so `s` is `ssh`
+    /// and nothing else may start with `s`. Two commands sharing a letter make
+    /// `s<Tab>` a guess, and the list a list of near-misses.
+    #[test]
+    fn every_command_starts_with_a_different_letter() {
+        let mut owner: std::collections::BTreeMap<char, &'static str> = Default::default();
+        for command in super::COMMANDS {
+            let letter = command
+                .name
+                .chars()
+                .next()
+                .expect("a command has a name")
+                .to_ascii_lowercase();
+            if let Some(other) = owner.insert(letter, command.name) {
+                panic!("`{other}` and `{}` both start with `{letter}`", command.name);
+            }
+        }
+    }
+
+    /// The rule's consequence: one letter, one command, and Tab finishes the
+    /// word. This is also the ranking assertion — an inner fuzzy match must not
+    /// outrank the command that starts with the letter, or `c<Tab>` would
+    /// complete `exec`.
+    #[test]
+    fn one_letter_completes_to_its_command() {
+        for command in super::COMMANDS {
+            let letter = &command.name[..1];
+            let inline = engine()
+                .inline(letter)
+                .unwrap_or_else(|| panic!("`{letter}` completed to nothing"));
+            assert_eq!(
+                format!("{letter}{}", inline.suffix),
+                command.name,
+                "`{letter}` should complete to the one command that starts with it"
+            );
+        }
     }
 }

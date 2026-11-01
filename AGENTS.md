@@ -641,6 +641,13 @@ and offered commands where hosts belong; `Parsed::of` keeps it. The consequence:
 space there is nothing to complete for a command with no arguments, so the list is empty
 rather than offering the command back.
 
+**A command's first letter is its accelerator, so it is unique.** `s` is `ssh` and
+nothing else may start with `s`: rename the new command rather than share the letter
+(`shell` became `exec`). `crates/dtr-complete` fails the build when two commands collide,
+and holds the ranking to it — one letter must *complete* to its command, not just rank
+it first. A command with no `palette::action_for` arm does not belong in the list: `log`
+and `logbook` were offered and inert, and are gone.
+
 **`C-n` and `C-p` are consumed like the arrows** — taken from `input_mut` before the text
 field sees them, so navigating cannot land an `n` in the query. **Reopening the palette
 starts a fresh sentence**: `toggle` clears query, selection and completions. **A modal

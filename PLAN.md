@@ -437,11 +437,19 @@ single owner task that receives `Write`/`Dtr`/`Rts`/`Break` commands, which mean
 split-read design; that is its own piece of work.
 
 **The picker is a palette, and its logic is `crates/dtr-complete`.** One input line that means
-different things by its first word — `connect /dev/ttyUSB0`, `ssh jupiter.home`, `shell fish` — so the
+different things by its first word — `connect /dev/ttyUSB0`, `ssh jupiter.home`, `exec fish` — so the
 engine answers two questions: `complete` (ranked list) and `inline` (the grey suffix Tab accepts).
 Inline is deliberately narrower: it only fires when the top candidate *starts with* what was typed.
 `ssh jptr` ranks jupiter first but shares no prefix, and ghost text that has nothing to do with the
 typed characters reads as a glitch, not a suggestion.
+
+**Every command starts with a different letter.** `s` is `ssh`, so nothing else may start with `s`;
+the first letter is the accelerator and Tab on one letter finishes the word. `shell` became `exec`
+for that reason. `log` and `logbook` left the list because `action_for` had no arm for either — the
+palette offers only commands that do something. `dtr-complete`'s
+`every_command_starts_with_a_different_letter` fails the build when a new command breaks the rule,
+and `one_letter_completes_to_its_command` holds the ranking to it: one letter must *complete* to its
+command, not merely appear before it.
 
 Ranking uses `nucleo-matcher` (helix's matcher): 5.2M downloads, two small pure-Rust dependencies
 (`memchr`, `unicode-segmentation`), and much better scoring than a naive subsequence — word

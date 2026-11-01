@@ -319,7 +319,7 @@ fn action_for(line: &str) -> Option<Action> {
         "connect" if !rest.is_empty() => Some(Action::Connect(rest.to_owned())),
         "theme" if !rest.is_empty() => Some(Action::Theme(rest.to_owned())),
         "ssh" if !rest.is_empty() => Some(Action::Ssh(rest.to_owned())),
-        "shell" => Some(Action::Shell(rest.to_owned())),
+        "exec" => Some(Action::Shell(rest.to_owned())),
         "replay" if !rest.is_empty() => Some(Action::Replay(rest.to_owned())),
         "files" => Some(Action::Files((!rest.is_empty()).then(|| rest.to_owned()))),
         "demo" => Some(Action::Demo),
@@ -350,8 +350,8 @@ mod tests {
     }
 
     #[test]
-    fn bare_shell_is_allowed() {
-        assert!(matches!(action_for("shell"), Some(Action::Shell(s)) if s.is_empty()));
+    fn bare_exec_is_allowed() {
+        assert!(matches!(action_for("exec"), Some(Action::Shell(s)) if s.is_empty()));
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod kittest_tests {
 
         harness
             .get_by_role(egui::accesskit::Role::TextInput)
-            .type_text("shell");
+            .type_text("exec");
         harness.run();
         harness.key_press(egui::Key::Enter);
         harness.run();
@@ -428,9 +428,9 @@ mod kittest_tests {
         harness.run();
         harness
             .get_by_role(egui::accesskit::Role::TextInput)
-            .type_text("shell");
+            .type_text("exec");
         harness.run();
-        assert_eq!(palette.borrow().text(), "shell", "typing reached the field");
+        assert_eq!(palette.borrow().text(), "exec", "typing reached the field");
 
         palette.borrow_mut().toggle();
         palette.borrow_mut().toggle();
