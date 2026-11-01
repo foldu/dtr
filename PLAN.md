@@ -1298,10 +1298,19 @@ message §8 does not have.
 What is left is honest rather than structural: the settings a macro sets and never reads back
 (`setbaud`, `logrotate`, `sendkcode`) are recorded and ignored, file transfer is a stub that
 reports success, `gettime`'s `<timezone>` parameter is recorded rather than honoured, and the
-password store keeps its passwords in memory instead of in Tera Term's encrypted file. The one
-that shows up in the data is decoding: a CP932 file's string literals reach the dialogs as the
-bytes they are, so `code_cp932.ttl` shows mojibake where Tera Term shows Japanese. That needs a
-code-page decoder and is the next thing this crate should grow.
+password store keeps its passwords in memory instead of in Tera Term's encrypted file. The
+regular-expression commands are the sharp edge of what is missing: `strmatch` and `regexoption`
+are not implemented at all, and `strreplace` and `waitregex` match literally where Tera Term uses
+Oniguruma. Nothing in the corpus needs them, which is why they are named here rather than assumed.
+
+**Code pages are a decision, not a gap.** A macro for dtr is a UTF-8 file. A legacy CP932 one
+still reads, lexes and runs — its non-ASCII *text* arrives as the bytes it holds (§3.1's ANSI
+fallback is byte-preserving), so the two corpus files that print Japanese print mojibake. Shipping
+a table for every Windows code page to fix the text of other people's legacy files is not worth
+it; the terminal's own text is UTF-8 everywhere.
+
+Nothing in `dtr` calls this crate yet: `Host` has one implementation, the recording one, so the
+terminal cannot run a macro until a `Host` over a live pane exists.
 
 ### The corpus
 

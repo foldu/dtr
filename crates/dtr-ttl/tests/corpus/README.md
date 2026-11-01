@@ -55,10 +55,13 @@ UPDATE_CORPUS_DIALOGS=1 cargo test -p dtr-ttl --test run_corpus
 and read the diff before committing it — regenerating a golden file without
 reading it is how a regression becomes an expectation.
 
-One known gap is visible in that file: a CP932 macro's string literals reach the
-dialogs as the bytes they are, decoded byte-preservingly rather than as Japanese,
-so `code_cp932.ttl` and `#36405-strreplace.ttl` show mojibake. A real code-page
-decoder is what fixes it; nothing else in the corpus cares.
+One thing in that file is deliberately not a gap. A CP932 macro's string
+literals reach the dialogs as the bytes they hold, because §3.1's ANSI fallback
+is byte-preserving and there is no code-page decoder behind it: a macro for dtr
+is a UTF-8 file, a legacy one still reads and runs, and translating every
+Windows code page to fix the text of other people's legacy files is not worth a
+table. `code_cp932.ttl` and `#36405-strreplace.ttl` therefore print mojibake
+where Tera Term prints Japanese; everything else about them works.
 
 `params_array.ttl` and `macroparam.ttl` want upstream's `.bat` wrappers, which
 were not vendored: they are run here with no parameters, so they exercise

@@ -27,8 +27,14 @@ pub enum Encoding {
     /// lexically faithful for the files a macro is written in: every ANSI code
     /// page is ASCII-compatible, and CP932's trail bytes are `0x40..=0xFC`, so
     /// no quote, semicolon, bracket, equals sign or newline can be hiding in
-    /// the second byte of a double-byte character. The text needs a real
-    /// decoder before any command may see it; the *structure* does not.
+    /// the second byte of a double-byte character.
+    ///
+    /// There is deliberately no code-page decoder behind this. A macro for dtr
+    /// is a UTF-8 file; a legacy one still *reads*, still lexes, still runs its
+    /// control flow and its file and connection commands, and the non-ASCII
+    /// text inside it reaches the dialogs as the bytes it holds. Translating
+    /// every Windows code page is a large table for one platform's legacy
+    /// files, and the terminal's own text is UTF-8 everywhere else.
     Ansi,
 }
 
