@@ -24,7 +24,10 @@ fn manifest_dir() -> PathBuf {
 /// Every name passed to `harness.snapshot("…")` under `src/`.
 fn snapshots_taken() -> BTreeSet<String> {
     fn walk(dir: &Path, names: &mut BTreeSet<String>) {
-        for entry in std::fs::read_dir(dir).expect("src is part of the crate").flatten() {
+        for entry in std::fs::read_dir(dir)
+            .expect("src is part of the crate")
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, names);
@@ -107,8 +110,8 @@ fn every_snapshot_has_a_baseline_in_the_repository() {
             .join("tests")
             .join("snapshots")
             .join(format!("{name}.png"));
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         assert!(
             bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
             "{} is not a PNG: a 130-byte file starting with \"version https://git-lfs\" is a \

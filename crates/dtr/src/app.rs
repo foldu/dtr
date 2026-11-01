@@ -64,7 +64,10 @@ pub enum UserEvent {
 /// must not be able to stall emulation (docs/sftp.md §5.2).
 #[derive(Debug)]
 pub enum SftpMsg {
-    List { alias: String, path: PathBuf },
+    List {
+        alias: String,
+        path: PathBuf,
+    },
     Download {
         alias: String,
         remote: PathBuf,
@@ -187,7 +190,10 @@ mod link_tests {
             Some(PathBuf::from("/tmp/a b.png"))
         );
         // A stray % is a literal: dropping it would silently change the path.
-        assert_eq!(path("file:///tmp/100%", false), Some(PathBuf::from("/tmp/100%")));
+        assert_eq!(
+            path("file:///tmp/100%", false),
+            Some(PathBuf::from("/tmp/100%"))
+        );
     }
 
     /// `ls --hyperlink=always` writes this machine's name into the URI, not
@@ -221,8 +227,14 @@ mod link_tests {
     /// `localhost` — which names the *remote* machine there, not this one.
     #[test]
     fn a_remote_session_resolves_on_its_own_host() {
-        assert_eq!(path("file://localhost/etc/hosts", true), Some(PathBuf::from("/etc/hosts")));
-        assert_eq!(path("file:///etc/hosts", true), Some(PathBuf::from("/etc/hosts")));
+        assert_eq!(
+            path("file://localhost/etc/hosts", true),
+            Some(PathBuf::from("/etc/hosts"))
+        );
+        assert_eq!(
+            path("file:///etc/hosts", true),
+            Some(PathBuf::from("/etc/hosts"))
+        );
         assert_eq!(
             path("file://jupyter.example/etc/hosts", true),
             Some(PathBuf::from("/etc/hosts"))
@@ -313,7 +325,9 @@ pub fn capture_headless(
     if startup.scroll != 0 {
         // After the output has arrived: scrolling an empty screen clamps to
         // zero, and the result looks like a scroll that did nothing.
-        std::thread::sleep(std::time::Duration::from_millis(u64::from(delay.as_millis() as u64 / 2)));
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(
+            delay.as_millis() as u64 / 2,
+        )));
         pane.send(crate::pane::Command::Scroll(-startup.scroll as isize));
     }
 
@@ -322,7 +336,9 @@ pub fn capture_headless(
     // the window would show.
     {
         let metrics = crate::screenshot::cell_metrics(width, height)?;
-        let cols = (f64::from(width) / f64::from(metrics.cell_width)).floor().max(1.0) as u16;
+        let cols = (f64::from(width) / f64::from(metrics.cell_width))
+            .floor()
+            .max(1.0) as u16;
         let rows = ((f64::from(height) - f64::from(crate::ui::STATUS_HEIGHT)).max(1.0)
             / f64::from(metrics.cell_height))
         .floor()
@@ -469,11 +485,12 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         startup.theme.clone(),
         std::sync::Arc::clone(&frame_budget),
         {
-        let proxy = proxy.clone();
-        move || {
-            let _ = proxy.send_event(UserEvent::Frame);
-        }
-    })?;
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(UserEvent::Frame);
+            }
+        },
+    )?;
     if !startup.send.is_empty() {
         pane.write(startup.send.clone());
     }
@@ -621,16 +638,12 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             .map(crate::keys::parse_script)
             .unwrap_or_default()
             .into(),
-        capture: startup
-            .capture
-            .clone()
-            .map(|path| {
-                (
-                    path,
-                    std::time::Instant::now()
-                        + std::time::Duration::from_millis(startup.capture_after),
-                )
-            }),
+        capture: startup.capture.clone().map(|path| {
+            (
+                path,
+                std::time::Instant::now() + std::time::Duration::from_millis(startup.capture_after),
+            )
+        }),
         held: None,
         config: startup.config.clone(),
         config_path: startup.config_path.clone(),
@@ -694,7 +707,9 @@ fn sftp_worker(
                 let session = dtr_sftp::Session::connect(&alias).await?;
                 connected = Some((alias.clone(), session));
             }
-            let (_, session) = connected.as_mut().ok_or_else(|| anyhow::anyhow!("no session"))?;
+            let (_, session) = connected
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("no session"))?;
             match message {
                 SftpMsg::List { alias, path } => {
                     // "." is the pane's way of asking for the home directory:
@@ -1130,7 +1145,9 @@ impl App {
             .and_then(|monitor| monitor.refresh_rate_millihertz());
         let budget = crate::pane::frame_budget(refresh);
         let nanos = budget.as_nanos() as u64;
-        let before = self.frame_budget.swap(nanos, std::sync::atomic::Ordering::Relaxed);
+        let before = self
+            .frame_budget
+            .swap(nanos, std::sync::atomic::Ordering::Relaxed);
         if before != nanos {
             tracing::debug!(
                 refresh_mhz = refresh.unwrap_or(0),
@@ -1237,181 +1254,178 @@ impl App {
     /// Handle one key event. Both the window and `--keys` come through here, so
     /// a scripted run exercises the same decisions a person's hands would.
     fn on_key(&mut self, stroke: &crate::keys::KeyStroke) {
-                // Every key event, before any decision: if a character arrives
-                // twice this is where you see it.
-                tracing::debug!(
-                    key = ?stroke.key,
-                    state = ?stroke.state,
-                    text = ?stroke.text,
-                    repeat = stroke.repeat,
-                    "key"
-                );
-                // Alt+digit selects a tab by number: the only binding that
-                // cannot be written as one chord, because it is "any digit".
-                let alt_digit = stroke.mods.alt_key()
-                    && stroke.state == winit::event::ElementState::Pressed
-                    && match &stroke.key {
-                        winit::keyboard::Key::Character(text) if stroke.mods.alt_key() => {
-                            match text.chars().next().and_then(|c| c.to_digit(10)) {
-                                Some(0) => {
-                                    self.set_active(self.tabs.len() - 1, "alt+0");
-                                    true
-                                }
-                                Some(digit) if digit as usize <= self.tabs.len() => {
-                                    self.set_active(digit as usize - 1, "alt+digit");
-                                    true
-                                }
-                                _ => false,
-                            }
+        // Every key event, before any decision: if a character arrives
+        // twice this is where you see it.
+        tracing::debug!(
+            key = ?stroke.key,
+            state = ?stroke.state,
+            text = ?stroke.text,
+            repeat = stroke.repeat,
+            "key"
+        );
+        // Alt+digit selects a tab by number: the only binding that
+        // cannot be written as one chord, because it is "any digit".
+        let alt_digit = stroke.mods.alt_key()
+            && stroke.state == winit::event::ElementState::Pressed
+            && match &stroke.key {
+                winit::keyboard::Key::Character(text) if stroke.mods.alt_key() => {
+                    match text.chars().next().and_then(|c| c.to_digit(10)) {
+                        Some(0) => {
+                            self.set_active(self.tabs.len() - 1, "alt+0");
+                            true
+                        }
+                        Some(digit) if digit as usize <= self.tabs.len() => {
+                            self.set_active(digit as usize - 1, "alt+digit");
+                            true
                         }
                         _ => false,
-                    };
-
-                // Everything else comes from the keymap, which the config file
-                // can rewrite. `pending` holds the chords of a binding that is
-                // not finished yet (`ctrl-k ctrl-s`).
-                let pressed = stroke.state == winit::event::ElementState::Pressed;
-
-                // The menu owns the keyboard while it is open. Releases only
-                // clear the held key; duplicates are compositor noise.
-                if self.settings.open {
-                    if !pressed {
-                        self.held = None;
-                        return;
-                    }
-                    if !stroke.repeat && self.held.as_ref() == Some(&stroke.key) {
-                        tracing::debug!(key = ?stroke.key, "ignoring a duplicate press");
-                        return;
-                    }
-                    self.held = Some(stroke.key.clone());
-                    let closes = crate::keys::chord_from_event(&stroke.key, stroke.mods)
-                        .is_some_and(|chord| {
-                            matches!(
-                                self.keymap.resolve(&[], chord),
-                                crate::keys::Matched::Action(crate::keys::Action::Settings)
-                            )
-                        });
-                    if closes {
-                        self.settings.open = false;
-                        self.repaint("settings closed");
-                        return;
-                    }
-                    match self.settings.handle(&stroke.key) {
-                        Some(crate::settings::Effect::Apply) => self.apply_settings(),
-                        Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
-                        Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
-                        None => {}
-                    }
-                    return;
-                }
-
-                // The pager owns the keyboard while it is open. Strictly: a
-                // keystroke that reached the shell would run a command nobody
-                // meant to type, and `j`/`k` are exactly the keys a shell keeps.
-                if self.pager.is_open() {
-                    if !pressed {
-                        self.held = None;
-                        return;
-                    }
-                    match self.pager.handle(&stroke.key, &stroke.mods) {
-                        Some(crate::pager::Action::Close) => {
-                            self.pager.close();
-                            self.repaint("pager closed");
-                        }
-                        Some(crate::pager::Action::Copy(text)) => {
-                            self.set_clipboard(&text);
-                            let note = format!("copied {} lines from the block", text.lines().count());
-                            self.toast = Some((note, std::time::Instant::now()));
-                            self.repaint("block copied");
-                        }
-                        None => self.repaint("pager scrolled"),
-                    }
-                    self.held = Some(stroke.key.clone());
-                    return;
-                }
-
-                // The menu owns the keyboard in the same way, but only briefly:
-                // any key dismisses it and then goes where it was going. Escape is
-                // the one that must not reach the shell, because it was aimed at
-                // the menu.
-                if self.link_menu.is_open() && pressed {
-                    let escape = matches!(
-                        &stroke.key,
-                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
-                    );
-                    self.link_menu.close();
-                    self.repaint("link menu closed");
-                    if escape {
-                        return;
                     }
                 }
+                _ => false,
+            };
 
-                let mut consumed = alt_digit;
-                let action = if pressed && !consumed {
-                    crate::keys::chord_from_event(&stroke.key, stroke.mods).and_then(
-                        |chord| match self.keymap.resolve(&self.pending, chord) {
-                            crate::keys::Matched::Action(action) => {
-                                self.pending.clear();
-                                self.pending_since = None;
-                                Some(action)
-                            }
-                            crate::keys::Matched::Prefix => {
-                                self.pending.push(chord);
-                                self.pending_since = Some(std::time::Instant::now());
-                                self.repaint("prefix");
-                                consumed = true;
-                                None
-                            }
-                            crate::keys::Matched::Nothing => {
-                                self.pending.clear();
-                                self.pending_since = None;
-                                None
-                            }
-                        },
+        // Everything else comes from the keymap, which the config file
+        // can rewrite. `pending` holds the chords of a binding that is
+        // not finished yet (`ctrl-k ctrl-s`).
+        let pressed = stroke.state == winit::event::ElementState::Pressed;
+
+        // The menu owns the keyboard while it is open. Releases only
+        // clear the held key; duplicates are compositor noise.
+        if self.settings.open {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            if !stroke.repeat && self.held.as_ref() == Some(&stroke.key) {
+                tracing::debug!(key = ?stroke.key, "ignoring a duplicate press");
+                return;
+            }
+            self.held = Some(stroke.key.clone());
+            let closes =
+                crate::keys::chord_from_event(&stroke.key, stroke.mods).is_some_and(|chord| {
+                    matches!(
+                        self.keymap.resolve(&[], chord),
+                        crate::keys::Matched::Action(crate::keys::Action::Settings)
                     )
-                } else {
-                    None
-                };
+                });
+            if closes {
+                self.settings.open = false;
+                self.repaint("settings closed");
+                return;
+            }
+            match self.settings.handle(&stroke.key) {
+                Some(crate::settings::Effect::Apply) => self.apply_settings(),
+                Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
+                Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
+                None => {}
+            }
+            return;
+        }
 
-                if let Some(action) = action {
-                    consumed = self.dispatch(action);
+        // The pager owns the keyboard while it is open. Strictly: a
+        // keystroke that reached the shell would run a command nobody
+        // meant to type, and `j`/`k` are exactly the keys a shell keeps.
+        if self.pager.is_open() {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            match self.pager.handle(&stroke.key, &stroke.mods) {
+                Some(crate::pager::Action::Close) => {
+                    self.pager.close();
+                    self.repaint("pager closed");
                 }
+                Some(crate::pager::Action::Copy(text)) => {
+                    self.set_clipboard(&text);
+                    let note = format!("copied {} lines from the block", text.lines().count());
+                    self.toast = Some((note, std::time::Instant::now()));
+                    self.repaint("block copied");
+                }
+                None => self.repaint("pager scrolled"),
+            }
+            self.held = Some(stroke.key.clone());
+            return;
+        }
 
-                if !consumed {
-                    if self.session().is_none() {
-                        // A file pane has focus: it gets navigation keys, and
-                        // everything terminal-only is ignored.
-                        if !self.palette.open
-                            && !stroke.mods.control_key()
-                            && !stroke.mods.alt_key()
-                        {
-                            if let Some(key) = explorer_key(&stroke.key) {
-                                let chosen = self
-                                    .focused_explorer_mut()
-                                    .and_then(|explorer| explorer.handle(key));
-                                if let Some(path) = chosen {
-                                    self.insert_path_into_terminal(path);
-                                }
-                            }
-                        }
-                        self.repaint("file navigation");
-                    } else if !self.palette.open && !self.settings.open {
-                        // The palette and the menu own the keyboard while they
-                        // are open; otherwise the key belongs to the session.
-                        //
-                        // Releases go too, and that is not a doubled keystroke:
-                        // the encoder emits nothing for a release unless the
-                        // program asked for the kitty protocol's press and
-                        // release reporting — and when it did, the release is
-                        // exactly what it asked for.
-                        if let Some(session) = self.session() {
-                            session
-                                .pane
-                                .send(crate::pane::Command::Key(Box::new(stroke.clone())));
+        // The menu owns the keyboard in the same way, but only briefly:
+        // any key dismisses it and then goes where it was going. Escape is
+        // the one that must not reach the shell, because it was aimed at
+        // the menu.
+        if self.link_menu.is_open() && pressed {
+            let escape = matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+            );
+            self.link_menu.close();
+            self.repaint("link menu closed");
+            if escape {
+                return;
+            }
+        }
+
+        let mut consumed = alt_digit;
+        let action = if pressed && !consumed {
+            crate::keys::chord_from_event(&stroke.key, stroke.mods).and_then(|chord| {
+                match self.keymap.resolve(&self.pending, chord) {
+                    crate::keys::Matched::Action(action) => {
+                        self.pending.clear();
+                        self.pending_since = None;
+                        Some(action)
+                    }
+                    crate::keys::Matched::Prefix => {
+                        self.pending.push(chord);
+                        self.pending_since = Some(std::time::Instant::now());
+                        self.repaint("prefix");
+                        consumed = true;
+                        None
+                    }
+                    crate::keys::Matched::Nothing => {
+                        self.pending.clear();
+                        self.pending_since = None;
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
+        if let Some(action) = action {
+            consumed = self.dispatch(action);
+        }
+
+        if !consumed {
+            if self.session().is_none() {
+                // A file pane has focus: it gets navigation keys, and
+                // everything terminal-only is ignored.
+                if !self.palette.open && !stroke.mods.control_key() && !stroke.mods.alt_key() {
+                    if let Some(key) = explorer_key(&stroke.key) {
+                        let chosen = self
+                            .focused_explorer_mut()
+                            .and_then(|explorer| explorer.handle(key));
+                        if let Some(path) = chosen {
+                            self.insert_path_into_terminal(path);
                         }
                     }
                 }
+                self.repaint("file navigation");
+            } else if !self.palette.open && !self.settings.open {
+                // The palette and the menu own the keyboard while they
+                // are open; otherwise the key belongs to the session.
+                //
+                // Releases go too, and that is not a doubled keystroke:
+                // the encoder emits nothing for a release unless the
+                // program asked for the kitty protocol's press and
+                // release reporting — and when it did, the release is
+                // exactly what it asked for.
+                if let Some(session) = self.session() {
+                    session
+                        .pane
+                        .send(crate::pane::Command::Key(Box::new(stroke.clone())));
                 }
+            }
+        }
+    }
 
     /// Whether the program in the focused pane asked for the mouse.
     ///
@@ -1501,7 +1515,10 @@ impl App {
     /// That pair is what X10 reporting has — there is no "wheel" event in it —
     /// and it is how vim, less and every pager over ssh scroll.
     fn scroll_to_program(&mut self, up: bool, notches: usize) {
-        let Some(at) = self.cursor_position.and_then(|(x, y)| self.pane_pixels(x, y)) else {
+        let Some(at) = self
+            .cursor_position
+            .and_then(|(x, y)| self.pane_pixels(x, y))
+        else {
             return;
         };
         let button = if up {
@@ -1806,10 +1823,7 @@ impl App {
         };
         // Said before rather than after: a file over a slow link is a silence,
         // and a silence nobody explained reads as a button that did nothing.
-        self.toast = Some((
-            format!("saving {name}..."),
-            std::time::Instant::now(),
-        ));
+        self.toast = Some((format!("saving {name}..."), std::time::Instant::now()));
         runtime.spawn(async move {
             let outcome = copy_to(&vfs, &location, &dest).await;
             let note = match outcome {
@@ -2342,7 +2356,8 @@ impl App {
                 let page = self
                     .session()
                     .and_then(|session| session.frame.as_ref())
-                    .map_or(10, |frame| frame.rows.saturating_sub(1)) as isize;
+                    .map_or(10, |frame| frame.rows.saturating_sub(1))
+                    as isize;
                 let Some(session) = self.session() else {
                     return false;
                 };
@@ -2851,8 +2866,7 @@ impl App {
         {
             return;
         }
-        tab.leaves
-            .insert(id, Pane::Files(Explorer::remote(alias)));
+        tab.leaves.insert(id, Pane::Files(Explorer::remote(alias)));
         tab.focus = id;
     }
 
@@ -2867,8 +2881,7 @@ impl App {
         {
             return;
         }
-        tab.leaves
-            .insert(id, Pane::Files(Explorer::new(path)));
+        tab.leaves.insert(id, Pane::Files(Explorer::new(path)));
         tab.focus = id;
     }
 
@@ -3006,17 +3019,10 @@ impl App {
             0.0
         };
         let tab = &mut self.tabs[self.active];
-        let rects = tab
-            .layout
-            .rects(
-                crate::layout::Rect::new(
-                    0.0,
-                    inset,
-                    screen.0,
-                    (screen.1 - status - inset).max(0.0),
-                ),
-                crate::ui::SPLIT_GAP * scale,
-            );
+        let rects = tab.layout.rects(
+            crate::layout::Rect::new(0.0, inset, screen.0, (screen.1 - status - inset).max(0.0)),
+            crate::ui::SPLIT_GAP * scale,
+        );
         for (id, rect) in rects {
             let Some(session) = tab.leaves.get_mut(&id).and_then(Pane::terminal_mut) else {
                 continue;
@@ -3073,8 +3079,12 @@ impl App {
             .into_iter()
             .find(|(id, _)| *id == tab.focus)
             .map(|(_, pane)| (pane.rect.x, pane.rect.y))?;
-        let col = ((x as f32 - origin.0) / metrics.cell_width).floor().max(0.0) as u32;
-        let row = ((y as f32 - origin.1) / metrics.cell_height).floor().max(0.0) as u32;
+        let col = ((x as f32 - origin.0) / metrics.cell_width)
+            .floor()
+            .max(0.0) as u32;
+        let row = ((y as f32 - origin.1) / metrics.cell_height)
+            .floor()
+            .max(0.0) as u32;
         if col >= cols || row >= rows {
             return None;
         }
@@ -3409,11 +3419,7 @@ impl ApplicationHandler<UserEvent> for App {
         });
     }
 
-    fn new_events(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _cause: winit::event::StartCause,
-    ) {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
         self.check_exit_deadline(event_loop);
     }
 
@@ -3473,8 +3479,12 @@ impl ApplicationHandler<UserEvent> for App {
                 let (sx, sy) = cell(start);
                 let (hx, hy) = cell(end);
                 if let Some(session) = self.session() {
-                    session.pane.send(crate::pane::Command::SelectStart { x: sx, y: sy });
-                    session.pane.send(crate::pane::Command::SelectHead { x: hx, y: hy });
+                    session
+                        .pane
+                        .send(crate::pane::Command::SelectStart { x: sx, y: sy });
+                    session
+                        .pane
+                        .send(crate::pane::Command::SelectHead { x: hx, y: hy });
                 }
                 self.scripted_selection = None;
             }
@@ -3558,11 +3568,7 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(gpu) => (gpu.metrics(), gpu.scale()),
                     None => return,
                 };
-                self.fit_panes(
-                    metrics,
-                    (size.width as f32, size.height as f32),
-                    scale,
-                );
+                self.fit_panes(metrics, (size.width as f32, size.height as f32), scale);
                 self.repaint("resize");
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -3651,418 +3657,427 @@ impl ApplicationHandler<UserEvent> for App {
                 // across a field and the whole struct.
                 let mut gpu = self.gpu.take();
                 if let Some(gpu) = gpu.as_mut() {
-                // The status strip follows the focused pane. A file pane has
-                // no byte counters, and saying so is more honest than showing
-                // the terminal beside it as if it were focused.
-                let mut label = String::from("files");
-                let (mut rx, mut tx) = (0u64, 0u64);
-                let (mut rx_rate, mut tx_rate) = (0.0f64, 0.0f64);
-                let mut connected = true;
-                let mut scrollback = 0u64;
-                let mut modem = None;
-                let mut counters = false;
-                if let Some(session) = self.session() {
-                    let stats = session.pane.stats().clone();
-                    label = session.label.clone();
-                    (rx, tx) = (stats.rx(), stats.tx());
-                    connected = stats.connected();
-                    scrollback = stats.scrollback();
-                    modem = session.serial.then(|| (stats.dtr(), stats.rts()));
-                    counters = session.counters;
-                    if let Some(session) = self.session_mut() {
-                        session.meter.sample(rx, tx);
-                    }
+                    // The status strip follows the focused pane. A file pane has
+                    // no byte counters, and saying so is more honest than showing
+                    // the terminal beside it as if it were focused.
+                    let mut label = String::from("files");
+                    let (mut rx, mut tx) = (0u64, 0u64);
+                    let (mut rx_rate, mut tx_rate) = (0.0f64, 0.0f64);
+                    let mut connected = true;
+                    let mut scrollback = 0u64;
+                    let mut modem = None;
+                    let mut counters = false;
                     if let Some(session) = self.session() {
-                        rx_rate = session.meter.rx_rate;
-                        tx_rate = session.meter.tx_rate;
+                        let stats = session.pane.stats().clone();
+                        label = session.label.clone();
+                        (rx, tx) = (stats.rx(), stats.tx());
+                        connected = stats.connected();
+                        scrollback = stats.scrollback();
+                        modem = session.serial.then(|| (stats.dtr(), stats.rts()));
+                        counters = session.counters;
+                        if let Some(session) = self.session_mut() {
+                            session.meter.sample(rx, tx);
+                        }
+                        if let Some(session) = self.session() {
+                            rx_rate = session.meter.rx_rate;
+                            tx_rate = session.meter.tx_rate;
+                        }
+                    } else if let Some(explorer) = self.focused_explorer() {
+                        label = explorer.title();
                     }
-                } else if let Some(explorer) = self.focused_explorer() {
-                    label = explorer.title();
-                }
-                let tabs = (self.active + 1, self.tabs.len());
-                let status = Status {
-                    label: &label,
-                    tabs,
-                    rx,
-                    tx,
-                    rx_rate,
-                    tx_rate,
-                    connected,
-                    scrollback,
-                    modem,
-                    counters,
-                };
-                let mut action = None;
-                let mut copied = None;
-                let mut copied_text = self
-                    .session_mut()
-                    .and_then(|session| session.pane.take_copied());
-                let captured = self
-                    .session_mut()
-                    .and_then(|session| session.pane.take_captured());
-                // The pane answered the hover question. Only accept it if the
-                // pointer is still on the cell it was asked about: a reply that
-                // arrives a frame late must not open the wrong link.
-                if let Some(reply) = self.session_mut().and_then(|session| session.pane.take_link())
-                {
-                    if self.hover_cell == Some((reply.x, reply.y)) {
-                        let uri = reply.uri;
-                        self.hover_link = uri.as_deref().map(|uri| LinkHover {
-                            x: reply.x,
-                            y: reply.y,
-                            uri: uri.to_owned(),
-                        });
-                        // Only when the link *changes*: the reply is edge-triggered
-                        // by the pane, so this is once per hovered cell, not once
-                        // per frame.
-                        if let Some(uri) = uri.as_deref() {
-                            self.request_thumbnail(uri);
-                        }
-                    }
-                }
-                // A pointing hand is the whole affordance: a link cell has no
-                // underline to draw, and the cursor says "this is clickable"
-                // everywhere else on the desktop too.
-                let wanted = if self.hover_link.is_some() {
-                    winit::window::CursorIcon::Pointer
-                } else {
-                    winit::window::CursorIcon::Default
-                };
-                if self.cursor_icon != Some(wanted) {
-                    self.cursor_icon = Some(wanted);
-                    gpu.window.set_cursor(wanted);
-                }
-                // A toast lives for 1.8 s and fades over its last 400 ms.
-                const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
-                // Owned, because the draw mutably borrows `self` further down.
-                let toast_text: Option<(String, f32)> =
-                    self.toast.as_ref().and_then(|(text, at)| {
-                        let age = at.elapsed();
-                        if age > TOAST {
-                            return None;
-                        }
-                        let fade = std::time::Duration::from_millis(450);
-                        let alpha = if age + fade > TOAST {
-                            (TOAST - age).as_secs_f32() / fade.as_secs_f32()
-                        } else {
-                            1.0
-                        };
-                        Some((text.clone(), alpha))
-                    });
-                let palette_open = self.palette.open;
-                // Split the borrows explicitly: the palette is `&mut` while the
-                // frame, pane and look are `&`, and taking them out one by one
-                // is what makes that legal.
-                // `take` rather than building a placeholder: `Palette::new`
-                // reads the machine, and this runs every frame.
-                let mut palette = std::mem::take(&mut self.palette);
-                let screen = (gpu.config.width as f32, gpu.config.height as f32);
-                let scale = gpu.scale();
-                if std::mem::take(&mut self.fonts_dirty) {
-                    gpu.rebuild_grid(&self.look);
-                }
-                self.pump_sftp();
-        self.log_strip_geometry(scale);
-                self.fit_panes(gpu.metrics(), screen, scale);
-                // Before the borrows below: uploading a texture needs `&mut self`
-                // (the cache turns pixels into a texture once) and `settings` is
-                // about to lend `self` out for the whole frame.
-                let thumbnail = self.hover_thumbnail(scale, &gpu.egui_ctx);
-                let settings = if self.settings.open { Some(&self.settings) } else { None };
-                // A window capture is due once, then never again.
-                // The active tab follows its focused session; the others keep
-                // the label they had, so a background session cannot rename
-                // itself under the eye.
-                if let Some(session) = self.tabs[self.active].focused_terminal() {
-                    let label = session.label.clone();
-                    self.tabs[self.active].title = label;
-                }
-                let tabs: Vec<String> = self
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, tab)| {
-                        if tab.title.is_empty() {
-                            format!("tab {}", index + 1)
-                        } else {
-                            tab.title.clone()
-                        }
-                    })
-                    .collect();
-                let mut tab_click = None;
-                let mut settings_change = None;
-                let capture_path = match self.capture.take() {
-                    Some((path, when)) if std::time::Instant::now() >= when => Some(path),
-                    other => {
-                        self.capture = other;
-                        None
-                    }
-                };
-                let tab = &self.tabs[self.active];
-                // The focused pane's rectangle, kept while the views are built:
-                // the IME box hangs off its caret.
-                let mut focused_rect = None;
-                let panes: Vec<_> = self
-                    .pane_views(tab, gpu.metrics(), screen, scale)
-                    .into_iter()
-                    .map(|(id, pane)| {
-                        if id == tab.focus {
-                            focused_rect = Some(pane.rect);
-                        }
-                        pane
-                    })
-                    .collect();
-                // File panes have no cells: they are painted with egui over
-                // the rectangle the grid pass reserved for them.
-                let (width, height) = (gpu.config.width as f32, gpu.config.height as f32);
-                let status_height = if self.status_visible() {
-                    (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * gpu.scale()
-                } else {
-                    0.0
-                };
-                let area = crate::layout::Rect::new(
-                    0.0,
-                    self.top_inset(gpu.scale()),
-                    width,
-                    (height - status_height - self.top_inset(gpu.scale())).max(0.0),
-                );
-                let file_panes: Vec<FilePaneView<'_>> = tab
-                    .layout
-                    .rects(area, crate::ui::SPLIT_GAP * gpu.scale())
-                    .into_iter()
-                    .filter_map(|(id, rect)| match tab.leaves.get(&id) {
-                        Some(Pane::Files(explorer)) => Some(FilePaneView {
-                            id,
-                            rect,
-                            explorer,
-                            focused: id == tab.focus,
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
-                // The composition box hangs off the caret of the focused
-                // terminal, and the platform's candidate window is told the same
-                // place: one geometry, two consumers, so they cannot disagree
-                // about where the person is typing.
-                let mut ime_anchor = None;
-                // Not while an overlay owns the keyboard: a dialogue's text field
-                // shows the composition itself (egui-winit feeds it), and a box
-                // hanging off the terminal cursor would claim the composition
-                // belongs to a pane that is not receiving it.
-                if self.preedit.is_composing() && self.terminal_owns_keys() {
-                    if let (Some(rect), Some(session)) = (focused_rect, tab.focused_terminal()) {
-                        let cursor = session.frame.as_ref().and_then(|frame| frame.cursor);
-                        if let Some(cursor) = cursor {
-                            let (col, row) = (cursor.x, cursor.y);
-                            let metrics = gpu.metrics();
-                            let cell = crate::layout::Rect::new(
-                                rect.x + f32::from(col) * metrics.cell_width,
-                                rect.y + f32::from(row) * metrics.cell_height,
-                                metrics.cell_width,
-                                metrics.cell_height,
-                            );
-                            // Physical pixels: winit's IME area is in them, and
-                            // repeating an unchanged one would send a request
-                            // per frame on Wayland.
-                            let key = [cell.x, cell.y, cell.width, cell.height];
-                            if self.ime_caret != Some(key) {
-                                self.ime_caret = Some(key);
-                                gpu.window.set_ime_cursor_area(
-                                    winit::dpi::PhysicalPosition::new(
-                                        cell.x as i32,
-                                        cell.y as i32,
-                                    ),
-                                    winit::dpi::PhysicalSize::new(
-                                        cell.width as u32,
-                                        cell.height as u32,
-                                    ),
-                                );
-                            }
-                            // egui draws in points; the grid is laid out in
-                            // physical pixels. One conversion, here.
-                            let points = gpu.egui_ctx.pixels_per_point();
-                            let to_points = |r: crate::layout::Rect| {
-                                egui::Rect::from_min_size(
-                                    egui::pos2(r.x / points, r.y / points),
-                                    egui::vec2(r.width / points, r.height / points),
-                                )
-                            };
-                            ime_anchor = Some(crate::ime::Anchor {
-                                caret: to_points(cell),
-                                pane: to_points(rect),
-                            });
-                        }
-                    }
-                }
-                let ime = ime_anchor.map(|anchor| (anchor, &self.preedit));
-                let look = self.look.clone();
-                // Taken out for the frame for the same reason the palette is: the
-                // pager mutates itself while it draws, and `self` is borrowed.
-                let mut pager = std::mem::take(&mut self.pager);
-                let mut link_menu = std::mem::take(&mut self.link_menu);
-                let mut menu_choice = None;
-                let rendered = gpu.render(
-                    &panes,
-                    self.frames_drawn,
-                    self.started,
-                    &file_panes,
-                    &status,
-                    &mut palette,
-                    &mut action,
-                    terminal_pane,
-                    palette_open,
-                    &mut pager,
-                    thumbnail
-                        .as_ref()
-                        .map(|(texture, size)| (texture, *size)),
-                    &mut link_menu,
-                    &mut menu_choice,
-                    &mut copied_text,
-                    &mut copied,
-                    toast_text
-                        .as_ref()
-                        .map(|(text, alpha)| (text.as_str(), *alpha)),
-                    settings,
-                    &tabs,
-                    self.active,
-                    &self.destinations,
-                    &mut tab_click,
-                    self.status_visible(),
-                    &mut settings_change,
-                    capture_path.as_deref(),
-                    &look,
-                    ime,
-                );
-                self.palette = palette;
-                // The pager comes back with the scroll the frame measured, which is
-                // the only place that knows how tall the text turned out.
-                self.pager = pager;
-                self.link_menu = link_menu;
-                // The answers come back after the frame, like a clicked tab: the
-                // drawing code knows what was clicked, the app knows what to do
-                // about it.
-                if let Some(choice) = menu_choice {
-                    self.link_menu_choice(choice);
-                }
-                if let Some(change) = settings_change {
-                    // A mouse edit updates the draft, and the file is written
-                    // when the menu is saved — same as a keyboard edit.
-                    self.settings.apply(change);
-                    self.repaint("settings changed");
-                }
-                match tab_click {
-                    // A click on a tab is a switch, exactly like the chord.
-                    Some(crate::ui::TabHit::Select(index)) if index < self.tabs.len() => {
-                        self.set_active(index, "chip clicked");
-                        self.repaint("tab clicked");
-                    }
-                    Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
-                    Some(crate::ui::TabHit::New(destination)) => match destination {
-                        // A port goes through the palette's own connect, because
-                        // somebody may have set a baud rate or CR translation for
-                        // this device and it is remembered per port. Opening a
-                        // bare `Transport::Serial` here would ignore both.
-                        Some(crate::sources::Destination::Serial { path, .. }) => {
-                            self.apply(Action::Connect(path))
-                        }
-                        Some(crate::sources::Destination::Ssh { alias, .. }) => {
-                            self.open(Transport::Shell(crate::pty::Config::ssh(&alias)))
-                        }
-                        None => {
-                            let cwd = self
-                                .session()
-                                .filter(|session| !session.remote)
-                                .and_then(|session| session.pane.cwd());
-                            self.open(Transport::Shell(crate::pty::Config {
-                                cwd,
-                                ..Default::default()
-                            }));
-                            self.repaint("new tab");
-                        }
-                    },
-                    _ => {}
-                }
-                drop(toast_text);
-                if let Some(text) = captured {
-                    // An empty block stays a toast: an empty pager would look like
-                    // a bug rather than a shell without prompt marks.
-                    if text.is_empty() {
-                        self.toast = Some((
-                            "nothing to capture — the shell has not marked a prompt".to_owned(),
-                            std::time::Instant::now(),
-                        ));
-                    } else {
-                        tracing::info!(lines = text.lines().count(), "paging a block");
-                        self.pager.show(text, "the last command block");
-                        // The pointer may be over a link; the pager is not a
-                        // terminal, so the pointing hand has to go.
-                        self.cursor_icon = Some(winit::window::CursorIcon::Default);
-                        self.repaint("pager opened");
-                    }
-                }
-                if let Some(text) = copied {
-                    // Both paths: egui's, so its own paste and IME state agree,
-                    // and ours, so the text reaches the desktop either way.
-                    self.set_clipboard(&text);
-                    let chars = text.chars().count();
-                    let bytes = text.len();
-                    // An empty copy is not a success: "copied 0 chars" claims
-                    // work that did not happen, and the usual cause is a click
-                    // that selected one blank cell.
-                    let note = if chars == 0 {
-                        "nothing to copy".to_owned()
-                    } else if chars < 40 {
-                        format!("copied {chars} chars")
-                    } else {
-                        format!("copied {bytes} bytes")
+                    let tabs = (self.active + 1, self.tabs.len());
+                    let status = Status {
+                        label: &label,
+                        tabs,
+                        rx,
+                        tx,
+                        rx_rate,
+                        tx_rate,
+                        connected,
+                        scrollback,
+                        modem,
+                        counters,
                     };
-                    self.toast = Some((note, std::time::Instant::now()));
-                }
-                if self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() > TOAST) {
-                    self.toast = None;
-                }
-                // egui asks for another frame when something it drew needs one —
-                // opening a popup, an animation, a hover highlight. Nobody calls
-                // `repaint` for those, so the request has to reach the event
-                // loop. It does **not** set the `wake` flag: a wake means "this
-                // is due now" and a zero-delay wait, and egui asks again every
-                // frame while anything animates, which spins the loop at 100% CPU
-                // instead of idling. A plain redraw request is enough — the
-                // compositor delivers it.
-                // Once per drawn frame, not once per check: egui keeps asking
-                // while anything animates, and a `request_redraw` that is never
-                // answered (the Wayland backend waits for a frame callback)
-                // makes winit's pump loop busy-poll — 55k iterations a second
-                // with 20 frames.
-                // Hover feedback is worth the redraw: the strip lights up under
-                // the pointer, and a frame per refresh while the mouse moves is
-                // what that costs.
-                if gpu.egui_ctx.has_requested_repaint() && !self.egui_redraw_pending {
-                    self.egui_redraw_pending = true;
-                    gpu.window.request_redraw();
-                }
-                self.loop_report.borrow_mut().frames += 1;
-                self.frames_drawn = self.frames_drawn.wrapping_add(1);
-                // A frame that took long enough to feel is worth a line: the
-                // glyph count says whether it was font work or drawing.
-                let frame_ms = gpu.cpu_ms;
-                if frame_ms > 8.0 {
-                    tracing::debug!(
-                        ms = format!("{frame_ms:.1}"),
-                        glyphs = gpu.grid.glyphs(),
-                        "slow frame"
+                    let mut action = None;
+                    let mut copied = None;
+                    let mut copied_text = self
+                        .session_mut()
+                        .and_then(|session| session.pane.take_copied());
+                    let captured = self
+                        .session_mut()
+                        .and_then(|session| session.pane.take_captured());
+                    // The pane answered the hover question. Only accept it if the
+                    // pointer is still on the cell it was asked about: a reply that
+                    // arrives a frame late must not open the wrong link.
+                    if let Some(reply) = self
+                        .session_mut()
+                        .and_then(|session| session.pane.take_link())
+                    {
+                        if self.hover_cell == Some((reply.x, reply.y)) {
+                            let uri = reply.uri;
+                            self.hover_link = uri.as_deref().map(|uri| LinkHover {
+                                x: reply.x,
+                                y: reply.y,
+                                uri: uri.to_owned(),
+                            });
+                            // Only when the link *changes*: the reply is edge-triggered
+                            // by the pane, so this is once per hovered cell, not once
+                            // per frame.
+                            if let Some(uri) = uri.as_deref() {
+                                self.request_thumbnail(uri);
+                            }
+                        }
+                    }
+                    // A pointing hand is the whole affordance: a link cell has no
+                    // underline to draw, and the cursor says "this is clickable"
+                    // everywhere else on the desktop too.
+                    let wanted = if self.hover_link.is_some() {
+                        winit::window::CursorIcon::Pointer
+                    } else {
+                        winit::window::CursorIcon::Default
+                    };
+                    if self.cursor_icon != Some(wanted) {
+                        self.cursor_icon = Some(wanted);
+                        gpu.window.set_cursor(wanted);
+                    }
+                    // A toast lives for 1.8 s and fades over its last 400 ms.
+                    const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
+                    // Owned, because the draw mutably borrows `self` further down.
+                    let toast_text: Option<(String, f32)> =
+                        self.toast.as_ref().and_then(|(text, at)| {
+                            let age = at.elapsed();
+                            if age > TOAST {
+                                return None;
+                            }
+                            let fade = std::time::Duration::from_millis(450);
+                            let alpha = if age + fade > TOAST {
+                                (TOAST - age).as_secs_f32() / fade.as_secs_f32()
+                            } else {
+                                1.0
+                            };
+                            Some((text.clone(), alpha))
+                        });
+                    let palette_open = self.palette.open;
+                    // Split the borrows explicitly: the palette is `&mut` while the
+                    // frame, pane and look are `&`, and taking them out one by one
+                    // is what makes that legal.
+                    // `take` rather than building a placeholder: `Palette::new`
+                    // reads the machine, and this runs every frame.
+                    let mut palette = std::mem::take(&mut self.palette);
+                    let screen = (gpu.config.width as f32, gpu.config.height as f32);
+                    let scale = gpu.scale();
+                    if std::mem::take(&mut self.fonts_dirty) {
+                        gpu.rebuild_grid(&self.look);
+                    }
+                    self.pump_sftp();
+                    self.log_strip_geometry(scale);
+                    self.fit_panes(gpu.metrics(), screen, scale);
+                    // Before the borrows below: uploading a texture needs `&mut self`
+                    // (the cache turns pixels into a texture once) and `settings` is
+                    // about to lend `self` out for the whole frame.
+                    let thumbnail = self.hover_thumbnail(scale, &gpu.egui_ctx);
+                    let settings = if self.settings.open {
+                        Some(&self.settings)
+                    } else {
+                        None
+                    };
+                    // A window capture is due once, then never again.
+                    // The active tab follows its focused session; the others keep
+                    // the label they had, so a background session cannot rename
+                    // itself under the eye.
+                    if let Some(session) = self.tabs[self.active].focused_terminal() {
+                        let label = session.label.clone();
+                        self.tabs[self.active].title = label;
+                    }
+                    let tabs: Vec<String> = self
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, tab)| {
+                            if tab.title.is_empty() {
+                                format!("tab {}", index + 1)
+                            } else {
+                                tab.title.clone()
+                            }
+                        })
+                        .collect();
+                    let mut tab_click = None;
+                    let mut settings_change = None;
+                    let capture_path = match self.capture.take() {
+                        Some((path, when)) if std::time::Instant::now() >= when => Some(path),
+                        other => {
+                            self.capture = other;
+                            None
+                        }
+                    };
+                    let tab = &self.tabs[self.active];
+                    // The focused pane's rectangle, kept while the views are built:
+                    // the IME box hangs off its caret.
+                    let mut focused_rect = None;
+                    let panes: Vec<_> = self
+                        .pane_views(tab, gpu.metrics(), screen, scale)
+                        .into_iter()
+                        .map(|(id, pane)| {
+                            if id == tab.focus {
+                                focused_rect = Some(pane.rect);
+                            }
+                            pane
+                        })
+                        .collect();
+                    // File panes have no cells: they are painted with egui over
+                    // the rectangle the grid pass reserved for them.
+                    let (width, height) = (gpu.config.width as f32, gpu.config.height as f32);
+                    let status_height = if self.status_visible() {
+                        (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * gpu.scale()
+                    } else {
+                        0.0
+                    };
+                    let area = crate::layout::Rect::new(
+                        0.0,
+                        self.top_inset(gpu.scale()),
+                        width,
+                        (height - status_height - self.top_inset(gpu.scale())).max(0.0),
                     );
-                }
-                if let Err(err) = rendered {
-                    tracing::error!(%err, "render");
-                }
-                if let Some(action) = action {
-                    self.apply(action);
-                }
-                if self.quit {
-                    event_loop.exit();
-                }
+                    let file_panes: Vec<FilePaneView<'_>> = tab
+                        .layout
+                        .rects(area, crate::ui::SPLIT_GAP * gpu.scale())
+                        .into_iter()
+                        .filter_map(|(id, rect)| match tab.leaves.get(&id) {
+                            Some(Pane::Files(explorer)) => Some(FilePaneView {
+                                id,
+                                rect,
+                                explorer,
+                                focused: id == tab.focus,
+                            }),
+                            _ => None,
+                        })
+                        .collect();
+                    let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
+                    // The composition box hangs off the caret of the focused
+                    // terminal, and the platform's candidate window is told the same
+                    // place: one geometry, two consumers, so they cannot disagree
+                    // about where the person is typing.
+                    let mut ime_anchor = None;
+                    // Not while an overlay owns the keyboard: a dialogue's text field
+                    // shows the composition itself (egui-winit feeds it), and a box
+                    // hanging off the terminal cursor would claim the composition
+                    // belongs to a pane that is not receiving it.
+                    if self.preedit.is_composing() && self.terminal_owns_keys() {
+                        if let (Some(rect), Some(session)) = (focused_rect, tab.focused_terminal())
+                        {
+                            let cursor = session.frame.as_ref().and_then(|frame| frame.cursor);
+                            if let Some(cursor) = cursor {
+                                let (col, row) = (cursor.x, cursor.y);
+                                let metrics = gpu.metrics();
+                                let cell = crate::layout::Rect::new(
+                                    rect.x + f32::from(col) * metrics.cell_width,
+                                    rect.y + f32::from(row) * metrics.cell_height,
+                                    metrics.cell_width,
+                                    metrics.cell_height,
+                                );
+                                // Physical pixels: winit's IME area is in them, and
+                                // repeating an unchanged one would send a request
+                                // per frame on Wayland.
+                                let key = [cell.x, cell.y, cell.width, cell.height];
+                                if self.ime_caret != Some(key) {
+                                    self.ime_caret = Some(key);
+                                    gpu.window.set_ime_cursor_area(
+                                        winit::dpi::PhysicalPosition::new(
+                                            cell.x as i32,
+                                            cell.y as i32,
+                                        ),
+                                        winit::dpi::PhysicalSize::new(
+                                            cell.width as u32,
+                                            cell.height as u32,
+                                        ),
+                                    );
+                                }
+                                // egui draws in points; the grid is laid out in
+                                // physical pixels. One conversion, here.
+                                let points = gpu.egui_ctx.pixels_per_point();
+                                let to_points = |r: crate::layout::Rect| {
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(r.x / points, r.y / points),
+                                        egui::vec2(r.width / points, r.height / points),
+                                    )
+                                };
+                                ime_anchor = Some(crate::ime::Anchor {
+                                    caret: to_points(cell),
+                                    pane: to_points(rect),
+                                });
+                            }
+                        }
+                    }
+                    let ime = ime_anchor.map(|anchor| (anchor, &self.preedit));
+                    let look = self.look.clone();
+                    // Taken out for the frame for the same reason the palette is: the
+                    // pager mutates itself while it draws, and `self` is borrowed.
+                    let mut pager = std::mem::take(&mut self.pager);
+                    let mut link_menu = std::mem::take(&mut self.link_menu);
+                    let mut menu_choice = None;
+                    let rendered = gpu.render(
+                        &panes,
+                        self.frames_drawn,
+                        self.started,
+                        &file_panes,
+                        &status,
+                        &mut palette,
+                        &mut action,
+                        terminal_pane,
+                        palette_open,
+                        &mut pager,
+                        thumbnail.as_ref().map(|(texture, size)| (texture, *size)),
+                        &mut link_menu,
+                        &mut menu_choice,
+                        &mut copied_text,
+                        &mut copied,
+                        toast_text
+                            .as_ref()
+                            .map(|(text, alpha)| (text.as_str(), *alpha)),
+                        settings,
+                        &tabs,
+                        self.active,
+                        &self.destinations,
+                        &mut tab_click,
+                        self.status_visible(),
+                        &mut settings_change,
+                        capture_path.as_deref(),
+                        &look,
+                        ime,
+                    );
+                    self.palette = palette;
+                    // The pager comes back with the scroll the frame measured, which is
+                    // the only place that knows how tall the text turned out.
+                    self.pager = pager;
+                    self.link_menu = link_menu;
+                    // The answers come back after the frame, like a clicked tab: the
+                    // drawing code knows what was clicked, the app knows what to do
+                    // about it.
+                    if let Some(choice) = menu_choice {
+                        self.link_menu_choice(choice);
+                    }
+                    if let Some(change) = settings_change {
+                        // A mouse edit updates the draft, and the file is written
+                        // when the menu is saved — same as a keyboard edit.
+                        self.settings.apply(change);
+                        self.repaint("settings changed");
+                    }
+                    match tab_click {
+                        // A click on a tab is a switch, exactly like the chord.
+                        Some(crate::ui::TabHit::Select(index)) if index < self.tabs.len() => {
+                            self.set_active(index, "chip clicked");
+                            self.repaint("tab clicked");
+                        }
+                        Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
+                        Some(crate::ui::TabHit::New(destination)) => match destination {
+                            // A port goes through the palette's own connect, because
+                            // somebody may have set a baud rate or CR translation for
+                            // this device and it is remembered per port. Opening a
+                            // bare `Transport::Serial` here would ignore both.
+                            Some(crate::sources::Destination::Serial { path, .. }) => {
+                                self.apply(Action::Connect(path))
+                            }
+                            Some(crate::sources::Destination::Ssh { alias, .. }) => {
+                                self.open(Transport::Shell(crate::pty::Config::ssh(&alias)))
+                            }
+                            None => {
+                                let cwd = self
+                                    .session()
+                                    .filter(|session| !session.remote)
+                                    .and_then(|session| session.pane.cwd());
+                                self.open(Transport::Shell(crate::pty::Config {
+                                    cwd,
+                                    ..Default::default()
+                                }));
+                                self.repaint("new tab");
+                            }
+                        },
+                        _ => {}
+                    }
+                    drop(toast_text);
+                    if let Some(text) = captured {
+                        // An empty block stays a toast: an empty pager would look like
+                        // a bug rather than a shell without prompt marks.
+                        if text.is_empty() {
+                            self.toast = Some((
+                                "nothing to capture — the shell has not marked a prompt".to_owned(),
+                                std::time::Instant::now(),
+                            ));
+                        } else {
+                            tracing::info!(lines = text.lines().count(), "paging a block");
+                            self.pager.show(text, "the last command block");
+                            // The pointer may be over a link; the pager is not a
+                            // terminal, so the pointing hand has to go.
+                            self.cursor_icon = Some(winit::window::CursorIcon::Default);
+                            self.repaint("pager opened");
+                        }
+                    }
+                    if let Some(text) = copied {
+                        // Both paths: egui's, so its own paste and IME state agree,
+                        // and ours, so the text reaches the desktop either way.
+                        self.set_clipboard(&text);
+                        let chars = text.chars().count();
+                        let bytes = text.len();
+                        // An empty copy is not a success: "copied 0 chars" claims
+                        // work that did not happen, and the usual cause is a click
+                        // that selected one blank cell.
+                        let note = if chars == 0 {
+                            "nothing to copy".to_owned()
+                        } else if chars < 40 {
+                            format!("copied {chars} chars")
+                        } else {
+                            format!("copied {bytes} bytes")
+                        };
+                        self.toast = Some((note, std::time::Instant::now()));
+                    }
+                    if self
+                        .toast
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() > TOAST)
+                    {
+                        self.toast = None;
+                    }
+                    // egui asks for another frame when something it drew needs one —
+                    // opening a popup, an animation, a hover highlight. Nobody calls
+                    // `repaint` for those, so the request has to reach the event
+                    // loop. It does **not** set the `wake` flag: a wake means "this
+                    // is due now" and a zero-delay wait, and egui asks again every
+                    // frame while anything animates, which spins the loop at 100% CPU
+                    // instead of idling. A plain redraw request is enough — the
+                    // compositor delivers it.
+                    // Once per drawn frame, not once per check: egui keeps asking
+                    // while anything animates, and a `request_redraw` that is never
+                    // answered (the Wayland backend waits for a frame callback)
+                    // makes winit's pump loop busy-poll — 55k iterations a second
+                    // with 20 frames.
+                    // Hover feedback is worth the redraw: the strip lights up under
+                    // the pointer, and a frame per refresh while the mouse moves is
+                    // what that costs.
+                    if gpu.egui_ctx.has_requested_repaint() && !self.egui_redraw_pending {
+                        self.egui_redraw_pending = true;
+                        gpu.window.request_redraw();
+                    }
+                    self.loop_report.borrow_mut().frames += 1;
+                    self.frames_drawn = self.frames_drawn.wrapping_add(1);
+                    // A frame that took long enough to feel is worth a line: the
+                    // glyph count says whether it was font work or drawing.
+                    let frame_ms = gpu.cpu_ms;
+                    if frame_ms > 8.0 {
+                        tracing::debug!(
+                            ms = format!("{frame_ms:.1}"),
+                            glyphs = gpu.grid.glyphs(),
+                            "slow frame"
+                        );
+                    }
+                    if let Err(err) = rendered {
+                        tracing::error!(%err, "render");
+                    }
+                    if let Some(action) = action {
+                        self.apply(action);
+                    }
+                    if self.quit {
+                        event_loop.exit();
+                    }
                 }
                 self.gpu = gpu;
             }
@@ -4099,7 +4114,11 @@ impl Gpu {
     /// the same state is not the same picture, and twice now the difference
     /// mattered (a menu that only drew in the window, a font that only broke
     /// there).
-    fn write_capture(&self, output: &wgpu::SurfaceTexture, path: &std::path::Path) -> anyhow::Result<()> {
+    fn write_capture(
+        &self,
+        output: &wgpu::SurfaceTexture,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let (width, height) = (self.config.width, self.config.height);
         // Copy rows must be a multiple of 256 bytes.
         let unpadded = width * 4;
@@ -4142,12 +4161,10 @@ impl Gpu {
 
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
 
         let mut pixels = Vec::with_capacity((unpadded * height) as usize);
         {
@@ -4204,14 +4221,15 @@ impl Gpu {
             "GPU adapter"
         );
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("dtr"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::Off,
-        }))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("dtr"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            }))?;
 
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -4227,7 +4245,12 @@ impl Gpu {
             .formats
             .iter()
             .copied()
-            .find(|f| matches!(f, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm))
+            .find(|f| {
+                matches!(
+                    f,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+                )
+            })
         {
             config.format = format;
         }
@@ -4383,13 +4406,9 @@ impl Gpu {
                             .inner_margin(egui::Margin {
                                 left: 6,
                                 right: 6,
-                                top: ((crate::ui::TAB_HEIGHT
-                                    - crate::ui::TAB_CHIP_HEIGHT)
-                                    / 2.0)
+                                top: ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0)
                                     .floor() as i8,
-                                bottom: ((crate::ui::TAB_HEIGHT
-                                    - crate::ui::TAB_CHIP_HEIGHT)
-                                    / 2.0)
+                                bottom: ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0)
                                     .ceil() as i8,
                             }),
                     )
@@ -4402,99 +4421,97 @@ impl Gpu {
                     });
             }
             if status_visible {
-            egui::Panel::bottom("dtr-status")
-                // Exactly the height the grid reserves. Left to itself the panel
-                // sizes to its content and its margins, comes out a couple of
-                // pixels taller than STATUS_HEIGHT, and covers the bottom row —
-                // which is where a shell puts its prompt.
-                .exact_size(crate::ui::STATUS_HEIGHT * self.scale())
-                .frame(
-                    egui::Frame::new()
-                        .fill(crate::ui::Look::colour(look.surface))
-                        .inner_margin(egui::Margin::symmetric(8, 4)),
-                )
-                .show(ui, |ui| crate::ui::status_bar(ui, status, look));
+                egui::Panel::bottom("dtr-status")
+                    // Exactly the height the grid reserves. Left to itself the panel
+                    // sizes to its content and its margins, comes out a couple of
+                    // pixels taller than STATUS_HEIGHT, and covers the bottom row —
+                    // which is where a shell puts its prompt.
+                    .exact_size(crate::ui::STATUS_HEIGHT * self.scale())
+                    .frame(
+                        egui::Frame::new()
+                            .fill(crate::ui::Look::colour(look.surface))
+                            .inner_margin(egui::Margin::symmetric(8, 4)),
+                    )
+                    .show(ui, |ui| crate::ui::status_bar(ui, status, look));
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ui, |_ui| {});
-                // File panes sit over the grid rectangle their leaf owns. They
-                // are areas rather than windows: fixed position, no dragging.
-                for file in files {
-                    crate::explorer::pane_ui(
-                        ui,
-                        egui::Id::unique(("dtr-files", file.id)),
-                        file.rect,
-                        file.explorer,
-                        look,
-                        file.focused,
-                    );
+            // File panes sit over the grid rectangle their leaf owns. They
+            // are areas rather than windows: fixed position, no dragging.
+            for file in files {
+                crate::explorer::pane_ui(
+                    ui,
+                    egui::Id::unique(("dtr-files", file.id)),
+                    file.rect,
+                    file.explorer,
+                    look,
+                    file.focused,
+                );
+            }
+            // The composition box goes over the grid and under the
+            // modals: it is part of typing, and a palette a composition
+            // could cover would be a palette nobody could read.
+            if let Some((anchor, preedit)) = ime {
+                preedit.ui(ui, anchor, look);
+            }
+            // The palette is an overlay above the panes: a file listing
+            // must not cover the command line it sits beside.
+            if let Some(settings) = settings {
+                if let Some(change) = settings.ui(ui, look) {
+                    *settings_change = Some(change);
                 }
-                // The composition box goes over the grid and under the
-                // modals: it is part of typing, and a palette a composition
-                // could cover would be a palette nobody could read.
-                if let Some((anchor, preedit)) = ime {
-                    preedit.ui(ui, anchor, look);
-                }
-                // The palette is an overlay above the panes: a file listing
-                // must not cover the command line it sits beside.
-                if let Some(settings) = settings {
-                    if let Some(change) = settings.ui(ui, look) {
-                        *settings_change = Some(change);
+            }
+            if palette_open {
+                crate::ui::overlay(ui, "dtr-palette", |ui| {
+                    if let Some(chosen) = palette.ui(ui, look) {
+                        *action = Some(chosen);
+                    }
+                });
+            }
+            // Above the panes, in the same foreground layer as the palette: a
+            // pager a file pane could cover would be a pager nobody could
+            // read.
+            if pager.is_open() {
+                crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
+            }
+            // A preview of the image the pointer is on. Last, so it is over
+            // the panes, and in the tooltip layer, so a file pane cannot hide
+            // it.
+            if let Some((texture, size)) = thumbnail {
+                crate::thumb::draw(ui, texture, size, look);
+            }
+            // A right-click's menu. "Save as" on it opens the desktop's own
+            // dialog, which is not drawn here at all.
+            if link_menu.is_open() {
+                *menu_choice = link_menu.ui(ui, look);
+            }
+            // Clipboard in and out. egui hands paste over as an event; the
+            // pane hands copied text back through a slot it fills itself.
+            let pasted: Vec<String> = ui.ctx().input(|input| {
+                input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::Paste(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            for text in pasted {
+                if !palette_open {
+                    if let Some(pane) = pane {
+                        pane.send(crate::pane::Command::Paste(text.into_bytes()));
                     }
                 }
-                if palette_open {
-                    crate::ui::overlay(ui, "dtr-palette", |ui| {
-                        if let Some(chosen) = palette.ui(ui, look) {
-                            *action = Some(chosen);
-                        }
-                    });
-                }
-                // Above the panes, in the same foreground layer as the palette: a
-                // pager a file pane could cover would be a pager nobody could
-                // read.
-                if pager.is_open() {
-                    crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
-                }
-                // A preview of the image the pointer is on. Last, so it is over
-                // the panes, and in the tooltip layer, so a file pane cannot hide
-                // it.
-                if let Some((texture, size)) = thumbnail {
-                    crate::thumb::draw(ui, texture, size, look);
-                }
-                // A right-click's menu. "Save as" on it opens the desktop's own
-                // dialog, which is not drawn here at all.
-                if link_menu.is_open() {
-                    *menu_choice = link_menu.ui(ui, look);
-                }
-                // Clipboard in and out. egui hands paste over as an event; the
-                // pane hands copied text back through a slot it fills itself.
-                let pasted: Vec<String> = ui
-                    .ctx()
-                    .input(|input| {
-                        input
-                            .events
-                            .iter()
-                            .filter_map(|event| match event {
-                                egui::Event::Paste(text) => Some(text.clone()),
-                                _ => None,
-                            })
-                            .collect()
-                    });
-                for text in pasted {
-                    if !palette_open {
-                        if let Some(pane) = pane {
-                            pane.send(crate::pane::Command::Paste(text.into_bytes()));
-                        }
-                    }
-                }
-                if let Some(text) = copied_text.take() {
-                    ui.ctx().copy_text(text.clone());
-                    *copied = Some(text);
-                }
-                if let Some((text, alpha)) = toast {
-                    crate::ui::toast(ui, look, text, alpha);
-                }
+            }
+            if let Some(text) = copied_text.take() {
+                ui.ctx().copy_text(text.clone());
+                *copied = Some(text);
+            }
+            if let Some((text, alpha)) = toast {
+                crate::ui::toast(ui, look, text, alpha);
+            }
         });
 
         self.egui_state
@@ -4543,10 +4560,7 @@ impl Gpu {
             // Startup is the one cost a user feels directly: the window appears
             // when this line is logged, and everything before it is what they
             // stared at.
-            tracing::info!(
-                elapsed_ms = started.elapsed().as_millis(),
-                "first frame"
-            );
+            tracing::info!(elapsed_ms = started.elapsed().as_millis(), "first frame");
         }
         if loud {
             let with_content = panes.iter().filter(|pane| pane.frame.is_some()).count();
@@ -4609,8 +4623,11 @@ impl Gpu {
             self.egui_renderer.render(&mut pass, &clipped, &screen);
         }
 
-        self.queue
-            .submit(user_cmds.into_iter().chain(std::iter::once(encoder.finish())));
+        self.queue.submit(
+            user_cmds
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
         if let Some(path) = capture {
             if let Err(err) = self.write_capture(&output, path) {
                 tracing::warn!(%err, path = %path.display(), "could not capture the window");
@@ -4676,7 +4693,10 @@ mod tests {
     #[test]
     fn shift_hands_the_mouse_back_to_the_terminal() {
         assert!(mouse_goes_to_program(true, false), "a captured mouse");
-        assert!(!mouse_goes_to_program(true, true), "shift in a captured pane");
+        assert!(
+            !mouse_goes_to_program(true, true),
+            "shift in a captured pane"
+        );
         assert!(!mouse_goes_to_program(false, false), "nobody asked for it");
         assert!(!mouse_goes_to_program(false, true), "shift changes nothing");
     }

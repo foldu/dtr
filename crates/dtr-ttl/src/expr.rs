@@ -466,7 +466,10 @@ mod tests {
 
     #[test]
     fn variables_are_read_through_the_scope() {
-        assert_eq!(run("A + 1", &[("A", Value::Int(41))]).unwrap(), Value::Int(42));
+        assert_eq!(
+            run("A + 1", &[("A", Value::Int(41))]).unwrap(),
+            Value::Int(42)
+        );
         assert_eq!(
             run("A + 1", &[]),
             Err(Error::VariableNotInitialized("A".into()))
@@ -553,6 +556,13 @@ mod tests {
         let toks = lex_line(&chars, &mut in_comment).unwrap();
         let (expr, used) = parse_prefix(&toks).unwrap();
         assert_eq!(used, 3, "A > 1");
-        assert_eq!(expr, Expr::Binary(Op::Gt, Box::new(Expr::Var("A".into())), Box::new(Expr::Int(1))));
+        assert_eq!(
+            expr,
+            Expr::Binary(
+                Op::Gt,
+                Box::new(Expr::Var("A".into())),
+                Box::new(Expr::Int(1))
+            )
+        );
     }
 }

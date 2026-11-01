@@ -166,10 +166,7 @@ pub fn capture(
         // grid, the right-hand one is painted by egui.
         let _ = layout.split(1, crate::layout::Axis::Horizontal, 2, false);
         let rects = layout.rects(area, crate::ui::SPLIT_GAP);
-        let file_rect = rects
-            .iter()
-            .find(|(id, _)| *id == 2)
-            .map(|(_, rect)| *rect);
+        let file_rect = rects.iter().find(|(id, _)| *id == 2).map(|(_, rect)| *rect);
         let panes = rects
             .into_iter()
             .map(|(id, rect)| crate::render::PaneView {
@@ -305,13 +302,7 @@ pub fn capture(
     device.on_uncaptured_error(std::sync::Arc::new(|err: wgpu::Error| {
         tracing::error!(%err, "wgpu validation");
     }));
-    grid.prepare(
-        &device,
-        &queue,
-        &panes,
-        look,
-        (width as f32, height as f32),
-    );
+    grid.prepare(&device, &queue, &panes, look, (width as f32, height as f32));
     {
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -382,7 +373,11 @@ pub fn capture(
         extent,
     );
 
-    queue.submit(user_cmds.into_iter().chain(std::iter::once(encoder.finish())));
+    queue.submit(
+        user_cmds
+            .into_iter()
+            .chain(std::iter::once(encoder.finish())),
+    );
 
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |result| {

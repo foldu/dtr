@@ -112,20 +112,30 @@ impl Theme {
                         theme.palette[slot] = Some([rgb.r, rgb.g, rgb.b]);
                     }
                 }
-                "background" => theme.background = Some(parse_colour(value).map_err(|err| {
-                    Error::Line(number + 1, format!("background: {err}"))
-                })?),
-                "foreground" => theme.foreground = Some(parse_colour(value).map_err(|err| {
-                    Error::Line(number + 1, format!("foreground: {err}"))
-                })?),
-                "cursor-color" | "cursor_color" => theme.cursor = Some(
-                    parse_colour(value)
-                        .map_err(|err| Error::Line(number + 1, format!("cursor-color: {err}")))?,
-                ),
-                "cursor-text" | "cursor_text" => theme.cursor_text = Some(
-                    parse_colour(value)
-                        .map_err(|err| Error::Line(number + 1, format!("cursor-text: {err}")))?,
-                ),
+                "background" => {
+                    theme.background = Some(
+                        parse_colour(value)
+                            .map_err(|err| Error::Line(number + 1, format!("background: {err}")))?,
+                    )
+                }
+                "foreground" => {
+                    theme.foreground = Some(
+                        parse_colour(value)
+                            .map_err(|err| Error::Line(number + 1, format!("foreground: {err}")))?,
+                    )
+                }
+                "cursor-color" | "cursor_color" => {
+                    theme.cursor =
+                        Some(parse_colour(value).map_err(|err| {
+                            Error::Line(number + 1, format!("cursor-color: {err}"))
+                        })?)
+                }
+                "cursor-text" | "cursor_text" => {
+                    theme.cursor_text =
+                        Some(parse_colour(value).map_err(|err| {
+                            Error::Line(number + 1, format!("cursor-text: {err}"))
+                        })?)
+                }
                 "selection-background" | "selection_background" => {
                     theme.selection_background = Some(parse_colour(value).map_err(|err| {
                         Error::Line(number + 1, format!("selection-background: {err}"))
@@ -245,13 +255,8 @@ pub fn import_itermcolors(path: &Path) -> Result<Import, Error> {
 /// diagnostic, so it is named even though it need not exist on disk.
 pub fn import_itermcolors_bytes(path: &Path, bytes: &[u8]) -> Result<Import, Error> {
     let value = plist::Value::from_reader(std::io::Cursor::new(bytes));
-    let value = value.map_err(|err| {
-        import_error(
-            path,
-            None,
-            format!("not an XML property list: {err}"),
-        )
-    })?;
+    let value = value
+        .map_err(|err| import_error(path, None, format!("not an XML property list: {err}")))?;
     let dictionary = value.as_dictionary().ok_or_else(|| {
         import_error(
             path,
@@ -296,20 +301,14 @@ pub fn import_itermcolors_bytes(path: &Path, bytes: &[u8]) -> Result<Import, Err
     // A theme without these is not a theme. ANSI 0..15, background and
     // foreground are required by the file format dtr reads (§8.1); the six
     // optional slots fall back below.
-    let background = background.ok_or_else(|| {
-        import_error(path, Some("Background Color"), "missing from the file")
-    })?;
-    let foreground = foreground.ok_or_else(|| {
-        import_error(path, Some("Foreground Color"), "missing from the file")
-    })?;
+    let background = background
+        .ok_or_else(|| import_error(path, Some("Background Color"), "missing from the file"))?;
+    let foreground = foreground
+        .ok_or_else(|| import_error(path, Some("Foreground Color"), "missing from the file"))?;
     for (index, entry) in ansi.iter().enumerate() {
         if entry.is_none() {
             let key = format!("Ansi {index} Color");
-            return Err(import_error(
-                path,
-                Some(&key),
-                "missing from the file",
-            ));
+            return Err(import_error(path, Some(&key), "missing from the file"));
         }
     }
     let palette = ansi;
@@ -387,9 +386,8 @@ fn iterm_colour(path: &Path, key: &str, value: &plist::Value) -> Result<(f64, [u
     };
 
     let alpha = match dictionary.get("Alpha Component") {
-        Some(value) => number(value).ok_or_else(|| {
-            import_error(path, Some(key), "\"Alpha Component\" is not a number")
-        })?,
+        Some(value) => number(value)
+            .ok_or_else(|| import_error(path, Some(key), "\"Alpha Component\" is not a number"))?,
         None => 1.0,
     };
 
@@ -437,15 +435,9 @@ fn linear_to_srgb(component: f64) -> f64 {
 fn p3_to_srgb(rgb: [f64; 3]) -> [f64; 3] {
     let linear = rgb.map(srgb_to_linear);
     let converted = [
-        P3_TO_SRGB[0][0] * linear[0]
-            + P3_TO_SRGB[0][1] * linear[1]
-            + P3_TO_SRGB[0][2] * linear[2],
-        P3_TO_SRGB[1][0] * linear[0]
-            + P3_TO_SRGB[1][1] * linear[1]
-            + P3_TO_SRGB[1][2] * linear[2],
-        P3_TO_SRGB[2][0] * linear[0]
-            + P3_TO_SRGB[2][1] * linear[1]
-            + P3_TO_SRGB[2][2] * linear[2],
+        P3_TO_SRGB[0][0] * linear[0] + P3_TO_SRGB[0][1] * linear[1] + P3_TO_SRGB[0][2] * linear[2],
+        P3_TO_SRGB[1][0] * linear[0] + P3_TO_SRGB[1][1] * linear[1] + P3_TO_SRGB[1][2] * linear[2],
+        P3_TO_SRGB[2][0] * linear[0] + P3_TO_SRGB[2][1] * linear[1] + P3_TO_SRGB[2][2] * linear[2],
     ];
     converted.map(|component| linear_to_srgb(component.clamp(0.0, 1.0)))
 }
@@ -516,7 +508,8 @@ fn write_theme_to(directory: &Path, theme: &Theme, force: bool) -> Result<PathBu
     }
     std::fs::create_dir_all(directory)
         .map_err(|err| Error::Io(directory.to_path_buf(), err.to_string()))?;
-    std::fs::write(&path, theme.render()).map_err(|err| Error::Io(path.clone(), err.to_string()))?;
+    std::fs::write(&path, theme.render())
+        .map_err(|err| Error::Io(path.clone(), err.to_string()))?;
     Ok(path)
 }
 
@@ -799,9 +792,8 @@ palette = 15=#dcd7ba
 
     #[test]
     fn an_itermcolors_file_round_trips_to_the_exact_bytes() {
-        let import =
-            import_itermcolors_bytes(Path::new("Dracula.itermcolors"), DRACULA.as_bytes())
-                .expect("import");
+        let import = import_itermcolors_bytes(Path::new("Dracula.itermcolors"), DRACULA.as_bytes())
+            .expect("import");
         assert!(
             import.warnings.is_empty(),
             "unexpected warnings: {:?}",
@@ -852,11 +844,9 @@ palette = 15=#dcd7ba
 
     #[test]
     fn the_theme_name_is_the_file_name_without_its_extension() {
-        let import = import_itermcolors_bytes(
-            Path::new("kanagawa wave.itermcolors"),
-            DRACULA.as_bytes(),
-        )
-        .expect("import");
+        let import =
+            import_itermcolors_bytes(Path::new("kanagawa wave.itermcolors"), DRACULA.as_bytes())
+                .expect("import");
         assert_eq!(import.theme.name, "kanagawa wave");
     }
 
@@ -981,12 +971,9 @@ palette = 15=#dcd7ba
     #[test]
     fn import_writes_a_theme_and_refuses_to_overwrite_without_force() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let theme = import_itermcolors_bytes(
-            Path::new("Dracula.itermcolors"),
-            DRACULA.as_bytes(),
-        )
-        .expect("import")
-        .theme;
+        let theme = import_itermcolors_bytes(Path::new("Dracula.itermcolors"), DRACULA.as_bytes())
+            .expect("import")
+            .theme;
 
         let path = write_theme_to(directory.path(), &theme, false).expect("write");
         assert_eq!(path, directory.path().join("Dracula"));
@@ -1008,12 +995,10 @@ palette = 15=#dcd7ba
     #[test]
     fn a_theme_name_cannot_escape_the_themes_directory() {
         let directory = tempfile::tempdir().expect("temp dir");
-        let mut theme = import_itermcolors_bytes(
-            Path::new("Dracula.itermcolors"),
-            DRACULA.as_bytes(),
-        )
-        .expect("import")
-        .theme;
+        let mut theme =
+            import_itermcolors_bytes(Path::new("Dracula.itermcolors"), DRACULA.as_bytes())
+                .expect("import")
+                .theme;
         theme.name = "../escape".to_owned();
 
         match write_theme_to(directory.path(), &theme, true) {

@@ -58,7 +58,9 @@ impl Config {
 /// number belongs to the adapter.
 pub fn identity(port: &str) -> Option<String> {
     let ports = serialport::available_ports().ok()?;
-    let found = ports.into_iter().find(|candidate| candidate.port_name == port)?;
+    let found = ports
+        .into_iter()
+        .find(|candidate| candidate.port_name == port)?;
     match found.port_type {
         serialport::SerialPortType::UsbPort(usb) => usb.serial_number,
         _ => None,
@@ -71,7 +73,9 @@ pub fn find_by_serial(serial: &str) -> Option<String> {
     ports
         .into_iter()
         .find(|candidate| match &candidate.port_type {
-            serialport::SerialPortType::UsbPort(usb) => usb.serial_number.as_deref() == Some(serial),
+            serialport::SerialPortType::UsbPort(usb) => {
+                usb.serial_number.as_deref() == Some(serial)
+            }
             _ => false,
         })
         .map(|candidate| candidate.port_name)

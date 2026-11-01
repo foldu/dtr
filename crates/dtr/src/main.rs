@@ -10,12 +10,12 @@ mod layout;
 mod linkmenu;
 mod logbook;
 mod modem;
-mod palette;
 mod pager;
-mod profile;
-mod render;
+mod palette;
 mod pane;
+mod profile;
 mod pty;
+mod render;
 mod screenshot;
 mod serial;
 mod settings;
@@ -305,7 +305,10 @@ mod serial_precedence {
         };
         let picked = resolve_serial(Some(57_600), Some("none"), Some(&remembered)).unwrap();
         assert_eq!(picked.baud, 57_600);
-        assert!(!picked.cr_to_crlf, "the command line asked for no translation");
+        assert!(
+            !picked.cr_to_crlf,
+            "the command line asked for no translation"
+        );
     }
 }
 
@@ -575,15 +578,25 @@ fn main() -> anyhow::Result<()> {
             let format = match args.log_format.as_str() {
                 "raw" => serial::LogFormat::Raw,
                 "timestamped" => serial::LogFormat::Timestamped,
-                other => anyhow::bail!("unknown log format {other:?}; expected `raw` or `timestamped`"),
+                other => {
+                    anyhow::bail!("unknown log format {other:?}; expected `raw` or `timestamped`")
+                }
             };
             Some((path, format))
         }
         None => None,
     };
 
-    let send = args.send.as_deref().map(input::unescape).unwrap_or_default();
-    let paste = args.paste.as_deref().map(input::unescape).unwrap_or_default();
+    let send = args
+        .send
+        .as_deref()
+        .map(input::unescape)
+        .unwrap_or_default();
+    let paste = args
+        .paste
+        .as_deref()
+        .map(input::unescape)
+        .unwrap_or_default();
     let files = args.files.as_deref().map(|path| {
         if path.is_empty() {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))

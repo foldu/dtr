@@ -65,7 +65,9 @@ impl From<std::str::Utf8Error> for DecodeError {
 /// Decode a macro file's bytes, returning the text and how it was read.
 pub fn decode(bytes: &[u8]) -> Result<(String, Encoding), DecodeError> {
     match bytes {
-        [0xEF, 0xBB, 0xBF, rest @ ..] => Ok((std::str::from_utf8(rest)?.to_owned(), Encoding::Utf8Bom)),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => {
+            Ok((std::str::from_utf8(rest)?.to_owned(), Encoding::Utf8Bom))
+        }
         [0xFE, 0xFF, rest @ ..] => Ok((utf16(rest, true)?, Encoding::Utf16Be)),
         [0xFF, 0xFE, rest @ ..] => Ok((utf16(rest, false)?, Encoding::Utf16Le)),
         _ => match std::str::from_utf8(bytes) {
@@ -134,7 +136,10 @@ mod tests {
 
     #[test]
     fn a_bom_selects_the_encoding() {
-        assert_eq!(decode(b"\xEF\xBB\xBF sendln 'x'\r\n").unwrap().1, Encoding::Utf8Bom);
+        assert_eq!(
+            decode(b"\xEF\xBB\xBF sendln 'x'\r\n").unwrap().1,
+            Encoding::Utf8Bom
+        );
         assert_eq!(decode(b"\xFE\xFF\0a\0b").unwrap().1, Encoding::Utf16Be);
         assert_eq!(decode(b"\xFF\xFEa\0b\0").unwrap().1, Encoding::Utf16Le);
         assert_eq!(decode(b"sendln 'x'").unwrap().1, Encoding::Utf8);
@@ -158,7 +163,11 @@ mod tests {
         assert!(text.starts_with("send '"));
         assert_eq!(text.chars().nth(6), Some('\u{95}'));
         assert_eq!(text.chars().nth(7), Some('\u{5C}'));
-        assert_eq!(text.chars().nth(8), Some('\''), "the closing quote survives");
+        assert_eq!(
+            text.chars().nth(8),
+            Some('\''),
+            "the closing quote survives"
+        );
     }
 
     #[test]

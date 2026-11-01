@@ -354,11 +354,7 @@ impl Explorer {
                     let size = (!is_dir)
                         .then(|| item.metadata().ok().map(|meta| meta.len()))
                         .flatten();
-                    entries.push(Entry {
-                        name,
-                        is_dir,
-                        size,
-                    });
+                    entries.push(Entry { name, is_dir, size });
                 }
                 Err(_) => unreadable += 1,
             }
@@ -628,11 +624,7 @@ pub fn parent_of(path: &Path) -> Option<PathBuf> {
 
 /// Keep a selection inside a list that may have changed underneath it.
 pub fn clamp_selection(selected: usize, len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        selected.min(len - 1)
-    }
+    if len == 0 { 0 } else { selected.min(len - 1) }
 }
 
 /// The first row to show: `scroll` when it can, otherwise the window that puts
@@ -689,8 +681,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Entry, Key, arrange, clamp_selection, display_join, display_path, first_visible,
-        human_size, parent_of, Explorer,
+        Entry, Explorer, Key, arrange, clamp_selection, display_join, display_path, first_visible,
+        human_size, parent_of,
     };
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -878,7 +870,10 @@ mod tests {
     #[test]
     fn a_pane_waits_for_the_listing_it_sent() {
         let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
-        assert!(!explorer.is_waiting_for(Path::new("/var/log")), "not sent yet");
+        assert!(
+            !explorer.is_waiting_for(Path::new("/var/log")),
+            "not sent yet"
+        );
         explorer.take_request();
         assert!(explorer.is_waiting_for(Path::new("/var/log")));
         assert!(!explorer.is_waiting_for(Path::new("/etc")));
@@ -896,6 +891,9 @@ mod tests {
         explorer.take_request();
         explorer.apply_listing(PathBuf::from("/etc"), Vec::new());
         assert_eq!(explorer.cwd, PathBuf::from("/var/log"));
-        assert!(explorer.is_waiting_for(Path::new("/var/log")), "still waiting");
+        assert!(
+            explorer.is_waiting_for(Path::new("/var/log")),
+            "still waiting"
+        );
     }
 }

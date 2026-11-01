@@ -69,8 +69,6 @@ impl Watcher {
         }
         Some(Self { inner })
     }
-
-
 }
 
 impl std::fmt::Debug for Watcher {
@@ -86,7 +84,11 @@ mod tests {
     #[test]
     fn the_ssh_config_is_watched_even_before_it_exists() {
         let paths = paths();
-        assert!(paths.iter().any(|path| path == std::path::Path::new("/dev")));
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == std::path::Path::new("/dev"))
+        );
         assert!(
             paths
                 .iter()

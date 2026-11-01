@@ -143,7 +143,6 @@ impl Look {
         }
         ctx.set_fonts(definitions);
     }
-
 }
 
 /// Give an area a known rectangle before it is shown.
@@ -286,18 +285,14 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
                 .corner_radius(6)
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(text)
-                            .monospace()
-                            .size(13.0)
-                            .strong()
-                            .color(Color32::from_rgba_unmultiplied(
-                                look.foreground[0],
-                                look.foreground[1],
-                                look.foreground[2],
-                                (255.0 * alpha) as u8,
-                            )),
-                    );
+                    ui.label(RichText::new(text).monospace().size(13.0).strong().color(
+                        Color32::from_rgba_unmultiplied(
+                            look.foreground[0],
+                            look.foreground[1],
+                            look.foreground[2],
+                            (255.0 * alpha) as u8,
+                        ),
+                    ));
                 });
         });
 }
@@ -340,11 +335,9 @@ pub fn tab_bar(
             } else {
                 Look::colour(look.foreground)
             };
-            let galley = ui.painter().layout_no_wrap(
-                text,
-                egui::FontId::monospace(12.0),
-                fg,
-            );
+            let galley = ui
+                .painter()
+                .layout_no_wrap(text, egui::FontId::monospace(12.0), fg);
             // Two hit targets in one chip: the label switches, the cross closes.
             // A keyboard-focusable widget here would be activated by Enter and
             // by Space — pressing Enter in the shell must not touch the strip,
@@ -363,10 +356,8 @@ pub fn tab_bar(
                 egui::pos2(rect.right() - 8.0 - close_size / 2.0, rect.center().y),
                 egui::vec2(close_size, close_size),
             );
-            let label_rect = egui::Rect::from_min_max(
-                rect.min,
-                egui::pos2(close_rect.left() - 4.0, rect.max.y),
-            );
+            let label_rect =
+                egui::Rect::from_min_max(rect.min, egui::pos2(close_rect.left() - 4.0, rect.max.y));
             let response = ui.interact(
                 label_rect,
                 egui::Id::unique(("dtr-tab", index)),
@@ -411,9 +402,7 @@ pub fn tab_bar(
             let name = format!("{} {}", index + 1, &labels[index]);
             response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
             let close_name = format!("close tab {}", index + 1);
-            close.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::Button, true, &close_name)
-            });
+            close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &close_name));
 
             // `Sense::click()` is not enough to be pointer-only: egui activates
             // any focused click-sensing widget on Enter, so a chip that once had
@@ -590,8 +579,8 @@ fn human_bytes(value: f64) -> String {
 #[cfg(test)]
 mod kittest_tests {
     use super::*;
-    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     /// The new-tab button offers the destinations a terminal has, each kind
     /// behind its own separator: the local shell, the serial ports, the hosts.
@@ -796,7 +785,11 @@ mod kittest_tests {
         });
         install_image_loaders(&harness.ctx);
         harness.run();
-        assert_eq!(*clicked.borrow(), None, "drawing alone must not switch tabs");
+        assert_eq!(
+            *clicked.borrow(),
+            None,
+            "drawing alone must not switch tabs"
+        );
 
         harness.get_by_label("2 shell").click();
         harness.run();
@@ -821,7 +814,11 @@ mod kittest_tests {
         *clicked.borrow_mut() = None;
         harness.key_press(egui::Key::Enter);
         harness.run();
-        assert_eq!(*clicked.borrow(), None, "Enter must not activate a tab chip");
+        assert_eq!(
+            *clicked.borrow(),
+            None,
+            "Enter must not activate a tab chip"
+        );
     }
 
     /// A visual record of the strip: two chips, the second one active.

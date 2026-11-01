@@ -56,12 +56,7 @@ impl Backend for Memory {
 
     fn stat<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Meta>> {
         Box::pin(async move {
-            if self
-                .dirs
-                .lock()
-                .expect("memory lock")
-                .contains(path)
-            {
+            if self.dirs.lock().expect("memory lock").contains(path) {
                 return Ok(Meta {
                     kind: Kind::Dir,
                     len: 0,

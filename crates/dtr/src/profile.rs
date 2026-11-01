@@ -75,7 +75,9 @@ impl Guard {
         if self.written.replace(true) {
             return;
         }
-        let Some(guard) = self.inner.as_ref() else { return };
+        let Some(guard) = self.inner.as_ref() else {
+            return;
+        };
         let started = self.started;
         match guard.report().build() {
             Ok(report) => {

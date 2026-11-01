@@ -191,7 +191,9 @@ impl Layout {
     pub fn contains(&self, target: LeafId) -> bool {
         match self {
             Layout::Leaf(id) => *id == target,
-            Layout::Split { first, second, .. } => first.contains(target) || second.contains(target),
+            Layout::Split { first, second, .. } => {
+                first.contains(target) || second.contains(target)
+            }
         }
     }
 }

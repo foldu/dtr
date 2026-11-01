@@ -90,10 +90,7 @@ impl LinkMenu {
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
                     .fill(Look::colour(look.surface))
-                    .stroke(Stroke::new(
-                        1.0,
-                        Look::colour(look.dim).gamma_multiply(0.7),
-                    ))
+                    .stroke(Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.7)))
                     .corner_radius(4.0)
                     .inner_margin(6)
                     .show(ui, |ui| {
@@ -132,8 +129,8 @@ impl LinkMenu {
 #[cfg(test)]
 mod tests {
     use super::{Choice, LinkMenu};
-    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     fn menu() -> LinkMenu {
         let mut menu = LinkMenu::default();

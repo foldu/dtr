@@ -61,34 +61,72 @@ pub enum Op {
 
     /// A command whose parameters are still tokens, so that the command table
     /// is the only place that knows what they mean.
-    Command { name: String, args: Vec<Vec<Tok>> },
+    Command {
+        name: String,
+        args: Vec<Vec<Tok>>,
+    },
 
     /// `if <cond> then`: a branch of a block, tested at run time.
-    If { cond: Expr, next: usize, endif: usize },
+    If {
+        cond: Expr,
+        next: usize,
+        endif: usize,
+    },
     /// `elseif <cond> then`. Reached by falling out of a taken branch (then it
     /// goes to `endif`) or by a false condition before it (then it is tested).
-    ElseIf { cond: Expr, next: usize, endif: usize },
-    Else { endif: usize },
+    ElseIf {
+        cond: Expr,
+        next: usize,
+        endif: usize,
+    },
+    Else {
+        endif: usize,
+    },
     EndIf,
     /// The single-line `if <cond> <statement>`: skip one statement when false.
-    IfOnce { cond: Expr, next: usize },
+    IfOnce {
+        cond: Expr,
+        next: usize,
+    },
 
-    While { cond: Expr, end: usize },
-    EndWhile { start: usize },
-    Until { cond: Expr, end: usize },
-    EndUntil { start: usize },
-    Do { pre: Option<Test>, end: usize },
-    Loop { post: Option<Test>, start: usize },
+    While {
+        cond: Expr,
+        end: usize,
+    },
+    EndWhile {
+        start: usize,
+    },
+    Until {
+        cond: Expr,
+        end: usize,
+    },
+    EndUntil {
+        start: usize,
+    },
+    Do {
+        pre: Option<Test>,
+        end: usize,
+    },
+    Loop {
+        post: Option<Test>,
+        start: usize,
+    },
     For {
         var: String,
         first: Expr,
         last: Expr,
         end: usize,
     },
-    Next { start: usize },
+    Next {
+        start: usize,
+    },
 
-    Break { to: usize },
-    Continue { to: usize },
+    Break {
+        to: usize,
+    },
+    Continue {
+        to: usize,
+    },
 
     Goto {
         label: String,
@@ -108,8 +146,12 @@ pub enum Op {
     /// `exit`: in an included file, return to the includer; in the main file,
     /// the same as [`Op::End`] (§6.7).
     Exit,
-    SetExitCode { value: Expr },
-    Include { path: Expr },
+    SetExitCode {
+        value: Expr,
+    },
+    Include {
+        path: Expr,
+    },
 }
 
 /// A macro ready to run.
@@ -126,16 +168,36 @@ pub struct Program {
 #[derive(Debug)]
 pub enum BuildError {
     /// A statement that does not parse.
-    Syntax { line: usize, detail: String },
+    Syntax {
+        line: usize,
+        detail: String,
+    },
     /// `else`, `elseif` or `endif` with no `if` open, or a closer that does
     /// not match its opener.
-    InvalidControl { line: usize, what: &'static str },
-    LabelAlreadyDefined { line: usize, name: String },
-    LabelRequired { line: usize, name: String },
-    TooManyLabels { line: usize },
+    InvalidControl {
+        line: usize,
+        what: &'static str,
+    },
+    LabelAlreadyDefined {
+        line: usize,
+        name: String,
+    },
+    LabelRequired {
+        line: usize,
+        name: String,
+    },
+    TooManyLabels {
+        line: usize,
+    },
     /// `break` or `continue` with no loop around it.
-    OutsideLoop { line: usize, what: &'static str },
-    Unclosed { line: usize, what: &'static str },
+    OutsideLoop {
+        line: usize,
+        what: &'static str,
+    },
+    Unclosed {
+        line: usize,
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for BuildError {
@@ -521,10 +583,7 @@ impl Builder {
             line: number,
             detail: error.to_string(),
         })?;
-        self.line(&Line {
-            number,
-            kind,
-        })
+        self.line(&Line { number, kind })
     }
 
     fn elseif(&mut self, args: &[Vec<Tok>], number: usize) -> Result<(), BuildError> {
@@ -636,12 +695,7 @@ impl Builder {
             *end = pos;
         }
         self.patch_jumps(&frame, pos, frame.open);
-        self.push(
-            Op::EndWhile {
-                start: frame.open,
-            },
-            number,
-        );
+        self.push(Op::EndWhile { start: frame.open }, number);
         Ok(())
     }
 
@@ -652,12 +706,7 @@ impl Builder {
             *end = pos;
         }
         self.patch_jumps(&frame, pos, frame.open);
-        self.push(
-            Op::EndUntil {
-                start: frame.open,
-            },
-            number,
-        );
+        self.push(Op::EndUntil { start: frame.open }, number);
         Ok(())
     }
 
@@ -708,10 +757,7 @@ impl Builder {
 
     fn jump_out(&mut self, what: &'static str, number: usize) -> Result<(), BuildError> {
         if self.loops.is_empty() {
-            return Err(BuildError::OutsideLoop {
-                line: number,
-                what,
-            });
+            return Err(BuildError::OutsideLoop { line: number, what });
         }
         let pos = self.ops.len();
         let op = if what == "break" {
@@ -730,11 +776,7 @@ impl Builder {
     }
 
     /// `do [while|until <cond>]` and `loop [while|until <cond>]`.
-    fn optional_test(
-        &self,
-        args: &[Vec<Tok>],
-        number: usize,
-    ) -> Result<Option<Test>, BuildError> {
+    fn optional_test(&self, args: &[Vec<Tok>], number: usize) -> Result<Option<Test>, BuildError> {
         let Some(first) = args.first() else {
             return Ok(None);
         };
@@ -807,7 +849,9 @@ impl Builder {
             })?;
             let loops = self.depths[target];
             if let Op::Goto {
-                target: to, loops: l, ..
+                target: to,
+                loops: l,
+                ..
             } = &mut self.ops[at]
             {
                 *to = target;
@@ -836,7 +880,9 @@ impl Builder {
 /// All parameters as one token run, so a condition split over several
 /// whitespace-separated parameters (`if a = 1 then`) parses as an expression.
 fn join(args: &[Vec<Tok>]) -> Vec<Tok> {
-    args.iter().flat_map(|group| group.iter().cloned()).collect()
+    args.iter()
+        .flat_map(|group| group.iter().cloned())
+        .collect()
 }
 
 /// A parameter that is exactly one bare word, lowercased.
@@ -852,7 +898,8 @@ fn word(group: &[Tok]) -> Option<String> {
 
 /// Position of the `then` parameter, if the line has one.
 fn then_index(args: &[Vec<Tok>]) -> Option<usize> {
-    args.iter().position(|group| word(group).as_deref() == Some("then"))
+    args.iter()
+        .position(|group| word(group).as_deref() == Some("then"))
 }
 
 /// The condition of an `elseif`: everything, minus a trailing `then`.
@@ -940,12 +987,26 @@ mod tests {
         // 0 If, 1 A=1, 2 ElseIf, 3 A=2, 4 Else, 5 A=3, 6 EndIf, 7 A=4
         assert_eq!(p.len(), 8, "{:?}", p.ops);
         assert!(
-            matches!(&p.ops[0], Op::If { next: 2, endif: 6, .. }),
+            matches!(
+                &p.ops[0],
+                Op::If {
+                    next: 2,
+                    endif: 6,
+                    ..
+                }
+            ),
             "{:?}",
             p.ops[0]
         );
         assert!(
-            matches!(&p.ops[2], Op::ElseIf { next: 4, endif: 6, .. }),
+            matches!(
+                &p.ops[2],
+                Op::ElseIf {
+                    next: 4,
+                    endif: 6,
+                    ..
+                }
+            ),
             "{:?}",
             p.ops[2]
         );
@@ -956,7 +1017,14 @@ mod tests {
     #[test]
     fn a_block_if_without_else_jumps_to_its_endif() {
         let p = program("if a then\nA = 1\nendif\n");
-        assert!(matches!(&p.ops[0], Op::If { next: 2, endif: 2, .. }));
+        assert!(matches!(
+            &p.ops[0],
+            Op::If {
+                next: 2,
+                endif: 2,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -964,7 +1032,11 @@ mod tests {
         let p = program("if result=0 setexitcode 0\nA = 1\n:done\n");
         // 0 IfOnce(next 2), 1 SetExitCode, 2 A=1, 3 Label
         assert_eq!(p.len(), 4, "{:?}", p.ops);
-        assert!(matches!(&p.ops[0], Op::IfOnce { next: 2, .. }), "{:?}", p.ops[0]);
+        assert!(
+            matches!(&p.ops[0], Op::IfOnce { next: 2, .. }),
+            "{:?}",
+            p.ops[0]
+        );
         assert!(matches!(p.ops[1], Op::SetExitCode { .. }));
     }
 
@@ -974,7 +1046,14 @@ mod tests {
         assert!(matches!(&p.ops[0], Op::IfOnce { next: 2, .. }));
         assert!(matches!(p.ops[1], Op::Assign { .. }));
         assert!(matches!(&p.ops[2], Op::IfOnce { next: 4, .. }));
-        assert!(matches!(&p.ops[3], Op::Goto { target: 4, loops: 0, .. }));
+        assert!(matches!(
+            &p.ops[3],
+            Op::Goto {
+                target: 4,
+                loops: 0,
+                ..
+            }
+        ));
         assert!(matches!(&p.ops[4], Op::Label(name) if name == "done"));
     }
 
@@ -995,8 +1074,16 @@ mod tests {
     fn a_goto_out_of_a_loop_records_the_nesting_it_lands_in() {
         let p = program(":outside\nfor i 1 3\n:inside\ngoto inside\ngoto outside\nnext\n");
         // 0 Label(outside), 1 For, 2 Label(inside), 3 Goto inside, 4 Goto outside, 5 Next
-        assert!(matches!(&p.ops[3], Op::Goto { loops: 1, .. }), "{:?}", p.ops[3]);
-        assert!(matches!(&p.ops[4], Op::Goto { loops: 0, .. }), "{:?}", p.ops[4]);
+        assert!(
+            matches!(&p.ops[3], Op::Goto { loops: 1, .. }),
+            "{:?}",
+            p.ops[3]
+        );
+        assert!(
+            matches!(&p.ops[4], Op::Goto { loops: 0, .. }),
+            "{:?}",
+            p.ops[4]
+        );
     }
 
     #[test]
@@ -1011,10 +1098,22 @@ mod tests {
              A = 1\n",
         );
         // 0 For, 1 While, 2 IfOnce, 3 Break, 4 Continue, 5 EndWhile, 6 Next, 7 A=1
-        assert!(matches!(&p.ops[0], Op::For { end: 6, .. }), "{:?}", p.ops[0]);
-        assert!(matches!(&p.ops[1], Op::While { end: 5, .. }), "{:?}", p.ops[1]);
+        assert!(
+            matches!(&p.ops[0], Op::For { end: 6, .. }),
+            "{:?}",
+            p.ops[0]
+        );
+        assert!(
+            matches!(&p.ops[1], Op::While { end: 5, .. }),
+            "{:?}",
+            p.ops[1]
+        );
         assert!(matches!(&p.ops[3], Op::Break { to: 6 }), "{:?}", p.ops[3]);
-        assert!(matches!(&p.ops[4], Op::Continue { to: 1 }), "{:?}", p.ops[4]);
+        assert!(
+            matches!(&p.ops[4], Op::Continue { to: 1 }),
+            "{:?}",
+            p.ops[4]
+        );
     }
 
     #[test]
@@ -1028,13 +1127,21 @@ mod tests {
     fn continue_in_a_for_goes_through_next() {
         let p = program("for i 1 3\ncontinue\nnext\n");
         // `next` is what increments, so continue must land there.
-        assert!(matches!(&p.ops[1], Op::Continue { to: 2 }), "{:?}", p.ops[1]);
+        assert!(
+            matches!(&p.ops[1], Op::Continue { to: 2 }),
+            "{:?}",
+            p.ops[1]
+        );
     }
 
     #[test]
     fn continue_in_a_do_goes_to_the_loop_test() {
         let p = program("do\ncontinue\nloop while x\n");
-        assert!(matches!(&p.ops[1], Op::Continue { to: 2 }), "{:?}", p.ops[1]);
+        assert!(
+            matches!(&p.ops[1], Op::Continue { to: 2 }),
+            "{:?}",
+            p.ops[1]
+        );
         assert!(matches!(&p.ops[0], Op::Do { pre: None, end: 2 }));
         assert!(matches!(
             &p.ops[2],
@@ -1059,7 +1166,13 @@ mod tests {
                 end: 1
             }
         ));
-        assert!(matches!(&p.ops[1], Op::Loop { post: None, start: 0 }));
+        assert!(matches!(
+            &p.ops[1],
+            Op::Loop {
+                post: None,
+                start: 0
+            }
+        ));
     }
 
     #[test]
@@ -1085,7 +1198,13 @@ mod tests {
     fn a_negative_limit_is_a_unary_minus_not_a_missing_parameter() {
         // `for i 5 -1` is three parameters: the minus binds to the 1.
         let p = program("for i 5 -1\nnext\n");
-        assert!(matches!(&p.ops[0], Op::For { last: expr::Expr::Unary(..), .. }));
+        assert!(matches!(
+            &p.ops[0],
+            Op::For {
+                last: expr::Expr::Unary(..),
+                ..
+            }
+        ));
     }
 
     #[test]

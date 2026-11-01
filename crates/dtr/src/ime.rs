@@ -105,11 +105,16 @@ impl Preedit {
             // The terminal's own background, so the preedit reads as text in the
             // grid rather than as chrome on top of it.
             Color32::from_rgb(look.background[0], look.background[1], look.background[2]),
-            Stroke::new(1.0, Color32::from_rgb(look.accent[0], look.accent[1], look.accent[2])),
+            Stroke::new(
+                1.0,
+                Color32::from_rgb(look.accent[0], look.accent[1], look.accent[2]),
+            ),
             egui::StrokeKind::Inside,
         );
         let origin = rect.min + PADDING;
-        let caret = self.caret_chars().unwrap_or_else(|| self.text.chars().count());
+        let caret = self
+            .caret_chars()
+            .unwrap_or_else(|| self.text.chars().count());
         let caret_x = origin.x
             + galley
                 .pos_from_cursor(egui::text::CCursor::new(caret))
@@ -121,7 +126,10 @@ impl Preedit {
                 egui::pos2(caret_x, origin.y),
                 egui::pos2(caret_x, origin.y + galley.size().y),
             ],
-            Stroke::new(1.0, Color32::from_rgb(look.accent[0], look.accent[1], look.accent[2])),
+            Stroke::new(
+                1.0,
+                Color32::from_rgb(look.accent[0], look.accent[1], look.accent[2]),
+            ),
         );
     }
 }
@@ -140,15 +148,13 @@ pub struct Anchor {
 /// composition near the right edge or in a pane shorter than the box has to stay
 /// readable rather than hang out of the window.
 pub fn place(caret: Rect, size: Vec2, pane: Rect) -> Rect {
-    let above = Rect::from_min_size(
-        egui::pos2(caret.min.x, caret.min.y - size.y - GAP),
-        size,
-    );
-    let below = Rect::from_min_size(
-        egui::pos2(caret.min.x, caret.max.y + GAP),
-        size,
-    );
-    let mut rect = if above.min.y >= pane.min.y { above } else { below };
+    let above = Rect::from_min_size(egui::pos2(caret.min.x, caret.min.y - size.y - GAP), size);
+    let below = Rect::from_min_size(egui::pos2(caret.min.x, caret.max.y + GAP), size);
+    let mut rect = if above.min.y >= pane.min.y {
+        above
+    } else {
+        below
+    };
     if rect.max.x > pane.max.x {
         rect = rect.translate(egui::vec2(pane.max.x - rect.max.x, 0.0));
     }
@@ -166,9 +172,9 @@ pub fn place(caret: Rect, size: Vec2, pane: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{place, Anchor, Preedit};
+    use super::{Anchor, Preedit, place};
     use crate::ui::Look;
-    use egui::{pos2, vec2, Rect};
+    use egui::{Rect, pos2, vec2};
     use egui_kittest::Harness;
 
     fn caret(x: f32, y: f32) -> Rect {

@@ -407,7 +407,10 @@ mod tests {
             Path::new("/var/log/syslog"),
         );
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        backend.fetch(Path::new("/var/log/syslog"), &dest).await.unwrap();
+        backend
+            .fetch(Path::new("/var/log/syslog"), &dest)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "line\n");
         assert!(dest.ends_with("jupyter/var/log/syslog"));
     }

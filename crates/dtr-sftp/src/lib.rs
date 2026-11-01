@@ -227,7 +227,11 @@ impl AsyncWrite for ChildStream {
 impl Session {
     /// The remote home directory, as the server reports it.
     pub async fn home(&mut self) -> Result<PathBuf> {
-        let cwd = self.sftp.canonicalize(".").await.context("canonicalize .")?;
+        let cwd = self
+            .sftp
+            .canonicalize(".")
+            .await
+            .context("canonicalize .")?;
         Ok(PathBuf::from(cwd))
     }
 }
@@ -297,7 +301,11 @@ mod tests {
 
     #[test]
     fn directories_come_before_files() {
-        let mut entries = vec![entry("z.txt", false), entry("a", true), entry("b.txt", false)];
+        let mut entries = vec![
+            entry("z.txt", false),
+            entry("a", true),
+            entry("b.txt", false),
+        ];
         sort_entries(&mut entries);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["a", "b.txt", "z.txt"]);

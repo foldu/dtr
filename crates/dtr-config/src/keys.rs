@@ -147,8 +147,7 @@ impl Sequence {
     }
 
     pub fn is_prefix_of(&self, other: &Sequence) -> bool {
-        other.chords.len() > self.chords.len()
-            && other.chords.starts_with(&self.chords[..])
+        other.chords.len() > self.chords.len() && other.chords.starts_with(&self.chords[..])
     }
 }
 
@@ -317,7 +316,10 @@ mod tests {
             parse_chord("shift-pageup").unwrap().key,
             Key::Named(Named::PageUp)
         );
-        assert_eq!(parse_chord("f5").unwrap().key, Key::Named(Named::Function(5)));
+        assert_eq!(
+            parse_chord("f5").unwrap().key,
+            Key::Named(Named::Function(5))
+        );
         assert_eq!(parse_chord("esc").unwrap().key, Key::Named(Named::Escape));
     }
 

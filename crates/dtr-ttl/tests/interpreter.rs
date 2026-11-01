@@ -194,8 +194,7 @@ messagebox 'after' 'x'
 
 #[test]
 fn include_runs_the_file_and_comes_back() {
-    let mut host = RecordingHost::new()
-        .with_file("part.ttl", b"messagebox 'inside' 'x'\n");
+    let mut host = RecordingHost::new().with_file("part.ttl", b"messagebox 'inside' 'x'\n");
     let status = Interpreter::run_text(
         &mut host,
         "messagebox 'before' 'x'
@@ -210,8 +209,10 @@ messagebox 'after' 'x'
 
 #[test]
 fn exit_in_an_included_file_returns_to_the_includer() {
-    let mut host = RecordingHost::new()
-        .with_file("part.ttl", b"messagebox 'inside' 'x'\nexit\nmessagebox 'never' 'x'\n");
+    let mut host = RecordingHost::new().with_file(
+        "part.ttl",
+        b"messagebox 'inside' 'x'\nexit\nmessagebox 'never' 'x'\n",
+    );
     Interpreter::run_text(
         &mut host,
         "include 'part.ttl'
@@ -259,10 +260,7 @@ fn the_system_variables_are_readable_and_writable() {
     let mut host = RecordingHost::new();
     let mut interp = Interpreter::with_program(
         &mut host,
-        dtr_ttl::program::Program::parse(
-            "result = 3\ninputstr = 'typed'\ntimeout = 7\n",
-        )
-        .unwrap(),
+        dtr_ttl::program::Program::parse("result = 3\ninputstr = 'typed'\ntimeout = 7\n").unwrap(),
     )
     .with_params(vec!["one".into(), "two".into()]);
     interp.run().unwrap();
@@ -378,8 +376,7 @@ fn a_cancelled_listbox_is_minus_one() {
     let mut host = RecordingHost::new();
     let mut interp = Interpreter::with_program(
         &mut host,
-        dtr_ttl::program::Program::parse("strdim items 1\nlistbox 'pick' 'title' items\n")
-            .unwrap(),
+        dtr_ttl::program::Program::parse("strdim items 1\nlistbox 'pick' 'title' items\n").unwrap(),
     );
     interp.run().unwrap();
     assert_eq!(interp.result(), -1);
@@ -472,10 +469,22 @@ r4 = result
         .unwrap(),
     );
     interp.run().unwrap();
-    assert_eq!(interp.vars().get("r1").unwrap(), dtr_ttl::value::Value::Int(0));
-    assert_eq!(interp.vars().get("r2").unwrap(), dtr_ttl::value::Value::Int(-1));
-    assert_eq!(interp.vars().get("r3").unwrap(), dtr_ttl::value::Value::Int(1));
-    assert_eq!(interp.vars().get("r4").unwrap(), dtr_ttl::value::Value::Int(5));
+    assert_eq!(
+        interp.vars().get("r1").unwrap(),
+        dtr_ttl::value::Value::Int(0)
+    );
+    assert_eq!(
+        interp.vars().get("r2").unwrap(),
+        dtr_ttl::value::Value::Int(-1)
+    );
+    assert_eq!(
+        interp.vars().get("r3").unwrap(),
+        dtr_ttl::value::Value::Int(1)
+    );
+    assert_eq!(
+        interp.vars().get("r4").unwrap(),
+        dtr_ttl::value::Value::Int(5)
+    );
 }
 
 #[test]
@@ -492,7 +501,10 @@ strjoin joined '-'
         .unwrap(),
     );
     interp.run().unwrap();
-    assert_eq!(interp.vars().get("n").unwrap(), dtr_ttl::value::Value::Int(3));
+    assert_eq!(
+        interp.vars().get("n").unwrap(),
+        dtr_ttl::value::Value::Int(3)
+    );
     assert_eq!(
         interp.vars().get("joined").unwrap(),
         dtr_ttl::value::Value::Str("a-b-c------".into()),
@@ -520,7 +532,8 @@ strreplace t 2 'b' 'B'
         dtr_ttl::value::Value::Str("aBc".into())
     );
     assert_eq!(
-        interp.system().groupmatchstr[0], "",
+        interp.system().groupmatchstr[0],
+        "",
         "`strreplace` clears the slots instead of filling them"
     );
 }
@@ -567,7 +580,14 @@ n4 = result
         .unwrap(),
     );
     interp.run().unwrap();
-    for (name, expected) in [("n0", 0), ("n5", 5), ("n6", 6), ("n1", 1), ("n3", 3), ("n4", 4)] {
+    for (name, expected) in [
+        ("n0", 0),
+        ("n5", 5),
+        ("n6", 6),
+        ("n1", 1),
+        ("n3", 3),
+        ("n4", 4),
+    ] {
         assert_eq!(
             interp.vars().get(name).unwrap(),
             dtr_ttl::value::Value::Int(expected),

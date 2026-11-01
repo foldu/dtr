@@ -382,12 +382,7 @@ impl GridRenderer {
                     (glyph.width, glyph.height, glyph.left, glyph.top)
                 };
                 self.instances.push(Instance {
-                    rect: [
-                        (x + left).round(),
-                        (y + top).round(),
-                        width,
-                        height,
-                    ],
+                    rect: [(x + left).round(), (y + top).round(), width, height],
                     uv: glyph.uv,
                     colour: rgb(cell.fg),
                 });
@@ -408,11 +403,8 @@ impl GridRenderer {
                 }
                 let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
                 let (x, y) = (x + origin_x, y + origin_y);
-                self.instances.push(Instance::solid(
-                    [x, y, cell_w, cell_h],
-                    look.accent,
-                    0.35,
-                ));
+                self.instances
+                    .push(Instance::solid([x, y, cell_w, cell_h], look.accent, 0.35));
             }
         }
 
@@ -438,7 +430,6 @@ impl GridRenderer {
                 1.0,
             ));
         }
-
     }
 
     fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -571,12 +562,7 @@ fn cell_origin(index: usize, cols: u16, cell_w: f32, cell_h: f32) -> (f32, f32) 
 fn bytemuck_cast<T: Copy>(slice: &[T]) -> &[u8] {
     // SAFETY: `Instance` is plain old data (f32 arrays only); this is the
     // standard transmute pattern for wgpu vertex buffers.
-    unsafe {
-        std::slice::from_raw_parts(
-            slice.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(slice),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) }
 }
 
 const SHADER: &str = r#"
@@ -816,7 +802,8 @@ impl Fonts {
                 let Some(family) = collection.family(id) else {
                     continue;
                 };
-                let Some(font) = family.match_font(fontique::FontWidth::NORMAL, slant, weight, false)
+                let Some(font) =
+                    family.match_font(fontique::FontWidth::NORMAL, slant, weight, false)
                 else {
                     continue;
                 };
@@ -890,11 +877,7 @@ impl Fonts {
         let loaded = self.faces.get(face)?;
         let font = swash::FontRef::from_index(&loaded.bytes, loaded.index)?;
         let context = &mut self.context;
-        let mut scaler = context
-            .builder(font)
-            .size(size)
-            .hint(true)
-            .build();
+        let mut scaler = context.builder(font).size(size).hint(true).build();
         let mut image = swash::scale::image::Image::new();
         swash::scale::Render::new(&[swash::scale::Source::Outline]).render_into(
             &mut scaler,
@@ -936,9 +919,18 @@ fn load_faces(look: &Look) -> [Loaded; 4] {
         candidates.push(family);
     }
     candidates.extend(
-        ["JetBrains Mono", "Hack", "DejaVu Sans Mono", "Liberation Mono", "Fira Code", "Ubuntu Mono", "Noto Sans Mono", "monospace"]
-            .iter()
-            .map(|name| (*name).to_owned()),
+        [
+            "JetBrains Mono",
+            "Hack",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Fira Code",
+            "Ubuntu Mono",
+            "Noto Sans Mono",
+            "monospace",
+        ]
+        .iter()
+        .map(|name| (*name).to_owned()),
     );
     for family in candidates.iter().map(String::as_str) {
         let Some(info) = collection.family_by_name(family) else {
@@ -1047,16 +1039,11 @@ mod font_tests {
         let Some(index) = fonts.face_for(Face::Regular, '日') else {
             return; // no CJK font installed here
         };
-        let name = fonts
-            .names
-            .get(index - 4)
-            .cloned()
-            .unwrap_or_default();
+        let name = fonts.names.get(index - 4).cloned().unwrap_or_default();
         // Only assert when a preferred family is actually installed: on a
         // machine without Sarasa or Noto, any family that has the glyph is
         // correct behaviour and there is nothing to check.
-        let mut collection =
-            fontique::Collection::new(fontique::CollectionOptions::default());
+        let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
         let preferred: Vec<&str> = crate::fonts::FALLBACK
             .iter()
             .copied()

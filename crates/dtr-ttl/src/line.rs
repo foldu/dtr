@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use crate::lex::{lex_line, LexError, Tok, Token};
+use crate::lex::{LexError, Tok, Token, lex_line};
 use crate::source;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,15 +42,26 @@ pub struct Line {
 
 #[derive(Debug)]
 pub enum ScanError {
-    Lex { line: usize, error: LexError },
+    Lex {
+        line: usize,
+        error: LexError,
+    },
     /// A `/*` that is never closed, reported at the last line.
-    UnterminatedComment { line: usize },
+    UnterminatedComment {
+        line: usize,
+    },
     /// A line that starts with something that cannot start one.
-    UnexpectedLineStart { line: usize },
+    UnexpectedLineStart {
+        line: usize,
+    },
     /// `name[` with no `]`.
-    UnclosedBracket { line: usize },
+    UnclosedBracket {
+        line: usize,
+    },
     /// `name[0]` with no `=` after it.
-    ExpectedEquals { line: usize },
+    ExpectedEquals {
+        line: usize,
+    },
 }
 
 impl fmt::Display for ScanError {
@@ -60,7 +71,9 @@ impl fmt::Display for ScanError {
             Self::UnterminatedComment { line } => {
                 write!(f, "line {line}: unterminated /* comment")
             }
-            Self::UnexpectedLineStart { line } => write!(f, "line {line}: cannot start a statement"),
+            Self::UnexpectedLineStart { line } => {
+                write!(f, "line {line}: cannot start a statement")
+            }
             Self::UnclosedBracket { line } => write!(f, "line {line}: missing ]"),
             Self::ExpectedEquals { line } => write!(f, "line {line}: missing = after the index"),
         }
@@ -78,8 +91,10 @@ pub fn scan(text: &str) -> Result<Vec<Line>, ScanError> {
     for (index, text) in raw.iter().enumerate() {
         let number = index + 1;
         let chars: Vec<char> = text.chars().collect();
-        let toks = lex_line(&chars, &mut in_comment)
-            .map_err(|error| ScanError::Lex { line: number, error })?;
+        let toks = lex_line(&chars, &mut in_comment).map_err(|error| ScanError::Lex {
+            line: number,
+            error,
+        })?;
         let kind = classify(&toks, number)?;
         out.push(Line { number, kind });
     }
@@ -201,7 +216,10 @@ impl fmt::Display for BlockError {
                 write!(f, "line {line}: {what} closes nothing that is open")
             }
             Self::Unclosed { line, what } => {
-                write!(f, "line {line}: the block opened here is never closed with {what}")
+                write!(
+                    f,
+                    "line {line}: the block opened here is never closed with {what}"
+                )
             }
         }
     }
@@ -307,7 +325,9 @@ mod tests {
                 }]
             }
         );
-        assert!(matches!(&k[4], LineKind::Command { name, args } if name == "sendln" && args.len() == 1));
+        assert!(
+            matches!(&k[4], LineKind::Command { name, args } if name == "sendln" && args.len() == 1)
+        );
     }
 
     #[test]
@@ -354,7 +374,13 @@ mod tests {
         assert!(matches!(err, BlockError::Unexpected { what: "endif", .. }));
 
         let err = check_blocks(&scan("for i 1 3\nendwhile\n").unwrap()).unwrap_err();
-        assert!(matches!(err, BlockError::Unexpected { what: "endwhile", .. }));
+        assert!(matches!(
+            err,
+            BlockError::Unexpected {
+                what: "endwhile",
+                ..
+            }
+        ));
     }
 
     #[test]

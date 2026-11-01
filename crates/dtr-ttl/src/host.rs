@@ -140,12 +140,8 @@ pub trait Host {
     /// `wait`/`waitln`: which of `patterns` matched (0-based) and the text
     /// that matched, or `None` when the wait timed out. `line` asks for a whole
     /// line rather than the first occurrence anywhere.
-    fn wait_for(
-        &mut self,
-        patterns: &[String],
-        millis: i64,
-        line: bool,
-    ) -> Option<(usize, String)>;
+    fn wait_for(&mut self, patterns: &[String], millis: i64, line: bool)
+    -> Option<(usize, String)>;
 
     /// The file system the §7.4 commands work on.
     fn files(&mut self) -> &mut dyn Files;

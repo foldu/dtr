@@ -247,7 +247,9 @@ pub fn lex_line(chars: &[char], in_comment: &mut bool) -> Result<Vec<Tok>, LexEr
                 j += 1;
             }
             let text: String = chars[i..j].iter().collect();
-            let value: i64 = text.parse().map_err(|_| LexError::NumberOutOfRange { col })?;
+            let value: i64 = text
+                .parse()
+                .map_err(|_| LexError::NumberOutOfRange { col })?;
             // §4.1: the only integer type is signed 32-bit, so a constant that
             // does not fit is refused rather than truncated.
             i32::try_from(value).map_err(|_| LexError::NumberOutOfRange { col })?;
@@ -293,7 +295,11 @@ fn push(out: &mut Vec<Tok>, kind: Token, space: bool, col: usize) {
 /// join, so `send 'a' 'b'` is still two parameters.
 fn push_possibly_glued(out: &mut Vec<Tok>, kind: Token, space: bool, col: usize) {
     if !space {
-        if let Some(Tok { kind: Token::Str(prev), .. }) = out.last_mut() {
+        if let Some(Tok {
+            kind: Token::Str(prev),
+            ..
+        }) = out.last_mut()
+        {
             if let Token::Str(add) = &kind {
                 prev.push_str(add);
                 return;
@@ -407,7 +413,10 @@ mod tests {
     #[test]
     fn the_other_quote_is_ordinary_inside_a_string() {
         assert_eq!(lex("\"I can't\""), [Token::Str("I can't".into())]);
-        assert_eq!(lex("'she said \"hi\"'"), [Token::Str("she said \"hi\"".into())]);
+        assert_eq!(
+            lex("'she said \"hi\"'"),
+            [Token::Str("she said \"hi\"".into())]
+        );
     }
 
     #[test]
@@ -433,10 +442,7 @@ mod tests {
 
     #[test]
     fn adjacent_string_pieces_are_one_string() {
-        assert_eq!(
-            lex("'cat'#13#10"),
-            [Token::Str("cat\r\n".into())],
-        );
+        assert_eq!(lex("'cat'#13#10"), [Token::Str("cat\r\n".into())],);
         assert_eq!(lex("'abc'#$0d#$0a'def'"), [Token::Str("abc\r\ndef".into())]);
     }
 

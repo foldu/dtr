@@ -22,7 +22,9 @@ use dtr_ttl::program::Program;
 use dtr_ttl::source;
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("corpus")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("corpus")
 }
 
 fn corpus_files() -> Vec<PathBuf> {
@@ -266,7 +268,10 @@ fn the_corpus_transcript_is_unchanged() {
         "the corpus's dialogs changed; if that was intended, re-run with \
          UPDATE_CORPUS_DIALOGS=1 and review the diff"
     );
-    assert!(current.contains("== test_file.ttl"), "the transcript has content");
+    assert!(
+        current.contains("== test_file.ttl"),
+        "the transcript has content"
+    );
 }
 
 #[test]
@@ -301,7 +306,9 @@ fn the_macros_that_test_the_language_say_what_they_should() {
         let program = Program::parse(&text).unwrap_or_else(|error| panic!("{name}: {error}"));
         let mut host = RecordingHost::new();
         let mut interp = Interpreter::with_program(&mut host, program);
-        interp.run().unwrap_or_else(|failure| panic!("{name}: {failure}"));
+        interp
+            .run()
+            .unwrap_or_else(|failure| panic!("{name}: {failure}"));
         assert_eq!(host.messages(), *expected, "{name}");
     }
 }

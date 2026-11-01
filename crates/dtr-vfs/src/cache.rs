@@ -25,7 +25,10 @@ pub fn path_for(root: &Path, id: &BackendId, path: &Path) -> PathBuf {
             }
             // A root, a prefix or a `..` says nothing about where the file is
             // *inside* the cache; the parts around it do.
-            Component::RootDir | Component::Prefix(_) | Component::CurDir | Component::ParentDir => {}
+            Component::RootDir
+            | Component::Prefix(_)
+            | Component::CurDir
+            | Component::ParentDir => {}
         }
     }
     if !named {
@@ -97,7 +100,11 @@ mod tests {
     #[test]
     fn a_remote_path_mirrors_under_its_machine() {
         assert_eq!(
-            path_for(&root(), &BackendId::Ssh("jupyter".into()), Path::new("/var/log/syslog")),
+            path_for(
+                &root(),
+                &BackendId::Ssh("jupyter".into()),
+                Path::new("/var/log/syslog")
+            ),
             PathBuf::from("/cache/jupyter/var/log/syslog")
         );
     }
@@ -119,7 +126,11 @@ mod tests {
     #[test]
     fn an_alias_is_sanitised() {
         assert_eq!(
-            path_for(&root(), &BackendId::Ssh("lab/../jup iter".into()), Path::new("/x")),
+            path_for(
+                &root(),
+                &BackendId::Ssh("lab/../jup iter".into()),
+                Path::new("/x")
+            ),
             PathBuf::from("/cache/lab_.._jup_iter/x")
         );
     }

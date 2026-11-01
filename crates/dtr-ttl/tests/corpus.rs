@@ -22,7 +22,9 @@ use dtr_ttl::program::{BuildError, LoadError, Program};
 use dtr_ttl::source::{self, Encoding};
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("corpus")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("corpus")
 }
 
 fn corpus_files() -> Vec<PathBuf> {

@@ -67,9 +67,7 @@ impl Action {
     }
 
     fn from_name(name: &str) -> Option<Self> {
-        ALL.iter()
-            .copied()
-            .find(|action| action.name() == name)
+        ALL.iter().copied().find(|action| action.name() == name)
     }
 }
 
@@ -173,11 +171,7 @@ impl KeyStroke {
             dtr_config::keys::Key::Char(ch) => {
                 // Shift shows up in the character a keyboard produces: the
                 // event says `|`, not shift and backslash.
-                let produced = if chord.mods.shift {
-                    shifted(ch)
-                } else {
-                    ch
-                };
+                let produced = if chord.mods.shift { shifted(ch) } else { ch };
                 (
                     winit::keyboard::Key::Character(produced.to_string().into()),
                     Some(produced.to_string()),
@@ -568,7 +562,10 @@ mod tests {
     #[test]
     fn a_two_chord_binding_waits_for_the_second_key() {
         let mut overrides = BTreeMap::new();
-        overrides.insert("new-tab".to_owned(), parse_sequence("ctrl-k ctrl-t").unwrap());
+        overrides.insert(
+            "new-tab".to_owned(),
+            parse_sequence("ctrl-k ctrl-t").unwrap(),
+        );
         let keymap = Keymap::new(&overrides);
 
         let first = parse_sequence("ctrl-k").unwrap().chords[0];

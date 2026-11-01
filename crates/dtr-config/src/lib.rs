@@ -100,7 +100,9 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self, Error> {
-        let document: DocumentMut = text.parse().map_err(|err| Error::Syntax(format!("{err}")))?;
+        let document: DocumentMut = text
+            .parse()
+            .map_err(|err| Error::Syntax(format!("{err}")))?;
         let mut config = Self::default();
 
         if let Some(serial) = document.get("serial").and_then(Item::as_table) {
@@ -120,7 +122,9 @@ impl Config {
                 // `new-tab = false` turns a default binding off, which is how a
                 // key you want for the shell gets handed back to the shell.
                 if item.as_bool() == Some(false) {
-                    config.keys.insert(action.to_owned(), keys::Sequence::disabled());
+                    config
+                        .keys
+                        .insert(action.to_owned(), keys::Sequence::disabled());
                     continue;
                 }
                 let text = item.as_str().ok_or_else(|| {
@@ -193,7 +197,9 @@ pub fn set_value(path: &Path, key: &str, raw: &str) -> Result<(), Error> {
 
 /// The pure half of [`set_value`], so it can be tested without a file.
 pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
-    let mut document: DocumentMut = text.parse().map_err(|err| Error::Syntax(format!("{err}")))?;
+    let mut document: DocumentMut = text
+        .parse()
+        .map_err(|err| Error::Syntax(format!("{err}")))?;
 
     let mut item: Item = match raw {
         "true" => value(true),
@@ -305,7 +311,9 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(message) => write!(formatter, "{message}"),
-            Error::Syntax(message) => write!(formatter, "the config file is not valid TOML: {message}"),
+            Error::Syntax(message) => {
+                write!(formatter, "the config file is not valid TOML: {message}")
+            }
             Error::Value(message) => write!(formatter, "{message}"),
         }
     }
@@ -339,7 +347,10 @@ path = "/tmp/mono.ttf"
         .unwrap();
         assert!(!config.serial.auto_reconnect);
         assert_eq!(config.font.size, 18.5);
-        assert_eq!(config.font.path.as_deref(), Some(std::path::Path::new("/tmp/mono.ttf")));
+        assert_eq!(
+            config.font.path.as_deref(),
+            Some(std::path::Path::new("/tmp/mono.ttf"))
+        );
     }
 
     #[test]
@@ -350,7 +361,9 @@ path = "/tmp/mono.ttf"
 
     #[test]
     fn a_nonsense_size_is_refused_with_the_reason() {
-        let error = Config::parse("[font]\nsize = 400\n").unwrap_err().to_string();
+        let error = Config::parse("[font]\nsize = 400\n")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("6–48"), "{error}");
     }
 
@@ -365,7 +378,9 @@ path = "/tmp/mono.ttf"
 
     #[test]
     fn a_wrong_type_names_the_key() {
-        let error = Config::parse("[serial]\nauto_reconnect = \"soon\"\n").unwrap_err().to_string();
+        let error = Config::parse("[serial]\nauto_reconnect = \"soon\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("serial.auto_reconnect"), "{error}");
     }
 
@@ -414,7 +429,12 @@ path = "/tmp/mono.ttf"
 
     #[test]
     fn a_top_level_key_is_set_in_place() {
-        let after = set_in_text("# my config\ntheme = \"old\"\n\n[font]\nsize = 14\n", "theme", "kanagawa wave").unwrap();
+        let after = set_in_text(
+            "# my config\ntheme = \"old\"\n\n[font]\nsize = 14\n",
+            "theme",
+            "kanagawa wave",
+        )
+        .unwrap();
         assert!(after.contains("# my config"), "{after}");
         assert!(after.contains("theme = \"kanagawa wave\""), "{after}");
         assert!(after.contains("size = 14"), "{after}");

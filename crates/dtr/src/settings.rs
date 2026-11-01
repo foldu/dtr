@@ -12,7 +12,9 @@ use dtr_config::Config;
 
 /// The baud rates worth cycling through. A terminal that offers an arbitrary
 /// number would need a text editor; a serial console uses one of these.
-const BAUDS: &[u32] = &[9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600];
+const BAUDS: &[u32] = &[
+    9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Row {
@@ -209,12 +211,14 @@ impl Settings {
                 return Some(Effect::Cancel);
             }
             Key::Named(winit::keyboard::NamedKey::Enter) => return Some(Effect::Apply),
-            Key::Named(winit::keyboard::NamedKey::ArrowDown) | Key::Named(winit::keyboard::NamedKey::Tab) => {
+            Key::Named(winit::keyboard::NamedKey::ArrowDown)
+            | Key::Named(winit::keyboard::NamedKey::Tab) => {
                 let count = self.rows().len();
                 self.row = (self.row + 1) % count;
                 return Some(Effect::Changed);
             }
-            Key::Named(winit::keyboard::NamedKey::ArrowUp) | Key::Named(winit::keyboard::NamedKey::Backspace) => {
+            Key::Named(winit::keyboard::NamedKey::ArrowUp)
+            | Key::Named(winit::keyboard::NamedKey::Backspace) => {
                 let count = self.rows().len();
                 self.row = (self.row + count - 1) % count;
                 return Some(Effect::Changed);
@@ -316,7 +320,11 @@ impl Settings {
                 .clone()
                 .or_else(|| crate::fonts::default_family(&self.families))
                 .unwrap_or_else(|| "—".to_owned()),
-            Row::Theme => self.draft.theme.clone().unwrap_or_else(|| "built-in".to_owned()),
+            Row::Theme => self
+                .draft
+                .theme
+                .clone()
+                .unwrap_or_else(|| "built-in".to_owned()),
             // No port, no value: the row says so rather than showing a rate that
             // belongs to nothing.
             Row::Baud => match &self.serial {
@@ -334,7 +342,10 @@ impl Settings {
     /// The lines to write to the config file, as `(key, raw value)`.
     pub fn writes(&self) -> Vec<(String, String)> {
         let mut writes = vec![
-            ("font.size".to_owned(), format!("{:.0}", self.draft.font.size)),
+            (
+                "font.size".to_owned(),
+                format!("{:.0}", self.draft.font.size),
+            ),
             (
                 "serial.auto_reconnect".to_owned(),
                 self.draft.serial.auto_reconnect.to_string(),
@@ -368,13 +379,16 @@ impl Settings {
         let rows = self.rows().len() as f32;
         let height = 44.0 + rows * 24.0 + 34.0;
         let rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
-        crate::ui::prime_area(ui.ctx(), egui::Id::new("dtr-settings"), egui::Order::Foreground, rect, true);
-        // Dim the terminal behind the menu: the settings are the subject now.
-        ui.painter().rect_filled(
-            screen,
-            0.0,
-            egui::Color32::from_black_alpha(140),
+        crate::ui::prime_area(
+            ui.ctx(),
+            egui::Id::new("dtr-settings"),
+            egui::Order::Foreground,
+            rect,
+            true,
         );
+        // Dim the terminal behind the menu: the settings are the subject now.
+        ui.painter()
+            .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
         egui::Area::new(egui::Id::new("dtr-settings"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
@@ -412,14 +426,13 @@ impl Settings {
                                 // a row does what the arrow keys do.
                                 let label = ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(name)
-                                            .monospace()
-                                            .size(12.0)
-                                            .color(crate::ui::Look::colour(if selected {
+                                        egui::RichText::new(name).monospace().size(12.0).color(
+                                            crate::ui::Look::colour(if selected {
                                                 look.foreground
                                             } else {
                                                 look.dim
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .sense(egui::Sense::click()),
                                 );
@@ -444,12 +457,10 @@ impl Settings {
                         }
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(
-                                "click to change   enter save   esc cancel",
-                            )
-                            .monospace()
-                            .size(11.0)
-                            .color(crate::ui::Look::colour(look.dim)),
+                            egui::RichText::new("click to change   enter save   esc cancel")
+                                .monospace()
+                                .size(11.0)
+                                .color(crate::ui::Look::colour(look.dim)),
                         );
                     });
             });
@@ -478,9 +489,8 @@ impl Settings {
                         .fixed_decimals(0)
                         .suffix(" pt"),
                 );
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name)
-                });
+                response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name));
                 response.changed().then_some(Change::FontSize(size))
             }
             Row::FontFamily => {
@@ -509,9 +519,9 @@ impl Settings {
                             }
                         }
                     });
-                response.response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
-                });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
                 change
             }
             Row::Theme => {
@@ -541,22 +551,26 @@ impl Settings {
                             }
                         }
                     });
-                response.response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
-                });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
                 change
             }
             Row::AutoReconnect => {
                 let mut on = self.draft.serial.auto_reconnect;
                 let response = ui.checkbox(&mut on, "");
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name)
-                });
+                response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name));
                 response.changed().then_some(Change::AutoReconnect(on))
             }
             Row::Baud => {
                 let Some(serial) = self.serial.as_ref() else {
-                    ui.label(egui::RichText::new("no port").monospace().size(12.0).color(dim));
+                    ui.label(
+                        egui::RichText::new("no port")
+                            .monospace()
+                            .size(12.0)
+                            .color(dim),
+                    );
                     return None;
                 };
                 let mut change = None;
@@ -577,21 +591,25 @@ impl Settings {
                             }
                         }
                     });
-                response.response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
-                });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
                 change
             }
             Row::CrToCrlf => {
                 let Some(serial) = self.serial.as_ref() else {
-                    ui.label(egui::RichText::new("no port").monospace().size(12.0).color(dim));
+                    ui.label(
+                        egui::RichText::new("no port")
+                            .monospace()
+                            .size(12.0)
+                            .color(dim),
+                    );
                     return None;
                 };
                 let mut on = serial.cr_to_crlf;
                 let response = ui.checkbox(&mut on, "");
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name)
-                });
+                response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name));
                 response.changed().then_some(Change::CrToCrlf(on))
             }
         }
@@ -650,7 +668,11 @@ mod tests {
                 cr_to_crlf: true,
             }),
         );
-        settings.row = settings.rows().iter().position(|row| *row == Row::Baud).unwrap();
+        settings.row = settings
+            .rows()
+            .iter()
+            .position(|row| *row == Row::Baud)
+            .unwrap();
         settings.nudge(1);
         assert_eq!(settings.serial().unwrap().baud, 230_400);
         settings.nudge(-1);
@@ -693,7 +715,10 @@ mod tests {
         }
 
         assert!(text.contains("# keep me"), "the comment above was lost");
-        assert!(text.contains("# an old board"), "an inline comment was lost");
+        assert!(
+            text.contains("# an old board"),
+            "an inline comment was lost"
+        );
 
         let parsed = Config::parse(&text).expect("reparse");
         assert_eq!(parsed.font.size, 17.0);
@@ -727,7 +752,11 @@ mod tests {
         // Every row that lives in the file must have a writer; the serial rate
         // rows live in the store and are covered by `serial_write`.
         for row in Row::FILE {
-            assert!(keys.contains(&row.key().as_str()), "{} is not written", row.key());
+            assert!(
+                keys.contains(&row.key().as_str()),
+                "{} is not written",
+                row.key()
+            );
         }
     }
 
@@ -743,8 +772,8 @@ mod tests {
 #[cfg(test)]
 mod kittest_tests {
     use super::*;
-    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     /// Opening the menu on a shell shows the terminal's own settings and nothing
     /// about a port, because there is no port to describe.
@@ -754,7 +783,12 @@ mod kittest_tests {
         settings.show(&Config::default());
         assert_eq!(
             settings.rows(),
-            vec![Row::FontSize, Row::FontFamily, Row::Theme, Row::AutoReconnect]
+            vec![
+                Row::FontSize,
+                Row::FontFamily,
+                Row::Theme,
+                Row::AutoReconnect
+            ]
         );
     }
 
@@ -764,10 +798,14 @@ mod kittest_tests {
     fn escape_cancels_without_writing() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight));
+        settings.handle(&winit::keyboard::Key::Named(
+            winit::keyboard::NamedKey::ArrowRight,
+        ));
         assert!(!settings.writes().is_empty(), "the change is in the draft");
         assert_eq!(
-            settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)),
+            settings.handle(&winit::keyboard::Key::Named(
+                winit::keyboard::NamedKey::Escape
+            )),
             Some(Effect::Cancel)
         );
     }
@@ -806,7 +844,9 @@ mod kittest_tests {
     fn the_menu_renders() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.handle(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown));
+        settings.handle(&winit::keyboard::Key::Named(
+            winit::keyboard::NamedKey::ArrowDown,
+        ));
         let look = crate::ui::Look::default();
         let mut harness = Harness::new_ui(|ui| {
             settings.ui(ui, &look);

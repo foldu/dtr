@@ -267,7 +267,8 @@ fn set_raw(fd: std::os::unix::io::RawFd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn candidates() -> Vec<String> {    #[cfg(windows)]
+fn candidates() -> Vec<String> {
+    #[cfg(windows)]
     {
         let mut list = Vec::new();
         if let Ok(shell) = std::env::var("DTR_SHELL") {
@@ -338,11 +339,27 @@ mod raw_tests {
         assert_eq!(unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) }, 0);
         let termios = unsafe { termios.assume_init() };
 
-        assert_eq!(termios.c_oflag & libc::OPOST, 0, "the kernel post-processes output");
-        assert_eq!(termios.c_lflag & libc::ICANON, 0, "the kernel line buffers input");
+        assert_eq!(
+            termios.c_oflag & libc::OPOST,
+            0,
+            "the kernel post-processes output"
+        );
+        assert_eq!(
+            termios.c_lflag & libc::ICANON,
+            0,
+            "the kernel line buffers input"
+        );
         assert_eq!(termios.c_lflag & libc::ECHO, 0, "the kernel echoes input");
-        assert_eq!(termios.c_iflag & libc::ICRNL, 0, "the kernel rewrites input newlines");
-        assert_ne!(termios.c_lflag & libc::ISIG, 0, "^C must still signal the foreground");
+        assert_eq!(
+            termios.c_iflag & libc::ICRNL,
+            0,
+            "the kernel rewrites input newlines"
+        );
+        assert_ne!(
+            termios.c_lflag & libc::ISIG,
+            0,
+            "^C must still signal the foreground"
+        );
     }
 
     /// `args` is a list rather than part of the program string so that one
@@ -394,7 +411,11 @@ mod tests {
     #[test]
     fn the_timeouts_come_before_the_destination_and_survive_a_reopen() {
         let config = Config::ssh("jupyter");
-        let alias = config.args.iter().position(|arg| arg == "jupyter").expect("the alias");
+        let alias = config
+            .args
+            .iter()
+            .position(|arg| arg == "jupyter")
+            .expect("the alias");
         for option in [CONNECT_TIMEOUT, KEEPALIVE, KEEPALIVE_COUNT] {
             let at = config
                 .args

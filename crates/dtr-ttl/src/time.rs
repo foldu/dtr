@@ -69,7 +69,10 @@ pub fn from_unix(seconds: i64, offset_minutes: i32) -> DateTime {
 /// The Unix timestamp of a `DateTime`, for `uptime`-style arithmetic.
 pub fn to_unix(date: DateTime) -> i64 {
     let days = days_from_civil(date.year, date.month, date.day);
-    days * 86_400 + i64::from(date.hour) * 3600 + i64::from(date.minute) * 60 + i64::from(date.second)
+    days * 86_400
+        + i64::from(date.hour) * 3600
+        + i64::from(date.minute) * 60
+        + i64::from(date.second)
 }
 
 const MONTHS: [&str; 12] = [
@@ -141,7 +144,11 @@ pub fn strftime(format: &str, date: DateTime) -> String {
                 let offset = offset.abs();
                 out.push_str(&format!("{sign}{:02}{:02}", offset / 60, offset % 60));
             }
-            'Z' => out.push_str(if date.utc_offset_minutes == 0 { "UTC" } else { "" }),
+            'Z' => out.push_str(if date.utc_offset_minutes == 0 {
+                "UTC"
+            } else {
+                ""
+            }),
             's' => out.push_str(&to_unix(date).to_string()),
             '%' => out.push('%'),
             other => {
@@ -170,11 +177,7 @@ mod tests {
     fn a_known_timestamp_round_trips() {
         // 2024-02-29T12:34:56Z, a leap day, which is where calendar code breaks.
         let date = from_unix(1_709_209_496, 0);
-        assert_eq!(
-            (date.year, date.month, date.day),
-            (2024, 2, 29),
-            "{date:?}"
-        );
+        assert_eq!((date.year, date.month, date.day), (2024, 2, 29), "{date:?}");
         assert_eq!(to_unix(date), 1_709_209_496);
     }
 
@@ -187,7 +190,11 @@ mod tests {
         assert_eq!(strftime("%a %b %e", date), "Thu Feb 29");
         assert_eq!(strftime("%A, %B %d", date), "Thursday, February 29");
         assert_eq!(strftime("100%%", date), "100%");
-        assert_eq!(strftime("%q", date), "%q", "unknown directives pass through");
+        assert_eq!(
+            strftime("%q", date),
+            "%q",
+            "unknown directives pass through"
+        );
     }
 
     #[test]

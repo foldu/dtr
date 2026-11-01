@@ -63,7 +63,9 @@ fn notes_may_contain_newlines_and_equals_signs() {
     let id = store
         .begin_session(&record("COM3", Some(note)))
         .expect("begin");
-    store.end_session(id, 1_700_000_001_000, "closed").expect("end");
+    store
+        .end_session(id, 1_700_000_001_000, "closed")
+        .expect("end");
 
     let sessions = store.sessions().expect("read");
     assert_eq!(sessions[0].note.as_deref(), Some(note));
@@ -105,9 +107,7 @@ fn two_sessions_in_the_same_millisecond_get_distinct_ids() {
 #[test]
 fn ending_an_unknown_session_is_not_an_error() {
     let (_dir, store) = store();
-    store
-        .end_session(999, now_ms(), "closed")
-        .expect("no-op");
+    store.end_session(999, now_ms(), "closed").expect("no-op");
     assert!(store.sessions().expect("read").is_empty());
 }
 
@@ -117,8 +117,12 @@ fn sessions_survive_a_reopen() {
     let path = dir.path().join("dtr.redb");
     let id = {
         let store = Store::open(&path).expect("open");
-        let id = store.begin_session(&record("COM7", Some("kept"))).expect("begin");
-        store.end_session(id, 1_700_000_005_000, "closed").expect("end");
+        let id = store
+            .begin_session(&record("COM7", Some("kept")))
+            .expect("begin");
+        store
+            .end_session(id, 1_700_000_005_000, "closed")
+            .expect("end");
         id
     };
     let store = Store::open(&path).expect("reopen");

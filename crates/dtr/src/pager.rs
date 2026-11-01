@@ -168,52 +168,49 @@ impl Pager {
             egui::StrokeKind::Inside,
         );
 
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(rect.shrink(10.0)),
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(10.0)), |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&self.title)
+                            .monospace()
+                            .color(Look::colour(look.foreground)),
+                    )
+                    .truncate(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("esc closes   y copies")
+                            .small()
+                            .color(Look::colour(look.dim)),
+                    );
+                });
+            });
+            ui.separator();
+
+            let height = (ui.available_height() - 4.0).max(0.0);
+            self.page = height;
+            let output = egui::ScrollArea::vertical()
+                .id_salt(egui::Id::unique("dtr-pager-text"))
+                .auto_shrink([false, false])
+                .max_height(height)
+                .vertical_scroll_offset(self.scroll)
+                .show(ui, |ui| {
+                    // Selectable, so the mouse can take a paragraph out of the
+                    // block without opening an editor for it.
                     ui.add(
                         egui::Label::new(
-                            RichText::new(&self.title)
+                            RichText::new(&self.text)
                                 .monospace()
                                 .color(Look::colour(look.foreground)),
                         )
-                        .truncate(),
+                        .selectable(true)
+                        .wrap(),
                     );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new("esc closes   y copies")
-                                .small()
-                                .color(Look::colour(look.dim)),
-                        );
-                    });
                 });
-                ui.separator();
-
-                let height = (ui.available_height() - 4.0).max(0.0);
-                self.page = height;
-                let output = egui::ScrollArea::vertical()
-                    .id_salt(egui::Id::unique("dtr-pager-text"))
-                    .auto_shrink([false, false])
-                    .max_height(height)
-                    .vertical_scroll_offset(self.scroll)
-                    .show(ui, |ui| {
-                        // Selectable, so the mouse can take a paragraph out of the
-                        // block without opening an editor for it.
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&self.text)
-                                    .monospace()
-                                    .color(Look::colour(look.foreground)),
-                            )
-                            .selectable(true)
-                            .wrap(),
-                        );
-                    });
-                self.scroll = output.state.clamped_offset().y;
-            },
-        );
+            self.scroll = output.state.clamped_offset().y;
+        });
     }
 }
 
@@ -263,7 +260,10 @@ mod tests {
     #[test]
     fn the_keys_are_the_ones_a_pager_taught_everyone() {
         let mut pager = opened();
-        assert_eq!(press(&mut pager, &Key::Character("q".into())), Some(Action::Close));
+        assert_eq!(
+            press(&mut pager, &Key::Character("q".into())),
+            Some(Action::Close)
+        );
         let mut pager = opened();
         assert_eq!(
             press(&mut pager, &Key::Character("y".into())),
@@ -301,10 +301,7 @@ mod tests {
     fn a_chord_is_not_a_pager_key() {
         let mut pager = opened();
         let ctrl = ModifiersState::CONTROL;
-        assert_eq!(
-            pager.handle(&Key::Character("j".into()), &ctrl),
-            None
-        );
+        assert_eq!(pager.handle(&Key::Character("j".into()), &ctrl), None);
         assert_eq!(pager.scroll, 0.0);
     }
 }
@@ -313,8 +310,8 @@ mod tests {
 mod render_tests {
     use super::Pager;
     use crate::ui::Look;
-    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
 
     /// The pager is laid out by egui, so the harness proves what a screenshot
     /// would: the whole block reached the label — one node carries all of it, so

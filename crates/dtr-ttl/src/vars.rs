@@ -134,8 +134,7 @@ impl Vars {
                 return Err(Error::TooManyVariables("string arrays"));
             }
         }
-        self.str_arrays
-            .insert(key, vec![String::new(); len]);
+        self.str_arrays.insert(key, vec![String::new(); len]);
         Ok(())
     }
 
@@ -193,7 +192,8 @@ impl Vars {
     /// 0 undefined, 1 integer, 3 string, 5 integer array, 6 string array. Code 4
     /// is a label, which lives in the program rather than in this namespace and
     /// is answered by the interpreter.
-    pub fn defined(&self, name: &str) -> i32 {        match self.kind(&key(name)) {
+    pub fn defined(&self, name: &str) -> i32 {
+        match self.kind(&key(name)) {
             Some(Kind::Int) => 1,
             Some(Kind::Str) => 3,
             Some(Kind::IntArray) => 5,
@@ -336,7 +336,10 @@ mod tests {
         vars.set("A", Value::Int(33)).unwrap();
         assert_eq!(vars.get("A").unwrap(), Value::Int(33));
 
-        assert_eq!(vars.set("A", Value::from("thirty")), Err(Error::TypeMismatch));
+        assert_eq!(
+            vars.set("A", Value::from("thirty")),
+            Err(Error::TypeMismatch)
+        );
         assert_eq!(vars.get("A").unwrap(), Value::Int(33));
     }
 
@@ -411,7 +414,10 @@ mod tests {
         assert!(vars.get("n").is_err());
         assert!(vars.set("n", Value::Int(1)).is_err());
         // And an element will not take the other type.
-        assert_eq!(vars.set_index("n", 0, Value::from("x")), Err(Error::TypeMismatch));
+        assert_eq!(
+            vars.set_index("n", 0, Value::from("x")),
+            Err(Error::TypeMismatch)
+        );
     }
 
     #[test]
@@ -482,14 +488,22 @@ mod tests {
 
         vars.redim("n", 4, true).unwrap();
         assert_eq!(vars.get_index("n", 0).unwrap(), Value::Int(7));
-        assert_eq!(vars.get_index("n", 3).unwrap(), Value::Int(0), "new tail is default");
+        assert_eq!(
+            vars.get_index("n", 3).unwrap(),
+            Value::Int(0),
+            "new tail is default"
+        );
 
         vars.redim("n", 2, true).unwrap();
         assert_eq!(vars.get_index("n", 1).unwrap(), Value::Int(8));
         assert!(vars.get_index("n", 2).is_err(), "the tail is gone");
 
         vars.redim("n", 4, false).unwrap();
-        assert_eq!(vars.get_index("n", 0).unwrap(), Value::Int(0), "not preserved");
+        assert_eq!(
+            vars.get_index("n", 0).unwrap(),
+            Value::Int(0),
+            "not preserved"
+        );
     }
 
     #[test]

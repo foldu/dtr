@@ -83,8 +83,9 @@ impl Backend for Local {
                 Ok(dir) => dir,
                 Err(err) => {
                     let _ = tx
-                        .send(Err(anyhow::Error::new(err)
-                            .context(format!("list {}", path.display()))))
+                        .send(Err(
+                            anyhow::Error::new(err).context(format!("list {}", path.display()))
+                        ))
                         .await;
                     return;
                 }
@@ -96,8 +97,9 @@ impl Backend for Local {
                     Ok(None) => break,
                     Err(err) => {
                         let _ = tx
-                            .send(Err(anyhow::Error::new(err)
-                                .context(format!("list {}", path.display()))))
+                            .send(Err(
+                                anyhow::Error::new(err).context(format!("list {}", path.display()))
+                            ))
                             .await;
                         return;
                     }

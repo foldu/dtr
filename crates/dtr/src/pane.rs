@@ -21,9 +21,7 @@ use libghostty_vt::render::{
     CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator, Snapshot,
 };
 use libghostty_vt::screen::TrackedGridRef;
-use libghostty_vt::selection::{
-    FormatOptions, SelectLineOptions, SelectWordOptions, Selection,
-};
+use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
 use portable_pty::MasterPty;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -59,9 +57,7 @@ pub type FrameBudget = std::sync::Arc<std::sync::atomic::AtomicU64>;
 /// other frame stale. The default is half of 60 Hz for a monitor that will not
 /// say; the floor keeps a 1000 Hz panel from turning the gate into a busy loop.
 pub fn frame_budget(refresh_millihertz: Option<u32>) -> std::time::Duration {
-    let mhz = refresh_millihertz
-        .filter(|mhz| *mhz > 0)
-        .unwrap_or(60_000);
+    let mhz = refresh_millihertz.filter(|mhz| *mhz > 0).unwrap_or(60_000);
     std::time::Duration::from_micros((500_000_000u64 / u64::from(mhz)).max(2_000))
 }
 
@@ -122,12 +118,7 @@ impl Cursor {
             ),
             CursorShape::Underline => {
                 let height = (cell.height * 0.2).ceil().clamp(1.0, cell.height.max(1.0));
-                crate::layout::Rect::new(
-                    cell.x,
-                    cell.y + cell.height - height,
-                    cell.width,
-                    height,
-                )
+                crate::layout::Rect::new(cell.x, cell.y + cell.height - height, cell.width, height)
             }
         }
     }
@@ -302,19 +293,34 @@ pub enum Command {
     Paste(Vec<u8>),
     /// Begin a mouse selection at a viewport cell: `x` and `y` are the cell the
     /// pointer went down on.
-    SelectStart { x: u16, y: u16 },
+    SelectStart {
+        x: u16,
+        y: u16,
+    },
     /// Move the selection's head to a viewport cell.
-    SelectHead { x: u16, y: u16 },
+    SelectHead {
+        x: u16,
+        y: u16,
+    },
     /// A double-click: the word under a viewport cell.
-    SelectWord { x: u16, y: u16 },
+    SelectWord {
+        x: u16,
+        y: u16,
+    },
     /// A triple-click: the line under a viewport cell.
-    SelectLine { x: u16, y: u16 },
+    SelectLine {
+        x: u16,
+        y: u16,
+    },
     /// Put the current selection on the clipboard.
     CopySelection,
     /// Report the hyperlink (OSC 8) at a viewport cell, if any. Answered into
     /// the pane's link slot, because the URI lives in the terminal and the
     /// terminal never leaves the pane's thread.
-    HyperlinkAt { x: u16, y: u16 },
+    HyperlinkAt {
+        x: u16,
+        y: u16,
+    },
     /// Walk the viewport to the previous (negative) or next prompt mark, which
     /// only exists when the shell emits OSC 133.
     ScrollPrompt(isize),
@@ -858,7 +864,10 @@ async fn run(
                     }
                     write.reply(Ok(()), false);
                 }
-                None => write.reply(Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported), false),
+                None => write.reply(
+                    Err(libghostty_vt::terminal::ClipboardWriteError::Unsupported),
+                    false,
+                ),
             }
         })?;
     }
@@ -900,8 +909,8 @@ async fn run(
     // drops bytes when the whole clipboard arrives at once. A shell in a pty
     // has a proper buffer and wants the paste immediately — pacing there just
     // makes it feel broken.
-    let paste_tick = matches!(transport, Transport::Serial(_))
-        .then(|| std::time::Duration::from_millis(20));
+    let paste_tick =
+        matches!(transport, Transport::Serial(_)).then(|| std::time::Duration::from_millis(20));
     let mut paste: Vec<u8> = Vec::new();
     let mut paste_at: Option<tokio::time::Instant> = None;
     let (reconnect_tx, mut reconnect_rx) =
@@ -1021,7 +1030,7 @@ async fn run(
             shell = Some(config);
             open_at = Some(tokio::time::Instant::now());
         }
-            Transport::Replay(path) => {
+        Transport::Replay(path) => {
             let bytes = std::fs::read(&path)?;
             tracing::info!(path = %path.display(), bytes = bytes.len(), "replay");
             source_alive = true;
@@ -1045,7 +1054,17 @@ async fn run(
 
     // Always publish once, even if the terminal is still clean: a pane that
     // has produced no output yet still has an (empty) grid to show.
-    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
+    publish(
+        &mut term,
+        &mut state,
+        &mut rows,
+        &mut cells,
+        &out,
+        &wake,
+        true,
+        &mut selection,
+        &mut shown,
+    )?;
 
     let mut sniffer = CwdSniffer::default();
     let mut marks = PromptMarks::default();
@@ -1856,17 +1875,7 @@ async fn write_paste(
     tracing::debug!(bracketed, bytes = bytes.len(), "paste");
     match paste_tick {
         // No pacing: hand the whole thing over at once.
-        None => {
-            deliver(
-                &bytes,
-                term,
-                stats,
-                sink,
-                typed_early,
-                ever_opened,
-            )
-            .await
-        }
+        None => deliver(&bytes, term, stats, sink, typed_early, ever_opened).await,
         Some(_) => {
             *paste = bytes;
             *paste_at = Some(tokio::time::Instant::now());
@@ -1916,9 +1925,7 @@ fn copy_text(
         default_bg: [0; 3],
         cursor: None,
         selection: None,
-        cells: Vec::with_capacity(
-            usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?),
-        ),
+        cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
     };
     fill_cells(&snapshot, rows, cells, &mut frame)?;
     Ok(frame_text(&frame))
@@ -2178,10 +2185,7 @@ struct SelectionAnchors {
 impl SelectionAnchors {
     /// A selection of one cell, at a viewport cell the pointer was over.
     fn at(term: &Terminal<'_, '_>, x: u16, y: u16) -> anyhow::Result<Self> {
-        let point = Point::Viewport(PointCoordinate {
-            x,
-            y: u32::from(y),
-        });
+        let point = Point::Viewport(PointCoordinate { x, y: u32::from(y) });
         Ok(Self {
             start: term.track_grid_ref(point)?,
             head: term.track_grid_ref(point)?,
@@ -2267,11 +2271,8 @@ fn viewport_ref<'t>(
     x: u16,
     y: u16,
 ) -> Option<libghostty_vt::screen::GridRef<'t>> {
-    term.grid_ref(Point::Viewport(PointCoordinate {
-        x,
-        y: u32::from(y),
-    }))
-    .ok()
+    term.grid_ref(Point::Viewport(PointCoordinate { x, y: u32::from(y) }))
+        .ok()
 }
 
 /// The highlight's linear span, or `None` for a press that has not moved.
@@ -2447,10 +2448,7 @@ fn terminator(bytes: &[u8]) -> Option<(usize, usize)> {
 /// The text of the block the last command produced: from the prompt it started
 /// at to the cursor. `None` when the shell has not marked any prompt, or the
 /// block has been pruned out of the scrollback.
-fn capture_block(
-    term: &Terminal<'_, '_>,
-    marks: &PromptMarks,
-) -> anyhow::Result<Option<String>> {
+fn capture_block(term: &Terminal<'_, '_>, marks: &PromptMarks) -> anyhow::Result<Option<String>> {
     let Some(start) = marks.block_start(term) else {
         return Ok(None);
     };
@@ -2737,8 +2735,8 @@ mod tests {
 
     #[test]
     fn the_vt_core_gives_back_the_characters_we_sent() {
-        use libghostty_vt::{RenderState, Terminal};
         use libghostty_vt::render::{CellIterator, RowIterator};
+        use libghostty_vt::{RenderState, Terminal};
 
         let mut term = Terminal::new(8, 2).unwrap();
         let mut state = RenderState::new().unwrap();
@@ -2772,7 +2770,10 @@ mod tests {
     fn copying_a_range_works_backwards() {
         // A drag can end before it starts; the range is the same either way.
         let frame = frame(&["abcdefgh", "ijklmnop"]);
-        assert_eq!(frame_text_range(&frame, 9, 2), frame_text_range(&frame, 2, 9));
+        assert_eq!(
+            frame_text_range(&frame, 9, 2),
+            frame_text_range(&frame, 2, 9)
+        );
     }
 
     #[test]
@@ -2806,8 +2807,7 @@ mod cwd_tests {
     /// The path, when the report names a directory on this machine.
     fn path_of(input: &[u8]) -> Option<String> {
         let report = CwdSniffer::default().feed(input)?;
-        crate::uri::is_local_host(&report.host)
-            .then(|| report.path.display().to_string())
+        crate::uri::is_local_host(&report.host).then(|| report.path.display().to_string())
     }
 
     /// The path as the pane keeps it for a reconnect: on whichever machine the
@@ -2908,15 +2908,17 @@ mod selection_tests {
         term
     }
 
-    fn head(term: &mut Terminal<'static, 'static>, cell: SelectionAnchors, x: u16, y: u16) -> SelectionAnchors {
+    fn head(
+        term: &mut Terminal<'static, 'static>,
+        cell: SelectionAnchors,
+        x: u16,
+        y: u16,
+    ) -> SelectionAnchors {
         let mut cell = cell;
         cell.head
             .set(
                 term,
-                Point::Viewport(PointCoordinate {
-                    x,
-                    y: u32::from(y),
-                }),
+                Point::Viewport(PointCoordinate { x, y: u32::from(y) }),
             )
             .unwrap();
         cell
@@ -3126,7 +3128,10 @@ mod prompt_tests {
         let block = capture_block(&term, &marks).unwrap().expect("a block");
         assert!(block.contains("echo hi"), "no command line in {block:?}");
         assert!(block.contains("hi"), "no output in {block:?}");
-        assert!(block.starts_with("$ "), "block does not start at the prompt: {block:?}");
+        assert!(
+            block.starts_with("$ "),
+            "block does not start at the prompt: {block:?}"
+        );
     }
 
     /// What fish actually sends, captured from a real `fish --no-config -i`:
@@ -3264,8 +3269,7 @@ mod session_tests {
         all.extend(args);
         config.args = all;
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
-        Pane::spawn(Transport::Shell(config), None, None, budget, || {})
-            .expect("a shell pane")
+        Pane::spawn(Transport::Shell(config), None, None, budget, || {}).expect("a shell pane")
     }
 
     /// Poll the published frames until `needle` is on screen, and hand back what
@@ -3307,7 +3311,11 @@ mod session_tests {
         // And the pane is still there, which is the whole point: a tab that
         // vanished on a dropped connection would take the scrollback with it.
         assert!(!pane.ended(), "a dropped connection ended the pane");
-        assert!(pane.error().is_none(), "the pane failed: {:?}", pane.error());
+        assert!(
+            pane.error().is_none(),
+            "the pane failed: {:?}",
+            pane.error()
+        );
     }
 
     /// A host that never answers: the pane stays, keeps trying, and grows the
@@ -3327,10 +3335,7 @@ mod session_tests {
             if made >= 2 {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "only {made} attempts were made"
-            );
+            assert!(Instant::now() < deadline, "only {made} attempts were made");
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!pane.ended(), "a failed connection ended the pane");
@@ -3470,10 +3475,7 @@ mod session_tests {
     /// test that would have caught htop's dead keyboard.
     #[test]
     fn an_arrow_key_is_encoded_for_the_program_that_asked() {
-        for (prologue, expected) in [
-            ("", "\x1b[A"),
-            (r"printf '\033[?1h'; ", "\x1bOA"),
-        ] {
+        for (prologue, expected) in [("", "\x1b[A"), (r"printf '\033[?1h'; ", "\x1bOA")] {
             let dir = tempfile::tempdir().expect("tempdir");
             let out = dir.path().join("keys");
             let script = format!("{prologue}exec cat > {}", out.display());
@@ -3751,10 +3753,7 @@ mod session_tests {
     /// the reply and dtr's job is not to lose it.
     #[test]
     fn the_kitty_query_is_answered() {
-        for (prologue, expected) in [
-            ("", "\x1b[?0u"),
-            (r"printf '\033[>1u'; ", "\x1b[?1u"),
-        ] {
+        for (prologue, expected) in [("", "\x1b[?0u"), (r"printf '\033[>1u'; ", "\x1b[?1u")] {
             let dir = tempfile::tempdir().expect("tempdir");
             let out = dir.path().join("reply");
             let script = format!("{prologue}printf '\\033[?u'; exec cat > {}", out.display());
@@ -3890,7 +3889,13 @@ mod session_tests {
         let at = (25.0, 45.0);
         click(&pane, mouse::Action::Press, mouse::Button::Left, at.0, at.1);
         wait_for_bytes(&pane, &out, "\x1b[<0;3;3M", "a left press");
-        click(&pane, mouse::Action::Release, mouse::Button::Left, at.0, at.1);
+        click(
+            &pane,
+            mouse::Action::Release,
+            mouse::Button::Left,
+            at.0,
+            at.1,
+        );
         wait_for_bytes(&pane, &out, "\x1b[<0;3;3m", "a left release");
 
         let mut ctrl = libghostty_vt::key::Mods::empty();
@@ -3928,7 +3933,13 @@ mod session_tests {
         // Column 3, row 3: 32 + button 0, 32 + 3, 32 + 3.
         click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
         wait_for_bytes(&pane, &out, "\x1b[M\x20##", "an X10 press");
-        click(&pane, mouse::Action::Release, mouse::Button::Left, 25.0, 45.0);
+        click(
+            &pane,
+            mouse::Action::Release,
+            mouse::Button::Left,
+            25.0,
+            45.0,
+        );
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
             std::fs::read_to_string(&out).unwrap_or_default(),
@@ -3943,7 +3954,13 @@ mod session_tests {
         let pane = mouse_pane(r"printf '\033[?1000h'; ", &out);
         click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
         wait_for_bytes(&pane, &out, "\x1b[M\x20##", "a normal press");
-        click(&pane, mouse::Action::Release, mouse::Button::Left, 25.0, 45.0);
+        click(
+            &pane,
+            mouse::Action::Release,
+            mouse::Button::Left,
+            25.0,
+            45.0,
+        );
         wait_for_bytes(&pane, &out, "\x1b[M##", "a normal release");
     }
 
@@ -3995,7 +4012,12 @@ mod session_tests {
         let out = dir.path().join("mouse");
         let pane = mouse_pane(r"printf '\033[?1002h\033[?1006h'; ", &out);
         click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
-        wait_for_bytes(&pane, &out, "\x1b[<0;3;3M", "the press that starts the drag");
+        wait_for_bytes(
+            &pane,
+            &out,
+            "\x1b[<0;3;3M",
+            "the press that starts the drag",
+        );
         pane.send(Command::Mouse {
             action: mouse::Action::Motion,
             button: Some(mouse::Button::Left),
@@ -4068,8 +4090,8 @@ mod session_tests {
             ..Default::default()
         };
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
-        let pane = Pane::spawn(Transport::Shell(config), None, None, budget, || {})
-            .expect("an nvim pane");
+        let pane =
+            Pane::spawn(Transport::Shell(config), None, None, budget, || {}).expect("an nvim pane");
         pane.send(Command::Resize {
             cols: 80,
             rows: 24,
@@ -4090,7 +4112,13 @@ mod session_tests {
         // The second line of the file, four cells in: a ten by twenty pixel cell
         // puts that at (45, 25).
         click(&pane, mouse::Action::Press, mouse::Button::Left, 45.0, 25.0);
-        click(&pane, mouse::Action::Release, mouse::Button::Left, 45.0, 25.0);
+        click(
+            &pane,
+            mouse::Action::Release,
+            mouse::Button::Left,
+            45.0,
+            25.0,
+        );
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut seen: Option<(Option<(u16, u16)>, String)> = None;
         loop {
@@ -4121,9 +4149,18 @@ mod session_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("mouse");
         let pane = mouse_pane("", &out);
-        assert!(!pane.stats().mouse(), "tracking was on with no program asking");
+        assert!(
+            !pane.stats().mouse(),
+            "tracking was on with no program asking"
+        );
         click(&pane, mouse::Action::Press, mouse::Button::Left, 25.0, 45.0);
-        click(&pane, mouse::Action::Release, mouse::Button::Left, 25.0, 45.0);
+        click(
+            &pane,
+            mouse::Action::Release,
+            mouse::Button::Left,
+            25.0,
+            45.0,
+        );
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
             std::fs::read_to_string(&out).unwrap_or_default(),
@@ -4249,8 +4286,8 @@ mod session_tests {
             ..Default::default()
         };
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
-        let pane = Pane::spawn(Transport::Shell(config), None, None, budget, || {})
-            .expect("an nvim pane");
+        let pane =
+            Pane::spawn(Transport::Shell(config), None, None, budget, || {}).expect("an nvim pane");
         let shape = |pane: &Pane| {
             pane.take_frame()
                 .and_then(|frame| frame.cursor)

@@ -104,7 +104,11 @@ mod tests {
             "Variable not initialized."
         );
         assert_eq!(
-            Error::IndexOutOfRange { name: "a".into(), index: 7 }.to_string(),
+            Error::IndexOutOfRange {
+                name: "a".into(),
+                index: 7
+            }
+            .to_string(),
             "Index out of range."
         );
         assert_eq!(

@@ -47,7 +47,10 @@ impl Handler for Mock {
         if filename != "/home/user/notes.txt" {
             return Err(StatusCode::NoSuchFile);
         }
-        Ok(Handle { id, handle: "notes.txt".to_owned() })
+        Ok(Handle {
+            id,
+            handle: "notes.txt".to_owned(),
+        })
     }
 
     async fn read(
@@ -84,17 +87,26 @@ impl Handler for Mock {
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
         eprintln!("server: realpath {path} id={id}");
-        Ok(Name { id, files: vec![File::new(path, attrs(true))] })
+        Ok(Name {
+            id,
+            files: vec![File::new(path, attrs(true))],
+        })
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         eprintln!("server: stat {path}");
-        Ok(Attrs { id, attrs: attrs(true) })
+        Ok(Attrs {
+            id,
+            attrs: attrs(true),
+        })
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         eprintln!("server: opendir {path}");
-        Ok(Handle { id, handle: "dir".to_owned() })
+        Ok(Handle {
+            id,
+            handle: "dir".to_owned(),
+        })
     }
 
     async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
@@ -105,7 +117,10 @@ impl Handler for Mock {
         self.listed = true;
         Ok(Name {
             id,
-            files: vec![File::new("notes.txt", attrs(false)), File::new("src", attrs(true))],
+            files: vec![
+                File::new("notes.txt", attrs(false)),
+                File::new("src", attrs(true)),
+            ],
         })
     }
 }
@@ -160,8 +175,14 @@ fn our_list_and_download_work_over_the_mock() {
             .await
             .expect("download");
         assert_eq!(written, b"hello from the mock".len() as u64);
-        assert_eq!(std::fs::read(&tmp).expect("read back"), b"hello from the mock");
-        assert!(!tmp.with_extension("part").exists(), "the .part file is renamed away");
+        assert_eq!(
+            std::fs::read(&tmp).expect("read back"),
+            b"hello from the mock"
+        );
+        assert!(
+            !tmp.with_extension("part").exists(),
+            "the .part file is renamed away"
+        );
         let _ = std::fs::remove_file(&tmp);
     });
 }

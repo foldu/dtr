@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn a_file_uri_names_a_path() {
-        assert_eq!(path("file:///tmp/notes.txt").as_deref(), Some("/tmp/notes.txt"));
+        assert_eq!(
+            path("file:///tmp/notes.txt").as_deref(),
+            Some("/tmp/notes.txt")
+        );
         assert_eq!(
             path("file://localhost/tmp/a%20b.png").as_deref(),
             Some("/tmp/a b.png")
@@ -123,8 +126,14 @@ mod tests {
 
     #[test]
     fn the_host_is_kept_apart_from_the_path() {
-        assert_eq!(split("file://jupyter/etc/hosts"), Some(("jupyter", "/etc/hosts".to_owned())));
-        assert_eq!(split("file:///etc/hosts"), Some(("", "/etc/hosts".to_owned())));
+        assert_eq!(
+            split("file://jupyter/etc/hosts"),
+            Some(("jupyter", "/etc/hosts".to_owned()))
+        );
+        assert_eq!(
+            split("file:///etc/hosts"),
+            Some(("", "/etc/hosts".to_owned()))
+        );
     }
 
     /// An escape that spells one character must decode to one character: the

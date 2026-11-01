@@ -58,7 +58,8 @@ impl Value {
     /// could produce one (concatenation, `sprintf`, reading a line) can be
     /// found when the rule is decided.
     pub fn is_over_long(&self) -> bool {
-        self.as_str().is_some_and(|s| s.chars().count() > crate::vars::MAX_STRING_CHARS)
+        self.as_str()
+            .is_some_and(|s| s.chars().count() > crate::vars::MAX_STRING_CHARS)
     }
 }
 

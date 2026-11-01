@@ -29,11 +29,10 @@ fn probe_all() -> Vec<String> {
             continue;
         };
         let name = family.name().to_owned();
-        if family
-            .fonts()
-            .iter()
-            .any(|font| font.load(Some(&mut cache)).is_some_and(|blob| works(blob.data(), font.index())))
-        {
+        if family.fonts().iter().any(|font| {
+            font.load(Some(&mut cache))
+                .is_some_and(|blob| works(blob.data(), font.index()))
+        }) {
             usable.push(name);
         }
     }

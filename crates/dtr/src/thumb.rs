@@ -261,7 +261,9 @@ pub fn draw(ui: &mut egui::Ui, texture: &TextureHandle, size: Vec2, look: &Look)
 
 #[cfg(test)]
 mod tests {
-    use super::{CAPACITY, Cache, Key, MAX_HEIGHT, MAX_WIDTH, Thumb, fit, load, looks_like_image, place};
+    use super::{
+        CAPACITY, Cache, Key, MAX_HEIGHT, MAX_WIDTH, Thumb, fit, load, looks_like_image, place,
+    };
     use egui::{Rect, Vec2, pos2};
     use std::path::{Path, PathBuf};
 
@@ -278,7 +280,10 @@ mod tests {
         assert!(looks_like_image(Path::new("a.png")));
         assert!(looks_like_image(Path::new("a.JPG")), "case is the shell's");
         assert!(looks_like_image(Path::new("dir/photo.jpeg")));
-        assert!(!looks_like_image(Path::new("a.gif")), "not a format this reads");
+        assert!(
+            !looks_like_image(Path::new("a.gif")),
+            "not a format this reads"
+        );
         assert!(!looks_like_image(Path::new("notes.txt")));
         assert!(!looks_like_image(Path::new("README")));
         assert!(!looks_like_image(Path::new("a.png.txt")));
@@ -414,11 +419,17 @@ mod tests {
             !cache.begin(&picture),
             "the second does not, it is in flight"
         );
-        assert!(cache.texture(&picture, &ctx).is_none(), "nothing to draw yet");
+        assert!(
+            cache.texture(&picture, &ctx).is_none(),
+            "nothing to draw yet"
+        );
 
         cache.finish(picture.clone(), Ok(one_pixel()));
         assert!(!cache.begin(&picture), "answered, so never asked again");
-        assert!(cache.texture(&picture, &ctx).is_some(), "and it can be drawn");
+        assert!(
+            cache.texture(&picture, &ctx).is_some(),
+            "and it can be drawn"
+        );
     }
 
     /// A refusal is an answer. Without this, every hover on a 2 GB scan would try
@@ -432,7 +443,10 @@ mod tests {
         assert!(cache.begin(&enormous));
         cache.finish(enormous.clone(), Err(anyhow::anyhow!("too big")));
         assert!(!cache.begin(&enormous), "known bad, not asked twice");
-        assert!(cache.texture(&enormous, &ctx).is_none(), "and nothing to draw");
+        assert!(
+            cache.texture(&enormous, &ctx).is_none(),
+            "and nothing to draw"
+        );
     }
 
     /// The same path on two machines is two files: a remote `/tmp/shot.png` must
@@ -449,7 +463,10 @@ mod tests {
 
         assert!(cache.begin(&remote), "another machine, another file");
         assert!(cache.texture(&remote, &ctx).is_none(), "not fetched yet");
-        assert!(cache.texture(&local, &ctx).is_some(), "the local one stands");
+        assert!(
+            cache.texture(&local, &ctx).is_some(),
+            "the local one stands"
+        );
     }
 
     /// The cache is a window over what the pointer has been near, not a library:
@@ -545,6 +562,9 @@ mod render_tests {
 
         // And nothing was painted far away, where there is only the window.
         let away = rendered.get_pixel(360, 260);
-        assert!(away[0] < 120, "a picture where there should be none: {away:?}");
+        assert!(
+            away[0] < 120,
+            "a picture where there should be none: {away:?}"
+        );
     }
 }

@@ -22,7 +22,7 @@
 //! families come next, and they change only this file.
 
 use crate::error::Error;
-use crate::interp::{as_string, Interpreter};
+use crate::interp::{Interpreter, as_string};
 use crate::lex::Tok;
 use crate::program::Program;
 use crate::value::Value;
@@ -92,8 +92,8 @@ pub(crate) fn invoke(
         "setecho" | "enablekeyb" | "setsync" | "setmulticastname" | "setserialdelaychar"
         | "setserialdelayline" | "setserialdelay" | "changedir" | "logopen" | "logclose"
         | "logwrite" | "logwritebinary" | "logrotate" | "loginfo" | "getfileattr"
-        | "setfileattr" | "sendkcode" | "folderdelete" | "setflowctrl"
-        | "setcomport" | "setbaud" => setting(interp, name, args),
+        | "setfileattr" | "sendkcode" | "folderdelete" | "setflowctrl" | "setcomport"
+        | "setbaud" => setting(interp, name, args),
         "recvln" => recvln(interp, args),
         "wait" => wait(interp, args, Wait::Any),
         "waitln" => wait(interp, args, Wait::Line),
@@ -431,8 +431,8 @@ fn mpause(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> 
 fn execcmnd(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
     interp.arity(args, "execcmnd", 1, 1)?;
     let text = interp.str_param(args, 0)?;
-    let program = Program::parse(&text)
-        .map_err(|error| Error::Syntax(format!("execcmnd: {error}")))?;
+    let program =
+        Program::parse(&text).map_err(|error| Error::Syntax(format!("execcmnd: {error}")))?;
     interp.push_program(program);
     Ok(())
 }
@@ -811,13 +811,14 @@ fn str2int(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error>
 /// §7.3: decimal or hexadecimal, and `$`/`0x` both name hex.
 fn parse_integer(text: &str) -> Option<i32> {
     let text = text.trim();
-    let (radix, digits) = if let Some(rest) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        (16, rest)
-    } else if let Some(rest) = text.strip_prefix('$') {
-        (16, rest)
-    } else {
-        (10, text)
-    };
+    let (radix, digits) =
+        if let Some(rest) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            (16, rest)
+        } else if let Some(rest) = text.strip_prefix('$') {
+            (16, rest)
+        } else {
+            (10, text)
+        };
     let negative = digits.starts_with('-');
     let digits = digits.trim_start_matches(['-', '+']);
     let value = i64::from_str_radix(digits, radix).ok()?;
@@ -855,7 +856,9 @@ fn strcopy(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error>
     let slice: String = if start >= chars.len() {
         String::new()
     } else {
-        chars[start..(start + take).min(chars.len())].iter().collect()
+        chars[start..(start + take).min(chars.len())]
+            .iter()
+            .collect()
     };
     interp.assign_str(&target, &slice)
 }
@@ -1108,7 +1111,9 @@ fn redim(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
     let preserve = if args.len() > 2 {
         let keyword = interp.str_param(args, 2)?;
         if !keyword.eq_ignore_ascii_case("Preserve") {
-            return Err(Error::Syntax("redim's third parameter is 'Preserve'".into()));
+            return Err(Error::Syntax(
+                "redim's third parameter is 'Preserve'".into(),
+            ));
         }
         true
     } else {
@@ -1214,11 +1219,7 @@ fn connect(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error>
     Ok(())
 }
 
-fn setting(
-    interp: &mut Interpreter<'_>,
-    name: &str,
-    args: &[Vec<Tok>],
-) -> Result<(), Error> {
+fn setting(interp: &mut Interpreter<'_>, name: &str, args: &[Vec<Tok>]) -> Result<(), Error> {
     interp.arity(args, name, 0, 8)?;
     let mut value = String::new();
     for index in 0..args.len() {
@@ -1261,11 +1262,7 @@ fn send_multicast(
 
 /// The parameters from `from` on, as bytes: a string is its bytes, an integer
 /// is one byte — the low 8 bits, truncated rather than refused (§7.1).
-fn payload(
-    interp: &Interpreter<'_>,
-    args: &[Vec<Tok>],
-    from: usize,
-) -> Result<Vec<u8>, Error> {
+fn payload(interp: &Interpreter<'_>, args: &[Vec<Tok>], from: usize) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     for index in from..args.len() {
         let expr = interp.param(args, index)?;
@@ -1388,9 +1385,7 @@ fn wait(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], kind: Wait) -> Result<(
     // means the wait never times out, which is why -1 is "infinite" here.
     let millis = i64::from(interp.system().timeout) * 1000 + i64::from(interp.system().mtimeout);
     let millis = if millis <= 0 { -1 } else { millis };
-    let answer = interp
-        .host()
-        .wait_for(&patterns, millis, kind != Wait::Any);
+    let answer = interp.host().wait_for(&patterns, millis, kind != Wait::Any);
     match answer {
         Some((index, text)) => {
             // §7.1: the result is which pattern matched, counted from 1.
@@ -1480,7 +1475,9 @@ fn filereadln(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Err
 fn fileread(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error> {
     interp.arity(args, "fileread", 3, 3)?;
     let handle = interp.int_param(args, 0)?;
-    let bytes = interp.int_param(args, 1)?.clamp(1, crate::vars::MAX_STRING_CHARS as i32) as usize;
+    let bytes = interp
+        .int_param(args, 1)?
+        .clamp(1, crate::vars::MAX_STRING_CHARS as i32) as usize;
     let target = interp.name_param(args, 2)?;
     match interp.host().files().read(handle, bytes) {
         Some(data) => {
@@ -1493,7 +1490,12 @@ fn fileread(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error
 }
 
 fn filewrite(interp: &mut Interpreter<'_>, args: &[Vec<Tok>], newline: bool) -> Result<(), Error> {
-    interp.arity(args, if newline { "filewriteln" } else { "filewrite" }, 2, 2)?;
+    interp.arity(
+        args,
+        if newline { "filewriteln" } else { "filewrite" },
+        2,
+        2,
+    )?;
     let handle = interp.int_param(args, 0)?;
     let mut bytes = payload(interp, args, 1)?;
     if newline {
@@ -1642,10 +1644,7 @@ fn filestat(interp: &mut Interpreter<'_>, args: &[Vec<Tok>]) -> Result<(), Error
     // The outputs are assigned either way: a macro that reads them after a
     // failed `filestat` is reading zeroes, not an uninitialised variable.
     let size = interp.host().files().size(&path);
-    interp.assign_int(
-        &size_target,
-        size.unwrap_or(0).min(i32::MAX as u64) as i32,
-    )?;
+    interp.assign_int(&size_target, size.unwrap_or(0).min(i32::MAX as u64) as i32)?;
     // The modification time and drive number need a real file system's
     // metadata; the parameters are accepted and left at zero.
     for index in 2..args.len() {

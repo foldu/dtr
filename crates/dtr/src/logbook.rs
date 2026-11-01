@@ -22,7 +22,10 @@ pub fn print(store: &Store) -> anyhow::Result<()> {
             timestamp(session.started_at),
             duration(session),
             session.label.clone(),
-            session.exit.clone().unwrap_or_else(|| "unfinished".to_owned()),
+            session
+                .exit
+                .clone()
+                .unwrap_or_else(|| "unfinished".to_owned()),
             session.note.clone().unwrap_or_default(),
         ]);
     }

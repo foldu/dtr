@@ -141,10 +141,7 @@ pub fn key_of(stroke: &KeyStroke) -> Key {
     }
     match &stroke.key {
         LogicalKey::Named(named) => key_of_named(*named),
-        LogicalKey::Character(text) => text
-            .chars()
-            .next()
-            .map_or(Key::Unidentified, key_of_char),
+        LogicalKey::Character(text) => text.chars().next().map_or(Key::Unidentified, key_of_char),
         _ => Key::Unidentified,
     }
 }
@@ -695,11 +692,17 @@ mod tests {
 
         // Nothing was consumed without a shift, without text, or by a key with
         // no unshifted character to compare against.
-        assert_eq!(consumed_mods(false, Some(";"), Key::Semicolon), Mods::empty());
+        assert_eq!(
+            consumed_mods(false, Some(";"), Key::Semicolon),
+            Mods::empty()
+        );
         assert_eq!(consumed_mods(true, None, Key::ArrowUp), Mods::empty());
         assert_eq!(consumed_mods(true, Some("\r"), Key::Enter), Mods::empty());
 
         // More than one character is not one key's text.
-        assert_eq!(consumed_mods(true, Some(":x"), Key::Semicolon), Mods::empty());
+        assert_eq!(
+            consumed_mods(true, Some(":x"), Key::Semicolon),
+            Mods::empty()
+        );
     }
 }

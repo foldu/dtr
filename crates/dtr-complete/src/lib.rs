@@ -208,7 +208,11 @@ impl Engine {
 
         // Stable within equal scores: the lists are sorted already, so equal
         // candidates keep an order the user can learn.
-        out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.item.label.cmp(&b.item.label)));
+        out.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.item.label.cmp(&b.item.label))
+        });
         out
     }
 
@@ -296,7 +300,8 @@ impl<'a> Parsed<'a> {
                 let needle = rest.trim_start();
                 let start = trimmed.len() - needle.len();
                 let command = COMMANDS.iter().find(|command| {
-                    command.name.eq_ignore_ascii_case(name) || command.name.starts_with(&name.to_lowercase())
+                    command.name.eq_ignore_ascii_case(name)
+                        || command.name.starts_with(&name.to_lowercase())
                 });
                 match command {
                     Some(command) => Self {
@@ -325,9 +330,7 @@ fn fuzzy(matcher: &mut Matcher, candidate: &str, needle: &str) -> Option<u32> {
     let mut needle_buf = Vec::new();
     let haystack = Utf32Str::new(candidate, &mut haystack_buf);
     let needle = Utf32Str::new(needle, &mut needle_buf);
-    matcher
-        .fuzzy_match(haystack, needle)
-        .map(u32::from)
+    matcher.fuzzy_match(haystack, needle).map(u32::from)
 }
 
 #[cfg(test)]
@@ -491,7 +494,10 @@ mod tests {
                 .expect("a command has a name")
                 .to_ascii_lowercase();
             if let Some(other) = owner.insert(letter, command.name) {
-                panic!("`{other}` and `{}` both start with `{letter}`", command.name);
+                panic!(
+                    "`{other}` and `{}` both start with `{letter}`",
+                    command.name
+                );
             }
         }
     }

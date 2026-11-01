@@ -50,7 +50,11 @@ impl Ssh {
 /// A failed or timed-out operation takes the child with it: leaving a dead
 /// session in the slot would make every later call fail the same way, which
 /// reads as "this host is down" long after it came back.
-async fn guarded<T, F>(alias: &str, session: &Mutex<Option<dtr_sftp::Session>>, mut op: F) -> Result<T>
+async fn guarded<T, F>(
+    alias: &str,
+    session: &Mutex<Option<dtr_sftp::Session>>,
+    mut op: F,
+) -> Result<T>
 where
     F: for<'a> FnMut(&'a mut dtr_sftp::Session) -> BoxFuture<'a, Result<T>>,
 {
@@ -120,9 +124,9 @@ impl Backend for Ssh {
             Ok(Meta {
                 kind: if entry.dir { Kind::Dir } else { Kind::File },
                 len: entry.size,
-                modified: entry
-                    .modified
-                    .and_then(|seconds| std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))),
+                modified: entry.modified.and_then(|seconds| {
+                    std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+                }),
             })
         })
     }

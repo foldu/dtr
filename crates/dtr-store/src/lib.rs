@@ -54,8 +54,7 @@ impl Store {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let db = Database::create(path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
 
         // Materialise both tables so a read on a fresh file does not error.
         let write = db.begin_write()?;
@@ -117,9 +116,7 @@ impl Store {
     pub fn last_port(&self) -> Result<Option<String>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(META)?;
-        Ok(table
-            .get(LAST_PORT)?
-            .map(|value| value.value().to_owned()))
+        Ok(table.get(LAST_PORT)?.map(|value| value.value().to_owned()))
     }
 
     pub fn set_last_port(&self, port: &str) -> Result<()> {

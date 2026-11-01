@@ -41,7 +41,11 @@ impl Modem {
     }
 
     fn set_line(&mut self, bit: i32, level: bool) -> std::io::Result<()> {
-        let request = if level { libc::TIOCMBIS } else { libc::TIOCMBIC };
+        let request = if level {
+            libc::TIOCMBIS
+        } else {
+            libc::TIOCMBIC
+        };
         // SAFETY: ioctl with a pointer to a live `c_int` for the call's duration.
         let result = unsafe { libc::ioctl(self.fd, request, &bit as *const i32) };
         if result == -1 {

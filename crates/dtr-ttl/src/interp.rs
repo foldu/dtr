@@ -114,7 +114,9 @@ fn param_number(name: &str) -> Option<usize> {
         return None;
     }
     let digit = rest.as_bytes()[0];
-    (b'1'..=b'9').contains(&digit).then(|| usize::from(digit - b'1'))
+    (b'1'..=b'9')
+        .contains(&digit)
+        .then(|| usize::from(digit - b'1'))
 }
 
 /// `groupmatchstr1`…`groupmatchstr9` when the name is one of them.
@@ -124,7 +126,9 @@ fn group_number(name: &str) -> Option<usize> {
         return None;
     }
     let digit = rest.as_bytes()[0];
-    (b'1'..=b'9').contains(&digit).then(|| usize::from(digit - b'1'))
+    (b'1'..=b'9')
+        .contains(&digit)
+        .then(|| usize::from(digit - b'1'))
 }
 
 impl Scope for View<'_> {
@@ -141,7 +145,9 @@ impl Scope for View<'_> {
             ("matchstr", None) => Some(Value::Str(self.system.matchstr.clone())),
             ("paramcnt", None) => Some(Value::Int(self.system.params.len() as i32)),
             ("params", Some(index)) => {
-                let item = usize::try_from(index).ok().and_then(|i| self.system.params.get(i));
+                let item = usize::try_from(index)
+                    .ok()
+                    .and_then(|i| self.system.params.get(i));
                 match item {
                     Some(text) => Some(Value::Str(text.clone())),
                     None => {
@@ -792,7 +798,10 @@ impl<'h> Interpreter<'h> {
     pub(crate) fn next_random(&mut self, max: i32) -> i32 {
         // A 32-bit LCG is enough for a macro that wants a jitter, and it has to
         // be ours: Tera Term's `random` is not documented as reproducible.
-        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.seed = self
+            .seed
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
         let span = (max as u32).saturating_add(1);
         ((self.seed >> 8) % span) as i32
     }
