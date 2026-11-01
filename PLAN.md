@@ -784,6 +784,30 @@ gets a bar through a real editor and back to a block on Escape.
 switched off, but the cursor is the one thing a reconnect has to restore, and a bar belongs to the
 insert mode of the editor that dropped rather than to the shell that replaces it.
 
+**"Save as" used to be a text field, and the reason it was one was wrong.** The argument was that `rfd`
+would drag GTK into the Linux build and a portal dependency into the one-file Windows exe, so a terminal
+whose users know how to type a path should type one. Neither half survived contact with the crates: rfd's
+defaults are `xdg-portal` (a D-Bus call to whatever file chooser the desktop already runs, with a `zenity`
+fallback when no portal answers) and, on Windows, the Common Item Dialog through `windows-sys` — no GTK, no
+extra DLL, and the one-file check still passes. `gtk3` is an opt-in feature nobody here turns on.
+
+The typed field was also the wrong shape of answer. It could not browse, could not show what was already in
+a folder, and asked the user to spell a path that the person who *drew* the folder already knows. A picker
+hands back a `PathBuf` and with it the platform's own behaviour for overwriting, creating folders and
+remembering where you were last time.
+
+Two things the platform dialog forces, and both are in the code rather than in a comment. It **blocks**
+until it is answered, so it runs on the files runtime and comes back as `UserEvent::SavePath` — called on
+the drawing thread it would freeze the window, and a frozen window with a dialog behind it is
+indistinguishable from a crash. And it is **parented** (`set_parent`): an unparented dialog opens behind
+the window on Windows and wherever the compositor fancies on Wayland. `rfd` reports a portal that never
+answered the same way it reports a cancel — `None` — so `LogTracer` is installed to put rfd's own `log`
+complaint in `-v`; a silent button is the one outcome a dialog must not have.
+
+The explorer's per-file download still lands in `~/Downloads` without asking, because that gesture means
+"take it" rather than "put it somewhere", and both paths still share the directory so the two ways of
+taking a remote file agree.
+
 ### M3 — the rest — the rest of a terminal
 
 - ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.

@@ -373,6 +373,12 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+    // Libraries that predate `tracing` say what went wrong through `log` — the
+    // file dialog is one, and "the picker never appeared" is exactly the kind of
+    // failure that needs a cause in the log. `init` above sets this up only when
+    // `tracing-subscriber`'s `tracing-log` feature is on, so it is asked for
+    // directly and a second registration is not an error.
+    let _ = tracing_log::LogTracer::init();
     // Said out loud so an empty log is never a mystery: if this line is missing
     // from the log, the binary predates it and needs rebuilding.
     tracing::info!(filter = %effective, version = env!("CARGO_PKG_VERSION"), "logging");

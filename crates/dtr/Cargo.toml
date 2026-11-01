@@ -31,6 +31,9 @@ image.workspace = true
 pollster.workspace = true
 portable-pty.workspace = true
 redb.workspace = true
+# The desktop's own file dialog, because a picker has to know about portals,
+# drive letters and the platform's idea of a folder. See the workspace comment.
+rfd.workspace = true
 fontique.workspace = true
 swash.workspace = true
 unicode-width.workspace = true
@@ -39,6 +42,7 @@ serialport.workspace = true
 tokio.workspace = true
 tokio-serial.workspace = true
 tracing.workspace = true
+tracing-log.workspace = true
 tracing-subscriber.workspace = true
 wgpu.workspace = true
 winit.workspace = true

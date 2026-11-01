@@ -47,6 +47,11 @@ png = "0.18"
 # Hover previews. PNG and JPEG only, and no encoders for anything else: the one
 # place dtr writes a picture is `--screenshot`, which uses `png` directly.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The system file dialogs, which is the one part of a terminal that has to be the
+# desktop's own: the XDG portal on Linux (with a zenity fallback), the Common Item
+# Dialog on Windows. `xdg-portal` and not `gtk3`, so the Linux build pulls no GTK
+# in; `wayland` lets the portal be told which surface the dialog belongs to.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }
 pollster = "0.4"
 portable-pty = "0.9"
 redb = "4"
@@ -67,5 +72,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "i
 tokio-serial = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# rfd says "Using zenity fallback" and "failed to …" through `log`; this is what
+# puts those lines in `-v` next to everything else. Without it a dialog that never
+# appeared is a silence with no cause in the log.
+tracing-log = "0.2"
 wgpu = "30"
 winit = "0.30"

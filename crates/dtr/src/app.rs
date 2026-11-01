@@ -48,6 +48,14 @@ pub enum UserEvent {
     /// A message for the user that no worker can put on screen itself: a link
     /// that could not be opened, a path that is not what it claimed.
     Notice(String),
+    /// The desktop's save dialog answered: where to put the copy, or `None` if it
+    /// was dismissed — and, since `rfd` reports a missing portal the same way, if
+    /// it could not be shown at all. `-v` says which, because the dialog's own
+    /// complaint goes through `log`.
+    SavePath {
+        location: dtr_vfs::Location,
+        path: Option<PathBuf>,
+    },
 }
 
 /// What the SFTP worker is asked to do, and what it reports back.
@@ -605,7 +613,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         thumb_pending: None,
         link_menu: crate::linkmenu::LinkMenu::default(),
         link_menu_target: None,
-        save: crate::linkmenu::SaveDialog::default(),
+        picking_save: false,
         cursor_icon: None,
         script: startup
             .keys
@@ -726,16 +734,74 @@ fn sftp_worker(
 ///
 /// The file explorer's download and the link menu's "Save as" share it, so a
 /// remote file taken two different ways does not end up in two different places.
+/// For "Save as" it is only where the dialog *starts*: the user picks the real
+/// destination, and picking somewhere else is the whole point of asking.
 fn save_target(source: &std::path::Path) -> PathBuf {
-    let name = source
+    save_dir().join(save_name(source))
+}
+
+/// The name a copy keeps: the source's own last component, or `download`.
+fn save_name(source: &std::path::Path) -> std::ffi::OsString {
+    source
         .file_name()
         .map(|name| name.to_owned())
-        .unwrap_or_else(|| "download".into());
+        .unwrap_or_else(|| "download".into())
+}
+
+/// `~/Downloads`, created if it is missing, because both save paths write there.
+fn save_dir() -> PathBuf {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Downloads");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join(name)
+    dir
+}
+
+/// The desktop's save dialog, asked for one path.
+///
+/// Blocking, and it must not be called on the drawing thread — the window would
+/// stop answering while the dialog is up. `rfd` gets the platform's own dialog:
+/// the XDG portal on Linux (falling back to `zenity` when no portal answers) and
+/// the Common Item Dialog on Windows, neither of which is a GTK dependency and
+/// neither of which is a window dtr draws.
+///
+/// `set_parent` is what makes it *this* window's dialog rather than a stray one:
+/// on Windows a transient dialog is centred on and owned by its parent, and on
+/// Wayland the portal needs the surface to attach the dialog to.
+fn pick_save_path(window: Option<Arc<Window>>, default: &Path) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("Save a copy");
+    if let Some(dir) = default.parent() {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(name) = default.file_name() {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    if let Some(window) = window {
+        dialog = dialog.set_parent(&*window);
+    }
+    dialog.save_file()
+}
+
+/// Copy `location` to `dest`, making the directory it names.
+///
+/// `materialise` first, because a remote file has to exist on this disk before
+/// anything can copy it, and a local one must never be copied — it is its own
+/// path. The picked path's parent is created rather than assumed: a native save
+/// dialog lets a name be typed into a folder that the user typed as well, and
+/// "saved" for a file that is not there would be the worst answer of the three.
+async fn copy_to(
+    vfs: &dtr_vfs::Vfs,
+    location: &dtr_vfs::Location,
+    dest: &Path,
+) -> anyhow::Result<u64> {
+    let local = vfs.materialise(location).await?;
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    tokio::fs::copy(&local, dest).await?;
+    Ok(tokio::fs::metadata(dest).await?.len())
 }
 
 /// The alias an `ssh` pane is connected to, if it is remote at all.
@@ -1008,8 +1074,10 @@ struct App {
     /// The right-click menu for a link, and what it is about.
     link_menu: crate::linkmenu::LinkMenu,
     link_menu_target: Option<LinkMenuTarget>,
-    /// Where a "Save as" copy should go, once the user has said so.
-    save: crate::linkmenu::SaveDialog,
+    /// True while the desktop's save dialog is up. The dialog is the platform's
+    /// and it keeps our window alive, so a second "Save as..." would open a
+    /// second dialog on top of the first.
+    picking_save: bool,
     /// The cursor this window was last told to show, so the icon is set when it
     /// changes rather than on every frame.
     cursor_icon: Option<winit::window::CursorIcon>,
@@ -1128,10 +1196,7 @@ impl App {
     /// committed into the shell behind an open palette would type somewhere the
     /// person is not looking. A new modal belongs in both places.
     fn terminal_owns_keys(&self) -> bool {
-        !self.palette.open
-            && !self.settings.open
-            && !self.pager.is_open()
-            && !self.save.is_open()
+        !self.palette.open && !self.settings.open && !self.pager.is_open()
     }
 
     /// Handle one event from the platform's input method.
@@ -1205,15 +1270,6 @@ impl App {
                 // can rewrite. `pending` holds the chords of a binding that is
                 // not finished yet (`ctrl-k ctrl-s`).
                 let pressed = stroke.state == winit::event::ElementState::Pressed;
-
-                // A dialog asking where to save owns the keyboard entirely. egui
-                // reads the same events, so the text field still types; this is
-                // what stops the filename from being typed into the shell as a
-                // command as well.
-                if self.save.is_open() {
-                    self.held = None;
-                    return;
-                }
 
                 // The menu owns the keyboard while it is open. Releases only
                 // clear the held key; duplicates are compositor noise.
@@ -1675,13 +1731,6 @@ impl App {
             }
             return;
         }
-        if self.save.is_open() {
-            if !self.save.contains(points) {
-                self.save.close();
-                self.repaint("save dialog dismissed");
-            }
-            return;
-        }
         self.pointer_down(at);
     }
 
@@ -1695,13 +1744,7 @@ impl App {
             // The URI, not the location: "Open" must be exactly what a left
             // click does, remote copy and all.
             crate::linkmenu::Choice::Open => self.open_link(&target.uri),
-            crate::linkmenu::Choice::SaveAs => {
-                let described = target.location.describe();
-                let default = save_target(&target.location.path);
-                self.save
-                    .show(target.location, described, default.display().to_string());
-                self.repaint("save dialog");
-            }
+            crate::linkmenu::Choice::SaveAs => self.ask_where_to_save(target.location),
             crate::linkmenu::Choice::CopyPath => {
                 let text = target.location.path.display().to_string();
                 self.set_clipboard(&text);
@@ -1711,10 +1754,35 @@ impl App {
         }
     }
 
-    fn save_outcome(&mut self, outcome: crate::linkmenu::Outcome) {
-        if let crate::linkmenu::Outcome::Confirm { location, dest } = outcome {
-            self.begin_save(location, dest);
+    /// Ask the desktop where to put a copy of `location`.
+    ///
+    /// The dialog is the platform's, not egui's and not dtr's: `rfd` reaches the
+    /// XDG portal on Linux (with a zenity fallback) and the Common Item Dialog on
+    /// Windows, so a Windows user gets the same browse-and-overwrite behaviour as
+    /// everywhere else rather than a text field in a terminal. It cannot run on
+    /// this thread — `pick_file` blocks until the user answers, and the window
+    /// would be frozen while it does — so it runs on the files runtime and comes
+    /// back as an event, the same way an SFTP listing does.
+    fn ask_where_to_save(&mut self, location: dtr_vfs::Location) {
+        if self.picking_save {
+            tracing::debug!("a save dialog is already up");
+            return;
         }
+        let Some(runtime) = self.files_rt.as_ref() else {
+            return;
+        };
+        let default = save_target(&location.path);
+        let parent = self.proxy.clone();
+        let window = self.gpu.as_ref().map(|gpu| Arc::clone(gpu.window()));
+        self.picking_save = true;
+        runtime.spawn_blocking(move || {
+            let chosen = pick_save_path(window, &default);
+            tracing::debug!(?chosen, "save dialog answered");
+            let _ = parent.send_event(UserEvent::SavePath {
+                location,
+                path: chosen,
+            });
+        });
     }
 
     /// Copy a file on this machine or another to `dest`.
@@ -1742,17 +1810,7 @@ impl App {
             std::time::Instant::now(),
         ));
         runtime.spawn(async move {
-            let outcome = async {
-                let local = vfs.materialise(&location).await?;
-                if let Some(parent) = dest.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                }
-                tokio::fs::copy(&local, &dest).await?;
-                Ok::<u64, anyhow::Error>(tokio::fs::metadata(&dest).await?.len())
-            }
-            .await;
+            let outcome = copy_to(&vfs, &location, &dest).await;
             let note = match outcome {
                 Ok(bytes) => format!(
                     "saved {} to {}",
@@ -1932,7 +1990,7 @@ impl App {
         // a picture of a file the user is not pointing at. The link menu is a
         // sharper case: it opens *at* the pointer, exactly where the preview would
         // be, and the tooltip layer sits above a foreground menu.
-        if self.pager.is_open() || self.link_menu.is_open() || self.save.is_open() {
+        if self.pager.is_open() || self.link_menu.is_open() {
             return None;
         }
         let uri = self.hover_link.as_ref()?.uri.clone();
@@ -3382,6 +3440,18 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toast = Some((text, std::time::Instant::now()));
                 self.repaint("notice");
             }
+            UserEvent::SavePath { location, path } => {
+                self.picking_save = false;
+                match path {
+                    Some(path) => self.begin_save(location, path),
+                    // Dismissed, or a dialog that never appeared. Nothing is
+                    // written, and the log is where the difference is.
+                    None => {
+                        tracing::info!("save dialog closed with no path");
+                        self.repaint("save dialog dismissed");
+                    }
+                }
+            }
             UserEvent::Destinations(destinations) => {
                 self.destinations = destinations;
                 self.scanning = false;
@@ -3498,13 +3568,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_position = Some((position.x, position.y));
                 // While the pager is open the pointer belongs to egui: hovering
                 // the grid underneath would light up a link the pager covers, and
-                // a drag would select text nobody can see. The same goes for a
-                // menu or a dialog: they are about one file, not about the cell
-                // under the pointer.
-                if !self.pager.is_open()
-                    && !self.link_menu.is_open()
-                    && !self.save.is_open()
-                {
+                // a drag would select text nobody can see. A menu is the same: it
+                // is about one file, not about the cell under the pointer.
+                if !self.pager.is_open() && !self.link_menu.is_open() {
                     self.pointer_move((position.x, position.y));
                     self.hover((position.x, position.y));
                 }
@@ -3544,7 +3610,7 @@ impl ApplicationHandler<UserEvent> for App {
                         (_, ElementState::Released) => {
                             // A press that dismissed a menu started no drag, so
                             // there is no drag to end.
-                            if !self.link_menu.is_open() && !self.save.is_open() {
+                            if !self.link_menu.is_open() {
                                 self.pointer_up();
                             }
                         }
@@ -3834,9 +3900,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // pager mutates itself while it draws, and `self` is borrowed.
                 let mut pager = std::mem::take(&mut self.pager);
                 let mut link_menu = std::mem::take(&mut self.link_menu);
-                let mut save = std::mem::take(&mut self.save);
                 let mut menu_choice = None;
-                let mut save_outcome = None;
                 let rendered = gpu.render(
                     &panes,
                     self.frames_drawn,
@@ -3853,8 +3917,6 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|(texture, size)| (texture, *size)),
                     &mut link_menu,
                     &mut menu_choice,
-                    &mut save,
-                    &mut save_outcome,
                     &mut copied_text,
                     &mut copied,
                     toast_text
@@ -3876,15 +3938,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // the only place that knows how tall the text turned out.
                 self.pager = pager;
                 self.link_menu = link_menu;
-                self.save = save;
                 // The answers come back after the frame, like a clicked tab: the
                 // drawing code knows what was clicked, the app knows what to do
                 // about it.
                 if let Some(choice) = menu_choice {
                     self.link_menu_choice(choice);
-                }
-                if let Some(outcome) = save_outcome {
-                    self.save_outcome(outcome);
                 }
                 if let Some(change) = settings_change {
                     // A mouse edit updates the draft, and the file is written
@@ -4217,6 +4275,16 @@ impl Gpu {
         self.grid.metrics()
     }
 
+    /// The window a native dialog is parented to.
+    ///
+    /// A file picker is the one piece of the UI egui does not draw, and a dialog
+    /// with no parent is a window that can open behind this one — or, on a
+    /// Wayland session, in a corner with the compositor's idea of where a
+    /// transient belongs rather than ours.
+    fn window(&self) -> &Arc<Window> {
+        &self.window
+    }
+
     /// Backing-store pixels per logical point, for chrome measurements.
     fn scale(&self) -> f32 {
         // The DPI factor, not a ratio of two physical sizes: `inner_size` is
@@ -4252,8 +4320,6 @@ impl Gpu {
         thumbnail: Option<(&egui::TextureHandle, egui::Vec2)>,
         link_menu: &mut crate::linkmenu::LinkMenu,
         menu_choice: &mut Option<crate::linkmenu::Choice>,
-        save: &mut crate::linkmenu::SaveDialog,
-        save_outcome: &mut Option<crate::linkmenu::Outcome>,
         copied_text: &mut Option<String>,
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
@@ -4388,12 +4454,10 @@ impl Gpu {
                 if let Some((texture, size)) = thumbnail {
                     crate::thumb::draw(ui, texture, size, look);
                 }
-                // A right-click's menu, and the dialog it can lead to.
+                // A right-click's menu. "Save as" on it opens the desktop's own
+                // dialog, which is not drawn here at all.
                 if link_menu.is_open() {
                     *menu_choice = link_menu.ui(ui, look);
-                }
-                if save.is_open() {
-                    *save_outcome = save.ui(ui, look);
                 }
                 // Clipboard in and out. egui hands paste over as an event; the
                 // pane hands copied text back through a slot it fills itself.
@@ -4560,7 +4624,42 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed, cycled, mouse_goes_to_program};
+    use super::{closed, copy_to, cycled, mouse_goes_to_program, save_name};
+
+    /// A path the save dialog hands back is where the copy goes, and the folder
+    /// it names does not have to exist yet: a native dialog lets a name be typed
+    /// into a folder that was typed as well, and "saved" for a file that is not
+    /// there is the worst of the three answers.
+    #[tokio::test]
+    async fn a_picked_path_is_where_the_copy_lands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("holiday.png");
+        std::fs::write(&source, b"pixels").expect("the file to copy");
+        let vfs = dtr_vfs::Vfs::with_root(dir.path().join("cache"));
+        let dest = dir.path().join("Pictures").join("2026").join("holiday.png");
+
+        let bytes = copy_to(&vfs, &dtr_vfs::Location::local(&source), &dest)
+            .await
+            .expect("a copy");
+
+        assert_eq!(bytes, 6);
+        assert_eq!(std::fs::read(&dest).expect("the copy"), b"pixels");
+        // A local file is its own path: the source is still there, and they are
+        // two files rather than one.
+        assert_eq!(std::fs::read(&source).expect("the source"), b"pixels");
+    }
+
+    /// A copy keeps the name it had, and a path with no name at all still gets
+    /// one — the dialog is handed a file name, never an empty field.
+    #[test]
+    fn a_copy_keeps_its_name() {
+        assert_eq!(
+            save_name(std::path::Path::new("/srv/pictures/holiday.png")),
+            "holiday.png"
+        );
+        assert_eq!(save_name(std::path::Path::new("/")), "download");
+        assert_eq!(save_name(std::path::Path::new(".")), "download");
+    }
 
     /// A program that grabbed the mouse still lets go of it for a selection.
     ///

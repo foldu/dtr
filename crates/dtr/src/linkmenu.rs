@@ -1,13 +1,11 @@
-//! What a right-click on a link offers, and where a saved copy goes.
+//! What a right-click on a link offers.
 //!
-//! Two overlays, both egui, both anchored in points: the menu at the pointer, the
-//! dialog in the middle. Neither reaches into the terminal — the app draws them
-//! and acts on the answer — which is why the file itself is fetched by the app
-//! afterwards, through the same VFS a click uses.
+//! One overlay, in egui, anchored at the pointer: it does not reach into the
+//! terminal. The app draws it, acts on the answer, and the file itself is fetched
+//! afterwards through the same VFS a click uses — including "Save as", whose
+//! destination comes from the desktop's own dialog rather than from a widget here.
 
-use std::path::{Path, PathBuf};
-
-use egui::{Align, Layout, Pos2, Rect, RichText, Stroke};
+use egui::{Pos2, Rect, RichText, Stroke};
 
 use crate::ui::Look;
 
@@ -131,183 +129,11 @@ impl LinkMenu {
     }
 }
 
-/// What the save dialog decided.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Confirm {
-        location: dtr_vfs::Location,
-        dest: PathBuf,
-    },
-    Cancel,
-}
-
-/// Where to put a copy, with the whole path editable.
-///
-/// Not a file browser: a terminal's user knows how to type a path, and a picker
-/// is a second filesystem UI to keep working on three platforms. The default is
-/// there so Enter is always a complete answer.
-pub struct SaveDialog {
-    open: bool,
-    location: Option<dtr_vfs::Location>,
-    /// What is being saved, in the form the toast uses: `jupyter:/var/log/x.png`.
-    described: String,
-    path: String,
-    rect: Rect,
-    /// The field takes focus on the first frame it exists: a dialog you have to
-    /// click before you can type is a dialog that types into the shell behind it.
-    focus: bool,
-}
-
-impl Default for SaveDialog {
-    fn default() -> Self {
-        Self {
-            open: false,
-            location: None,
-            described: String::new(),
-            path: String::new(),
-            rect: Rect::NOTHING,
-            focus: false,
-        }
-    }
-}
-
-impl SaveDialog {
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    pub fn close(&mut self) {
-        self.open = false;
-        self.location = None;
-    }
-
-    pub fn contains(&self, at: Pos2) -> bool {
-        self.open && self.rect.contains(at)
-    }
-
-    pub fn show(&mut self, location: dtr_vfs::Location, described: String, default: String) {
-        self.open = true;
-        self.location = Some(location);
-        self.described = described;
-        self.path = default;
-        self.focus = true;
-    }
-
-    /// The path the field holds, in the form the file will be written to.
-    pub fn dest(&self) -> PathBuf {
-        expand(self.path.trim())
-    }
-
-    pub fn ui(&mut self, ui: &mut egui::Ui, look: &Look) -> Option<Outcome> {
-        if !self.open {
-            return None;
-        }
-        let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
-        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-
-        let screen = ui.max_rect();
-        let width = 520.0f32.min(screen.width() - 32.0).max(240.0);
-        let rect = Rect::from_center_size(screen.center(), egui::vec2(width, 128.0));
-        let painter = ui.painter();
-        painter.rect_filled(rect, 6.0, Look::colour(look.surface));
-        painter.rect_stroke(
-            rect,
-            6.0,
-            Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.7)),
-            egui::StrokeKind::Inside,
-        );
-        self.rect = rect;
-
-        let mut path = std::mem::take(&mut self.path);
-        let described = self.described.clone();
-        let focus = std::mem::replace(&mut self.focus, false);
-        let mut confirm = false;
-        let mut cancel = false;
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(rect.shrink(12.0)),
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    RichText::new("Save a copy")
-                        .monospace()
-                        .color(Look::colour(look.foreground)),
-                );
-                ui.label(
-                    RichText::new(&described)
-                        .size(10.0)
-                        .color(Look::colour(look.dim)),
-                );
-                ui.add_space(4.0);
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut path)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("where to put it"),
-                );
-                if focus {
-                    field.request_focus();
-                }
-                ui.add_space(6.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Save").clicked() {
-                        confirm = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            },
-        );
-        self.path = path;
-
-        if escape || cancel {
-            self.close();
-            return Some(Outcome::Cancel);
-        }
-        if enter || confirm {
-            let dest = self.dest();
-            // Nothing typed is not a place to put a file; the dialog stays up.
-            if dest.as_os_str().is_empty() || dest == Path::new("~") {
-                return None;
-            }
-            let location = self.location.take();
-            self.close();
-            return location.map(|location| Outcome::Confirm { location, dest });
-        }
-        None
-    }
-}
-
-/// `~/Pictures/x.png` is in the home directory, not in a directory called `~`.
-///
-/// A path field that shows `~/Downloads/x.png` and then writes a literal `~` is
-/// the kind of thing that is discovered after the file is gone.
-pub fn expand(text: &str) -> PathBuf {
-    if text == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    }
-    if let Some(rest) = text.strip_prefix("~/") {
-        if let Some(mut home) = dirs::home_dir() {
-            home.push(rest);
-            return home;
-        }
-    }
-    PathBuf::from(text)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Choice, LinkMenu, Outcome, SaveDialog, expand};
-    use dtr_vfs::{BackendId, Location};
+    use super::{Choice, LinkMenu};
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
-    use std::path::PathBuf;
-
-    fn location() -> Location {
-        Location {
-            backend: BackendId::Ssh("jupyter".to_owned()),
-            path: PathBuf::from("/srv/pictures/holiday.png"),
-        }
-    }
 
     fn menu() -> LinkMenu {
         let mut menu = LinkMenu::default();
@@ -346,76 +172,5 @@ mod tests {
         harness.get_by_label("Save as...").click();
         harness.run();
         assert_eq!(*chosen.borrow(), Some(Choice::SaveAs));
-    }
-
-    /// The dialog starts at the default, and Enter answers with it — no typing
-    /// needed for the common case.
-    #[test]
-    fn the_dialog_saves_where_it_says() {
-        let look = crate::ui::Look::default();
-        let dialog = std::rc::Rc::new(std::cell::RefCell::new(SaveDialog::default()));
-        dialog.borrow_mut().show(
-            location(),
-            "jupyter:/srv/pictures/holiday.png".to_owned(),
-            "/home/me/Downloads/holiday.png".to_owned(),
-        );
-        let sink = std::rc::Rc::clone(&dialog);
-        let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let picked = std::rc::Rc::clone(&outcome);
-        let mut harness = Harness::new_ui(move |ui| {
-            if let Some(outcome) = sink.borrow_mut().ui(ui, &look) {
-                *picked.borrow_mut() = Some(outcome);
-            }
-        });
-        harness.run();
-
-        harness.get_by_label_contains("Save a copy");
-        harness.get_by_label_contains("jupyter:/srv/pictures/holiday.png");
-        harness.key_press(egui::Key::Enter);
-        harness.run();
-
-        match outcome.borrow().clone() {
-            Some(Outcome::Confirm { location, dest }) => {
-                assert_eq!(location, super::tests::location());
-                assert_eq!(dest, PathBuf::from("/home/me/Downloads/holiday.png"));
-            }
-            other => panic!("expected a save, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn escape_cancels_and_closes() {
-        let look = crate::ui::Look::default();
-        let dialog = std::rc::Rc::new(std::cell::RefCell::new(SaveDialog::default()));
-        dialog
-            .borrow_mut()
-            .show(location(), "described".to_owned(), "/tmp/x".to_owned());
-        let sink = std::rc::Rc::clone(&dialog);
-        let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let picked = std::rc::Rc::clone(&outcome);
-        let mut harness = Harness::new_ui(move |ui| {
-            if let Some(outcome) = sink.borrow_mut().ui(ui, &look) {
-                *picked.borrow_mut() = Some(outcome);
-            }
-        });
-        harness.run();
-        harness.key_press(egui::Key::Escape);
-        harness.run();
-
-        assert_eq!(*outcome.borrow(), Some(Outcome::Cancel));
-        assert!(!dialog.borrow().is_open());
-    }
-
-    /// A path field showing `~` must write to the home directory, not to a
-    /// literal tilde.
-    #[test]
-    fn a_tilde_is_a_home_directory() {
-        let home = dirs::home_dir().expect("a home directory");
-        assert_eq!(expand("~/Downloads/x.png"), home.join("Downloads/x.png"));
-        assert_eq!(expand("~"), home);
-        assert_eq!(expand("/tmp/x"), PathBuf::from("/tmp/x"));
-        assert_eq!(expand("~/"), home.join(""));
-        // A tilde that is not a leading component is just a character.
-        assert_eq!(expand("/tmp/~/x"), PathBuf::from("/tmp/~/x"));
     }
 }
