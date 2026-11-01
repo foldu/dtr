@@ -239,7 +239,6 @@
           cargoTestExtraArgs = "--workspace";
           nativeBuildInputs = cargoCommon.nativeBuildInputs ++ [pkgs.mesa fontPackages];
           FONTCONFIG_FILE = fontsConf;
-          DTR_SHELL = "${pkgs.bash}/bin/bash";
           VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
           WGPU_BACKEND = "vulkan";
           LIBGL_ALWAYS_SOFTWARE = "1";
@@ -319,11 +318,6 @@
         # fontconfig reads the store, not /usr/share/fonts, and its compiled-in
         # defaults point at a system a devShell does not have.
         export FONTCONFIG_FILE=${fontsConf}
-
-        # The pane tests start a shell. On a runner `$SHELL` may be unset and
-        # `/bin/bash` may not exist — the failure reads as "the pane said
-        # nothing", which is what it did.
-        export DTR_SHELL=${pkgs.bash}/bin/bash
 
         # A runner has no /dev/dri, so wgpu enumerates no adapter and every
         # snapshot test panics before it compares anything. Lavapipe is Vulkan in
