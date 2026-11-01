@@ -1270,3 +1270,33 @@ so dtr needs either that vocabulary or a translation; `callmenu`, `sendkcode`, `
 They are separable, though: nothing else in the language depends on them, so the first
 implementation can refuse them explicitly — a macro that reaches such a command should be told
 so, not left to conclude that its menu command worked.
+
+### Where it stands
+
+The reading half is implemented: `source` decodes a file (§3.1) and cuts it into lines
+(§3.2); `lex` turns a line into tokens (§3.3–§3.7); `line` classifies each line as one of the
+four kinds and checks that every block is closed by its own keyword (§6). There is no
+expression parser, no command set and no host interface yet, so nothing executes.
+
+That boundary was chosen because it is the largest part of the task that can be *checked*
+against real macros without running them, and because it is where a TTL implementation usually
+gets things subtly wrong: `'abc'#13#10'def'` is one string (§3.7), a sign is an operator and
+therefore `for i 5 -1` has two parameters rather than three (§5.4), a `;` inside a quoted string
+is not a comment, and a `/* */` comment can end mid-line with code after it (§3.3).
+
+### The corpus
+
+Tera Term's own macro tests are vendored at `crates/dtr-ttl/tests/corpus/`: 53 macros, mostly
+the reproduction attached to a bug report and named after it, copied verbatim under the
+BSD-3-Clause notice in the `NOTICE` beside them. Upstream has no runner and no CI job for them,
+and two thirds end in `messagebox`, so they are a checklist rather than a suite — but they are
+real TTL, written for Tera Term, and they contain what a synthetic test would not think of: 15
+CP932 files, one UTF-16BE, one UTF-16LE, Windows drive letters, `ls` against a live host.
+
+What `tests/corpus.rs` asserts is that all 53 decode, lex and nest, and it pins the totals — 53
+files, 2 485 lines, 1 621 commands — so a scanner change that silently stops seeing something
+fails. What it cannot assert is that they *run*. They were kept for that reason: the expected
+answers are already written in the files, so a host interface that records `messagebox`
+arguments instead of displaying them turns most of the corpus into assertions without editing a
+single macro. That is the argument for making the dialog commands host calls from the start
+rather than drawing them from the evaluator.

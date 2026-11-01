@@ -19,7 +19,7 @@ window, one OS thread per pane. `crates/` holds the workspace:
 | `dtr-sshconfig` | the ssh config parser |
 | `dtr-sftp` | the SFTP client |
 | `dtr-vfs` | file backends: local, in-memory, ssh |
-| `dtr-ttl` | the Tera Term macro language — specification only so far |
+| `dtr-ttl` | the Tera Term macro language — manual, corpus, and the reading half of an interpreter |
 
 ## Building and testing
 
@@ -677,6 +677,9 @@ enough.
 - `PLAN.md` — design, milestones, spike findings, and the reasoning behind
   decisions that were reversed.
 - `crates/dtr-ttl/MANUAL.md` — the Tera Term macro language, distilled.
+- `crates/dtr-ttl/tests/corpus/` — Tera Term's own 53 macro tests, vendored under
+  their BSD-3 notice; its README says what they pin and what they cannot. The
+  totals asserted in `tests/corpus.rs` move only when the corpus is re-vendored.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
