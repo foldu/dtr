@@ -158,8 +158,7 @@ stroke per frame through the same handler a keyboard uses (`App::on_key`), and
 `--capture PATH --capture-after MS` photographs the window afterwards. `;`
 separates tokens because a chord may be a comma; `+` joins the chords of one
 binding; `text:` types characters (only meaningful with a real shell, not
-`--demo`). Together they check that a menu opens, a chord is wired, or a font
-renders in the window.
+`--demo`).
 
 **A missing glyph is not a missing character.** The grid face covers Latin; CJK,
 emoji and the rest come from another installed family. `Fonts::face_for` asks the
@@ -925,11 +924,12 @@ outside the pane is not the program's, while a drag that leaves it still is, so
 `pane_pixels` clamps and only presses are refused. A wheel notch is buttons 4 and 5 as a
 press *and* a release, because X10 has no wheel event; shift sends it to the scrollback.
 
-**A hidden cursor is not a dirty frame.** `?25l` changes nothing but the cursor, and the render
-state does not count a mode as dirty, so `publish` skipped and the frame with the block on it stayed
-while btop painted its own screen. A position is not a cursor: `publish` reads
-`snapshot.cursor().visible`, `note_modes` forces one frame when it changes (a search box's `?25h`
-then appears), and `reset_modes` turns it back on.
+**A cursor is not a dirty cell.** Hiding it, showing it or asking for nvim's insert bar changes no
+cell, and the render state counts only cells — so `publish` skipped and the last cursor stayed on
+screen while btop painted its own picture. `publish` compares the `Cursor` it is about to publish
+(position plus DECSCUSR's style: 5 and 6 are nvim's insert bar) against the one the last frame
+carried, and a hidden cursor is nothing to draw. `reset_modes` restores both, visibility on and the
+shape to a block.
 
 **OSC 52 writes arrive on the pane thread, not the UI.** The VT core calls
 `Terminal::on_clipboard_write` synchronously while parsing bytes, so the handler

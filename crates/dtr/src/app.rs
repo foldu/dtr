@@ -3785,9 +3785,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // belongs to a pane that is not receiving it.
                 if self.preedit.is_composing() && self.terminal_owns_keys() {
                     if let (Some(rect), Some(session)) = (focused_rect, tab.focused_terminal()) {
-                        if let Some((col, row)) =
-                            session.frame.as_ref().and_then(|frame| frame.cursor)
-                        {
+                        let cursor = session.frame.as_ref().and_then(|frame| frame.cursor);
+                        if let Some(cursor) = cursor {
+                            let (col, row) = (cursor.x, cursor.y);
                             let metrics = gpu.metrics();
                             let cell = crate::layout::Rect::new(
                                 rect.x + f32::from(col) * metrics.cell_width,

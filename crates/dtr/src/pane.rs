@@ -17,7 +17,9 @@ use std::thread;
 use libghostty_vt::Terminal;
 use libghostty_vt::key::{Encoder as KeyEncoder, Event as KeyEvent};
 use libghostty_vt::mouse;
-use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator, Snapshot};
+use libghostty_vt::render::{
+    CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator, Snapshot,
+};
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{
     FormatOptions, SelectLineOptions, SelectWordOptions, Selection,
@@ -76,13 +78,68 @@ pub struct Cell {
     pub italic: bool,
 }
 
+/// What a cursor is drawn as.
+///
+/// The program asks with DECSCUSR (`CSI Ps SP q`), and the difference is not
+/// decoration: nvim sends `ver25` in insert mode and a block in normal, so a
+/// terminal that always draws a block is telling the user they are about to
+/// replace text when they are about to insert it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    /// A vertical bar against the cell's left edge — ncurses' `ver25`.
+    Bar,
+    /// A horizontal bar along the cell's bottom — `hor20`.
+    Underline,
+}
+
+/// Where the cursor is and what it looks like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub x: u16,
+    pub y: u16,
+    pub shape: CursorShape,
+}
+
+impl Cursor {
+    /// The rectangle the cursor's mark fills inside one cell.
+    ///
+    /// A block is the cell; a bar is a quarter of its width, a fifth of its
+    /// height for an underline — the fractions DECSCUSR's own names use, so a
+    /// program that asked for `ver25` gets a quarter and not a hairline. Both
+    /// have a one-pixel floor: a sub-pixel bar draws nothing, which is worse
+    /// than drawing it a pixel too wide, because the user cannot tell an insert
+    /// cursor from no cursor at all.
+    pub fn mark(&self, cell: crate::layout::Rect) -> crate::layout::Rect {
+        match self.shape {
+            CursorShape::Block => cell,
+            CursorShape::Bar => crate::layout::Rect::new(
+                cell.x,
+                cell.y,
+                (cell.width * 0.25).ceil().clamp(1.0, cell.width.max(1.0)),
+                cell.height,
+            ),
+            CursorShape::Underline => {
+                let height = (cell.height * 0.2).ceil().clamp(1.0, cell.height.max(1.0));
+                crate::layout::Rect::new(
+                    cell.x,
+                    cell.y + cell.height - height,
+                    cell.width,
+                    height,
+                )
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub cols: u16,
     pub rows: u16,
     pub default_fg: [u8; 3],
     pub default_bg: [u8; 3],
-    pub cursor: Option<(u16, u16)>,
+    pub cursor: Option<Cursor>,
     /// The mouse selection as linear cell indices into `cells`, in either
     /// order. Recomputed on every publish, so it names the same characters
     /// after the view scrolls — and `None` once those characters have left the
@@ -649,8 +706,9 @@ fn reset_modes(term: &mut Terminal<'_, '_>) {
     // pushed with `CSI > … u`. A program that died while holding one would have
     // the shell that replaces it typed `CSI 97;5u` for ctrl+a, which is bytes no
     // shell has ever read as a control character. Pop the stack, then zero what
-    // is left.
-    term.vt_write(b"\x1b[<999u\x1b[=0u");
+    // is left. DECSCUSR goes with it: a bar cursor belongs to the insert mode of
+    // the editor that dropped, not to the shell that comes back.
+    term.vt_write(b"\x1b[<999u\x1b[=0u\x1b[0 q");
     // The cursor is the one mode that has to come *back*, and the loop above
     // cannot do it: a program that hid the cursor and then lost its connection
     // would leave the shell that replaces it with no cursor at all, which reads
@@ -682,9 +740,8 @@ struct KeyModes {
     cursor_visible: bool,
 }
 
-/// Returns whether the cursor's visibility changed, which the caller has to force
-/// a frame for.
-fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) -> bool {
+/// Notice the modes the UI or the encoders care about, and log a change once.
+fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) {
     let cursor_keys = term.mode(Mode::DECCKM).unwrap_or(false);
     let kitty = term
         .kitty_keyboard_flags()
@@ -704,13 +761,12 @@ fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) -> bo
         // about 1000 versus 1002 versus no mode at all.
         tracing::debug!(mouse, "mouse tracking");
     }
+    // Only a change is worth a line: btop toggles this once per frame it draws.
     let visible = term.mode(Mode::CURSOR_VISIBLE).unwrap_or(true);
     if seen.cursor_visible != visible {
         seen.cursor_visible = visible;
         tracing::debug!(visible, "cursor visibility");
-        return true;
     }
-    false
 }
 
 /// A line of dtr's own in the session's scrollback.
@@ -728,6 +784,7 @@ fn notice(
     out: &Mutex<Option<Frame>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
     selection: &mut Option<SelectionAnchors>,
+    shown: &mut Option<Cursor>,
 ) -> anyhow::Result<()> {
     let mut line = String::with_capacity(text.len() + 16);
     // CR LF, not LF: the session is raw, so nothing rewrites it for us.
@@ -735,7 +792,7 @@ fn notice(
     line.push_str(text);
     line.push_str("\x1b[0m\r\n");
     term.vt_write(line.as_bytes());
-    publish(term, state, rows, cells, out, wake, true, selection)
+    publish(term, state, rows, cells, out, wake, true, selection, shown)
 }
 
 async fn run(
@@ -819,6 +876,9 @@ async fn run(
     // Declared before the first publish: publishing is where a selection that
     // has scrolled out of the frame is dropped.
     let mut selection: Option<SelectionAnchors> = None;
+    // The cursor the last frame carried, so `publish` can notice when the program
+    // changed it without changing any cell — see the dirty check there.
+    let mut shown: Option<Cursor> = None;
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
 
@@ -985,7 +1045,7 @@ async fn run(
 
     // Always publish once, even if the terminal is still clean: a pane that
     // has produced no output yet still has an (empty) grid to show.
-    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
+    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
 
     let mut sniffer = CwdSniffer::default();
     let mut marks = PromptMarks::default();
@@ -1047,12 +1107,7 @@ async fn run(
                         // "what does the mouse mean" and "is the cursor showing"
                         // is in the terminal now — the encoders read it per event
                         // — and a *change* is worth one line of log.
-                        //
-                        // The cursor is the one that has to reach the frame by
-                        // force: the render state does not count a mode as dirty,
-                        // so a program that hides it after painting would keep
-                        // the last frame, cursor and all, on screen.
-                        let cursor_changed = note_modes(&term, &mut keys_seen, &stats);
+                        note_modes(&term, &mut keys_seen, &stats);
                         // The program has spoken, so whatever it wanted to say
                         // about pasting is in the terminal now — which is the
                         // answer a held paste was waiting for.
@@ -1072,11 +1127,8 @@ async fn run(
                             .await;
                         }
                         tracing::debug!(chunks, bytes = total, "burst parsed");
-                        // A cursor change publishes now rather than waiting for
-                        // the gate: it is a rare event, and the frame it owes is
-                        // one the dirty check would otherwise swallow.
-                        if cursor_changed || tokio::time::Instant::now() >= next_publish {
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, cursor_changed, &mut selection)?;
+                        if tokio::time::Instant::now() >= next_publish {
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
                             next_publish = tokio::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
@@ -1090,7 +1142,7 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep_until(next_publish), if publish_pending => {
-                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
+                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
                 next_publish = tokio::time::Instant::now()
                     + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
                 publish_pending = false;
@@ -1161,6 +1213,7 @@ async fn run(
                         &out,
                         &wake,
                         &mut selection,
+                        &mut shown,
                     )?;
                 }
                 match start_shell(&config, &bytes_tx, &exit_tx, &log) {
@@ -1201,6 +1254,7 @@ async fn run(
                             &out,
                             &wake,
                             &mut selection,
+                            &mut shown,
                         )?;
                         let wait = backoff.next();
                         tracing::info!(ms = wait.as_millis() as u64, "retrying");
@@ -1332,7 +1386,7 @@ async fn run(
                         // are shown without being sent anywhere else.
                         if echo {
                             term.vt_write(&bytes);
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection)?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
                         }
                     }
                     Command::Key(stroke) => {
@@ -1496,14 +1550,14 @@ async fn run(
                             }
                         }
                         tracing::debug!(cols = new_cols, rows = new_rows, "resized");
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
                     }
                     Command::Scroll(lines) => {
                         term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
                         // Forced: a viewport move does not necessarily mark the
                         // render state dirty, and a scroll that does not repaint
                         // looks like a broken wheel.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::ScrollPrompt(delta) => {
@@ -1512,7 +1566,7 @@ async fn run(
                         );
                         // Forced, for the same reason as `Scroll`: a viewport
                         // move does not necessarily dirty the render state.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::CaptureBlock => {
@@ -1540,7 +1594,7 @@ async fn run(
                         } else {
                             libghostty_vt::terminal::ScrollViewport::Bottom
                         });
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::Echo(on) => echo = on,
@@ -1566,7 +1620,7 @@ async fn run(
                             match next.apply(&mut term) {
                                 Ok(()) => {
                                     tracing::info!(theme = %next.name, "theme switched");
-                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection)?;
+                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
                                 }
                                 Err(err) => tracing::warn!(%err, "could not switch theme"),
                             }
@@ -1578,7 +1632,7 @@ async fn run(
                                 selection = Some(anchors);
                                 publish(
                                     &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                    true, &mut selection,
+                                    true, &mut selection, &mut shown,
                                 )?;
                             }
                             Err(err) => tracing::warn!(%err, "could not start a selection"),
@@ -1600,7 +1654,7 @@ async fn run(
                         if moved {
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, &mut selection,
+                                true, &mut selection, &mut shown,
                             )?;
                         }
                     }
@@ -1609,7 +1663,7 @@ async fn run(
                             selection = Some(anchors);
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, &mut selection,
+                                true, &mut selection, &mut shown,
                             )?;
                         }
                     }
@@ -1618,7 +1672,7 @@ async fn run(
                             selection = Some(anchors);
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, &mut selection,
+                                true, &mut selection, &mut shown,
                             )?;
                         }
                     }
@@ -2009,27 +2063,46 @@ fn publish(
     wake: &Arc<dyn Fn() + Send + Sync>,
     force: bool,
     selection: &mut Option<SelectionAnchors>,
+    shown: &mut Option<Cursor>,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let snapshot = state.update(term)?;
 
-    // A clean frame means the UI already has the current contents.
-    if !force && matches!(snapshot.dirty()?, Dirty::Clean) {
-        return Ok(());
-    }
-
-    let colors = snapshot.colors()?;
     // Hidden is not somewhere else. A program that draws the whole screen itself
     // — btop, vim in the alternate screen, anything using a full-screen UI —
     // sends `?25l` and leaves a position behind, and `cursor_viewport` answers
     // *where* the cursor is rather than whether it is showing: drawing that
     // stray block puts a cursor in the middle of a monitor that has none.
     let cursor = snapshot.cursor()?;
+    let shape = match cursor.visual_style {
+        CursorVisualStyle::Bar => CursorShape::Bar,
+        CursorVisualStyle::Underline => CursorShape::Underline,
+        // `BlockHollow` is a block whose middle shows the character through it.
+        // At terminal sizes that is a pixel of border, and drawing the block is
+        // closer to what the program meant than drawing nothing.
+        _ => CursorShape::Block,
+    };
     let cursor = cursor
         .visible
         .then_some(cursor.viewport)
         .flatten()
-        .map(|at| (at.x, at.y));
+        .map(|at| Cursor {
+            x: at.x,
+            y: at.y,
+            shape,
+        });
+
+    // A cursor is not a dirty cell. Hiding it, showing it, or turning its block
+    // into the bar nvim wants in insert mode changes nothing in the grid, so the
+    // render state stays clean — and a frame that is never published leaves the
+    // old cursor on screen while the program's own idea of it has moved on.
+    let cursor_changed = cursor != *shown;
+    // A clean frame means the UI already has the current contents.
+    if !force && !cursor_changed && matches!(snapshot.dirty()?, Dirty::Clean) {
+        return Ok(());
+    }
+
+    let colors = snapshot.colors()?;
     let mut frame = Frame {
         cols: snapshot.cols()?,
         rows: snapshot.rows()?,
@@ -2079,6 +2152,9 @@ fn publish(
         Ok(mut slot) => *slot = Some(frame),
         Err(err) => tracing::error!("frame slot poisoned: {err}"),
     }
+    // After the frame is in the slot, so a failed publish is retried by the next
+    // one rather than remembered as drawn.
+    *shown = cursor;
     wake();
     Ok(())
 }
@@ -2607,6 +2683,56 @@ mod tests {
             selection: None,
             cells,
         }
+    }
+
+    /// The mark a cursor leaves inside its cell, in pixels.
+    ///
+    /// A block is the cell; a bar is a quarter of the cell's width against its
+    /// left edge (DECSCUSR's `ver25`, which is what nvim asks for in insert mode)
+    /// and an underline a fifth of its height along the bottom (`hor20`). Both
+    /// have a one-pixel floor, because a bar thinner than a pixel draws nothing
+    /// and the user cannot then tell insert mode from no cursor at all.
+    #[test]
+    fn a_bar_cursor_is_a_stripe_and_not_a_cell() {
+        use super::{Cursor, CursorShape};
+        use crate::layout::Rect;
+
+        let cell = Rect::new(10.0, 20.0, 8.0, 16.0);
+        let mark = |shape| Cursor { x: 0, y: 0, shape }.mark(cell);
+
+        assert_eq!(mark(CursorShape::Block), cell);
+        // A quarter of 8 is 2, and it sits against the left edge of the cell.
+        let bar = mark(CursorShape::Bar);
+        assert_eq!((bar.x, bar.width, bar.height), (10.0, 2.0, 16.0));
+        // A fifth of 16 is 3.2, rounded up to a whole pixel at the bottom.
+        let underline = mark(CursorShape::Underline);
+        assert_eq!(
+            (underline.y, underline.width, underline.height),
+            (32.0, 8.0, 4.0)
+        );
+        // And the floor: a three-pixel-wide cell in a two-pixel-tall font still
+        // gets one pixel of bar rather than a sub-pixel nothing.
+        let thin = Rect::new(0.0, 0.0, 3.0, 2.0);
+        assert_eq!(
+            Cursor {
+                x: 0,
+                y: 0,
+                shape: CursorShape::Bar
+            }
+            .mark(thin)
+            .width,
+            1.0
+        );
+        assert_eq!(
+            Cursor {
+                x: 0,
+                y: 0,
+                shape: CursorShape::Underline
+            }
+            .mark(thin)
+            .height,
+            1.0
+        );
     }
 
     #[test]
@@ -3260,7 +3386,7 @@ mod session_tests {
     #[test]
     fn a_reconnect_leaves_the_alternate_screen_and_its_modes() {
         let mut term = Terminal::new(COLS, ROWS).expect("a terminal");
-        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?1h\x1b[>3u\x1b[?25l");
+        term.vt_write(b"\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?1h\x1b[>3u\x1b[?25l\x1b[6 q");
         assert!(term.mode(Mode::ALT_SCREEN_SAVE).expect("mode"));
         assert!(term.mode(Mode::NORMAL_MOUSE).expect("mode"));
         assert!(!term.mode(Mode::CURSOR_VISIBLE).expect("mode"));
@@ -3275,6 +3401,16 @@ mod session_tests {
         assert!(
             term.mode(Mode::CURSOR_VISIBLE).expect("mode"),
             "the cursor stayed hidden after a reconnect"
+        );
+        // The shape goes with the program, though, and it can only be read from a
+        // snapshot: a connection that dropped inside insert mode must not leave the
+        // shell that replaces it with a bar cursor.
+        let mut state = RenderState::new().expect("render state");
+        let snapshot = state.update(&term).expect("snapshot");
+        assert_eq!(
+            snapshot.cursor().expect("cursor").visual_style,
+            CursorVisualStyle::Block,
+            "the cursor shape outlived the program that set it"
         );
         // The kitty flags are a stack, not a mode, and a dead program's push
         // must not reach the shell that replaces it.
@@ -3855,12 +3991,12 @@ mod session_tests {
         let mut seen: Option<(Option<(u16, u16)>, String)> = None;
         loop {
             if let Some(frame) = pane.take_frame() {
-                let cursor = frame.cursor;
+                let at = frame.cursor.map(|cursor| (cursor.x, cursor.y));
                 let text = frame_text(&frame);
-                if cursor == Some((4, 1)) {
+                if at == Some((4, 1)) {
                     break;
                 }
-                seen = Some((cursor, text));
+                seen = Some((at, text));
             }
             assert!(
                 Instant::now() < deadline,
@@ -3947,5 +4083,125 @@ mod session_tests {
              cursor the last one had"
         );
         assert_eq!(last.flatten(), None, "a cursor survived ?25l: {last:?}");
+    }
+
+    /// DECSCUSR is how a program says "insert" instead of "replace".
+    ///
+    /// `CSI Ps SP q`: 1 and 2 are a block (blinking and steady), 3 and 4 a
+    /// horizontal bar, 5 and 6 a vertical one. A terminal that draws every one of
+    /// them as a block is telling the user they are about to overwrite a
+    /// character when the editor is going to push one in.
+    #[test]
+    fn the_cursor_shape_follows_the_program() {
+        for (prologue, expected) in [
+            ("", CursorShape::Block),
+            (r"printf '\033[2 q'; ", CursorShape::Block),
+            (r"printf '\033[6 q'; ", CursorShape::Bar),
+            (r"printf '\033[4 q'; ", CursorShape::Underline),
+        ] {
+            let script = format!("{prologue}printf 'x'; exec cat > /dev/null");
+            let pane = pane(script, None, Vec::new());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let shape = loop {
+                if let Some(frame) = pane.take_frame() {
+                    if frame_text(&frame).contains('x') {
+                        break frame.cursor.map(|cursor| cursor.shape);
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the program never said anything (with {prologue:?})"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(shape, Some(expected), "the cursor under {prologue:?}");
+        }
+    }
+
+    /// The reason any of this matters, through the editor that asks for it: nvim
+    /// sends `CSI 6 SP q` when it enters insert mode and `CSI 2 SP q` when it
+    /// leaves, so the block has to become a bar and go back.
+    #[test]
+    fn nvim_insert_mode_gets_a_bar_cursor() {
+        let Some(editor) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("nvim"))
+            .find(|path| path.is_file())
+        else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("text");
+        std::fs::write(&file, "one\ntwo\n").expect("the file nvim opens");
+        let command = format!(
+            "XDG_STATE_HOME={dir}/state XDG_DATA_HOME={dir}/data \
+             XDG_CACHE_HOME={dir}/cache exec {editor} --clean -n -i NONE {file}",
+            dir = dir.path().display(),
+            editor = editor.display(),
+            file = file.display()
+        );
+        let config = pty::Config {
+            program: Some("/bin/sh".to_owned()),
+            args: vec!["-c".to_owned(), command],
+            ..Default::default()
+        };
+        let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
+        let pane = Pane::spawn(Transport::Shell(config), None, None, budget, || {})
+            .expect("an nvim pane");
+        let shape = |pane: &Pane| {
+            pane.take_frame()
+                .and_then(|frame| frame.cursor)
+                .map(|cursor| cursor.shape)
+        };
+        // Normal mode first: the block nvim starts in.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = None;
+        while !matches!(seen, Some(CursorShape::Block)) {
+            if let Some(shape) = shape(&pane) {
+                seen = Some(shape);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nvim never showed a block cursor: {seen:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // `i`, and the bar nvim says insert mode looks like.
+        let mut typed = key(
+            winit::keyboard::Key::Character("i".into()),
+            KeyCode::KeyI,
+            ModifiersState::empty(),
+        );
+        typed.text = Some("i".to_owned());
+        pane.send(Command::Key(Box::new(typed)));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = None;
+        while !matches!(seen, Some(CursorShape::Bar)) {
+            if let Some(shape) = shape(&pane) {
+                seen = Some(shape);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nvim did not switch to a bar cursor in insert mode: {seen:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // And back out: Escape restores the block.
+        pane.send(Command::Key(Box::new(key(
+            winit::keyboard::Key::Named(NamedKey::Escape),
+            KeyCode::Escape,
+            ModifiersState::empty(),
+        ))));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = Some(CursorShape::Bar);
+        while !matches!(seen, Some(CursorShape::Block)) {
+            if let Some(shape) = shape(&pane) {
+                seen = Some(shape);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nvim stayed in a bar cursor after Escape: {seen:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

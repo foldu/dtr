@@ -416,16 +416,27 @@ impl GridRenderer {
             }
         }
 
-        if let (true, Some((cx, cy))) = (pane.cursor, frame.cursor) {
+        if let (true, Some(cursor)) = (pane.cursor, frame.cursor) {
             let (x, y) = cell_origin(
-                usize::from(cy) * usize::from(frame.cols) + usize::from(cx),
+                usize::from(cursor.y) * usize::from(frame.cols) + usize::from(cursor.x),
                 frame.cols,
                 cell_w,
                 cell_h,
             );
-            let (x, y) = (x + origin_x, y + origin_y);
-            self.instances
-                .push(Instance::solid([x, y, cell_w, cell_h], look.accent, 1.0));
+            // Not the whole cell unless the program asked for a block: an insert
+            // cursor is a bar against the left edge, which is how a terminal says
+            // "typing goes in here" without covering the character it sits on.
+            let mark = cursor.mark(crate::layout::Rect::new(
+                x + origin_x,
+                y + origin_y,
+                cell_w,
+                cell_h,
+            ));
+            self.instances.push(Instance::solid(
+                [mark.x, mark.y, mark.width, mark.height],
+                look.accent,
+                1.0,
+            ));
         }
 
     }

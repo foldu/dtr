@@ -246,7 +246,8 @@ pub fn capture(
         }
         if let Some(preedit) = preedit {
             if let Some(pane) = panes.iter().find(|pane| pane.cursor) {
-                if let Some((col, row)) = pane.frame.and_then(|frame| frame.cursor) {
+                if let Some(cursor) = pane.frame.and_then(|frame| frame.cursor) {
+                    let (col, row) = (cursor.x, cursor.y);
                     // The capture has no metrics of its own: the cell is the
                     // pane divided by the grid it holds, which is the same
                     // arithmetic the live path does with `Metrics`.

@@ -763,13 +763,26 @@ to point at the tempdir or it sits at a hit-enter prompt where a click answers t
 **A cursor is a mode, and a mode is not a dirty row.** The core reports both halves: `cursor_viewport`
 is *where* the cursor would be, `cursor().visible` is whether it is showing. Drawing the first without
 the second put a block in the middle of btop's own screen, because every full-screen program hides the
-cursor (`?25l`) and then paints the whole grid itself. Two things followed from fixing that, both found
-by test rather than by reading. The render state does not consider a mode change dirty, so a program that
-hides the cursor *after* drawing — or a search box that shows it again with `?25h` — produced no frame at
-all, and the old picture, cursor included, stayed up; `note_modes` therefore returns whether visibility
-changed and the burst publishes in spite of the gate, which is cheap because a mode change is rare. And
-`reset_modes` turns the cursor back *on*: every other mode in that list is switched off, but the one a
-reconnect has to restore is the one a dead program hid.
+cursor (`?25l`) and then paints the whole grid itself. That was the visible bug; the one under it was
+worse. The render state counts *cells* as dirty and nothing else, so a program that hides the cursor
+after drawing — or a search box that shows it again with `?25h` — produced no frame at all, and the old
+picture, cursor included, stayed up. The first fix made `note_modes` force a frame; the one that
+replaced it is simpler and covers more: `publish` remembers the `Cursor` the last frame carried
+(`shown`, threaded through the same argument list as the selection) and publishes when the new one
+differs, which is exactly the rule for anything else that is not a cell.
+
+The *shape* falls out of the same comparison. DECSCUSR (`CSI Ps SP q`) is how an editor says "insert"
+rather than "replace": nvim sends `6 q` when it enters insert mode and `2 q` when it leaves, and 3/4
+ask for an underline. A terminal that draws every one of them as a block is telling the user they are
+about to overwrite a character. `CursorShape::mark` turns that into a rectangle — a quarter of the
+cell's width against the left edge for a bar, a fifth of its height along the bottom for an underline,
+with a one-pixel floor, because a sub-pixel bar draws nothing and the user cannot then tell insert mode
+from no cursor at all. The floor was the one thing worth pinning in a unit test; `nvim_insert_mode`
+gets a bar through a real editor and back to a block on Escape.
+
+`reset_modes` turns visibility back *on* and the shape back to a block: every other mode in that list is
+switched off, but the cursor is the one thing a reconnect has to restore, and a bar belongs to the
+insert mode of the editor that dropped rather than to the shell that replaces it.
 
 ### M3 — the rest — the rest of a terminal
 
