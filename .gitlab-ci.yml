@@ -8,7 +8,7 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
-  - test
+  - check
   - build
 
 # Everything here needs the toolchain, which only the nix runner has: `nix` is
@@ -17,49 +17,60 @@ default:
   tags:
     - nix
 
-variables:
-  # The devShell is what puts cargo, rustc, zig and libghostty's pkg-config on
-  # PATH; nothing is installed globally on the runner.
-  CARGO_HOME: $CI_PROJECT_DIR/.cargo
-  CARGO_TARGET_DIR: $CI_PROJECT_DIR/target
-  RUST_BACKTRACE: "1"
-
-test:
-  stage: test
+check:
+  stage: check
   script:
-    - nix develop .#default --command cargo test --workspace
-    # The benchmark payloads are shell scripts, so nothing compiles them. This
-    # proves they still produce bytes, without a window, a GPU or a network.
-    #
-    # Through the devShell like the tests: the runner is alpine and the script
-    # starts with `#!/usr/bin/env bash`, so the bare container answers
-    # "env: can't execute 'bash'" — which is what it did.
-    - nix develop .#default --command ./scripts/bench.sh --check
-    # The desktop entry is packaging, so `cargo test` cannot see it: validate it
-    # against the installed package, where a wrong path or a missing icon shows
-    # up as a menu with a blank square in it.
-    - nix build .#checks.x86_64-linux.desktop-entry
-  cache:
-    key:
-      files:
-        - Cargo.lock
-        - flake.lock
-    paths:
-      - .cargo/
-      - target/
+    - |
+      # The gates are `checks.x86_64-linux` in flake.nix, and this job only
+      # invokes them: the test suite, the benchmark payloads, the desktop entry
+      # and the single-executable check (which also cross-compiles .#windows).
+      # A `cargo` or `nix develop` line here would be a second copy of a gate,
+      # and the pipeline would stop meaning the same as a local `nix flake
+      # check`. Add checks to the flake, not to this file.
+      #
+      # The runner's `sh` may be bash, which GitLab starts with `set -eo
+      # pipefail`; a failing check must not abort this script before the
+      # snapshots have been copied out.
+      set +e
+
+      # --keep-failed is for the artifact below. A kittest mismatch writes the
+      # picture it drew next to the baseline, inside the failed derivation's
+      # build directory, and Nix deletes that directory unless it is asked to
+      # keep it — the log otherwise says only "images differ".
+      #
+      # There is no cargo cache here on purpose: the store is the cache. crane's
+      # dependency build is keyed on Cargo.lock and the Cargo.tomls, not on the
+      # crates' sources, so a pushed commit recompiles only the workspace while
+      # the runner's store keeps the dependency graph.
+      { nix flake check -L --keep-failed 2>&1; echo $? >flake-check.status; } | tee flake-check.log
+      status=$(cat flake-check.status 2>/dev/null || echo 1)
+
+      if [ "$status" -ne 0 ]; then
+        mkdir -p failed-snapshots
+        grep -o 'keeping build directory "[^"]*"' flake-check.log |
+          cut -d'"' -f2 |
+          while read -r dir; do
+            find "$dir" -path '*/tests/snapshots/*' -name '*.png' \
+              -exec cp {} failed-snapshots/ \;
+          done
+        exit "$status"
+      fi
   artifacts:
     when: on_failure
     paths:
-      # A kittest snapshot failure writes the picture it drew next to the
-      # baseline; without it the log says only "images differ".
-      - crates/dtr/tests/snapshots/
+      # Each failing snapshot test's drawn picture, so the job log is not the
+      # only thing to read. Empty when the failure was not a snapshot.
+      - failed-snapshots/
     expire_in: 1 week
 
 build:
   stage: build
   script:
-    # The one-file Windows executable is the artefact this project exists to
-    # produce; a Linux build alone would not catch a cross-compilation break.
+    # The one-file Windows executable is the artifact this project exists to
+    # produce; `nix flake check` asserts the property as `single-exe`, which
+    # means it is already in the store by the time this job runs. A Linux-only
+    # build would not catch a cross-compilation break, which is why the check
+    # stage builds it too.
     - nix build .#windows
     - ls -l result/bin
   artifacts:

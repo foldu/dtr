@@ -148,6 +148,25 @@ impl Config {
     }
 }
 
+/// The directory a session starts in: the one asked for when it exists, else
+/// `$HOME` when *it* exists, else the directory dtr was started from.
+///
+/// The fallbacks are not politeness. portable-pty uses `$HOME` as the child's
+/// working directory when no `cwd` is set, and `current_dir` on a path that
+/// does not exist fails the whole spawn with a bare `ENOENT`.
+fn start_dir(wanted: Option<&std::path::Path>) -> std::path::PathBuf {
+    wanted
+        .filter(|dir| dir.is_dir())
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|dir| dir.is_dir())
+        })
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
 fn spawn(config: &Config, program: &str) -> anyhow::Result<Shell> {
     let system = native_pty_system();
     let pair = system.openpty(config.size.unwrap_or(PtySize {
@@ -182,9 +201,12 @@ fn spawn(config: &Config, program: &str) -> anyhow::Result<Shell> {
     let mut parts = program.split_whitespace();
     let exe = parts.next().unwrap_or(program);
     let mut cmd = CommandBuilder::new(exe);
-    if let Some(dir) = &config.cwd {
-        cmd.cwd(dir);
-    }
+    // Always give a directory, because portable-pty's own fallback is `$HOME`
+    // and it passes that to `current_dir` without checking: a `$HOME` that no
+    // longer exists makes the spawn fail with a bare `ENOENT`, which reads as
+    // "the shell is missing". A stale home must not stop a terminal from
+    // opening a shell.
+    cmd.cwd(start_dir(config.cwd.as_deref()));
     for arg in parts {
         cmd.arg(arg);
     }
@@ -278,6 +300,23 @@ fn candidates() -> Vec<String> {    #[cfg(windows)]
 #[cfg(all(test, unix))]
 mod raw_tests {
     use super::*;
+
+    /// A directory that is asked for and exists is the one used, so "open a tab
+    /// in this directory" keeps working.
+    #[test]
+    fn an_existing_start_directory_is_the_one_used() {
+        let wanted = std::env::temp_dir();
+        assert_eq!(start_dir(Some(&wanted)), wanted);
+    }
+
+    /// The sandbox case: a `$HOME` that does not exist used to fail the spawn
+    /// with `ENOENT`, which reads as "the shell is missing". Whatever the fall
+    /// chain lands on has to be a real directory, or `current_dir` fails again.
+    #[test]
+    fn a_start_directory_that_is_gone_still_lands_somewhere_real() {
+        let dir = start_dir(Some(std::path::Path::new("/nonexistent/dtr-test")));
+        assert!(dir.is_dir(), "{dir:?} is not a directory");
+    }
 
     /// The trap this guards: a pty is cooked until somebody says otherwise, and
     /// cooked means the kernel runs a line discipline in front of ours. The

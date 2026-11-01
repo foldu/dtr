@@ -1004,12 +1004,17 @@ exercise the real path. This is a better test than a fake stream because it is b
 "does the exe start and render a frame" — Wine's ConPTY is irrelevant here since M0 has no PTY,
 which is a small argument for serial-first.
 
-**CI (`nix flake check`):**
-- `clippy` + `cargo test` (pane/transport logic, byte mapper, key mapping).
-- `screenshot`: `--headless --replay fixture --screenshot $out.png` under lavapipe, asserting a
-  non-blank image; the PNG is the artifact.
-- `packages.default`, `packages.windows` build.
+**CI (`nix flake check`), where every gate lives:**
+- `tests`: `cargo test --workspace` in the sandbox, with lavapipe and the store's fonts.
+- `bench-payloads`: `scripts/bench.sh --check`, because the benchmark payloads are shell
+  scripts that nothing compiles.
+- `desktop-entry`: the installed entry parses and every icon it names exists.
+- `packages.default` build (through `desktop-entry`), and `packages.windows` through
+  `single-exe`.
 - `single-exe`: DLL allowlist assertion on the Windows binary (§7).
+- Still to come: `clippy`, and a `screenshot` check — `--headless --replay fixture
+  --screenshot $out.png` under lavapipe, asserting a non-blank image, with the PNG as the
+  artifact.
 
 ---
 

@@ -228,6 +228,9 @@
       default = dtr;
     };
 
+    # `nix flake check` is the one place the gates are written down: CI runs it
+    # and adds nothing, so a green run on a laptop means the same thing as a
+    # green pipeline. Add a gate here rather than to .gitlab-ci.yml.
     checks.${system} = {
       # The tests render through wgpu and lay out real text, and the sandbox has
       # neither a GPU nor /usr/share/fonts. The same software paths the devShell
@@ -237,12 +240,59 @@
         // {
           cargoArtifacts = dtrDeps;
           cargoTestExtraArgs = "--workspace";
-          nativeBuildInputs = cargoCommon.nativeBuildInputs ++ [pkgs.mesa fontPackages];
+          # Flat on purpose: a list inside nativeBuildInputs is a deprecation
+          # warning in nixpkgs 26.05, and `nix flake check` prints it.
+          # coreutils is for the pty tests, which run `true`; a build's PATH
+          # does not otherwise promise it.
+          nativeBuildInputs =
+            cargoCommon.nativeBuildInputs ++ [pkgs.mesa pkgs.coreutils] ++ fontPackages;
           FONTCONFIG_FILE = fontsConf;
           VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
           WGPU_BACKEND = "vulkan";
           LIBGL_ALWAYS_SOFTWARE = "1";
+          # winit and wgpu reach their backends with `dlopen`, so there is no
+          # DT_NEEDED entry and no rpath for the loader to find — the devShell
+          # exports this for `cargo run`, and a check has no shellHook. Without
+          # it wgpu finds no Vulkan loader and every kittest says "No adapter
+          # found", which reads like a missing GPU rather than a missing path.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
+            wayland
+            libxkbcommon
+            vulkan-loader
+            libGL
+            mesa
+            libX11
+            libxcb
+            libXcursor
+            libXi
+            libXrandr
+            udev
+            fontconfig
+            freetype
+          ]);
+          # A panicking test says only "test failed" otherwise, and a backtrace
+          # in the check log is the whole reason CI set this before.
+          RUST_BACKTRACE = "1";
         });
+
+      # The benchmark payloads are shell scripts, and nothing compiles them: a
+      # payload that stopped printing, or a syntax error in one, is invisible to
+      # both `cargo test` and the release build. `bench.sh --check` runs each of
+      # them under a pty and asserts it still produces bytes, with no window, no
+      # GPU and no network — which is what a sandbox is.
+      bench-payloads = pkgs.runCommand "dtr-bench-payloads" {
+        nativeBuildInputs = with pkgs; [bash coreutils util-linux procps];
+      } ''
+        # The script finds the payloads relative to itself, so keep the two
+        # directories side by side; the store copies are read-only.
+        cp -r ${./scripts} scripts
+        cp -r ${./benchmarks} benchmarks
+        chmod -R u+w scripts benchmarks
+        # Through bash, not the shebang: the script asks for `/usr/bin/env`,
+        # which a sandbox does not have (the devShell runner's alpine does).
+        bash ./scripts/bench.sh --check
+        touch $out
+      '';
 
       # A desktop entry is only worth installing if it parses *and* the icon it
       # names exists: a typo in `Icon=` is a blank square in every menu, and a
@@ -309,8 +359,11 @@
         # these a runner fails nine of them with "No adapter found" and a
         # smaller set with an empty grid face.
         pkgs.mesa
-        fontPackages
-      ];
+      ]
+      # Appended rather than nested: mkShell turns `packages` into
+      # nativeBuildInputs, and a list inside one is a nixpkgs 26.05 deprecation
+      # warning that `nix flake check` prints.
+      ++ fontPackages;
 
       shellHook = ''
         export PKG_CONFIG_PATH="${libghostty-vt.dev}/share/pkgconfig:${pkgs.udev.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"

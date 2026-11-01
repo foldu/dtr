@@ -31,6 +31,7 @@ nix develop .#default --command bash -c 'cargo test --workspace'
 nix build .#dtr                              # Linux package
 nix build .#windows                          # the one-file Windows exe (cross)
 nix build .#checks.x86_64-linux.single-exe   # asserts the one-file property
+nix flake check                              # every gate CI runs, locally
 ```
 
 If `cargo build` cannot find libghostty's pkg-config file (the devShell hook sets
@@ -45,11 +46,16 @@ script',pty,raw,echo=0` — killable mid-session to exercise reconnect. Kill it 
 `pkill -x socat`; `pkill -f "socat pty"` matches the shell running it and kills
 your own test.
 
-CI (`.gitlab-ci.yml`) has two jobs on the `nix` runner: `test` runs
-`cargo test --workspace` in the devShell, `build` produces `.#windows` — a
-Linux-only build would not catch a cross-compilation break. Snapshots are generated
-here and compared byte-exactly there; if a font or renderer ever disagrees, the
-answer is a threshold, not a baseline regenerated from whichever machine ran last.
+**The CI gates live in the flake.** `.gitlab-ci.yml` has two jobs on the `nix`
+runner: `check` runs `nix flake check`, and `build` produces `.#windows` for
+download. Everything worth failing a branch over is a `checks.x86_64-linux` entry —
+`tests` (the whole suite, through lavapipe and the store's fonts), `bench-payloads`
+(`scripts/bench.sh --check`), `desktop-entry` and `single-exe` — so a local `nix
+flake check` runs the same gates as the pipeline. `single-exe` also cross-compiles
+`.#windows`, because a Linux-only build would not catch a cross-compilation break.
+Put a new gate there, not in YAML. Snapshots are generated here and compared
+byte-exactly there; if a font or renderer ever disagrees, the answer is a threshold,
+not a baseline regenerated from whichever machine ran last.
 
 ## The house rules
 
@@ -682,6 +688,7 @@ enough.
 | Undefined `ghostty_terminal_mode_get` | crates.io `libghostty-vt 0.2.2` is broken; the git rev in `Cargo.toml` is the pinned one |
 | `Terminal` cannot cross threads | it is `!Send`; each pane owns its own thread and `LocalSet` |
 | fish renders nothing, or writes nothing | it needs writable `XDG_*` dirs in the sandbox, and the terminal must reply on `on_pty_write` (a shell waits for its answer) |
+| `a pty with sh on it: No such file or directory` | portable-pty passes `$HOME` to `current_dir` without checking it exists; `pty::start_dir` always hands it a real directory, because a stale home made the whole spawn fail with a bare `ENOENT` |
 | `cargo test` does not refresh the binary | build first; `target/debug/dtr` is what you run, tests do not rebuild it |
 | A removed pane takes two panes with it | the recursive remove returned "delete me" and the grandparent deleted the collapsed subtree; only the direct parent may collapse |
 | Line height is far too small | swash reports `descent` as a *positive* distance below the baseline; negating it halves the cell |
