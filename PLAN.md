@@ -1010,6 +1010,10 @@ which is a small argument for serial-first.
   scripts that nothing compiles.
 - `desktop-entry`: the installed entry parses and every icon it names exists.
 - `just-fmt`: `just --fmt --check`, because the task list is part of the interface now.
+- `deny`: `cargo deny` against `deny.toml` — licences (a permissive allowlist, because
+  the exe is statically linked), crates.io-only sources apart from the pinned VT core, and
+  no wildcard dependencies. The advisory half fetches the RustSec database and so runs in
+  CI rather than in the flake.
 - `packages.default` build (through `desktop-entry`), and `packages.windows` through
   `single-exe`.
 - `single-exe`: DLL allowlist assertion on the Windows binary (§7).

@@ -69,6 +69,12 @@ jobs:
       - name: Check
         run: nix flake check -L
 
+      # The one gate that cannot live in the flake: it fetches the RustSec
+      # database, and a pinned copy would be a check that only knows last
+      # month's advisories. Everything else about it is in deny.toml.
+      - name: Advisories
+        run: nix develop .#default --command cargo deny check advisories
+
       # Not a second build: `checks.single-exe` has already built the exe, so
       # this is a copy out of the store into something downloadable.
       - name: Collect dtr.exe

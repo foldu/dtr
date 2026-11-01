@@ -312,6 +312,21 @@
         touch $out
       '';
 
+      # Every crate the binary links has to be one we can redistribute, and it
+      # has to come from a source we chose. The advisory half needs the live
+      # RustSec database, so it runs in CI (and `just deny`) rather than here —
+      # the checks crane runs are the ones that can be answered offline.
+      deny = craneLib.cargoDeny (cargoCommon
+        // {
+          cargoDenyChecks = "bans licenses sources";
+          # Deliberately not in `src`: the policy changes more often than the
+          # crates do, and putting it in the source tree would rebuild the
+          # binary, the suite and the exe for a comment in the allowlist.
+          postPatch = ''
+            cp ${./deny.toml} deny.toml
+          '';
+        });
+
       # A desktop entry is only worth installing if it parses *and* the icon it
       # names exists: a typo in `Icon=` is a blank square in every menu, and a
       # `StartupWMClass` that disagrees with the window is a second, iconless
@@ -371,6 +386,10 @@
         # drives it. The in-process fallback (`--cpu-profile`) needs neither.
         pkgs.perf
         pkgs.cargo-flamegraph
+        # Supply-chain checks. `checks.deny` runs the offline half in a sandbox;
+        # the advisory half needs the RustSec database, so `just deny` and CI
+        # run it here, where there is a network.
+        pkgs.cargo-deny
         # What a headless machine lacks and a desktop already has: a Vulkan
         # implementation that is not a GPU, and fonts for fontconfig to find.
         # The UI tests render through wgpu and lay out real text, so without

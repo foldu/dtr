@@ -52,12 +52,20 @@ both forges: `.gitlab-ci.yml` has two jobs on the `nix` runner (`check` runs it,
 the same command on the GitHub mirror. Everything worth failing a branch over is a
 `checks.x86_64-linux` entry — `tests` (the whole suite, through lavapipe and the
 store's fonts), `bench-payloads` (`scripts/bench.sh --check`), `desktop-entry`,
-`just-fmt` and `single-exe` — so a local `nix flake check` runs the same gates as
-either pipeline. `single-exe` also cross-compiles `.#windows`, because a Linux-only
+`just-fmt`, `deny` and `single-exe` — so a local `nix flake check` runs the same gates
+as either pipeline. `single-exe` also cross-compiles `.#windows`, because a Linux-only
 build would not catch a cross-compilation break. Put a new gate there, not in YAML.
 Snapshots are generated here and compared byte-exactly there; if a font or renderer
 ever disagrees, the answer is a threshold, not a baseline regenerated from
 whichever machine ran last.
+
+`deny` is the supply-chain half of that: [`deny.toml`](deny.toml) allows a permissive
+licence set (the Windows exe is statically linked and handed out as a download),
+denies crates.io-only sources other than the pinned VT core, and refuses wildcard
+dependencies. The one check that is *not* a flake check is the advisory half:
+it fetches the RustSec database, so GitHub runs `cargo deny check advisories` after
+`nix flake check`, and `just deny` runs all four locally. An ignore in `deny.toml` is
+a claim that the advisory cannot be reached; write the reason down.
 
 The lab runner is the fast one — its store is already warm — and GitHub is the
 public one; both run the same command, so a red job means the same thing on

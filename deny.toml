@@ -1,0 +1,96 @@
+# cargo-deny policy.
+#
+# `nix flake check` runs the half that can be answered offline — `checks.deny`,
+# which is licenses, bans and sources. The advisory check needs the live RustSec
+# database and so runs in CI (and in `just deny`, which has a network).
+
+[graph]
+# The shipped artefact links everything, so every feature a dependency can turn
+# on is part of the graph we are licensing.
+all-features = true
+
+[advisories]
+# Lives in CI: the database is fetched, and a stale copy would be worse than no
+# check at all.
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# A yanked crate is not a vulnerability, but pulling one is a mistake either
+# way: it means the version was withdrawn.
+yanked = "deny"
+# Each of these is a claim that the advisory cannot be reached, not a
+# suppression of the database: the reasons are what makes the difference.
+ignore = [
+  # quick-xml, through inferno (pprof's `flamegraph` feature). dtr never parses
+  # XML — `--cpu-profile` *writes* an SVG from our own folded stacks — and both
+  # advisories need a document the attacker controls. The upgrade path is a
+  # newer inferno, which pprof has not taken yet (`^0.11` on 0.15.0 too).
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml is reached only through inferno, which writes SVGs here; no untrusted XML is parsed" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml is reached only through inferno, which writes SVGs here; no untrusted XML is parsed" },
+  # winit 0.30 draws its own window decorations through sctk-adwaita →
+  # ab_glyph → ttf-parser, which is unmaintained with no replacement inside that
+  # version. It parses the *system* font's files, not anything from a session.
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser is only reached by winit's window decorations; no safe upgrade exists inside winit 0.30" },
+]
+
+[licenses]
+# The Windows build is a single `dtr.exe` handed out as a download, and it
+# statically links everything (see PLAN §7). A copyleft dependency would change
+# what can be done with that download, so this is an allowlist of permissive
+# licences rather than a denylist of the ones we happen to know about.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  # Boost: permissive and OSI-approved, and it comes in with `clipboard-win` —
+  # which *is* in the Windows exe.
+  "BSL-1.0",
+  # CDDL-1.0 is file-scoped copyleft: linking it does not license dtr, it asks
+  # that the CDDL files' own source stay available — and it is `inferno`, reached
+  # only through `pprof` on Linux, unmodified from crates.io.
+  "CDDL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  # Fonts, not code: `epaint_default_fonts` embeds the faces egui draws its own
+  # UI with, and those carry font licences — permissive, and the obligation is
+  # attribution and not selling the font on its own.
+  "OFL-1.1",
+  "Ubuntu-font-1.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[bans]
+# One copy of a crate is the ideal, but a workspace this size pulls several
+# (two `windows-sys` majors, two `rand`s...). Warn rather than fail, so a new
+# duplicate is visible in the log without blocking on a dependency's release
+# schedule.
+multiple-versions = "warn"
+
+# A wildcard dependency means the lockfile is the only pin, and the lockfile is
+# not what a downstream consumer uses.
+wildcards = "deny"
+# The workspace's own members are path dependencies on purpose, and
+# `foo.workspace = true` has no version string in the member's manifest — that
+# is what the workspace table is for, so those are not the wildcards above.
+allow-wildcard-paths = true
+
+# Crates that must not be pulled in at all, whatever the transitive path.
+deny = [
+  # Nothing here needs OpenSSL — ssh is the system binary and SFTP speaks its
+  # protocol in pure Rust — and an accidental link would break the one-file
+  # Windows build (PLAN §7) rather than merely bloat it.
+  { name = "openssl-sys", reason = "nothing here needs OpenSSL, and linking it would break the one-file Windows build" },
+]
+
+[sources]
+# Every crate comes from crates.io, except the VT core, which is pinned to a
+# revision deliberately (PLAN §12.4: the crates.io release is broken).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/Uzaaft/libghostty-rs"]

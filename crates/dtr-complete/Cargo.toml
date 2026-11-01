@@ -4,6 +4,7 @@ description = "Completion and fuzzy ranking for dtr's command palette"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 nucleo-matcher.workspace = true

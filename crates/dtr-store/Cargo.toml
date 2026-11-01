@@ -4,6 +4,7 @@ description = "Persistence for dtr: remembered serial settings, and the logbook 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true

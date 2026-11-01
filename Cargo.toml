@@ -6,6 +6,11 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Unlicense"
+# dtr is an application, not a library: nothing here is published, and the
+# members depend on each other by path, so `cargo publish` would fail on them
+# anyway. Saying so is what lets cargo-deny treat those path dependencies as the
+# internal ones they are (`deny.toml`).
+publish = false
 
 [profile.profiling]
 inherits = "release"

@@ -3,6 +3,7 @@ name = "dtr-sftp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "SFTP over the host's own ssh: one child process, one protocol stream"
 
 [dependencies]

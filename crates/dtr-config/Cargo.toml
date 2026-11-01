@@ -4,6 +4,7 @@ description = "dtr's config file: reading it, and editing it without rewriting i
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 dirs.workspace = true

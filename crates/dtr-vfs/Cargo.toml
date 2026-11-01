@@ -3,6 +3,7 @@ name = "dtr-vfs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Files, whichever machine they live on: one trait over local and remote"
 
 [dependencies]

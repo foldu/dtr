@@ -14,6 +14,12 @@ default:
 check:
     nix flake check
 
+# Supply-chain checks: licences, bans, sources, and advisories.
+deny:
+    # The advisory half fetches the RustSec database, which is why this is not
+    # `nix flake check`: `checks.deny` is the half that answers offline.
+    {{ dev }} cargo deny check
+
 # The suite without the sandbox: the inner loop.
 test *args:
     {{ dev }} cargo test --workspace {{ args }}
