@@ -109,7 +109,8 @@ GitHub: if the mirror does not copy tags, nothing publishes — push it by hand
 - **Screenshots are in-app only**, never a compositor grab. `--screenshot` renders
   offscreen from injected state; `--capture PATH --capture-after MS` copies the live
   window's surface. When a menu or a font differs between them, `--capture` is the
-  one that tells the truth.
+  one that tells the truth — and the offscreen path renders at 1×, so it cannot show a
+  HiDPI bug at all (`docs/windows.md` §2).
 - Commits end with the co-author trailer.
 
 ## The event loop, redraws, and doing work off the UI thread
@@ -209,7 +210,11 @@ over a 30 **point** strip), which is why it reproduced on the laptop and not in 
 captures here. `scale()` is `window.scale_factor()` now, and `-v` logs `strip
 geometry` once per scale. The units rule: egui works in points and applies the DPI
 factor itself; `top_inset` and grid rects are physical pixels. Layout constants are
-points, grid sizes are physical, and the scale is applied exactly once.
+points, grid sizes are physical, and the scale is applied exactly once — with one
+known, unfixed exception: the **grid font size** is documented in points and used as
+physical pixels, so the cells never scale with the display while the chrome does
+(`docs/windows.md` §2). The status panel also still multiplies `STATUS_HEIGHT` by the
+scale in *points*, which is how it ends up taller than the space reserved for it.
 
 **A shell has no status bar; the strip is reserved even for one tab.** The bar exists
 for a serial port's counters and modem lines and is not drawn (nor reserved) when the
@@ -806,6 +811,9 @@ enough.
   corpus is upstream's bug reports, and nobody's job depends on them.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/themes.md` — which terminal theme formats dtr could read.
+- `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
+  status bar), serial baud and autobaud, glyph and icon rendering, resize cost, and the
+  instrument each open item still needs.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
 - `crates/dtr/src/app.rs` — the event loop, keys, and the palette glue.
 - `crates/dtr/src/layout.rs` — the split tree. It knows nothing about terminals;
