@@ -547,8 +547,10 @@ tag mirroring on.
   **A preset is a request**: `Skin::resolve` takes the platform's skin as an argument and
   falls back to dtr, because reading the system palette is platform code and lives in
   `crates/dtr/src/system.rs` — `AppsUseLightTheme` and DWM's `AccentColor` on Windows,
-  nothing on Linux, where there is no portable palette and `native` is the dtr style by
-  decision. `-v` logs `chrome skin=… requested=…`, which is the difference between a
+  plus the **accent ladder** (`AccentPalette` under `...\Explorer\Accent`) so a hover
+  lands on the variant Windows' own controls use; nothing on Linux, where there is no
+  portable palette and `native` is the dtr style by decision (a measured design for
+  fixing that is `docs/gtk-palette.md`). `-v` logs `chrome skin=… requested=…`, which is the difference between a
   preference and an outcome. **Painted controls belong in
   `crates/dtr-widgets/src/widgets/`**: `Editable` (a text field with a dropdown arrow,
   reporting `Edit::Typed` and `Edit::Picked` as different answers), the layout primitives
@@ -762,6 +764,9 @@ not a slow terminal.
 - `docs/bench.md` — what a vtebench number means, what a `.dat` is worth, and the `.meta`
   sidecar.
 - `docs/themes.md` — which terminal theme formats dtr could read.
+- `docs/gtk-palette.md` — how `native` could read the GTK4/libadwaita palette on
+  Linux without linking GLib: the XDG portal for scheme and accent, constants
+  measured out of libadwaita's gresource, and why v1 does not parse user CSS.
 - `docs/ui.md` — why the chrome has a skin at all, what a token is, and what
   `native` means on each platform.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
