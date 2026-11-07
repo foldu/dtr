@@ -80,6 +80,28 @@ pub struct Metrics {
     /// the line gap is split in half and put above and below the face, then the
     /// baseline is nudged so the face is centred in the whole-pixel cell.
     pub baseline: f32,
+    /// The face's own advance, before it was rounded up to a cell.
+    ///
+    /// A constraint is measured against the *face* box, not the pixel cell:
+    /// that is the difference between an icon that fills the room the type
+    /// thinks it has and one that fills the room the grid happens to give it.
+    pub face_width: f32,
+    /// The face's own line height, before it was rounded up to a cell.
+    pub face_height: f32,
+    /// Distance from the cell's top edge to the top of the face box.
+    ///
+    /// The cell is a whole number of pixels and the face is not, so the face
+    /// sits an asymmetric distance inside it. Vertical constraints are measured
+    /// from the face, not from the cell, for the same reason the baseline is
+    /// nudged rather than the face being centred.
+    pub face_top: f32,
+    /// Cap height, and the icon heights Ghostty derives from it.
+    ///
+    /// `icon_height_single` is `(2 * cap + face_height) / 3` — the same
+    /// heuristic the Nerd Font patcher uses, so an icon in a one-cell
+    /// constraint matches what the font designer drew for one cell.
+    pub icon_height: f32,
+    pub icon_height_single: f32,
 }
 
 /// Where a glyph's bitmap sits inside its cell, in pixels from the cell's
@@ -102,6 +124,349 @@ fn placement(metrics: &Metrics, image: &swash::scale::image::Image) -> (f32, f32
     )
 }
 
+/// A glyph's box relative to the cell's top-left corner, in pixels.
+#[derive(Clone, Copy, Debug)]
+struct Ink {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+/// How a glyph is fitted into the cells it may occupy.
+///
+/// A port of Ghostty's `RenderOptions.Constraint` (`src/font/Glyph.zig`), down
+/// to the field names. The rules are the accumulated answer to "why is this
+/// icon off-centre and that one overlapping its neighbour", and re-deriving
+/// them by eye is how you get a powerline arrow with a seam beside it.
+///
+/// The pads are thousandths of the face box rather than fractions so the whole
+/// constraint can be a `Hash + Eq` atlas key; nothing in the range a font
+/// needs is finer than a thousandth of a cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct Constraint {
+    size: Fit,
+    align_h: Align,
+    align_v: Align,
+    pad_top: u16,
+    pad_right: u16,
+    pad_bottom: u16,
+    pad_left: u16,
+    /// The most cells the glyph may spread into.
+    max_width: u8,
+    height: Height,
+}
+
+/// The size rule.
+///
+/// `Fit` and `Cover` are part of the ported rule set and are matched in
+/// `factors`; nothing constructs them yet. Colour emoji want `Cover` with a
+/// pad and a centre (`docs/cjk.md` §5, M5) and a user-configured icon height is
+/// the other candidate, so they stay as the shape of the thing rather than
+/// being deleted and re-derived.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum Fit {
+    /// Leave the glyph the size its designer drew it.
+    #[default]
+    None,
+    /// Scale down if needed to fit the box, preserving the aspect ratio.
+    Fit,
+    /// Scale up or down to cover the box, preserving the aspect ratio.
+    Cover,
+    /// Scale down to fit, and up to cover one cell when smaller — but never
+    /// shrink because a second cell was offered. Ghostty's Nerd Font rule:
+    /// without it an icon gets smaller when you type a space after it.
+    Cover1,
+    /// Fill the box in both directions, ignoring the aspect ratio.
+    Stretch,
+}
+
+/// The alignment rule. `Start` and `End` are the leading and trailing edge of
+/// the axis — left and right horizontally, **bottom and top** vertically.
+///
+/// `Start`, `End` and `Center` are matched in `place` but not constructed: the
+/// two rules dtr needs are `Center1` for icons and no alignment at all for
+/// everything else. A vendored Nerd Font table is what would use the rest.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum Align {
+    /// Do not move the glyph, but keep it inside the padded box.
+    #[default]
+    None,
+    Start,
+    End,
+    Center,
+    /// Centred on the *first* cell even when several are available, which is
+    /// the patcher's rule for icons: a lone icon must not jump sideways when a
+    /// space opens after it.
+    Center1,
+}
+
+/// Which height a vertical size rule measures against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum Height {
+    /// The face's line height: what a box-drawing character needs to tile.
+    #[default]
+    Cell,
+    /// The icon height, which depends on whether the glyph has one cell or two.
+    Icon,
+}
+
+impl Constraint {
+    /// Draw the glyph exactly as the font drew it.
+    const NONE: Self = Self {
+        size: Fit::None,
+        align_h: Align::None,
+        align_v: Align::None,
+        pad_top: 0,
+        pad_right: 0,
+        pad_bottom: 0,
+        pad_left: 0,
+        max_width: 2,
+        height: Height::Cell,
+    };
+
+    /// A Nerd Font icon: fit or cover one cell, centred on the first cell it
+    /// has. Ghostty's generated table uses this for the bulk of the PUA.
+    const ICON: Self = Self {
+        size: Fit::Cover1,
+        align_h: Align::Center1,
+        align_v: Align::Center1,
+        height: Height::Icon,
+        ..Self::NONE
+    };
+
+    /// A graphics element: two blocks side by side must not leave a seam, and
+    /// a box-drawing line must meet the one beside it, so the glyph fills its
+    /// cell exactly.
+    const TILE: Self = Self {
+        size: Fit::Stretch,
+        ..Self::NONE
+    };
+
+    /// A powerline arrow: stretched to the cell it belongs to.
+    ///
+    /// An arrow is a solid shape meant to abut the one beside it, so scaling it
+    /// into the cell is the fix for a 36 px arrow in a 33 px cell — and unlike a
+    /// box-drawing line, whose three pixels of ink *are* the line, a triangle
+    /// stretched by ten percent is still a triangle. One cell wide: an arrow is
+    /// one segment of a bar, not an icon with room to spill into.
+    const POWERLINE: Self = Self {
+        size: Fit::Stretch,
+        max_width: 1,
+        ..Self::NONE
+    };
+
+    fn does_anything(&self) -> bool {
+        self.size != Fit::None || self.align_h != Align::None || self.align_v != Align::None
+    }
+
+    /// The metrics this constraint measures against.
+    ///
+    /// A stretched glyph is meant to meet its neighbour at a cell boundary, so
+    /// it is measured against the *cell*: measured against the face, `█` would
+    /// leave a gap the width of its side bearing, and every row of blocks would
+    /// be striped.
+    fn box_metrics(&self, metrics: Metrics) -> Metrics {
+        if self.size != Fit::Stretch {
+            return metrics;
+        }
+        Metrics {
+            face_width: metrics.cell_width,
+            face_height: metrics.cell_height,
+            face_top: 0.0,
+            ..metrics
+        }
+    }
+
+    /// How many cells this glyph may actually use.
+    ///
+    /// A face whose advance is nearly its line height is already square, and
+    /// stretching it across two cells would draw a rectangle over two cells of
+    /// type — the same guard the font patcher has.
+    fn cells(&self, offered: u8, metrics: &Metrics) -> u8 {
+        if self.size == Fit::Stretch && metrics.face_width > 0.9 * metrics.face_height {
+            return 1;
+        }
+        self.max_width.min(offered)
+    }
+
+    /// The horizontal and vertical scale factors for an ink box.
+    fn factors(&self, metrics: &Metrics, ink: Ink, cells: u8) -> (f32, f32) {
+        if self.size == Fit::None {
+            return (1.0, 1.0);
+        }
+        let m = self.box_metrics(*metrics);
+        let multi = cells > 1;
+        let pads = |left: u16, right: u16| (pad(left), pad(right));
+        let (pad_left, pad_right) = pads(self.pad_left, self.pad_right);
+        let target_width = (f32::from(cells) - pad_left - pad_right) * m.face_width;
+        let target_height = (1.0 - pad(self.pad_top) - pad(self.pad_bottom))
+            * match self.height {
+                Height::Cell => m.face_height,
+                Height::Icon if multi => m.icon_height,
+                Height::Icon => m.icon_height_single,
+            };
+        let mut width_factor = target_width / ink.width.max(0.01);
+        let mut height_factor = target_height / ink.height.max(0.01);
+        match self.size {
+            Fit::None => unreachable!("handled above"),
+            // `.min(1)`: a glyph that already fits is not enlarged, which is
+            // what keeps text-looking symbols at their design size.
+            Fit::Fit => {
+                height_factor = height_factor.min(1.0).min(width_factor);
+                width_factor = height_factor;
+            }
+            Fit::Cover => {
+                height_factor = height_factor.min(width_factor);
+                width_factor = height_factor;
+            }
+            Fit::Cover1 => {
+                height_factor = height_factor.min(width_factor);
+                if multi && height_factor > 1.0 {
+                    // The single-cell rule, so an icon does not shrink as the
+                    // constraint gets wider. Recursion depth is one: `cells` is
+                    // 1 there, so `multi` is false.
+                    let (_, single) = self.factors(metrics, ink, 1);
+                    height_factor = single.max(1.0);
+                }
+                width_factor = height_factor;
+            }
+            Fit::Stretch => {}
+        }
+        (width_factor, height_factor)
+    }
+
+    /// Where the already-scaled ink box goes, relative to the cell.
+    fn place(&self, metrics: &Metrics, ink: Ink, cells: u8) -> (f32, f32) {
+        if !self.does_anything() {
+            return (ink.x, ink.y);
+        }
+        let m = self.box_metrics(*metrics);
+        let mut x = ink.x;
+        let mut y = ink.y;
+        if self.size != Fit::None || self.align_h != Align::None {
+            let pad_left = pad(self.pad_left) * m.face_width;
+            let pad_right = pad(self.pad_right) * m.face_width;
+            // The face cells are laid out from the left edge of the grid cell,
+            // so a two-cell span is one face plus one more cell.
+            let span = m.face_width + f32::from(cells - 1) * m.cell_width;
+            let start = pad_left;
+            let end = span - ink.width - pad_right;
+            x = match self.align_h {
+                // Not aligned, but still kept inside the padded box: every
+                // size rule implies that.
+                Align::None => x.max(start).min(end),
+                Align::Start => start,
+                Align::End => end.max(start),
+                Align::Center => ((start + end) / 2.0).max(start),
+                Align::Center1 => {
+                    let end1 = m.face_width - ink.width - pad_right;
+                    ((start + end1) / 2.0).max(start)
+                }
+            };
+        }
+        if self.size != Fit::None || self.align_v != Align::None {
+            let pad_top = pad(self.pad_top) * m.face_height;
+            let pad_bottom = pad(self.pad_bottom) * m.face_height;
+            let start = m.face_top + pad_top;
+            let end = m.face_top + m.face_height - pad_bottom - ink.height;
+            y = match self.align_v {
+                Align::None if end < start => (start + end) / 2.0,
+                Align::None => y.max(start).min(end),
+                // The axis runs downwards, so its start is the bottom edge.
+                Align::Start => end,
+                Align::End => start,
+                Align::Center | Align::Center1 => (start + end) / 2.0,
+            };
+        }
+        (x, y)
+    }
+}
+
+fn pad(thousandths: u16) -> f32 {
+    f32::from(thousandths) / 1000.0
+}
+
+/// The constraint a codepoint asks for.
+///
+/// The full answer is a generated table derived from the Nerd Font patcher's
+/// attributes (Ghostty ships one, ~270 distinct variants). dtr uses the same
+/// three rules for the whole PUA instead: it is a page of code and gets an icon
+/// to the right size and in the right place, where today it leaks out of its
+/// cell. The table is the next step if a specific icon still looks wrong
+/// (`docs/cjk.md` §5, M3).
+fn constraint_for(ch: char) -> Constraint {
+    let cp = ch as u32;
+    if matches!(cp, 0x2800..=0x28FF) {
+        // Braille is a dot grid drawn to fill its cell, so a proportional scale
+        // inside the cell keeps the pattern and closes the seams. A braille
+        // canvas with a gap between cells is not a canvas.
+        return Constraint::TILE;
+    }
+    if matches!(cp, 0xE0B0..=0xE0D7) {
+        return Constraint::POWERLINE;
+    }
+    // Box drawing and block elements are meant to tile too, and stretching
+    // their ink is *not* the fix: `─` is three pixels of ink that would become a
+    // solid block, and `▀` would lose the half that makes it a half. Ghostty
+    // draws these itself, from a sprite face, for exactly this reason
+    // (`docs/cjk.md` §5, M6).
+    if is_graphics_element(ch) {
+        return Constraint::NONE;
+    }
+    if is_symbol(ch) {
+        Constraint::ICON
+    } else {
+        Constraint::NONE
+    }
+}
+
+/// Is this a "symbol-like" codepoint: something that may borrow the cell to its
+/// right and wants to be fitted rather than set?
+///
+/// Private use (where every Nerd Font icon lives), the blocks Ghostty's
+/// `isSymbol` names, and the legacy-computing symbols — a block of drawings
+/// that a terminal is asked to render and that no text font has.
+fn is_symbol(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x2460..=0x24FF     // enclosed alphanumerics
+        | 0x2190..=0x21FF   // arrows
+        | 0x2600..=0x26FF   // miscellaneous symbols
+        | 0x2700..=0x27FF   // dingbats
+        | 0xE000..=0xF8FF   // private use, the BMP (Nerd Fonts)
+        | 0x1F100..=0x1F1FF // enclosed alphanumeric supplement
+        | 0x1F300..=0x1F5FF // miscellaneous symbols and pictographs
+        | 0x1F600..=0x1F64F // emoticons
+        | 0x1F680..=0x1F6FF // transport and map symbols
+        | 0x1FB00..=0x1FBFF // symbols for legacy computing
+        | 0x1CC00..=0x1CEBF // ... and its Unicode 16 supplement
+        | 0xF0000..=0xFFFFD // private use, supplementary
+        | 0x100000..=0x10FFFD // private use, supplementary
+    )
+}
+
+/// Is this a glyph meant to tile: to meet its neighbour with no gap?
+///
+/// Ghostty's `isGraphicsElement` is box drawing, block elements, legacy
+/// computing and powerline — and it does not stretch them (it draws several of
+/// them itself, from a sprite face). Braille is here because a braille canvas
+/// is the same promise: dots that stop short of the cell edge leave a grid of
+/// gaps where the picture should be.
+fn is_graphics_element(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x2500..=0x257F     // box drawing
+        | 0x2580..=0x259F   // block elements
+        | 0x2800..=0x28FF   // braille patterns
+        | 0xE0B0..=0xE0D7   // powerline, in the private use area
+        | 0x1FB00..=0x1FBFF // symbols for legacy computing
+        | 0x1CC00..=0x1CEBF
+    )
+}
+
 pub struct GridRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
@@ -117,9 +482,10 @@ pub struct GridRenderer {
     shelf_y: u32,
     shelf_height: u32,
     shelf_x: u32,
-    /// Keyed by (face, glyph id, size×4): the same character is a different
-    /// bitmap in the bold face, and a different size is a different raster.
-    glyphs: HashMap<(u32, u16, u32), Glyph>,
+    /// Keyed by (face, glyph id, size×4, constraint, cells): the same character
+    /// is a different bitmap in the bold face, a different size is a different
+    /// raster, and the same icon is a different bitmap one cell wide than two.
+    glyphs: HashMap<(u32, u16, u32, Constraint, u8), Glyph>,
     fonts: Fonts,
     instances: Vec<Instance>,
     instance_buffer: Option<wgpu::Buffer>,
@@ -394,8 +760,12 @@ impl GridRenderer {
             // after it are the room it needs. Fitting it into the pair is what
             // made Han 21% too large and turned a full stop into a square — the
             // glyph's own bearings already say where it goes.
+            //
+            // A symbol or a graphics element is a different question, and
+            // `constraint_width` answers it from the neighbours.
+            let cells = constraint_width(frame, index);
             for ch in cell.text.chars() {
-                let Some(glyph) = self.glyph(device, queue, ch, style, look.size) else {
+                let Some(glyph) = self.glyph(device, queue, ch, style, look.size, cells) else {
                     continue;
                 };
                 self.instances.push(Instance {
@@ -491,6 +861,10 @@ impl GridRenderer {
     }
 
     /// Rasterise a character if the atlas does not have it yet.
+    ///
+    /// `cells` is how many cells the glyph may be constrained into
+    /// (`constraint_width`), not how many the character occupies: the grid does
+    /// not move, this is room for the glyph inside the cells it already has.
     fn glyph(
         &mut self,
         device: &wgpu::Device,
@@ -498,17 +872,25 @@ impl GridRenderer {
         ch: char,
         style: Face,
         size: f32,
+        cells: u8,
     ) -> Option<Glyph> {
         let face = self.fonts.face_for(style, ch)?;
         let glyph_id = self.fonts.glyph_id(face, ch)?;
-        let key = (face as u32, glyph_id, (size * 4.0) as u32);
+        let constraint = constraint_for(ch);
+        let key = (
+            face as u32,
+            glyph_id,
+            (size * 4.0) as u32,
+            constraint,
+            cells,
+        );
         if let Some(glyph) = self.glyphs.get(&key) {
             return Some(*glyph);
         }
 
-        let image = self.fonts.rasterise(face, glyph_id, size)?;
-        let width = image.placement.width;
-        let height = image.placement.height;
+        let laid = lay_out(&mut self.fonts, face, glyph_id, ch, size, cells)?;
+        let image = &laid.image;
+        let (width, height) = (image.placement.width, image.placement.height);
         if width == 0 || height == 0 {
             let glyph = Glyph {
                 uv: SOLID,
@@ -560,21 +942,133 @@ impl GridRenderer {
         let _ = device;
 
         let size_px = self.atlas_size as f32;
-        let (left, top, width, height) = placement(&self.fonts.metrics, &image);
         let glyph = Glyph {
             uv: [
                 x as f32 / size_px,
                 y as f32 / size_px,
-                (x + image.placement.width) as f32 / size_px,
-                (y + image.placement.height) as f32 / size_px,
+                (x + width) as f32 / size_px,
+                (y + height) as f32 / size_px,
             ],
-            left,
-            top,
-            width,
-            height,
+            left: laid.ink.x,
+            top: laid.ink.y,
+            width: laid.ink.width,
+            height: laid.ink.height,
         };
         self.glyphs.insert(key, glyph);
         Some(glyph)
+    }
+}
+
+/// One glyph, rasterised and constrained: the bitmap to copy into the atlas and
+/// the box to draw it in.
+///
+/// The renderer and `--font-report` both come through here. That is the point:
+/// a report that recomputed the arithmetic would be a second opinion about a
+/// frame nobody draws, which is how the numbers in a bug report stop matching
+/// the picture.
+struct Laid {
+    image: swash::scale::image::Image,
+    /// Where the bitmap is drawn, relative to the cell's top-left corner.
+    ink: Ink,
+    constraint: Constraint,
+    /// The cells the constraint was given, after `max_width`.
+    cells: u8,
+}
+
+fn lay_out(
+    fonts: &mut Fonts,
+    face: usize,
+    glyph_id: u16,
+    ch: char,
+    size: f32,
+    cells: u8,
+) -> Option<Laid> {
+    let metrics = fonts.metrics;
+    let constraint = constraint_for(ch);
+    let cells = constraint.cells(cells, &metrics);
+    let base = fonts.rasterise(face, glyph_id, size)?;
+    let (left, top, width, height) = placement(&metrics, &base);
+    let (sx, sy) = constraint.factors(
+        &metrics,
+        Ink {
+            x: left,
+            y: top,
+            width,
+            height,
+        },
+        cells,
+    );
+    // A uniform scale is applied to the *outlines*, not to the bitmap: an icon
+    // rasterised at 1.6× is crisp, and the same bitmap stretched to 1.6× is
+    // grey mush. Only `stretch` changes the aspect ratio, and that one has no
+    // outline equivalent, so it is the one drawn into a different rectangle.
+    let uniform = (sx - sy).abs() < 1e-3;
+    let image = if uniform && (sx - 1.0).abs() > 0.002 {
+        let target = ((size * sx * 4.0).round() / 4.0).max(1.0);
+        fonts.rasterise(face, glyph_id, target)?
+    } else {
+        base
+    };
+    let (left, top, width, height) = placement(&metrics, &image);
+    let (scale_x, scale_y) = if uniform { (1.0, 1.0) } else { (sx, sy) };
+    let mut ink = Ink {
+        x: left,
+        y: top,
+        width: width * scale_x,
+        height: height * scale_y,
+    };
+    (ink.x, ink.y) = constraint.place(&metrics, ink, cells);
+    Some(Laid {
+        image,
+        ink,
+        constraint,
+        cells,
+    })
+}
+
+/// How many cells the glyph in cell `index` may be constrained into.
+///
+/// Ghostty's `constraintWidth` (`renderer/cell.zig`). A symbol may use the cell
+/// beside it when that cell is blank and the glyph to its left was not also a
+/// symbol — the second half is what keeps a row of icons on one advance instead
+/// of every other one drifting right.
+fn constraint_width(frame: &Frame, index: usize) -> u8 {
+    let Some(cell) = frame.cells.get(index) else {
+        return 1;
+    };
+    // A wide character already has two cells, so its constraint is the pair.
+    if cell.wide {
+        return 2;
+    }
+    let Some(ch) = cell.text.chars().next() else {
+        return 1;
+    };
+    if !is_symbol(ch) {
+        return 1;
+    }
+    let cols = usize::from(frame.cols).max(1);
+    // The end of a row is not the end of the buffer: the next cell is the row
+    // below, which is never the glyph's to borrow.
+    if (index + 1) % cols == 0 {
+        return 1;
+    }
+    if index > 0 {
+        let previous = frame
+            .cells
+            .get(index - 1)
+            .and_then(|c| c.text.chars().next());
+        if previous.is_some_and(|p| is_symbol(p) && !is_graphics_element(p)) {
+            return 1;
+        }
+    }
+    match frame
+        .cells
+        .get(index + 1)
+        .and_then(|c| c.text.chars().next())
+    {
+        None => 2,
+        Some(next) if next.is_whitespace() => 2,
+        Some(_) => 1,
     }
 }
 
@@ -760,16 +1254,37 @@ impl Fonts {
                     let cell_height = face_height.max(1.0).ceil();
                     let baseline =
                         (ascent + line_gap / 2.0 + (cell_height - face_height) / 2.0).round();
+                    // Cap height decides the single-cell icon height. A font
+                    // that does not declare one gets the usual ratio of its
+                    // ascent rather than an icon of zero height.
+                    let cap_height = {
+                        let declared = scale(font.metrics(&[]).cap_height);
+                        if declared > 0.0 {
+                            declared
+                        } else {
+                            ascent * 0.72
+                        }
+                    };
                     Metrics {
                         cell_width,
                         cell_height,
                         baseline,
+                        face_width: advance.max(1.0),
+                        face_height,
+                        face_top: baseline - ascent - line_gap / 2.0,
+                        icon_height: face_height,
+                        icon_height_single: (2.0 * cap_height + face_height) / 3.0,
                     }
                 }
                 None => Metrics {
                     cell_width: look.size * 0.6,
                     cell_height: look.size * 1.2,
                     baseline: look.size,
+                    face_width: look.size * 0.6,
+                    face_height: look.size * 1.2,
+                    face_top: 0.0,
+                    icon_height: look.size * 1.2,
+                    icon_height_single: look.size * 1.2,
                 },
             }
         };
@@ -966,6 +1481,17 @@ const FONT_REPORT_SAMPLE: &[char] = &[
     'M', 'g', '啊', 'あ', '。', '─', '█', '\u{f015}', '\u{e0b0}', '😀',
 ];
 
+/// The constraint's name, for `--font-report`.
+fn constraint_name(constraint: Constraint) -> &'static str {
+    match constraint.size {
+        Fit::None => "none",
+        Fit::Fit => "fit",
+        Fit::Cover => "cover",
+        Fit::Cover1 => "fit_cover1",
+        Fit::Stretch => "stretch",
+    }
+}
+
 /// Print what the glyph pipeline will do, then let the caller exit.
 ///
 /// The placement arithmetic is the renderer's own (`placement`), so this is not
@@ -1003,7 +1529,11 @@ pub fn font_report(look: &Look) {
             println!("U+{:04X} {ch}  face {face} has no glyph", ch as u32);
             continue;
         };
-        let Some(image) = fonts.rasterise(face, glyph_id, look.size) else {
+        // The report shows the room a *lone* glyph gets: the second cell a
+        // symbol may borrow when its neighbour is blank. Whether it has one on
+        // screen is the neighbours' answer, not the report's.
+        let offered = if is_symbol(ch) { 2 } else { 1 };
+        let Some(laid) = lay_out(&mut fonts, face, glyph_id, ch, look.size, offered) else {
             continue;
         };
         // The face's own ascent, to show why a fallback used to float: the
@@ -1016,18 +1546,19 @@ pub fn font_report(look: &Look) {
             let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
             font.glyph_metrics(&[]).advance_width(glyph_id) * look.size / units
         });
-        let (left, top, width, height) = placement(&metrics, &image);
         println!(
-            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}",
+            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}  {} cw{}",
             ch as u32,
             ascent,
             advance,
-            image.placement.width,
-            image.placement.height,
-            left,
-            top,
-            width,
-            height,
+            laid.image.placement.width,
+            laid.image.placement.height,
+            laid.ink.x,
+            laid.ink.y,
+            laid.ink.width,
+            laid.ink.height,
+            constraint_name(laid.constraint),
+            laid.cells,
         );
     }
 
@@ -1179,6 +1710,7 @@ impl Loaded {
 #[cfg(test)]
 mod font_tests {
     use super::*;
+    use crate::pane::Cell;
 
     /// One character, measured the way the renderer measures it.
     struct Placed {
@@ -1199,14 +1731,199 @@ mod font_tests {
         let mut fonts = Fonts::load(&look);
         let face = fonts.face_for(Face::Regular, ch)?;
         let glyph_id = fonts.glyph_id(face, ch)?;
-        let image = fonts.rasterise(face, glyph_id, look.size)?;
-        let rect = placement(&fonts.metrics, &image);
+        // Through the renderer's own path — rasterised, constrained, placed —
+        // so a passing test describes the frame the window draws.
+        let laid = lay_out(&mut fonts, face, glyph_id, ch, look.size, 1)?;
+        let rect = (laid.ink.x, laid.ink.y, laid.ink.width, laid.ink.height);
         Some(Placed {
             face,
-            image,
+            image: laid.image,
             rect,
             metrics: fonts.metrics,
         })
+    }
+
+    /// One character laid out with a given number of cells offered, or `None`
+    /// when this machine has no font for it.
+    fn drawn(ch: char, cells: u8) -> Option<(Metrics, Ink, u8)> {
+        let look = Look::default();
+        let mut fonts = Fonts::load(&look);
+        let face = fonts.face_for(Face::Regular, ch)?;
+        let glyph_id = fonts.glyph_id(face, ch)?;
+        let laid = lay_out(&mut fonts, face, glyph_id, ch, look.size, cells)?;
+        Some((fonts.metrics, laid.ink, laid.cells))
+    }
+
+    /// A one-row frame, one string per cell.
+    fn row(cells: &[(&str, bool)]) -> Frame {
+        Frame {
+            cols: cells.len() as u16,
+            rows: 1,
+            default_fg: [0; 3],
+            default_bg: [0; 3],
+            cursor: None,
+            selection: None,
+            cells: cells
+                .iter()
+                .map(|(text, wide)| Cell {
+                    text: (*text).to_owned(),
+                    wide: *wide,
+                    ..Cell::default()
+                })
+                .collect(),
+        }
+    }
+
+    /// The codepoint table is the whole of M3's policy, so it is worth pinning
+    /// without a font: an icon, a tiling glyph and text each ask for a
+    /// different rule.
+    #[test]
+    fn the_constraint_table_says_what_each_family_gets() {
+        // Text is left alone, whatever face it comes from.
+        assert_eq!(constraint_for('啊'), Constraint::NONE);
+        assert_eq!(constraint_for('M'), Constraint::NONE);
+        assert_eq!(constraint_for('。'), Constraint::NONE);
+        // Nerd Font icons and the private use area are fitted.
+        assert_eq!(constraint_for('\u{f015}'), Constraint::ICON);
+        assert_eq!(constraint_for('\u{e000}'), Constraint::ICON);
+        // A powerline arrow is fitted to the cell's height, one cell wide.
+        assert_eq!(constraint_for('\u{e0b0}'), Constraint::POWERLINE);
+        assert_eq!(constraint_for('\u{e0b0}').max_width, 1);
+        // Braille tiles by stretching, because its ink *is* a grid.
+        assert_eq!(constraint_for('\u{2800}'), Constraint::TILE);
+        assert_eq!(constraint_for('\u{28ff}'), Constraint::TILE);
+        // Box drawing and blocks are left alone: their ink is a line or a
+        // fraction of a cell, and stretching it turns a line into a block.
+        assert_eq!(constraint_for('─'), Constraint::NONE);
+        assert_eq!(constraint_for('█'), Constraint::NONE);
+        assert_eq!(constraint_for('▀'), Constraint::NONE);
+        assert!(is_symbol('\u{f015}'));
+        assert!(!is_symbol('啊'));
+    }
+
+    /// The two-cell rule, which is what stops a row of icons marching to the
+    /// right: the first icon may use the blank cell beside it, the second may
+    /// not, and neither may borrow a cell that has text in it.
+    #[test]
+    fn a_symbol_borrows_a_cell_only_when_its_neighbour_is_blank() {
+        // Blank both sides: two cells.
+        let frame = row(&[("", false), ("\u{f015}", false), ("", false)]);
+        assert_eq!(constraint_width(&frame, 1), 2);
+        // An icon to the left: aligned with it, so one cell.
+        let frame = row(&[("\u{f015}", false), ("\u{f015}", false), ("", false)]);
+        assert_eq!(constraint_width(&frame, 1), 1);
+        // Text to the right: no room to borrow.
+        let frame = row(&[("\u{f015}", false), ("a", false), ("", false)]);
+        assert_eq!(constraint_width(&frame, 0), 1);
+        // The last column of a row never borrows the next row's first cell.
+        let frame = row(&[("", false), ("\u{f015}", false)]);
+        assert_eq!(constraint_width(&frame, 1), 1);
+        // A wide character already has its pair, and text never borrows.
+        let frame = row(&[("啊", true), ("", false)]);
+        assert_eq!(constraint_width(&frame, 0), 2);
+        let frame = row(&[("a", false), ("", false)]);
+        assert_eq!(constraint_width(&frame, 0), 1);
+        // A graphics element does not suppress the next symbol's second cell:
+        // `█` followed by an icon is not a row of icons.
+        let frame = row(&[("█", false), ("\u{f015}", false), ("", false)]);
+        assert_eq!(constraint_width(&frame, 1), 2);
+    }
+
+    /// A braille cell fills its cell exactly, which is the whole point of
+    /// stretching it: measured from the face, every cell of a braille canvas
+    /// leaves the same gap and the picture comes out as a grid of tiles.
+    #[test]
+    fn a_braille_cell_fills_its_cell() {
+        let Some((m, ink, _)) = drawn('\u{28ff}', 1) else {
+            return; // no font here has braille
+        };
+        assert!(
+            (ink.height - m.cell_height).abs() <= 1.0,
+            "a braille cell is {} px tall in a {} px cell",
+            ink.height,
+            m.cell_height
+        );
+        assert!(
+            (ink.width - m.cell_width).abs() <= 1.0,
+            "a braille cell is {} px wide in a {} px cell",
+            ink.width,
+            m.cell_width
+        );
+        assert!(
+            ink.x.abs() <= 0.5 && ink.y.abs() <= 0.5,
+            "a braille cell starts at the cell's corner, not at ({}, {})",
+            ink.x,
+            ink.y
+        );
+    }
+
+    /// A powerline arrow is a whole cell tall: drawn at its design size it
+    /// overlaps the row above and leaves a notch below.
+    #[test]
+    fn a_powerline_arrow_fills_the_cell_height() {
+        let Some((m, ink, _)) = drawn('\u{e0b0}', 1) else {
+            return; // no Nerd Font installed here
+        };
+        assert!(
+            (ink.height - m.cell_height).abs() <= 1.0,
+            "a powerline arrow is {} px tall in a {} px cell",
+            ink.height,
+            m.cell_height
+        );
+    }
+
+    /// An icon is drawn inside the cells it is given, centred on its own cell,
+    /// and never in the row above — which is what it did when the fallback
+    /// face's own bearings were used with no constraint at all.
+    #[test]
+    fn an_icon_fits_and_is_centred() {
+        let Some((m, ink, cells)) = drawn('\u{f015}', 2) else {
+            return; // no icon font installed here
+        };
+        assert_eq!(cells, 2, "a lone icon may use the cell beside it");
+        assert!(
+            ink.x >= -0.5 && ink.x + ink.width <= m.cell_width * 2.0 + 0.5,
+            "the icon is {} px wide at x {:+.1}, outside its two {} px cells",
+            ink.width,
+            ink.x,
+            m.cell_width * 2.0
+        );
+        assert!(
+            ink.y >= -0.5 && ink.y + ink.height <= m.cell_height + 0.5,
+            "the icon is {} px tall at y {:+.1}, outside its {} px cell",
+            ink.height,
+            ink.y,
+            m.cell_height
+        );
+        // Centred on the first cell, not on the pair: an icon that jumped when
+        // a space opened after it was the bug Ghostty's `center1` fixed. An
+        // icon wider than a cell has no room to centre in and goes flush left,
+        // which is what `center1`'s clamp does and what it is for.
+        let centre = ink.x + ink.width / 2.0;
+        if ink.width <= m.face_width {
+            assert!(
+                (centre - m.face_width / 2.0).abs() <= 1.0,
+                "the icon is centred at {centre}, not on the cell's {}",
+                m.face_width / 2.0
+            );
+        } else {
+            assert!(
+                ink.x.abs() <= 1.0,
+                "an icon wider than its cell starts at x {:+.1}, not flush left",
+                ink.x
+            );
+        }
+        // And one cell is a smaller box than two.
+        let Some((_, narrow, cells)) = drawn('\u{f015}', 1) else {
+            return;
+        };
+        assert_eq!(cells, 1);
+        assert!(
+            narrow.width <= ink.width + 0.5,
+            "an icon with one cell ({} px) came out wider than with two ({} px)",
+            narrow.width,
+            ink.width
+        );
     }
 
     /// A CJK character must come from another family, and finding it must be

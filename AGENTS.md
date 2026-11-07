@@ -117,6 +117,10 @@ GitHub: if the mirror does not copy tags, nothing publishes — push it by hand
   reads like a renderer bug. Use `--shell "bash --norc --noprofile"` (the flag
   splits on whitespace) for any capture, screenshot or font comparison, and the
   same for a payload that a shell rc would otherwise decorate.
+- **A captured sample must print `\r\n`, not `\n`.** The pty is raw, so nothing turns
+  a line feed into a carriage return for the child: a script that ends its lines with
+  `\n` draws a *staircase*, each line starting where the last one ended, and the
+  glyphs look misplaced. It is the harness, not the renderer.
 - Commits end with the co-author trailer.
 
 ## The event loop, redraws, and doing work off the UI thread
@@ -397,6 +401,24 @@ stop a 17×17 square (`docs/cjk.md` §1).
 edge to the glyph, not a size: the bearings come from the rasteriser relative to the
 baseline and were never proportional to the bitmap. One placement rule, in
 `render::placement`, shared with `--font-report`; do not add a second copy of it here.
+
+**A glyph is drawn as its font drew it unless a rule says otherwise, and the rules
+are Ghostty's.** `render::Constraint` is a port of `RenderOptions.Constraint`
+(`font/Glyph.zig`): five size rules, five alignments, pads in thousandths of the face
+box, a maximum number of cells, and two height metrics. `constraint_for(codepoint)` is
+the only policy: private use and the symbol blocks get `fit_cover1` centred on the
+first cell, powerline and braille `stretch`, everything else nothing. Two traps. A
+uniform scale belongs on the **outlines** — re-rasterise at `size × factor`, or an
+enlarged icon is grey mush, and only `stretch` (which changes the aspect ratio) may
+scale the bitmap. And `stretch` is only right where the ink *is* the shape: `─` is
+three pixels of ink and stretching it draws a solid block, so box drawing and block
+elements are left alone until there is a sprite face (`docs/cjk.md` §5, M6).
+
+**How many cells a glyph may use is the neighbours' answer.** `constraint_width` is
+Ghostty's `renderer/cell.zig` rule: a symbol may borrow the cell to its right when
+that cell is blank, the glyph to its left was not also a symbol, and it is not the
+last column of its row. It changes the *glyph's* room, never the grid — and without
+it every other icon in a row drifts right.
 
 **egui's default fonts have no arrows.** `↑↓` and `←→` panicked the harness and had
 been drawing empty boxes in the window; hints are words now (`up/down`).

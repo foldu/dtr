@@ -103,15 +103,18 @@ every TUI box leaks by a pixel.
 | which face has a character | `render.rs` `Fonts::face_for` — preferred list (`fonts::FALLBACK`), then every family |
 | rasterise | `render.rs` `Fonts::rasterise` — swash, `Source::Outline` only, `.hint(true)` |
 | place it | `render.rs` `placement` — the bearings on `Metrics::baseline`, shared with `--font-report` |
+| constrain it | `render.rs` `Constraint` / `lay_out` — a port of Ghostty's rule set; `constraint_for` is the per-codepoint policy |
+| how many cells it may use | `render.rs` `constraint_width` — Ghostty's `renderer/cell.zig` rule, from the frame's neighbours |
 | draw it | `render.rs` `prepare_pane` — no scaling, whatever the cell's width |
 | cell text and width | `pane.rs` `fill_cells` — `Cell::wide()`, spacers carry no text |
 | cursor | `pane.rs` `Cursor` (`wide_tail`) + `render.rs` `cursor_cell` |
 | report | `main.rs` `--font-report` → `render::font_report` |
 | UI text fallback | `fonts.rs` `ui_fallback` (egui's own faces are Latin-only) |
 
-The atlas key is `(face, glyph id, size × 4)`; the size is the same for every
-face, so a fallback is rasterised at the grid's point size with no adjustment
-(M4 changes that).
+The atlas key is `(face, glyph id, size × 4, constraint, cells)`; the size is
+the same for every face, so a fallback is rasterised at the grid's point size
+with no adjustment (M4 changes that), and a constrained glyph is a different
+raster because it is rasterised at a different size.
 
 ---
 
@@ -232,11 +235,11 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 |---|---|---|---|
 | 1 | wide text is scaled to fill the box | Han 21 % too big and low; **。 is a square** | **done**, M1–M2: design size on the grid baseline |
 | 2 | baseline is per face | every fallback glyph floats or sinks by (face ascent − grid ascent) | **done**, M1: one baseline from the grid metrics |
-| 3 | symbols are unconstrained and 1 cell | powerline/block/Braille overlap their neighbours and the row above | M3: `fit`/`stretch` + centring + the 2-cell rule |
+| 3 | symbols are unconstrained and 1 cell | powerline/block/Braille overlap their neighbours and the row above | **done**, M3: `fit_cover1` + centring for icons, `stretch` for powerline and braille, the 2-cell rule |
 | 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | M4: preferred list, monospace preference, per-codepoint policy |
 | 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | M4: scale by x-height/ic-width at load |
 | 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | M5: second atlas, swash colour sources |
-| 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | M6: stretch, then optionally a sprite face |
+| 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | M6: a sprite face — **not** a stretch, which turns a 3 px line into a block |
 | 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
 | 9 | no per-cell shaper | combining marks stack on the base | M5-ish: shape a cell's cluster before placing |
 | 10 | cursor is one cell | a block cursor covers half a Han character | **done**, M2: `wide_tail`, 2-cell block |
@@ -249,8 +252,8 @@ Ordered so each step is independently visible and testable. M0 is the
 instrument every later step needs; M1–M2 are the CJK fix proper; M3–M4 the
 icons; M5–M6 the remaining families. Estimates are for a tested slice.
 
-**Done: M0, M1, M2.** Their acceptance lines are the tests named in §7.2, and
-`dtr --font-report` prints the "draws now" column of §1.
+**Done: M0, M1, M2, M3.** Their acceptance lines are the tests named in §7.2,
+and `dtr --font-report` prints the "draws now" column of §1.
 
 ### M0 — make it measurable (`--font-report`) — done
 
@@ -327,7 +330,7 @@ and all panes share one draw call (`AGENTS.md`, "Panes share one instance
 buffer"). It is a one-cell overdraw in a resize or an off-grid pane width, not a
 wrong glyph; a per-pane scissor is the fix if it ever shows.
 
-### M3 — symbols are constrained
+### M3 — symbols are constrained — done
 
 * Port Ghostty's `Constraint` (size/align/pad/`constraint_width`) into
   `render.rs`, applied at rasterise time. The atlas key becomes
@@ -352,6 +355,41 @@ neighbour is blank, and inside 9×17 when it is not; `E0B0` fills the cell
 height exactly (|height − cell_height| ≤ 1); a row of icons keeps one advance.
 Risk: the constraint data is a new vendored artifact; record its provenance and
 the generator's upstream commit.
+
+*Landed:* the rule set is ported in full — `Fit` (`none`, `fit`, `cover`,
+`fit_cover1`, `stretch`), `Align` (`none`, `start`, `end`, `center`, `center1`),
+pads, `max_width`, and both height metrics (`cell`, and the patcher's `icon`
+with its one-cell form) — but the *table* is not. `constraint_for` decides from
+the codepoint: private use and the symbol blocks get `fit_cover1` + `center1` +
+the icon height, powerline (`E0B0–E0D7`) gets `stretch` one cell wide, braille
+(`U+2800–28FF`) gets `stretch`, and everything else is left alone.
+
+That is this plan's own fallback rule, minus the part it got wrong. Box drawing
+and block elements are **not** stretched: `─` is three pixels of ink and
+stretching it draws a solid block, and `▀` would lose the half that makes it a
+half. There is no rule that fixes both of those from the ink box alone, which is
+why Ghostty draws them itself — they wait for M6.
+
+A uniform scale is applied to the *outlines*, not the bitmap: the glyph is
+re-rasterised at `size × factor`, so an icon at 1.6× is crisp instead of grey.
+Only `stretch` changes the aspect ratio, so it is the one drawn into a wider
+rectangle.
+
+Measured here at 28 pt, before → after, same faces:
+
+| glyph | before | after |
+|---|---|---|
+| `E0B0` (DejaVu grid) | 15×36 at (−1,−1), overlapping the row above | **17×33 at (0,0)**, exactly the cell |
+| `F015` (from Monaspace Radon NF) | 19×15 at (−1,+8) | 19×15 at (0,+9) |
+| `E0B0` (0xProto Nerd Font grid) | 19×45 at (−1,0) | 18×44 at (0,0), exactly the cell |
+| `F015` (0xProto Nerd Font grid) | 18×16 at (0,14) | unchanged — it already fitted, and `fit_cover1` does not enlarge a glyph that fits |
+
+Not done: the generated table. Every icon gets one rule instead of the patcher's
+per-glyph one, which is right for the bulk of the PUA and wrong for the few
+icons drawn to two cells — those get the second cell when the neighbour is
+blank, which is the same compromise Ghostty's `constraintWidth` makes. `😀` has
+no ink at all: Unifont Upper draws it monochrome and Noto Color Emoji has no
+outline. That is M5.
 
 ### M4 — fallback choice becomes a policy
 
@@ -468,12 +506,24 @@ the rasteriser-disagreement problem the UI snapshots already have). Landed:
 * `a_block_cursor_on_a_wide_tail_covers_both_cells` — and a bar stays one cell.
 * `a_wide_character_is_two_cells_and_a_spacer` (pane) — `啊` is `Wide`, the cell
   after it carries no text and is not wide, the next character is column 2.
+* `the_constraint_table_says_what_each_family_gets` — the codepoint policy, with
+  no font at all: text untouched, icons fitted, powerline and braille stretched,
+  box drawing and blocks left alone.
+* `a_symbol_borrows_a_cell_only_when_its_neighbour_is_blank` — the two-cell
+  rule, driven through real `Frame`s: blank either side is two cells, an icon to
+  the left is one, text to the right is one, the end of a row never borrows the
+  next row's first cell.
+* `an_icon_fits_and_is_centred` — a PUA glyph is inside `2 × cell_w` and
+  `cell_height`, centred on its own cell (flush left when it is wider than one),
+  and one cell is a smaller box than two.
+* `a_powerline_arrow_fills_the_cell_height` — `E0B0` is the cell's height.
+* `a_braille_cell_fills_its_cell` — `U+28FF` is the cell exactly, and at its
+  corner.
 
 Still to write, with the milestone that makes them mean something:
 
-* `a_nerd_glyph_fits_its_cells` — PUA glyph inside `2 × cell_w` and
-  `cell_height` (M3).
-* `a_block_fills_its_cell` — `█` size equals the cell (M6).
+* `a_block_fills_its_cell` — `█` size equals the cell (M6, if the sprite face
+  lands; a block element is deliberately untouched until then).
 * `a_monospace_family_wins_over_a_proportional_one` — the M4 policy, with a
   synthetic candidate list.
 
@@ -500,9 +550,16 @@ Font families (`0xProto Nerd Font*`). Consequences:
 
 `--screenshot` renders offscreen at 1× and `--capture` copies the live window,
 so a HiDPI check of CJK needs `--capture` (docs/windows.md §2). Neither is a
-test gate; the placement assertions are. And capture with a shell that does not
-read the user's bash rc (`--shell "bash --norc --noprofile"`): a bad `PS1`
-prints readline's `\[` markers into the grid and reads like a renderer bug.
+test gate; the placement assertions are. Two traps in the harness, both of which
+read like renderer bugs:
+
+* Capture with a shell that does not read the user's bash rc
+  (`--shell "bash --norc --noprofile"`): a bad `PS1` prints readline's `\[`
+  markers into the grid.
+* A script that prints `\n` renders a staircase. The pty is raw (that is the
+  whole `pty::set_raw` story in AGENTS.md), so nothing turns LF into CRLF for
+  the child: every line starts where the previous one ended. Print `\r\n` from
+  the sample, or the picture is unreadable and the glyphs look misplaced.
 
 ---
 
