@@ -5,30 +5,38 @@ Status: research, 2026-11-07 · Scope: *how* dtr draws text outside its grid fac
 compared with Ghostty, then the order to close the gap. Not a rewrite of the
 glyph pipeline.
 
+**Landed so far: M0, M1 and M2** (§5). `dtr --font-report` exists, every glyph is
+placed on one grid baseline at its design size, and the cell width comes from the
+VT core. §1 keeps the before-numbers because that is the evidence the plan rests
+on; the "now" column in that table is what the binary prints. M3–M6 are still
+plans.
+
 Question: the grid face covers Latin, so everything else arrives through
 `Fonts::face_for` and is placed by `render::prepare_pane`. On this machine that
-path produces visibly wrong output — oversized Han, square full stops, icons
+path produced visibly wrong output — oversized Han, square full stops, icons
 that overlap their neighbours. Ghostty ships the same fonts and looks right.
 What does Ghostty do that dtr does not, and what is the cheapest order to adopt
 it?
 
-Everything in §1 was **measured on this machine** with a throw-away test that
-called the real `Fonts`/`rasterise` code (the probe is described in §7.1).
-§3 is **read** from Ghostty at `5813c94` (2026-11-06). §8 says which is which.
+Everything in §1 was **measured on this machine** with the real `Fonts` code, now
+available as `dtr --font-report` (§7.1). §3 is **read** from Ghostty at `5813c94`
+(2026-11-06). §8 says which is which.
 
 ---
 
-## 1. What dtr draws today
+## 1. What dtr drew before M1–M2
 
 `Look::default()` — 14, DejaVu Sans Mono as the grid face. The cell is
 **9 × 17**, baseline 13 px from the cell top (ascent 12.99, descent 3.30, no
-line gap). "drawn" is the rectangle `prepare_pane` pushes as an instance;
-"natural" is where the glyph would sit with its own bearings on that baseline.
+line gap). "drawn" is the rectangle `prepare_pane` pushed as an instance;
+"natural" is where the glyph sits with its own bearings on that baseline, which
+is what M1–M2 made it draw.
 
-| char | face that answered | advance | ink bbox (left, top) | dtr draws | natural |
+| char | face that answered | advance | ink bbox (left, top) | drew before | draws now |
 |---|---|---|---|---|---|
-| `M` | grid (DejaVu) | 8.43 | 8×10 at (0,10) | 8×10 at (0,3) | same |
-| `漢` | Noto Sans Mono CJK SC | 14.00 | 14×14 at (0,12) | **17×17 at (0.5,0)** | 14×14 at (0,1) |
+| `M` | grid (DejaVu) | 8.43 | 8×10 at (0,10) | 8×10 at (0,3) | 8×10 at (0,3) |
+| `啊` | Noto Sans Mono CJK SC | 14.00 | 13×14 at (0,12) | **15.8×17 at (1.1,0)** | 13×14 at (1,1) |
+| `漢` | " | 14.00 | 14×14 at (0,12) | **17×17 at (0.5,0)** | 14×14 at (0,1) |
 | `日` | " | 14.00 | 10×13 at (2,11) | **13.1×17 at (2.5,0)** | 10×13 at (2,2) |
 | `。` | " | 14.00 | 5×5 at (0,3) | **17×17 at (0.5,0)** | 5×5 at (0,10) |
 | `、` | " | 14.00 | 5×5 at (0,3) | **17×17 at (0.5,0)** | 5×5 at (0,10) |
@@ -36,59 +44,74 @@ line gap). "drawn" is the rectangle `prepare_pane` pushes as an instance;
 | `E0B0` (powerline) | **Monaspace Radon** | 8.68 | 8×18 at (-1,14) | 8×18 at (-1,-0.2) | (overflows the row) |
 | `😀` | **Unifont Upper** | 14.00 | 14×13 at (0,12) | 18×16.7 at (0,0.3) | (monochrome, wrong face) |
 
-Three rules produce every row, and each one is wrong in a different way:
+The "drew before" column is the old rule applied to the measured ink (the ink
+does not change with placement, so the arithmetic is exact); the "draws now"
+column is `--font-report`. The first four rows are fixed; the last three are
+what M3–M4 are for.
 
-1. **Wide text is scaled, not placed.** `prepare_pane` computes
-   `scale = min(2·cell_w / ink_w, cell_h / ink_h)` and rests the result on the
-   cell's bottom edge. For `漢` that is ×1.21 — 21 % larger than Latin, and it
-   grows with whatever fills first. Because the scale is driven by whichever
-   axis fills first, a full-width punctuation glyph (5×5 ink) is blown up to
-   17×17: **。 renders as a solid square**. The same rule is why Han characters
-   sit ~2 px lower than Latin: they are bottom-aligned, not baseline-aligned.
-2. **Every face has its own baseline.** `glyph()` stores
+`啊` (`U+554A`) is the repository's CJK test character (`AGENTS.md`), so it is
+in this table and in the tests: one glyph, chosen for ink in all four quadrants,
+instead of a different character per bug report.
+
+Three rules produced every "before" row, and each was wrong in a different way:
+
+1. **Wide text was scaled, not placed.** `prepare_pane` computed
+   `scale = min(2·cell_w / ink_w, cell_h / ink_h)` and rested the result on the
+   cell's bottom edge. For `漢` that was ×1.21 — 21 % larger than Latin, and it
+   grew with whatever filled first. Because the scale was driven by whichever
+   axis filled first, a full-width punctuation glyph (5×5 ink) was blown up to
+   17×17: **。 rendered as a solid square**. The same rule is why Han characters
+   sat ~2 px lower than Latin: they were bottom-aligned, not baseline-aligned.
+2. **Every face had its own baseline.** `glyph()` stored
    `top = ascent(face) − placement.top`, using *that face's* ascent. Noto CJK's
-   ascent is 16.24 against the grid's 13.00, so its glyphs are pushed 3.24 px
-   down; Monaspace Radon's 15.82 pushes the powerline arrow down 2.82 px;
-   Unifont Upper's 12.25 lifts the emoji 0.75 px. A fallback glyph never shares
-   the baseline of the text it sits next to.
-3. **Width is guessed and icons are not constrained.** `cell.wide` comes from
-   `unicode_width::UnicodeWidthChar` rather than the terminal, and a PUA icon
-   whose design advance is 1 em (14 px) is drawn at that size inside a 9 px
-   cell — the powerline arrow above is 8 px wide but 18 px tall in a 17 px row,
-   so a powerline prompt overlaps the row above it. Nothing fits a symbol to
-   its cell, nothing gives a wide icon the second cell, and a pure-PUA
-   codepoint falls back to whichever family fontconfig lists first.
+   ascent is 16.24 against the grid's 13.00, so its glyphs were pushed 3.24 px
+   down; Monaspace Radon's 15.82 pushed the powerline arrow down 2.82 px;
+   Unifont Upper's 12.25 lifted the emoji 0.75 px. A fallback glyph never shared
+   the baseline of the text beside it.
+3. **The width was guessed, and icons were not constrained.** `cell.wide` came
+   from `unicode_width::UnicodeWidthChar` rather than the terminal, so VS16 and
+   ZWJ clusters disagreed with the core and spacer cells were invisible to the
+   renderer. And a PUA icon whose design advance is 1 em (14 px) was drawn at
+   that size inside a 9 px cell — the powerline arrow above is 8 px wide but
+   18 px tall in a 17 px row, so a powerline prompt overlapped the row above.
+   Nothing fits a symbol to its cell and nothing gives a wide icon the second
+   cell; **still true, M3**.
 
-**The fallback face is not a policy, it is whatever comes first.** Running the
-same probe twice against the same config produced `0xProto Nerd Font Mono`
-first and then `Courier New`; `face_for` walks `collection.family_ids()` and
-takes the first family whose charmap maps the character. A proportional Latin
-face with a stray PUA mapping wins over the installed Nerd Font whenever
-fontconfig happens to list it first. Emoji come from `Unifont Upper` (or DejaVu
-Sans) for the same reason — the first family with the codepoint, not the
-terminal-appropriate one.
+The width half of rule 3 is fixed (`fill_cells` reads `Cell::wide()`); the symbol
+half is M3.
 
-Also visible in the table, and cheaply fixable: a block element (`█`, from the
-grid face) is 10×18 at (-1,-1) in a 9×17 cell, so full blocks overlap their
-neighbours and every TUI box leaks by a pixel.
+**The fallback face is not a policy, it is whatever comes first** — still true,
+M4. Running the same probe twice against the same config produced
+`0xProto Nerd Font Mono` first and then `Courier New`; `face_for` walks
+`collection.family_ids()` and takes the first family whose charmap maps the
+character. A proportional Latin face with a stray PUA mapping wins over the
+installed Nerd Font whenever fontconfig happens to list it first. Emoji come from
+`Unifont Upper` (or DejaVu Sans) for the same reason — the first family with the
+codepoint, not the terminal-appropriate one.
+
+Also still true and cheap to fix (M6): a block element (`█`, from the grid face)
+is 10×18 at (-1,-1) in a 9×17 cell, so full blocks overlap their neighbours and
+every TUI box leaks by a pixel.
 
 ---
 
-## 2. What dtr does today, in code
+## 2. What dtr does, in code
 
 | what | where |
 |---|---|
-| cell metrics, per-face ascent | `render.rs` `Fonts::load` (the `Metrics` block), `Fonts::ascent` |
+| cell metrics and the one baseline | `render.rs` `Metrics`, computed in `Fonts::load` |
 | which face has a character | `render.rs` `Fonts::face_for` — preferred list (`fonts::FALLBACK`), then every family |
 | rasterise | `render.rs` `Fonts::rasterise` — swash, `Source::Outline` only, `.hint(true)` |
-| place it | `render.rs` `Renderer::glyph` (`top = ascent(face) − placement.top`) |
-| draw it | `render.rs` `prepare_pane` (the wide-scale branch) |
-| cell text and width | `pane.rs` `fill_cells` (`unicode_width`, no spacer-cell knowledge) |
-| cursor | `pane.rs` `Cursor` — one cell, no wide-tail |
+| place it | `render.rs` `placement` — the bearings on `Metrics::baseline`, shared with `--font-report` |
+| draw it | `render.rs` `prepare_pane` — no scaling, whatever the cell's width |
+| cell text and width | `pane.rs` `fill_cells` — `Cell::wide()`, spacers carry no text |
+| cursor | `pane.rs` `Cursor` (`wide_tail`) + `render.rs` `cursor_cell` |
+| report | `main.rs` `--font-report` → `render::font_report` |
 | UI text fallback | `fonts.rs` `ui_fallback` (egui's own faces are Latin-only) |
 
 The atlas key is `(face, glyph id, size × 4)`; the size is the same for every
-face, so a fallback is rasterised at the grid's point size with no adjustment.
+face, so a fallback is rasterised at the grid's point size with no adjustment
+(M4 changes that).
 
 ---
 
@@ -205,18 +228,18 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 
 ## 4. The gap, ordered by how much it hurts
 
-| # | gap | symptom | dtr's fix |
+| # | gap | symptom | fix |
 |---|---|---|---|
-| 1 | wide text is scaled to fill the box | Han 21 % too big and low; **。 is a square** | draw at design size, on the grid baseline |
-| 2 | baseline is per face | every fallback glyph floats or sinks by (face ascent − grid ascent) | one baseline from the grid metrics |
-| 3 | symbols are unconstrained and 1 cell | powerline/block/Braille overlap their neighbours and the row above | `fit`/`stretch` + centring + the 2-cell rule |
-| 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | preferred list, monospace preference, per-codepoint policy |
-| 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | scale by x-height/ic-width at load |
-| 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | second atlas, swash colour sources |
-| 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | stretch, then optionally a sprite face |
-| 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled; glyphs can bleed past the pane edge at a wrap | take `Cell::wide()` from the core |
-| 9 | no per-cell shaper | combining marks stack on the base | shape a cell's cluster before placing |
-| 10 | cursor is one cell | a block cursor covers half a Han character | `wide_tail` from the core, 2-cell mark |
+| 1 | wide text is scaled to fill the box | Han 21 % too big and low; **。 is a square** | **done**, M1–M2: design size on the grid baseline |
+| 2 | baseline is per face | every fallback glyph floats or sinks by (face ascent − grid ascent) | **done**, M1: one baseline from the grid metrics |
+| 3 | symbols are unconstrained and 1 cell | powerline/block/Braille overlap their neighbours and the row above | M3: `fit`/`stretch` + centring + the 2-cell rule |
+| 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | M4: preferred list, monospace preference, per-codepoint policy |
+| 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | M4: scale by x-height/ic-width at load |
+| 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | M5: second atlas, swash colour sources |
+| 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | M6: stretch, then optionally a sprite face |
+| 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
+| 9 | no per-cell shaper | combining marks stack on the base | M5-ish: shape a cell's cluster before placing |
+| 10 | cursor is one cell | a block cursor covers half a Han character | **done**, M2: `wide_tail`, 2-cell block |
 
 ---
 
@@ -226,7 +249,10 @@ Ordered so each step is independently visible and testable. M0 is the
 instrument every later step needs; M1–M2 are the CJK fix proper; M3–M4 the
 icons; M5–M6 the remaining families. Estimates are for a tested slice.
 
-### M0 — make it measurable (`--font-report`)
+**Done: M0, M1, M2.** Their acceptance lines are the tests named in §7.2, and
+`dtr --font-report` prints the "draws now" column of §1.
+
+### M0 — make it measurable (`--font-report`) — done
 
 Add a diagnostic mode that prints what the glyph pipeline actually chose:
 cell metrics, baseline, the grid family, and for a fixed sample (Latin, Han,
@@ -242,52 +268,64 @@ Files: `main.rs` (flag), `render.rs` (a `report()` on `Fonts`). Effort: half a d
 Acceptance: `dtr --font-report` on this machine prints the §1 table.
 Risk: none. Do this first or the later steps are judged by eye.
 
-### M1 — one cell canvas, one baseline
+*Landed:* `--font-report` (not a subcommand — the existing non-interactive flags
+are flat, and this one wants the same `Look` a window would use, so it sits after
+the config and theme are read). The `-v` line now carries the fallback face's
+ascended size; "how it was found" is still the walk, so it says nothing yet.
+
+### M1 — one cell canvas, one baseline — done
 
 * `Metrics` gains `baseline` (from the cell top) computed the Ghostty way:
   `cell_height = ceil(ascent + descent + line_gap)` with half the gap on each
   side, `baseline = round(ascent + half_line_gap + (cell_height − face_height)/2)`.
   For DejaVu this is unchanged (9×17, 13); it matters for faces with a real
-  line gap, and it fixes the asymmetric inset dtr has now.
+  line gap, and it fixes the asymmetric inset dtr had.
 * `Renderer::glyph` stores `top = metrics.baseline − placement.top` for **every**
-  face (and its comment stops saying "ascent minus that"). `Fonts::ascent(face,
-  size)` goes away; a fallback's own ascent is no longer allowed to move the
-  baseline.
+  face. `Fonts::ascent(face, size)` is gone; a fallback's own ascent cannot move
+  the baseline.
 * Rasterise each face at its own size (see M4) and let the bearings place it.
 
 Files: `render.rs`. Effort: half a day.
 Acceptance (unit tests, skip-if-absent like the existing font tests):
-`漢` is drawn at 14×14 with `top == 1`; `日` at 10×13 with `top == 2`;
-a fallback glyph's baseline equals the grid's within 0.01 px.
+`啊` is drawn at its ink size with `top == baseline − placement.top`;
+`。` is not a square.
 Risk: glyphs with deep descenders now extend below the cell — Ghostty allows
 that too (it is why `adjust-cell-height` exists); visual check with a font that
 has a large descent.
 
-### M2 — draw wide text, do not fit it; take the width from the core
+*Landed:* `placement(metrics, image)` is the one rule, used by the renderer and
+the report. DejaVu has no line gap, so the cell metrics on this machine did not
+move; the baseline is no longer per face.
+
+### M2 — draw wide text, do not fit it; take the width from the core — done
 
 * Delete the wide-scale branch. A 2-cell glyph is placed at
   `x + placement.left` inside the 2-cell box (18 px here), on the cell's
   baseline; the glyph's own bearings decide the rest.
 * Take the width from the terminal: `pane.rs::fill_cells` reads
   `cell.raw_cell()?.wide()?` → `Narrow`/`Wide`/`SpacerTail`/`SpacerHead`.
-  `Wide` draws across two cells; the spacers are skipped for text (the
-  background stays per cell, which it already is). This replaces the
-  `unicode-width` guess and makes VS16/ZWJ clusters agree with the cursor,
+  `Wide` draws across two cells; the spacers carry no text, so they draw
+  nothing (the background stays per cell, which it already was). This replaces
+  the `unicode-width` guess and makes VS16/ZWJ clusters agree with the cursor,
   selection and mouse.
-* Clamp a `Wide` glyph at the last column to the pane's right edge: a wide
-  character in the last fitting column can emit an instance past it today, and
-  nothing scissors it.
-* Cursor: carry `at_wide_tail` (`CursorViewport` already has it) and, when set,
-  move the mark back one cell and double its width.
+* Cursor: carry `at_wide_tail` (`CursorViewport` has it) and, when set, move the
+  mark back one cell and — for a block — double its width.
 
 Files: `pane.rs`, `render.rs`. Effort: half a day.
-Acceptance: `。` is drawn 5×5 at (0,10), not 17×17; `漢` at (0,1) not (0.5,0);
-a cursor on `日` covers both cells; `the_width_comes_from_the_core` asserts a
-known wide character is `Wide` and its second cell `SpacerTail`.
+Acceptance: `。` is drawn 5×5 at (0,10), not 17×17; `啊` at (1,1) not (1.1,0);
+a block cursor on a wide character covers both cells; a wide character is `Wide`
+and its second cell carries no text.
 Risk: an 18 px pair for a 14 px glyph leaves a 4 px right gap between Han
 characters. That is Ghostty's rendering too (its cell is narrower, so the gap
 is smaller), and it is what keeps the advance honest. If it reads as loose,
 the answer is the M4 size adjustment, not a per-glyph stretch.
+
+*Landed:* the wide branch is gone; `fill_cells` asks the core; the cursor has
+`wide_tail`. Not done: a wide glyph in the last fitting column can still emit an
+instance up to one cell past the pane's right edge — the renderer has no scissor
+and all panes share one draw call (`AGENTS.md`, "Panes share one instance
+buffer"). It is a one-cell overdraw in a resize or an off-grid pane width, not a
+wrong glyph; a per-pane scissor is the fix if it ever shows.
 
 ### M3 — symbols are constrained
 
@@ -381,47 +419,61 @@ list narrow and do not apply it to general symbols.
 
 ## 6. Config surface
 
-Keep it small and name it after Ghostty so the mental model transfers:
+Not implemented yet; M1–M2 needed none of it. Keep it small and name it after
+Ghostty when it lands, so the mental model transfers:
 
 ```toml
 [font]
 fallback = ["Noto Sans Mono CJK SC", "0xProto Nerd Font Mono"]  # M4
-adjust_cell_height = 0      # M1, pixels; re-centres the baseline like Ghostty
-adjust_baseline = 0         # M1
-cjk_scale = 1.0             # M2, opt-in; the old stretch-the-box behaviour
+adjust_cell_height = 0      # pixels; re-centres the baseline like Ghostty
+adjust_baseline = 0
+cjk_scale = 1.0             # opt-in; the old stretch-the-box behaviour
 icon_scale = 1.0            # M3
 ```
 
 `cjk_scale > 1` is the escape hatch for people who prefer Han filling its two
-cells; it must not be the default, because it is the bug this plan removes.
+cells; it must not be the default, because it is the bug this plan removed.
 
 ---
 
 ## 7. Tests and measurement
 
-### 7.1 The probe that produced §1
+### 7.1 `dtr --font-report`
 
-A temporary `#[test]` in `render.rs`'s `font_tests` module: `Fonts::load(&Look::default())`,
-then for each sample character `face_for` → `glyph_id` → `rasterise`, printing
-the placement and recomputing the drawn rectangle with the same arithmetic as
-`prepare_pane`. It needs no GPU (no atlas), so it runs anywhere. M0 promotes it
-to `--font-report`; the tests below are its assertions.
+The probe that produced §1 is a flag now:
+
+```sh
+dtr --font-report              # honours [font] size/family/path and the theme
+dtr --font-report --font-family 'Noto Sans Mono CJK SC'
+```
+
+It loads the real `Fonts`, walks the same sample (`M`, `g`, `啊`, `あ`, `。`, `─`,
+`█`, a Nerd Font icon, a powerline arrow, an emoji), and prints for each: the
+face and family that answered, that face's own ascent, the advance, the ink box,
+and the rectangle `prepare_pane` would emit. No GPU, no atlas, no window — so it
+runs on a CI box with no `/dev/dri`.
+
+`啊` is first among the CJK samples because it is the repository's CJK test
+character (`AGENTS.md`); the report and the tests look at the same glyph.
 
 ### 7.2 Assertions, not pixels
 
-Placement is deterministic arithmetic on a font, so assert the numbers with a
-1 px tolerance rather than adding grid goldens (a golden would duplicate the
-rasteriser-disagreement problem the UI snapshots already have):
+Placement is deterministic arithmetic on a font, so the tests assert the numbers
+with a 1 px tolerance rather than adding grid goldens (a golden would duplicate
+the rasteriser-disagreement problem the UI snapshots already have). Landed:
 
-* `a_wide_glyph_keeps_its_design_size` — `漢` height ≤ cell height, and its
-  drawn top is within 1 px of `baseline − placement.top`.
-* `a_fallback_shares_the_grid_baseline` — for a character from a fallback face,
-  `top + placement.top == metrics.baseline` (0.01).
-* `a_fullwidth_dot_is_not_a_square` — `。` drawn width ≤ cell width.
+* `a_wide_glyph_keeps_its_design_size_and_baseline` — `啊` is drawn at its ink
+  size, inside its two cells, with `top + placement.top == metrics.baseline`.
+* `a_fullwidth_stop_is_not_a_square` — `。` fits inside one cell.
+* `a_block_cursor_on_a_wide_tail_covers_both_cells` — and a bar stays one cell.
+* `a_wide_character_is_two_cells_and_a_spacer` (pane) — `啊` is `Wide`, the cell
+  after it carries no text and is not wide, the next character is column 2.
+
+Still to write, with the milestone that makes them mean something:
+
 * `a_nerd_glyph_fits_its_cells` — PUA glyph inside `2 × cell_w` and
-  `cell_height`.
-* `a_block_fills_its_cell` — `█` size equals the cell (after M6).
-* `the_width_comes_from_the_core` — `Wide` + `SpacerTail` for a known pair.
+  `cell_height` (M3).
+* `a_block_fills_its_cell` — `█` size equals the cell (M6).
 * `a_monospace_family_wins_over_a_proportional_one` — the M4 policy, with a
   synthetic candidate list.
 
@@ -436,9 +488,11 @@ Nerd Font. Outside the shell this machine sees 351 families, three of them Nerd
 Font families (`0xProto Nerd Font*`). Consequences:
 
 * add a Nerd Font to `fontPackages` (e.g. `nerd-fonts.0xproto`, the one
-  installed here) so the PUA tests run in CI instead of skipping;
+  installed here) so the M3 PUA tests run in CI instead of skipping — **not
+  done yet**;
 * every §1-style measurement must say whether it was taken inside or outside
-  the devShell — the numbers differ;
+  the devShell — the numbers differ (inside, PUA has *no face at all*, which the
+  report now says out loud);
 * a bug report "CJK looks wrong" from someone running `nix develop` then `dtr`
   is reporting the *pinned* font set, not their system's.
 
@@ -446,7 +500,9 @@ Font families (`0xProto Nerd Font*`). Consequences:
 
 `--screenshot` renders offscreen at 1× and `--capture` copies the live window,
 so a HiDPI check of CJK needs `--capture` (docs/windows.md §2). Neither is a
-test gate; the placement assertions are.
+test gate; the placement assertions are. And capture with a shell that does not
+read the user's bash rc (`--shell "bash --norc --noprofile"`): a bad `PS1`
+prints readline's `\[` markers into the grid and reads like a renderer bug.
 
 ---
 
@@ -458,6 +514,13 @@ probe on the real `Fonts` code. The two runs that disagreed about the PUA face
 were the same config and package set, so the order fontconfig reports families
 (and the state of its cache) is enough to change the answer — which is exactly
 why a policy is needed.
+
+Measured again after M1–M2, through `--font-report`, at 14 and at 28 (cell
+17 × 33, baseline 26): `啊` 25 × 27 ink at (+2, +2), `。` 9 × 10 at (+1, +18),
+`M` 15 × 20 at (+1, +6). A side-by-side `--screenshot` of the two builds at 28
+(sharing `XDG_CONFIG_HOME` so they read the same config) is the sanity check for
+the numbers: the old build's Han are ~21 % larger, sit low, and its full stop is
+a blob; the new ones share the Latin baseline.
 
 Read (§3): Ghostty `5813c94`, `src/font/Metrics.zig` (`calc`, `apply`),
 `src/font/face/freetype.zig` (`renderGlyph`), `src/font/Glyph.zig`

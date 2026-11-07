@@ -102,6 +102,12 @@ pub struct Cursor {
     pub x: u16,
     pub y: u16,
     pub shape: CursorShape,
+    /// The cursor is on the second half of a two-cell character.
+    ///
+    /// The grid position points at the invisible half, so a one-cell mark lands
+    /// on a blank column with half the character left uncovered. The renderer
+    /// moves the mark back one cell and, for a block, doubles it.
+    pub wide_tail: bool,
 }
 
 impl Cursor {
@@ -2103,6 +2109,9 @@ fn publish(
             x: at.x,
             y: at.y,
             shape,
+            // The core already knows this: on a wide character the cursor is
+            // reported on the tail, and the renderer draws it across both cells.
+            wide_tail: at.at_wide_tail,
         });
 
     // A cursor is not a dirty cell. Hiding it, showing it, or turning its block
@@ -2581,12 +2590,17 @@ fn fill_cells(
             };
             cell.graphemes_utf8(&mut text)?;
             out.text.push_str(&text);
-            // The render iterator does not report cell width, so measure the
-            // character: on a wcwidth grid, two cells means a wide glyph.
-            out.wide = text
-                .chars()
-                .next()
-                .is_some_and(|ch| unicode_width::UnicodeWidthChar::width(ch) == Some(2));
+            // The width is the terminal's, not a guess: the core lays text out
+            // on a wcwidth grid, so it is the one that knows a cell is the
+            // first half of a wide character, the invisible second half, or a
+            // spacer left by a wrap. Measuring the first codepoint with
+            // `unicode-width` disagreed with it for VS16/ZWJ clusters (a
+            // narrow base promoted by U+FE0F) and said nothing at all about
+            // spacers, which must not be drawn.
+            out.wide = matches!(
+                cell.raw_cell()?.wide()?,
+                libghostty_vt::screen::CellWide::Wide
+            );
 
             if let Some(fg) = cell.fg_color()? {
                 out.fg = rgb(fg);
@@ -2730,7 +2744,15 @@ mod tests {
         use crate::layout::Rect;
 
         let cell = Rect::new(10.0, 20.0, 8.0, 16.0);
-        let mark = |shape| Cursor { x: 0, y: 0, shape }.mark(cell);
+        let mark = |shape| {
+            Cursor {
+                x: 0,
+                y: 0,
+                shape,
+                wide_tail: false,
+            }
+            .mark(cell)
+        };
 
         assert_eq!(mark(CursorShape::Block), cell);
         // A quarter of 8 is 2, and it sits against the left edge of the cell.
@@ -2749,7 +2771,8 @@ mod tests {
             Cursor {
                 x: 0,
                 y: 0,
-                shape: CursorShape::Bar
+                shape: CursorShape::Bar,
+                wide_tail: false,
             }
             .mark(thin)
             .width,
@@ -2759,7 +2782,8 @@ mod tests {
             Cursor {
                 x: 0,
                 y: 0,
-                shape: CursorShape::Underline
+                shape: CursorShape::Underline,
+                wide_tail: false,
             }
             .mark(thin)
             .height,
@@ -2789,6 +2813,27 @@ mod tests {
         }
         assert_eq!(per_cell[0], "O", "cells: {per_cell:?}");
         assert_eq!(per_cell[1], "K", "cells: {per_cell:?}");
+    }
+
+    /// A wide character is one cell of text and one of spacer, and the width is
+    /// the terminal's.
+    ///
+    /// `啊` is AGENTS.md's CJK test character. Its frame cell must say `wide`
+    /// (so the renderer draws across two cells) while the cell after it says
+    /// nothing at all — measuring the first codepoint with `unicode-width` got
+    /// `啊` right by luck but had no idea a spacer existed, and missed the
+    /// clusters where the terminal's width table disagrees with it.
+    #[test]
+    fn a_wide_character_is_two_cells_and_a_spacer() {
+        let frame = published("啊x".as_bytes());
+        assert_eq!(frame.cells[0].text, "啊");
+        assert!(frame.cells[0].wide, "the character cell is wide");
+        assert_eq!(frame.cells[1].text, "", "the second half carries no text");
+        assert!(
+            !frame.cells[1].wide,
+            "and is not a second copy of the glyph"
+        );
+        assert_eq!(frame.cells[2].text, "x", "the next cell is the next column");
     }
 
     /// The frame a pane would publish for `bytes`.

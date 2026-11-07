@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::pane::Frame;
+use crate::pane::{Cursor, CursorShape, Frame};
 use crate::ui::Look;
 
 /// A glyph as it sits in the atlas, plus where it goes relative to the cell.
@@ -65,11 +65,41 @@ fn rgb(colour: [u8; 3]) -> [f32; 4] {
 }
 
 /// Cell metrics in physical pixels, derived once per size change.
+///
+/// Everything here belongs to the *grid* face, not to whichever face a glyph
+/// came from. That is the point: a fallback face places its glyphs on the
+/// grid's baseline, so a Han character and the Latin beside it sit on one line
+/// however different their own ascents are.
 #[derive(Clone, Copy, Debug)]
 pub struct Metrics {
     pub cell_width: f32,
     pub cell_height: f32,
-    pub ascent: f32,
+    /// Distance from the cell's top edge to the baseline every glyph sits on.
+    ///
+    /// Computed the way Ghostty computes `cell_baseline` (`font/Metrics.zig`):
+    /// the line gap is split in half and put above and below the face, then the
+    /// baseline is nudged so the face is centred in the whole-pixel cell.
+    pub baseline: f32,
+}
+
+/// Where a glyph's bitmap sits inside its cell, in pixels from the cell's
+/// top-left corner.
+///
+/// The bearings come from the rasteriser and are relative to the pen on the
+/// baseline; the cell's top edge is `baseline` above that. Nothing is scaled:
+/// a wide character is 1 em of type inside two cells, and 2 × cell_width is
+/// normally wider than the em, so the cell pair is the room it needs rather
+/// than a box to fill.
+///
+/// Two callers need this and must agree: the renderer, to emit an instance, and
+/// `--font-report`, to say what the renderer emitted.
+fn placement(metrics: &Metrics, image: &swash::scale::image::Image) -> (f32, f32, f32, f32) {
+    (
+        image.placement.left as f32,
+        metrics.baseline - image.placement.top as f32,
+        image.placement.width as f32,
+        image.placement.height as f32,
+    )
 }
 
 pub struct GridRenderer {
@@ -359,34 +389,22 @@ impl GridRenderer {
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
             let (x, y) = (x + origin_x, y + origin_y);
             let style = face_for(cell.bold, cell.italic);
-            // A wide character is drawn across the two cells it occupies.
-            // Without this the grid shows a one-cell glyph and a one-cell hole,
-            // which reads as broken spacing rather than as a wide character.
-            let wide = cell.wide;
+            // A wide character is drawn across the two cells it occupies, at
+            // its design size: the terminal's `Wide` cell and the empty cell
+            // after it are the room it needs. Fitting it into the pair is what
+            // made Han 21% too large and turned a full stop into a square — the
+            // glyph's own bearings already say where it goes.
             for ch in cell.text.chars() {
                 let Some(glyph) = self.glyph(device, queue, ch, style, look.size) else {
                     continue;
                 };
-                let (width, height, left, top) = if wide && glyph.width > 0.0 {
-                    // Fit the glyph into the two cells it occupies, centred and
-                    // resting on the bottom of the cell. Scaling the already
-                    // placed offsets instead is what made CJK overlap: `top` is
-                    // a distance from the cell's top edge, not a length
-                    // proportional to the bitmap, so multiplying it moved the
-                    // glyph by the wrong amount.
-                    let scale = (cell_w * 2.0 / glyph.width).min(cell_h / glyph.height);
-                    let (width, height) = (glyph.width * scale, glyph.height * scale);
-                    (
-                        width,
-                        height,
-                        (cell_w * 2.0 - width) / 2.0,
-                        (cell_h - height).max(0.0),
-                    )
-                } else {
-                    (glyph.width, glyph.height, glyph.left, glyph.top)
-                };
                 self.instances.push(Instance {
-                    rect: [(x + left).round(), (y + top).round(), width, height],
+                    rect: [
+                        (x + glyph.left).round(),
+                        (y + glyph.top).round(),
+                        glyph.width,
+                        glyph.height,
+                    ],
                     uv: glyph.uv,
                     colour: rgb(cell.fg),
                 });
@@ -419,13 +437,18 @@ impl GridRenderer {
                 cell_w,
                 cell_h,
             );
+            // A cursor on the tail of a two-cell character belongs to the
+            // character, not to the invisible half: move it back one cell so a
+            // block covers both, and a bar sits at the character's own left
+            // edge. Ghostty does the same (`renderer/generic.zig`, `addCursor`).
+            let (dx, width) = cursor_cell(&cursor, cell_w);
             // Not the whole cell unless the program asked for a block: an insert
             // cursor is a bar against the left edge, which is how a terminal says
             // "typing goes in here" without covering the character it sits on.
             let mark = cursor.mark(crate::layout::Rect::new(
-                x + origin_x,
+                x + origin_x + dx,
                 y + origin_y,
-                cell_w,
+                width,
                 cell_h,
             ));
             self.instances.push(Instance::solid(
@@ -537,20 +560,18 @@ impl GridRenderer {
         let _ = device;
 
         let size_px = self.atlas_size as f32;
+        let (left, top, width, height) = placement(&self.fonts.metrics, &image);
         let glyph = Glyph {
             uv: [
                 x as f32 / size_px,
                 y as f32 / size_px,
-                (x + width) as f32 / size_px,
-                (y + height) as f32 / size_px,
+                (x + image.placement.width) as f32 / size_px,
+                (y + image.placement.height) as f32 / size_px,
             ],
-            // `placement.top` is the distance from the baseline up to the
-            // bitmap's top edge; the cell origin is the top of the line, so the
-            // glyph sits at ascent minus that.
-            left: image.placement.left as f32,
-            top: self.fonts.ascent(face, size) - image.placement.top as f32,
-            width: width as f32,
-            height: height as f32,
+            left,
+            top,
+            width,
+            height,
         };
         self.glyphs.insert(key, glyph);
         Some(glyph)
@@ -561,6 +582,28 @@ fn cell_origin(index: usize, cols: u16, cell_w: f32, cell_h: f32) -> (f32, f32) 
     let cols = usize::from(cols).max(1);
     let (row, col) = (index / cols, index % cols);
     (col as f32 * cell_w, row as f32 * cell_h)
+}
+
+/// The rectangle a cursor's mark is measured against: `(offset from the
+/// reported cell, width)`.
+///
+/// A cursor on the second half of a two-cell character is reported on the
+/// invisible half, so a block has to move back one cell and cover both. A bar
+/// or an underline stays at the character's own left edge — a bar marks where
+/// typing begins, and the middle of a glyph is not that — but the cell it is
+/// measured against is still the character's, so the bar lands on the character
+/// and not on the spacer. Ghostty's `addCursor` does the same with
+/// `cursor_wide`.
+fn cursor_cell(cursor: &Cursor, cell_w: f32) -> (f32, f32) {
+    if !cursor.wide_tail {
+        return (0.0, cell_w);
+    }
+    let width = if cursor.shape == CursorShape::Block {
+        cell_w * 2.0
+    } else {
+        cell_w
+    };
+    (-cell_w, width)
 }
 
 fn bytemuck_cast<T: Copy>(slice: &[T]) -> &[u8] {
@@ -656,6 +699,10 @@ struct Fonts {
     faces: Vec<Loaded>,
     context: swash::scale::ScaleContext,
     metrics: Metrics,
+    /// The point size every face is rasterised at.
+    size: f32,
+    /// The family that answered as the grid face, for the report and the log.
+    grid_name: String,
     /// Which face has each character in each style. `None` is cached too: a
     /// character nobody covers must not be searched for twice.
     resolved: HashMap<(u8, char), Option<usize>>,
@@ -675,7 +722,7 @@ struct Fonts {
 
 impl Fonts {
     fn load(look: &Look) -> Self {
-        let faces = load_faces(look);
+        let (faces, grid_name) = load_faces(look);
 
         let context = swash::scale::ScaleContext::new();
         let metrics = {
@@ -686,38 +733,51 @@ impl Fonts {
             match font {
                 Some(font) => {
                     let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
-                    let ascent = font.metrics(&[]).ascent * look.size / units;
-                    let advance = font
-                        .glyph_metrics(&[])
-                        .advance_width(font.charmap().map('M'))
-                        * look.size
-                        / units;
+                    let scale = |value: f32| value * look.size / units;
+                    let ascent = scale(font.metrics(&[]).ascent);
+                    let advance = scale(
+                        font.glyph_metrics(&[])
+                            .advance_width(font.charmap().map('M')),
+                    );
                     // swash reports descent as a positive distance *below* the
                     // baseline (unlike FreeType, which gives it negative), so
                     // negating it here shrinks the cell and the lines collapse
                     // into each other.
-                    let descent = font.metrics(&[]).descent * look.size / units;
+                    let descent = scale(font.metrics(&[]).descent);
+                    let line_gap = scale(font.metrics(&[]).leading);
                     // Whole-pixel cells: a fractional advance puts every glyph
                     // on a half-pixel and the whole screen looks out of focus.
                     // Round *up*: rounding down makes the cell narrower than the
                     // glyph advance, so neighbours overlap ("llll" renders as a
                     // smear).
+                    let cell_width = advance.max(1.0).ceil();
+                    // The line gap is split either side of the face rather than
+                    // added below it, and the baseline is then placed inside the
+                    // rounded cell the same way — Ghostty's `Metrics.calc`. A
+                    // face with a real line gap otherwise sits high in its cell,
+                    // and every fallback glyph follows it.
+                    let face_height = ascent + descent + line_gap;
+                    let cell_height = face_height.max(1.0).ceil();
+                    let baseline =
+                        (ascent + line_gap / 2.0 + (cell_height - face_height) / 2.0).round();
                     Metrics {
-                        cell_width: advance.max(1.0).ceil(),
-                        cell_height: (ascent + descent).max(1.0).ceil(),
-                        ascent: ascent.round(),
+                        cell_width,
+                        cell_height,
+                        baseline,
                     }
                 }
                 None => Metrics {
                     cell_width: look.size * 0.6,
                     cell_height: look.size * 1.2,
-                    ascent: look.size,
+                    baseline: look.size,
                 },
             }
         };
 
         Self {
             faces: faces.into_iter().collect(),
+            grid_name,
+            size: look.size,
             context,
             metrics,
             resolved: HashMap::new(),
@@ -821,6 +881,14 @@ impl Fonts {
                 if reference.charmap().map(ch) == 0 {
                     continue;
                 }
+                // The face's own ascent, so `-v` shows why its glyphs sit
+                // where they do relative to the grid's baseline. Past this
+                // point the ascent must never move that baseline.
+                let ascent = {
+                    let metrics = reference.metrics(&[]);
+                    let units = f32::from(metrics.units_per_em).max(1.0);
+                    metrics.ascent * self.size / units
+                };
                 drop(bytes);
                 // Reload to own the bytes: `font.load` borrows from the cache.
                 let Some(bytes) = font.load(None) else {
@@ -834,7 +902,12 @@ impl Fonts {
                 });
                 found = Some(self.faces.len() - 1);
                 self.fallback_order.push(self.faces.len() - 1);
-                tracing::debug!(character = %ch, family = self.names.last().map(String::as_str), "fallback face");
+                tracing::debug!(
+                    character = %ch,
+                    family = self.names.last().map(String::as_str),
+                    ascent,
+                    "fallback face"
+                );
                 break;
             }
             if found.is_some() {
@@ -855,18 +928,6 @@ impl Fonts {
         let font = self.font(face)?;
         let id = font.charmap().map(ch);
         (id != 0).then_some(id)
-    }
-
-    /// The scaled ascent of one face, for placing its glyphs on the same
-    /// baseline as the grid. A fallback face rarely shares the grid's ascent,
-    /// and using the grid's would float its glyphs.
-    fn ascent(&self, face: usize, size: f32) -> f32 {
-        let Some(font) = self.font(face) else {
-            return self.metrics.ascent;
-        };
-        let metrics = font.metrics(&[]);
-        let units = f32::from(metrics.units_per_em).max(1.0);
-        metrics.ascent * size / units
     }
 
     fn rasterise(
@@ -892,24 +953,117 @@ impl Fonts {
     }
 }
 
-/// Load the four faces: regular, bold, italic, bold-italic.
+/// Characters `--font-report` measures: one from each family a terminal is
+/// asked to draw.
+///
+/// `啊` (`U+554A`) is *the* CJK sample in this repository — AGENTS.md says so.
+/// It is a full-width Han character with ink in all four quadrants, so a
+/// baseline error, a wrong size or a half-drawn cell is visible in its numbers
+/// and on screen. The rest are here because they fail differently: kana, a
+/// full-width full stop (tiny ink in a wide cell), box drawing and a block
+/// (which must tile), a Nerd Font icon, a powerline arrow, and colour emoji.
+const FONT_REPORT_SAMPLE: &[char] = &[
+    'M', 'g', '啊', 'あ', '。', '─', '█', '\u{f015}', '\u{e0b0}', '😀',
+];
+
+/// Print what the glyph pipeline will do, then let the caller exit.
+///
+/// The placement arithmetic is the renderer's own (`placement`), so this is not
+/// a second opinion: it is the frame the window would draw. `-v` says which
+/// family answered; this says what the answer came out as.
+pub fn font_report(look: &Look) {
+    let mut fonts = Fonts::load(look);
+    let metrics = fonts.metrics;
+    println!(
+        "grid      {} at {}",
+        if fonts.grid_name.is_empty() {
+            "(none)"
+        } else {
+            fonts.grid_name.as_str()
+        },
+        look.size
+    );
+    println!(
+        "cell      {:.0} x {:.0} px, baseline {:.0} px from the top",
+        metrics.cell_width, metrics.cell_height, metrics.baseline
+    );
+    println!();
+
+    for &ch in FONT_REPORT_SAMPLE {
+        let Some(face) = fonts.face_for(Face::Regular, ch) else {
+            println!("U+{:04X} {ch}  no face has this character", ch as u32);
+            continue;
+        };
+        let name = if face < 4 {
+            fonts.grid_name.clone()
+        } else {
+            fonts.names.get(face - 4).cloned().unwrap_or_default()
+        };
+        let Some(glyph_id) = fonts.glyph_id(face, ch) else {
+            println!("U+{:04X} {ch}  face {face} has no glyph", ch as u32);
+            continue;
+        };
+        let Some(image) = fonts.rasterise(face, glyph_id, look.size) else {
+            continue;
+        };
+        // The face's own ascent, to show why a fallback used to float: the
+        // baseline below is the grid's, not this number.
+        let ascent = fonts.font(face).map_or(0.0, |font| {
+            let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
+            font.metrics(&[]).ascent * look.size / units
+        });
+        let advance = fonts.font(face).map_or(0.0, |font| {
+            let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
+            font.glyph_metrics(&[]).advance_width(glyph_id) * look.size / units
+        });
+        let (left, top, width, height) = placement(&metrics, &image);
+        println!(
+            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}",
+            ch as u32,
+            ascent,
+            advance,
+            image.placement.width,
+            image.placement.height,
+            left,
+            top,
+            width,
+            height,
+        );
+    }
+
+    println!();
+    println!(
+        "fallbacks {}",
+        if fonts.names.is_empty() {
+            "(none loaded)".to_owned()
+        } else {
+            fonts.names.join(", ")
+        }
+    );
+}
+
+/// Load the four faces: regular, bold, italic, bold-italic, and the family that
+/// answered.
 ///
 /// `font.path` wins and can only supply one face, so the other three fall back
 /// to it — a user who points at a single file gets a uniform grid rather than a
 /// partial one. Otherwise the family is asked for each style and a missing face
 /// falls back down the chain: bold-italic → italic → bold → regular, which is
 /// what a terminal does when a family ships only two weights.
-fn load_faces(look: &Look) -> [Loaded; 4] {
+fn load_faces(look: &Look) -> ([Loaded; 4], String) {
     if let Some(path) = look.path.as_ref() {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let loaded = Loaded { bytes, index: 0 };
-                return [
-                    loaded.clone_face(),
-                    loaded.clone_face(),
-                    loaded.clone_face(),
-                    loaded,
-                ];
+                return (
+                    [
+                        loaded.clone_face(),
+                        loaded.clone_face(),
+                        loaded.clone_face(),
+                        loaded,
+                    ],
+                    path.display().to_string(),
+                );
             }
             Err(err) => tracing::warn!(path = %path.display(), %err, "configured font"),
         }
@@ -983,12 +1137,15 @@ fn load_faces(look: &Look) -> [Loaded; 4] {
                 bytes: Vec::new(),
                 index: 0,
             };
-            return [
-                regular,
-                bold.unwrap_or_else(|| empty.clone_face()),
-                italic.unwrap_or_else(|| empty.clone_face()),
-                bold_italic.unwrap_or(empty),
-            ];
+            return (
+                [
+                    regular,
+                    bold.unwrap_or_else(|| empty.clone_face()),
+                    italic.unwrap_or_else(|| empty.clone_face()),
+                    bold_italic.unwrap_or(empty),
+                ],
+                family.to_owned(),
+            );
         }
     }
 
@@ -997,12 +1154,15 @@ fn load_faces(look: &Look) -> [Loaded; 4] {
         bytes: Vec::new(),
         index: 0,
     };
-    [
-        empty.clone_face(),
-        empty.clone_face(),
-        empty.clone_face(),
-        empty,
-    ]
+    (
+        [
+            empty.clone_face(),
+            empty.clone_face(),
+            empty.clone_face(),
+            empty,
+        ],
+        String::new(),
+    )
 }
 
 impl Loaded {
@@ -1020,17 +1180,46 @@ impl Loaded {
 mod font_tests {
     use super::*;
 
+    /// One character, measured the way the renderer measures it.
+    struct Placed {
+        face: usize,
+        image: swash::scale::image::Image,
+        /// The rectangle the renderer emits, relative to the cell.
+        rect: (f32, f32, f32, f32),
+        metrics: Metrics,
+    }
+
+    /// Place one character at the default look, or `None` when this machine has
+    /// no font for it.
+    ///
+    /// These tests use the renderer's own arithmetic, so a test that passes
+    /// here is describing the frame the window draws.
+    fn placed(ch: char) -> Option<Placed> {
+        let look = Look::default();
+        let mut fonts = Fonts::load(&look);
+        let face = fonts.face_for(Face::Regular, ch)?;
+        let glyph_id = fonts.glyph_id(face, ch)?;
+        let image = fonts.rasterise(face, glyph_id, look.size)?;
+        let rect = placement(&fonts.metrics, &image);
+        Some(Placed {
+            face,
+            image,
+            rect,
+            metrics: fonts.metrics,
+        })
+    }
+
     /// A CJK character must come from another family, and finding it must be
     /// remembered rather than repeated for every cell.
     #[test]
     fn a_han_character_falls_back_to_a_face_that_has_it() {
         let mut fonts = Fonts::load(&Look::default());
-        let Some(first) = fonts.face_for(Face::Regular, '日') else {
+        let Some(first) = fonts.face_for(Face::Regular, '啊') else {
             // No CJK font installed here; nothing to prove.
             return;
         };
         assert!(first >= 4, "a fallback must not be one of the grid faces");
-        let second = fonts.face_for(Face::Regular, '本');
+        let second = fonts.face_for(Face::Regular, '漢');
         assert_eq!(second, Some(first), "the next character reuses the face");
         assert_eq!(fonts.fallback_order.len(), 1, "one fallback was enough");
     }
@@ -1040,7 +1229,7 @@ mod font_tests {
     #[test]
     fn a_preferred_fallback_family_is_chosen_over_an_arbitrary_one() {
         let mut fonts = Fonts::load(&Look::default());
-        let Some(index) = fonts.face_for(Face::Regular, '日') else {
+        let Some(index) = fonts.face_for(Face::Regular, '啊') else {
             return; // no CJK font installed here
         };
         let name = fonts.names.get(index - 4).cloned().unwrap_or_default();
@@ -1060,6 +1249,85 @@ mod font_tests {
             preferred.contains(&name.as_str()),
             "picked {name}, but {preferred:?} is installed and preferred"
         );
+    }
+
+    /// `啊` is drawn at its design size, on the grid's baseline.
+    ///
+    /// This is the CJK sample this repository standardises on (AGENTS.md). It
+    /// used to be scaled into its two cells and rested on the cell's bottom
+    /// edge — 21 % too large and a pixel low, because the cell pair is 18 px
+    /// and the glyph is 14 (`docs/cjk.md` §1). The baseline assertion is the
+    /// other half: Noto's own ascent is 16.24 against the grid's 13, so a
+    /// per-face baseline put every Han glyph 3 px below the Latin beside it.
+    #[test]
+    fn a_wide_glyph_keeps_its_design_size_and_baseline() {
+        let Some(p) = placed('啊') else {
+            return; // no CJK font installed here
+        };
+        let (_, top, width, height) = p.rect;
+        assert!(p.face >= 4, "a Han glyph comes from a fallback face");
+        assert!(width > 0.0 && height > 0.0, "the sample must have ink");
+        assert_eq!(
+            (width, height),
+            (
+                p.image.placement.width as f32,
+                p.image.placement.height as f32
+            ),
+            "the bitmap is drawn at the size it was rasterised at, not fitted"
+        );
+        assert!(
+            width <= p.metrics.cell_width * 2.0 + 0.01,
+            "a wide glyph fits its two cells, {width} px wide in {}",
+            p.metrics.cell_width * 2.0
+        );
+        assert!(
+            (top + p.image.placement.top as f32 - p.metrics.baseline).abs() < 0.01,
+            "the glyph's baseline is the grid's: top {top} + rise {} != {}",
+            p.image.placement.top,
+            p.metrics.baseline
+        );
+        assert!(top >= 0.0, "a Han glyph starts below the cell's top edge");
+    }
+
+    /// A full-width full stop is a dot, not a cell.
+    ///
+    /// `。` is 14 px of advance and 5 px of ink: the old wide rule scaled the
+    /// *ink* to fill the two cells, so it drew a 17 × 17 square. Nothing about
+    /// a wide character says its ink is as big as its advance.
+    #[test]
+    fn a_fullwidth_stop_is_not_a_square() {
+        let Some(p) = placed('。') else { return };
+        let (_, _, width, height) = p.rect;
+        assert!(
+            width <= p.metrics.cell_width && height <= p.metrics.cell_width,
+            "a full stop is {width}x{height}, not a cell"
+        );
+    }
+
+    /// A wide-character cursor moves back onto the character and covers it.
+    #[test]
+    fn a_block_cursor_on_a_wide_tail_covers_both_cells() {
+        let cell_w = 9.0;
+        let block = Cursor {
+            x: 5,
+            y: 0,
+            shape: CursorShape::Block,
+            wide_tail: true,
+        };
+        assert_eq!(cursor_cell(&block, cell_w), (-cell_w, 2.0 * cell_w));
+        // A bar is a mark against where typing starts, so it stays one cell
+        // wide and lands on the character's own left edge.
+        let bar = Cursor {
+            shape: CursorShape::Bar,
+            ..block
+        };
+        assert_eq!(cursor_cell(&bar, cell_w), (-cell_w, cell_w));
+        // And off a wide character there is nothing to move.
+        let narrow = Cursor {
+            wide_tail: false,
+            ..block
+        };
+        assert_eq!(cursor_cell(&narrow, cell_w), (0.0, cell_w));
     }
 
     #[test]

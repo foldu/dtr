@@ -111,6 +111,12 @@ GitHub: if the mirror does not copy tags, nothing publishes — push it by hand
   window's surface. When a menu or a font differs between them, `--capture` is the
   one that tells the truth — and the offscreen path renders at 1×, so it cannot show a
   HiDPI bug at all (`docs/windows.md` §2).
+- **Capture with a shell that does not read the user's bash rc.** dtr launches
+  `$SHELL`, so a broken `~/.bashrc` ends up *in the grid*: readline's `\[` and `\]`
+  prompt markers are printed literally, the prompt grows to half a screen, and it
+  reads like a renderer bug. Use `--shell "bash --norc --noprofile"` (the flag
+  splits on whitespace) for any capture, screenshot or font comparison, and the
+  same for a payload that a shell rc would otherwise decorate.
 - Commits end with the co-author trailer.
 
 ## The event loop, redraws, and doing work off the UI thread
@@ -370,25 +376,27 @@ grid stops lining up. `-v` logs `fallback face` naming the winner, which is how 
 tell whether the list does anything on a given machine.
 
 Two consequences: the glyph atlas key includes the *face index* (glyph ids collide
-between fonts), and — the current bug — a glyph is placed by the ascent of the face
-that produced it, so every fallback sits off the grid's baseline. Ghostty places
-every face on one `cell_baseline` (`docs/cjk.md` §3.1).
+between fonts), and every glyph is placed on the **grid's** baseline — `Metrics::baseline`,
+from the grid face — not on the ascent of the face that produced it. A fallback's own
+ascent only decides where its ink sits relative to that baseline (Ghostty's
+`cell_baseline`, `docs/cjk.md` §3.1).
 
-**A wide character is two cells, not one.** The render iterator used to hide cell
-width, so width came from `unicode-width`; the core does report it (`Cell::wide()`,
-`Narrow`/`Wide`/`SpacerTail`/`SpacerHead`) and the plan is to take it from there.
-Today a two-cell character is drawn across both cells, *scaled to fit* — which is
-one of the four bugs `docs/cjk.md` §1 measures, together with the per-face
-baseline, the unconstrained symbols and the "first family fontconfig lists"
-fallback.
+**`啊` is the CJK test character.** `U+554A`: full-width Han with ink in all four
+quadrants, so a baseline error, a wrong size or a half-drawn cell shows up in its
+numbers and on screen. It is in `FONT_REPORT_SAMPLE` (`dtr --font-report`) and in the
+placement tests; use it for a new CJK test or capture rather than inventing another
+character, so two people comparing two builds are looking at the same glyph.
+
+**A wide character is two cells, not one, and neither is a box to fill.** The width
+is the terminal's (`Cell::wide()` → `Narrow`/`Wide`/`SpacerTail`/`SpacerHead`), taken
+in `fill_cells`; a spacer is not drawn. The glyph is drawn at its design size across
+the pair — the old code scaled the *ink* to fill the box, which made a full-width full
+stop a 17×17 square (`docs/cjk.md` §1).
 
 **A placed offset is not a length.** `glyph.top` is the distance from the cell's top
-edge to the glyph, not a size — scaling it with the bitmap moved wide glyphs by the
-wrong amount and piled CJK on its neighbours. Today wide glyphs are fitted from the
-bitmap: scaled uniformly into the two-cell box, centred, resting on the cell's
-bottom. Ghostty's model — one cell canvas, one baseline, nothing scaled unless a
-constraint says so — is in `docs/cjk.md` §3; do not add a second copy of the fitting
-rule here.
+edge to the glyph, not a size: the bearings come from the rasteriser relative to the
+baseline and were never proportional to the bitmap. One placement rule, in
+`render::placement`, shared with `--font-report`; do not add a second copy of it here.
 
 **egui's default fonts have no arrows.** `↑↓` and `←→` panicked the harness and had
 been drawing empty boxes in the window; hints are words now (`up/down`).

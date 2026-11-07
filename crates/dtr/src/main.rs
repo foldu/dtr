@@ -83,6 +83,11 @@ struct Args {
     #[arg(long)]
     fonts: bool,
 
+    /// Print the glyph pipeline's decisions for a fixed sample — cell metrics,
+    /// and the face, size and rectangle behind each character — then exit
+    #[arg(long)]
+    font_report: bool,
+
     /// Prefer the GPU whose name contains TEXT, e.g. --gpu nvidia
     #[arg(long, value_name = "TEXT")]
     gpu: Option<String>,
@@ -504,6 +509,14 @@ fn main() -> anyhow::Result<()> {
         config.font.path.clone(),
         theme.as_ref(),
     );
+
+    // After the Look, so the report describes the font the terminal would
+    // actually use — config, family and theme included — and before anything
+    // opens a window or a port.
+    if args.font_report {
+        render::font_report(&look);
+        return Ok(());
+    }
 
     // Never fatal: a broken or read-only state file must not stop a terminal
     // from opening a port.
