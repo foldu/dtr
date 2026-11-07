@@ -4619,6 +4619,16 @@ impl Gpu {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ui, |_ui| {});
+            // A frameless window's borders. The window manager's grip went with
+            // the frame, so the strips are ours — added after the panels so the
+            // few pixels at the edge belong to the resize and not to whatever
+            // happens to be drawn underneath them.
+            if self.client_frame {
+                if let Some(direction) = crate::chrome::resize_edges(ui, ui.max_rect()) {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                }
+            }
             // File panes sit over the grid rectangle their leaf owns. They
             // are areas rather than windows: fixed position, no dragging.
             for file in files {

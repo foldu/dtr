@@ -388,6 +388,94 @@ pub fn drag_rect(strip: Rect, used: Rect) -> Option<Rect> {
     (drag.width() >= 1.0 && drag.height() >= 1.0).then_some(drag)
 }
 
+/// Width of the border that grabs a resize, in points.
+///
+/// A frameless window has no window manager to resize it, and the OS's own
+/// grip is gone with the frame; this is the whole of what replaces it.
+const RESIZE_EDGE: f32 = 4.0;
+
+/// The corner boxes, which are bigger than the edge band so a diagonal drag is
+/// easy to hit.
+const RESIZE_CORNER: f32 = 10.0;
+
+/// The window's resize borders, as interactive strips on `screen`.
+///
+/// Drawn by egui rather than by the OS, so this is where a frameless window's
+/// resizing comes from on Linux. On Windows the retained frame still hit-tests
+/// the outer pixels and takes the press first, which is why this is correct to
+/// run there too: it never wins, it just does not have to.
+///
+/// The cursor is set from the zone under the pointer, because an invisible
+/// border with no cursor is a border nobody finds.
+pub fn resize_edges(ui: &mut Ui, screen: Rect) -> Option<egui::ResizeDirection> {
+    use egui::{CursorIcon, ResizeDirection as Dir};
+    let e = RESIZE_EDGE;
+    let c = RESIZE_CORNER;
+    let (l, t, r, b) = (screen.left(), screen.top(), screen.right(), screen.bottom());
+    // Edges first, corners last: a press in a corner is inside both, and the
+    // later widget is the one egui gives the press to.
+    let zones = [
+        (
+            Rect::from_min_max(egui::pos2(l + c, t), egui::pos2(r - c, t + e)),
+            Dir::North,
+            "north",
+            CursorIcon::ResizeNorth,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(l + c, b - e), egui::pos2(r - c, b)),
+            Dir::South,
+            "south",
+            CursorIcon::ResizeSouth,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(l, t + c), egui::pos2(l + e, b - c)),
+            Dir::West,
+            "west",
+            CursorIcon::ResizeWest,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(r - e, t + c), egui::pos2(r, b - c)),
+            Dir::East,
+            "east",
+            CursorIcon::ResizeEast,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(l, t), egui::pos2(l + c, t + c)),
+            Dir::NorthWest,
+            "north-west",
+            CursorIcon::ResizeNorthWest,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(r - c, t), egui::pos2(r, t + c)),
+            Dir::NorthEast,
+            "north-east",
+            CursorIcon::ResizeNorthEast,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(l, b - c), egui::pos2(l + c, b)),
+            Dir::SouthWest,
+            "south-west",
+            CursorIcon::ResizeSouthWest,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(r - c, b - c), egui::pos2(r, b)),
+            Dir::SouthEast,
+            "south-east",
+            CursorIcon::ResizeSouthEast,
+        ),
+    ];
+    for (rect, direction, name, cursor) in zones {
+        let response = ui.interact(rect, Id::unique(("dtr-resize", name)), Sense::drag());
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(cursor);
+        }
+        if response.drag_started() {
+            return Some(direction);
+        }
+    }
+    None
+}
+
 /// Draw the drag region into `strip` and report what the pointer asked for.
 ///
 /// `used` is what `ui::tab_bar` allocated, so a press that lands on a chip or
@@ -480,6 +568,66 @@ mod tests {
                 drag.right() <= buttons.left(),
                 "{kind:?}: the drag runs under the buttons"
             );
+        }
+    }
+
+    /// The borders are invisible, so the only proof they exist is that a drag
+    /// there asks for a resize — and for the right edge of it.
+    #[test]
+    fn a_drag_on_a_border_asks_for_that_resize() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let seen: Rc<RefCell<Vec<egui::ResizeDirection>>> = Rc::default();
+        let sink = Rc::clone(&seen);
+        let rects: Rc<RefCell<Option<Rect>>> = Rc::default();
+        let seen_rects = Rc::clone(&rects);
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            let screen = ui.max_rect();
+            *seen_rects.borrow_mut() = Some(screen);
+            if let Some(direction) = resize_edges(ui, screen) {
+                sink.borrow_mut().push(direction);
+            }
+        });
+        harness.run();
+        let screen = rects.borrow().expect("the window was drawn");
+
+        for (pos, expected) in [
+            (
+                screen.left_top() + egui::vec2(2.0, 2.0),
+                egui::ResizeDirection::NorthWest,
+            ),
+            (
+                screen.right_bottom() - egui::vec2(2.0, 2.0),
+                egui::ResizeDirection::SouthEast,
+            ),
+            (
+                egui::pos2(screen.center().x, screen.top() + 2.0),
+                egui::ResizeDirection::North,
+            ),
+            (
+                egui::pos2(screen.center().x, screen.bottom() - 2.0),
+                egui::ResizeDirection::South,
+            ),
+            (
+                egui::pos2(screen.left() + 2.0, screen.center().y),
+                egui::ResizeDirection::West,
+            ),
+            (
+                egui::pos2(screen.right() - 2.0, screen.center().y),
+                egui::ResizeDirection::East,
+            ),
+        ] {
+            // Move towards the middle, so the drag never leaves the window.
+            let toward = (screen.center() - pos).normalized() * 24.0;
+            seen.borrow_mut().clear();
+            harness.drag_at(pos);
+            harness.run();
+            harness.hover_at(pos + toward);
+            harness.run();
+            assert_eq!(*seen.borrow(), vec![expected], "a drag at {pos:?}");
+            harness.drop_at(pos + toward);
+            harness.run();
         }
     }
 
