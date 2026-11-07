@@ -21,15 +21,27 @@ are in the library.
 
 So:
 
-- read the portal with **two `busctl` subprocesses** (one per key; no GLib link,
-  no GLib CLI);
-- fall back to `gsettings` (a subprocess), then to `settings.ini` for the
-  *theme name*, then to `None`;
+- read the portal over the session bus with **`zbus`** (a pure-Rust D-Bus
+  client, MIT, no GLib link) on its **`tokio`** transport, because dtr already
+  runs tokio: one `Connection::session()` and two `Proxy::call`s; `busctl
+  --json=short` is the zero-dependency fallback and returns the same values as
+  JSON, so the fallback is not text parsing either;
+- fall back to `gsettings` (a subprocess) when the portal is absent, then to
+  `settings.ini` for the *theme name*, then to `None`;
 - build `Palette::adwaita(dark, accent)` from constants measured out of
   `libadwaita-1.so`, and `Skin::linux(dark, accent)` from it;
 - do **not** parse libadwaita's gresource and do **not** parse user CSS in v1.
   A parser that cannot evaluate `color-mix()`, `oklab()` or the injected accent
   would produce a palette GTK does not show, which is worse than the dtr skin.
+
+The only new dependency is **`zbus` 5** (MIT), on its `tokio` transport. It is
+a D-Bus client, not a toolkit: it links no GLib, it reuses the runtime dtr
+already runs, and it reads the same service `rfd`'s `xdg-portal` backend already
+uses for the file dialog. It does bring a tree — 77 lock entries in a probe,
+against zero crates for the `busctl --json=short` variant in §4.2, which is the
+same design with a subprocess instead of a client. That is the trade to decide,
+not a detail: about 2 ms once per process against a dependency tree that every
+future `cargo deny` run has to re-approve.
 
 **Measured against GTK itself.** A throwaway GTK4/libadwaita probe (§3.2.1)
 resolves `window_bg_color #222226`, `accent_bg_color #3584E4`,
@@ -290,6 +302,16 @@ That is the case the design has to be honest about.
 
 ### 4.1 What is installed and what it says
 
+**What "the portal" is.** The XDG desktop portal: a session-bus service at
+`org.freedesktop.portal.Desktop`, object `/org/freedesktop/portal/desktop`,
+interface `org.freedesktop.portal.Settings`, method
+`Read(namespace, key) -> v`. The namespace is `org.freedesktop.appearance`; the
+keys are `color-scheme` (`0` no preference, `1` prefer dark, `2` prefer light)
+and `accent-color` (three doubles, RGB in 0..1). It is not GTK and not
+GNOME-specific; here it is `xdg-desktop-portal` with
+`org.freedesktop.impl.portal.desktop.gnome`, and dtr already reaches it through
+`rfd`'s `xdg-portal` backend for the file dialog.
+
 **Measured.** `gsettings` (glib 2.88.3), `dconf`, `gdbus` and `busctl` (systemd
 262) are present. The session bus is at `unix:path=/run/user/1000/bus`, and
 `org.freedesktop.portal.Desktop` is running.
@@ -355,7 +377,8 @@ NixOS behaviour.
 
 | Source | What it gives | Cost (measured) | Failure |
 |---|---|---|---|
-| `busctl --user call … Read` | scheme int, accent RGB floats | ~2.6 ms for both (20 pairs, 52 ms) | no bus, no portal, unknown key → exit 1 |
+| `zbus` (`tokio`) session + `Proxy::call` | scheme `Value::U32`, accent `Value::Structure([F64; 3])` | ~2.0 ms for both (20 runs, 41 ms), one connection | no bus, no portal → `Err` |
+| `busctl --json=short --user call … Read` | the same values as typed JSON (`{"type":"v","data":[{"type":"v","data":{"type":"(ddd)","data":[0.2078…]}}]}`) | ~2.6 ms for both (20 pairs, 52 ms) | no bus, no portal, unknown key → exit 1 |
 | `gdbus call --session …` | the same, as `(<<uint32 1>>,)` / `(<<(ddd)>>,)` | ~2.4 ms per call (20 calls, 48 ms) | same |
 | `gsettings get` | scheme string, accent *name*, theme name; schema defaults applied | ~2.9 ms for both (20 pairs, 58 ms) | no schemas, no bus; dconf warnings on stderr |
 | `dconf read` | stored keys only | ~2.0 ms for both (20 pairs, 39 ms) | effective-default problem above |
@@ -366,15 +389,17 @@ NixOS behaviour.
 `file`). The gvdb format is documented, but parsing it buys one fewer subprocess
 and loses the schema defaults. Rejected.
 
-The costs are per read (one process per source, two for the portal pair).
-`OnceLock` is what makes them acceptable: `Look::skin()` is asked by every
-surface on every frame, and 2.6 ms × 60 is 156 ms/s — the same reason the
-Windows registry read is cached (`crates/dtr/src/system.rs`).
+The costs are per read (one connection for `zbus`, one process per key for
+`busctl`, one process for `gsettings`). `OnceLock` is what makes them
+acceptable: `Look::skin()` is asked by every surface on every frame, and
+2–2.6 ms × 60 is 120–156 ms/s — the same reason the Windows registry read is
+cached (`crates/dtr/src/system.rs`).
 
-**Reasoned read order.** Portal first (cross-desktop, resolved values, no GLib);
-`gsettings` second (a GLib CLI, but only a subprocess; applies defaults; works
-when the portal is absent); `settings.ini` for the theme *name*; then `None`,
-which `Skin::resolve` turns into the dtr skin.
+**Reasoned read order.** `zbus` first (cross-desktop, resolved values, no GLib,
+typed); `busctl` if the crate is not in the build (the same portal, zero new
+dependencies); `gsettings` when the portal is absent (a GLib CLI, but only a
+subprocess; applies defaults); `settings.ini` for the theme *name*; then
+`None`, which `Skin::resolve` turns into the dtr skin.
 
 ## 5. Precedence and fallbacks
 
@@ -467,8 +492,39 @@ fn platform_skin() -> Option<Skin> {
 ```
 
 `crates/dtr/src/system/linux.rs` (or `system/linux/` with `css.rs` for v2) owns
-the environment, the subprocesses and the files. `OnceLock` stays where it is:
-the portal read is once per process, not once per frame.
+the connection, the fallbacks and the files. The `zbus` dependency is
+target-specific, so the Windows build does not see it:
+
+```toml
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
+```
+
+**Measured, the transport matters to the tree.** The `tokio` feature reuses the
+runtime dtr already has; `async-io` (zbus's default) would add a second reactor
+beside it. A throwaway probe resolving the same two keys:
+
+| Features | Lock entries | Result |
+|---|---|---|
+| `async-io` + `blocking-api` | 86 | `Value(U32(1))`, `(ddd) 0.2078 0.5176 0.8941` |
+| `tokio` + `blocking-api` | 77 | the same two values |
+
+zbus wants tokio ≥ 1.37 with `rt`, `rt-multi-thread`, `net`, `time`, `fs`,
+`io-util`; `Cargo.toml` already asks for `1` with the first three of those, so
+cargo unifies the features and no second runtime appears. The flake's
+`rust-bin.stable.latest.default` is newer than zbus 5.19's Rust 1.87 MSRV, so
+the crate is not a toolchain bump.
+
+The reader opens one `zbus::blocking::Connection::session()` and calls `Read`
+twice; a missing session bus or portal is `None`, not a panic. The return is an
+`OwnedValue`: `Value::U32` for the scheme, `Value::Structure` of three `F64`s
+for the accent (the probe in the appendix is the working example). The
+blocking API is used once at startup; it is not on the per-frame path. The
+`busctl` variant is a one-function swap behind the same `portal()` interface,
+for a build that does not want the crate.
+
+`OnceLock` stays where it is: the portal read is once per process, not once per
+frame.
 
 **`-v` (proposed).** The existing line becomes:
 
@@ -482,10 +538,10 @@ chrome skin="dtr" requested="native" accent="#FFB000" source="none" reason="them
 "asked for native and got dtr" with no cause, which `docs/ui.md` already calls
 out as the reason the line exists.
 
-**Timeouts.** 500 ms per subprocess and for the whole read; a local call measured
-at 2.6 ms, so the ceiling is a stuck-portal guard, not a delay. Any failure is
-`None`, logged once. The failure prevented: a hung D-Bus daemon freezing the
-first frame.
+**Timeouts.** 500 ms for the whole read (the `zbus` call or the `busctl`
+fallback); a local call measured at 2–2.6 ms, so the ceiling is a stuck-portal
+guard, not a delay. Any failure is `None`, logged once. The failure prevented:
+a hung D-Bus daemon freezing the first frame.
 
 **Tests.** `Palette::adwaita` gets the same shape of tests as `Palette::windows`:
 light and dark differ, `control_strong` is stronger than `border`, every slot is
@@ -648,31 +704,32 @@ What remains unknown:
 
 ### 9.1 If GLib were allowed
 
-The probe is the prototype of the route the constraint forbids. Linked against
-`gtk4` and `libadwaita`, it can do everything the subprocess route does and
-more:
+The portal does not need GLib: `zbus` is the pure-Rust transport and the
+recommended one. This section is about the *other* GLib route — linking GTK and
+libadwaita, which is what the probe does. It can do everything the `zbus` route
+does and more:
 
-| What | Subprocess + constants | Linked GTK4/libadwaita |
+| What | `zbus` + constants | Linked GTK4/libadwaita |
 |---|---|---|
 | scheme and accent | portal, else `gsettings` | `AdwStyleManager` / `GtkSettings` |
 | Adwaita surfaces | vendored constants | `GtkCssProvider` + `GtkStyleContext` |
 | user `@define-color`, `var()`, `oklab()`, `color-mix()` | v2 hand parser, dropping what it cannot resolve | resolved by GTK |
 | a non-Adwaita theme | dtr in v1 | resolved by GTK |
-| dependencies | none | gtk4-rs / glib-sys / gio, `pkg-config`, the GTK dev closure, libgtk and libadwaita at runtime |
+| dependencies | `zbus` (MIT) and its tree | gtk4-rs / glib-sys / gio, `pkg-config`, the GTK dev closure, libgtk and libadwaita at runtime |
 | build | one Rust binary, no C toolchain | C toolchain and dev closure; dynamic libraries in the Linux package |
 | display | none needed | `gtk_init` and a display (the probe used `wayland-1`) |
-| API | files and CLI output | `gtk_style_context_lookup_color`, deprecated since GTK 4.10 |
+| API | typed `OwnedValue` from a stable D-Bus interface | `gtk_style_context_lookup_color`, deprecated since GTK 4.10 |
 | answer on this machine | `#222226`, `#3584E4`, `#FFFFFF`, … | the same values (measured) |
 
 For the slots dtr needs, the linked route is **not easier**: it produced exactly
-the subprocess route's values on this machine, and it brings the dependency
-the maintainer rejects. It is the only route that resolves an arbitrary user
+the `zbus` route's values on this machine, and it brings the dependency the
+maintainer rejects. It is the only route that resolves an arbitrary user
 stylesheet without a parser, which is why §10 keeps it on the table.
 
 If the constraint is ever relaxed, the shape should be explicit rather than a
 silent dependency: either a `cfg(target_os = "linux")` module behind a Cargo
 feature that is **off** by default, or a separate helper process that links GTK
-and prints the resolved palette as JSON — dtr spawns it like `busctl`. The
+and prints the resolved palette as JSON — dtr spawns it instead of `zbus`. The
 helper keeps GTK out of the dtr binary and its one-file story, but it is still
 a second binary to ship, still needs a display, and still violates the letter
 of "no GTK". Neither should happen without the maintainer saying so.
@@ -713,6 +770,12 @@ display.
 - **Whether the GTK probe becomes a `scripts/` check.** It is the only way to
   see a libadwaita upgrade change a surface, and it needs a display, so it would
   be a manual command — never a `nix flake check` gate.
+- **`zbus`'s tree.** `zbus` 5 is MIT and pure Rust, but it is a D-Bus stack
+  (`zvariant`, `async-io`, …) and locks ~85 packages. The `busctl` fallback is
+  the zero-dependency variant; which one ships is a packaging decision, not a
+  palette one. The crate is MIT, its tree is permissive, and `cargo deny` is
+  the gate; the fallback exists so a target that cannot take it still gets a
+  native skin.
 - **A linked GTK helper, if the constraint is ever relaxed.** §9.1 gives the
   shape and the costs; it is not a recommendation, and it should not happen
   without an explicit reversal.
@@ -883,3 +946,55 @@ accent_fg_color          rgba(255,255,255,1.000)  #FFFFFF
 destructive_bg_color     rgba(224, 27, 36,1.000)  #E01B24
 shade_color              rgba(  0,  0,  6,0.070)  #000006
 ```
+
+The `zbus` route is the shipping transport, and it is the one that was measured
+against the same portal:
+
+```sh
+$ cd /tmp/zbusprobe && cargo run
+# The tokio transport, and the tree it pulls: 77 lock entries against 86 for
+# async-io, and the same two values out.
+$ cd /tmp/zbustokio && cargo build --offline && ./target/debug/zbustokio
+$ grep -c '^name = ' /tmp/zbustokio/Cargo.lock
+color-scheme = OwnedValue(Value(U32(1)))
+accent-color = OwnedValue(Value(Structure(Structure { fields: [F64(0.2078431397676468), F64(0.5176470875740051), F64(0.8941176533699036)], signature: Structure(Dynamic { fields: [F64, F64, F64] }) })))
+$ time (for i in $(seq 20); do ./target/debug/zbusprobe >/dev/null 2>&1; done)
+real    0m0.041s
+```
+
+Its `Cargo.toml` and the call are small enough to show:
+
+```toml
+[package]
+name = "zbusprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["blocking-api", "async-io"] }
+```
+
+```rust
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::OwnedValue;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::session()?;
+    let proxy = Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Settings",
+    )?;
+    let scheme: OwnedValue =
+        proxy.call("Read", &("org.freedesktop.appearance", "color-scheme"))?;
+    let accent: OwnedValue =
+        proxy.call("Read", &("org.freedesktop.appearance", "accent-color"))?;
+    println!("{scheme:?}\n{accent:?}");
+    Ok(())
+}
+```
+
+The `20 runs, 41 ms` figure in §4.2 is this probe, opening a new connection each
+time; dtr opens one connection and caches the result, so the per-process cost is
+one connection plus two calls.
