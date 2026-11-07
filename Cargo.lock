@@ -806,6 +806,7 @@ dependencies = [
  "dtr-sshconfig",
  "dtr-store",
  "dtr-vfs",
+ "dtr-widgets",
  "egui",
  "egui-wgpu",
  "egui-winit",

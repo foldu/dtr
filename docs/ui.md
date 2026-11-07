@@ -95,6 +95,19 @@ what makes them testable and what lets a caller `--send` into them.
 - `check` — a 16- or 20-point box with the tick drawn from two strokes, because
   egui's faces have no check mark and an icon would make every harness install
   an image loader first.
+- `Button` — primary (accent) or secondary (control surface), with the label's
+  width as a floor so a clipped word is never a button.
+- `segmented` — one chip per option; the chosen one is the accent with
+  `on_accent` on it, which is what makes "selected" mean one thing everywhere.
+- `menu_row` — a full-width list entry, with the tick marking the value already
+  in the field.
+- `cross` — a close button drawn from two strokes, sized by its target rather
+  than its glyph.
+
+The serial sheet is drawn entirely with these: `serial_dialog.rs` contains no
+colour, radius or stroke width, and its row heights and gaps come from
+`Look::skin()`. `menu_row` and `cross` exist because the sheet was the second
+place to need them.
 
 Every painted widget declares an accessibility node for its response, refuses
 the Enter that egui turns into a click, and keeps its hit targets disjoint.

@@ -267,6 +267,20 @@ fn the_dropdown_opens_under_its_field() {
     harness.snapshot("widgets_dtr_open");
 }
 
+/// A hand-painted hover fill is invisible to every test where the pointer is
+/// somewhere else, which is how three controls in this tree ended up with no
+/// hover state worth having. One snapshot with the pointer on a chip is the
+/// cheapest way to see that the state exists and is the palette's.
+#[test]
+fn a_chip_lights_up_under_the_pointer() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(dtr_skin());
+    harness.run();
+    harness.get_by_label("parity odd").hover();
+    harness.run();
+    harness.snapshot("widgets_dtr_hover");
+}
+
 #[test]
 fn the_windows_dark_skin_renders() {
     let mut harness = harness(Skin::windows_dark());

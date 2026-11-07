@@ -22,6 +22,7 @@ mod block;
 mod button;
 mod check;
 mod combo;
+mod cross;
 mod menu;
 mod segmented;
 
@@ -29,5 +30,6 @@ pub use block::{label_cell, row, section};
 pub use button::Button;
 pub use check::check;
 pub use combo::{Edit, Editable};
+pub use cross::cross;
 pub use menu::menu_row;
 pub use segmented::segmented;

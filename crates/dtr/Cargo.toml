@@ -17,6 +17,9 @@ dtr-complete = { path = "../dtr-complete" }
 dtr-config = { path = "../dtr-config" }
 dtr-sshconfig = { path = "../dtr-sshconfig" }
 dtr-store = { path = "../dtr-store" }
+# The chrome's vocabulary: one palette, one set of metrics, and the controls
+# painted from them, so two surfaces cannot disagree about what "hovered" is.
+dtr-widgets = { path = "../dtr-widgets" }
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

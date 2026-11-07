@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use dtr_widgets::Preset;
 use egui::{Color32, RichText, Ui};
 
 /// How the grid is drawn: the font size, and an optional font file to load in
@@ -31,6 +32,8 @@ pub struct Look {
     pub surface: [u8; 3],
     /// Secondary text.
     pub dim: [u8; 3],
+    /// Which chrome to draw: the terminal's own, or the platform's.
+    pub preset: Preset,
 }
 
 impl Default for Look {
@@ -45,6 +48,7 @@ impl Default for Look {
             accent: [0xff, 0xb0, 0x00],
             surface: [0x14, 0x18, 0x16],
             dim: [0x6b, 0x77, 0x72],
+            preset: Preset::Native,
         }
     }
 }
@@ -83,6 +87,22 @@ impl Look {
         look.surface = mix(look.background, look.foreground, 0.10);
         look.dim = mix(look.background, look.foreground, 0.55);
         look
+    }
+
+    /// The chrome's skin, derived from these colours on demand.
+    ///
+    /// Derived rather than stored because the colours are the theme's: a stored
+    /// skin would have to be rebuilt when the theme changes, and the one time
+    /// somebody forgets is the frame the window looks like the old theme. A
+    /// palette is a few dozen mixes, which is nothing next to a frame.
+    ///
+    /// `native` resolves to the platform's palette where this crate can read one
+    /// and to `dtr` everywhere else — see `dtr_widgets::Skin::system`.
+    pub fn skin(&self) -> dtr_widgets::Skin {
+        dtr_widgets::Skin::resolve(
+            self.preset,
+            dtr_widgets::Palette::dtr(self.background, self.foreground, self.accent),
+        )
     }
 
     pub fn colour(rgb: [u8; 3]) -> Color32 {
