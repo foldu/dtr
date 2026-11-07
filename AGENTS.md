@@ -657,9 +657,18 @@ tag mirroring on.
   says `unbound` where a binding was switched off — "does nothing" and "is not bound" are
   the same silence at the keyboard. Each row also names the action as `[keys]` spells it
   (`new-tab`, `split-horizontal`), because the card is where a person finds out what to
-  *write*, not only what to press. It reads as a reference: nothing on it is clickable
-  except the close cross, and its two columns, rows and fonts come from the skin, so the
-  native style gets a taller card whose body scrolls inside the same 480 points.
+  *write*, not only what to press. **A row is a button**, because rebinding has to start
+  somewhere a person can find: pressing one opens a popup that waits for a key, with a
+  `reset`. The key is captured by `App::on_key` rather than by the card — the card draws
+  and reports, and dispatch is the only thing that knows what a keystroke means — and a
+  replacement is `dtr_config::set_value("keys.<name>", …)` followed by rebuilding the map
+  from `config.keys`, so the card cannot show a chord a restart would not have. Reset is
+  `dtr_config::remove_value`, not "write the default back": deleting the override is what
+  makes a future default apply. `keys::refuse_reason` is the one policy for a chord that
+  cannot be taken — no modifier, already another action's, or the start of a longer
+  binding — and the popup says which, because a refused key and a dead card look alike.
+  The columns, rows and fonts come from the skin, so the native style gets a taller card
+  whose body scrolls inside the same 480 points.
 - **Icons are Lucide SVGs, fetched by a skill in this repository**:
   `.dsh/skills/lucide-icons` and `scripts/fetch.sh` pull
   `https://lucide.dev/api/icons/<name>` into `crates/dtr/assets/icons/<name>.svg`,

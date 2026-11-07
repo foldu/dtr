@@ -418,6 +418,27 @@ fn named_key(named: dtr_config::keys::Named) -> winit::keyboard::Key {
     Key::Named(named)
 }
 
+/// Why `chord` cannot become `action`'s binding, or `None` when it can.
+///
+/// Rebinding from the keyboard has to refuse in words rather than ignore the
+/// press: a chord that silently does nothing looks exactly like a broken card.
+/// Three rules, and they are the ones dispatch already believes — a binding with
+/// no modifier would eat typing, a chord another action owns would make one of
+/// the two unreachable, and a prefix would make a longer binding's first chord
+/// fire on its own.
+pub fn refuse_reason(keymap: &Keymap, action: Action, chord: Chord) -> Option<String> {
+    if !(chord.mods.ctrl || chord.mods.alt || chord.mods.sup) {
+        return Some("needs ctrl, alt or super".to_owned());
+    }
+    match keymap.resolve(&[], chord) {
+        Matched::Action(other) if other != action => {
+            Some(format!("already bound to {}", other.label()))
+        }
+        Matched::Prefix => Some("starts another binding".to_owned()),
+        _ => None,
+    }
+}
+
 /// Turn a real key event into a chord, or `None` for keys that stay with the
 /// terminal.
 ///
@@ -648,6 +669,51 @@ mod tests {
             Matched::Action(Action::Keymap),
             "the chord a keyboard actually sends"
         );
+    }
+
+    /// What the card's two buttons do, at the level they do it: a replacement
+    /// is a line in `[keys]`, and resetting is the absence of one, so the
+    /// default comes back even if a later version changes it.
+    #[test]
+    fn writing_and_removing_a_binding_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let read = || {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            dtr_config::Config::parse(&text).expect("config")
+        };
+
+        dtr_config::set_value(&path, "keys.new-tab", "ctrl-alt-t").expect("write");
+        assert_eq!(
+            Keymap::new(&read().keys).bound(Action::NewTab),
+            vec!["ctrl-alt-t".to_owned()]
+        );
+
+        dtr_config::remove_value(&path, "keys.new-tab").expect("remove");
+        assert_eq!(
+            Keymap::new(&read().keys).bound(Action::NewTab),
+            vec!["ctrl-shift-t".to_owned()]
+        );
+    }
+
+    /// The three refusals, and the one chord that is accepted.
+    #[test]
+    fn a_replacement_is_refused_in_words() {
+        let keymap = Keymap::new(&BTreeMap::new());
+        let plain = parse_sequence("enter").expect("chord").chords[0];
+        assert_eq!(
+            refuse_reason(&keymap, Action::Palette, plain).as_deref(),
+            Some("needs ctrl, alt or super")
+        );
+        let taken = parse_sequence("ctrl-shift-t").expect("chord").chords[0];
+        assert_eq!(
+            refuse_reason(&keymap, Action::Palette, taken).as_deref(),
+            Some("already bound to new tab")
+        );
+        // Re-binding an action onto its own chord is not a conflict.
+        assert_eq!(refuse_reason(&keymap, Action::NewTab, taken), None);
+        let free = parse_sequence("ctrl-alt-t").expect("chord").chords[0];
+        assert_eq!(refuse_reason(&keymap, Action::Palette, free), None);
     }
 
     #[test]

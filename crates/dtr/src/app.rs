@@ -603,7 +603,10 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             }
             settings
         },
-        keymap_open: startup.keymap,
+        keymap_card: crate::keymap::Overlay {
+            open: startup.keymap,
+            edit: None,
+        },
         serial_dialog: startup.serial_dialog,
         fonts_dirty: false,
         keymap: crate::keys::Keymap::new(&startup.config.keys),
@@ -1149,9 +1152,10 @@ struct App {
     held: Option<winit::keyboard::Key>,
     /// The settings menu, and the config it edits.
     settings: crate::settings::Settings,
-    /// The keyboard map: a reference card, not a form. Read-only, so it is a
-    /// flag rather than a struct with state.
-    keymap_open: bool,
+    /// The keyboard map: the card's own state (whether it is up, and which row is
+    /// waiting for a key), plus the bindings it draws, which are rebuilt whenever
+    /// one is written.
+    keymap_card: crate::keymap::Overlay,
     /// The serial connection sheet. `Some` while it is open; the connect path
     /// will put it here, and `--serial-dialog` is how the chrome is previewed.
     serial_dialog: Option<crate::serial_dialog::SerialDialog>,
@@ -1259,7 +1263,7 @@ impl App {
     fn terminal_owns_keys(&self) -> bool {
         !self.palette.open
             && !self.settings.open
-            && !self.keymap_open
+            && !self.keymap_card.open
             && !self.pager.is_open()
             && self.serial_dialog.is_none()
     }
@@ -1377,7 +1381,7 @@ impl App {
         // The keyboard map owns the keyboard, because every key it does not
         // need is a key it must not pass on: it is the answer to "what does
         // this key do", and answering by doing it would be a puzzle.
-        if self.keymap_open {
+        if self.keymap_card.open {
             if !pressed {
                 self.held = None;
                 return;
@@ -1391,6 +1395,18 @@ impl App {
                 &stroke.key,
                 winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
             );
+            // A row that is waiting for a key takes this one, whatever it is: a
+            // replacement is captured by the same code that dispatches, so what
+            // the card promises and what the keyboard does cannot differ.
+            if let Some((action, _)) = self.keymap_card.edit {
+                if escape {
+                    self.keymap_card.edit = None;
+                    self.repaint("rebind cancelled");
+                } else {
+                    self.capture_binding(action, &stroke);
+                }
+                return;
+            }
             let toggles =
                 crate::keys::chord_from_event(&stroke.key, stroke.mods).is_some_and(|chord| {
                     matches!(
@@ -1399,7 +1415,8 @@ impl App {
                     )
                 });
             if escape || toggles {
-                self.keymap_open = false;
+                self.keymap_card.open = false;
+                self.keymap_card.edit = None;
                 self.repaint("keymap closed");
             }
             return;
@@ -2357,6 +2374,103 @@ impl App {
 
     /// Do what a binding asks for. Returns whether it acted, so a terminal-only
     /// action with a file pane focused falls through to the pane's own keys.
+    /// Apply what the keyboard map asked for.
+    fn keymap_event(&mut self, asked: crate::keymap::Event) {
+        use crate::keymap::Event;
+        match asked {
+            Event::Close => {
+                self.keymap_card.open = false;
+                self.keymap_card.edit = None;
+            }
+            Event::Edit(action) => self.keymap_card.edit = Some((action, None)),
+            Event::Cancel => self.keymap_card.edit = None,
+            Event::Reset(action) => self.reset_binding(action),
+        }
+        self.repaint("keymap");
+    }
+
+    /// Take the keystroke a waiting row receives as its new chord.
+    ///
+    /// Refusals are said in the popup rather than swallowed: a key that does
+    /// nothing and a key that was rejected are the same silence, and this card
+    /// exists to remove that silence.
+    fn capture_binding(&mut self, action: crate::keys::Action, stroke: &crate::keys::KeyStroke) {
+        let Some(chord) = crate::keys::chord_from_event(&stroke.key, stroke.mods) else {
+            self.refuse_binding(action, "a character on its own belongs to the shell");
+            return;
+        };
+        if let Some(why) = crate::keys::refuse_reason(&self.keymap, action, chord) {
+            self.refuse_binding(action, &why);
+            return;
+        }
+        let sequence = dtr_config::keys::Sequence::single(chord);
+        self.write_binding(action, Some(&sequence.to_string()));
+    }
+
+    /// Say why the last keystroke was not taken, and keep waiting.
+    fn refuse_binding(&mut self, action: crate::keys::Action, why: &str) {
+        self.keymap_card.edit = Some((action, Some(why.to_owned())));
+        self.repaint("rebind refused");
+    }
+
+    /// Write a binding to `[keys]`, or remove the override with `None`.
+    ///
+    /// The file is the source of truth: the config is written first and the live
+    /// map is rebuilt from it, so the card cannot show a chord that a restart
+    /// would not have.
+    fn write_binding(&mut self, action: crate::keys::Action, text: Option<&str>) {
+        let name = action.name();
+        let result = match text {
+            Some(text) => dtr_config::set_value(&self.config_path, &format!("keys.{name}"), text),
+            None => dtr_config::remove_value(&self.config_path, &format!("keys.{name}")),
+        };
+        if let Err(err) = result {
+            tracing::warn!(%name, %err, "could not save a key binding");
+            self.refuse_binding(action, "could not write the config");
+            return;
+        }
+        match text {
+            Some(text) => match dtr_config::keys::parse_sequence(text) {
+                Ok(sequence) => {
+                    self.config.keys.insert(name.to_owned(), sequence);
+                }
+                Err(err) => {
+                    tracing::warn!(%name, %err, "the chord it just wrote will not parse");
+                }
+            },
+            None => {
+                self.config.keys.remove(name);
+            }
+        }
+        self.keymap = crate::keys::Keymap::new(&self.config.keys);
+        // A half-typed sequence belongs to the old map: flushing it now would
+        // fire an action nobody chose on the way out.
+        self.pending.clear();
+        self.pending_since = None;
+        self.keymap_card.edit = None;
+        let now = self.keymap.bound(action);
+        let note = match (text.is_some(), now.first()) {
+            (true, Some(chord)) => format!("{} is now {chord}", action.label()),
+            (false, Some(chord)) => format!("{} is back to {chord}", action.label()),
+            (false, None) => format!("{} has no default", action.label()),
+            (true, None) => format!("{} is unbound", action.label()),
+        };
+        self.toast = Some((note, std::time::Instant::now()));
+        self.repaint("rebind");
+    }
+
+    fn reset_binding(&mut self, action: crate::keys::Action) {
+        if !self.config.keys.contains_key(action.name()) {
+            self.keymap_card.edit = None;
+            self.toast = Some((
+                format!("{} was already the default", action.label()),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        self.write_binding(action, None);
+    }
+
     fn dispatch(&mut self, action: crate::keys::Action) -> bool {
         use crate::keys::Action;
         match action {
@@ -2366,7 +2480,10 @@ impl App {
                 true
             }
             Action::Keymap => {
-                self.keymap_open = !self.keymap_open;
+                self.keymap_card.open = !self.keymap_card.open;
+                if !self.keymap_card.open {
+                    self.keymap_card.edit = None;
+                }
                 self.repaint("keymap");
                 true
             }
@@ -3353,7 +3470,7 @@ impl App {
                 // reopens it when it drops instead of closing the tab.
                 self.open(Transport::Shell(crate::pty::Config::ssh(&host)));
             }
-            Action::Keys => self.keymap_open = true,
+            Action::Keys => self.keymap_card.open = true,
             Action::Quit => self.quit = true,
         }
     }
@@ -4207,7 +4324,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut link_menu = std::mem::take(&mut self.link_menu);
                     let mut menu_choice = None;
                     let mut close_window = false;
-                    let mut keymap_close = false;
+                    let mut keymap_event = None;
                     let rendered = gpu.render(
                         &panes,
                         self.frames_drawn,
@@ -4228,9 +4345,9 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_ref()
                             .map(|(text, alpha)| (text.as_str(), *alpha)),
                         settings,
-                        self.keymap_open,
+                        self.keymap_card.open.then_some(&self.keymap_card),
                         &self.keymap,
-                        &mut keymap_close,
+                        &mut keymap_event,
                         serial_dialog.as_ref(),
                         &mut serial_event,
                         &tabs,
@@ -4244,12 +4361,12 @@ impl ApplicationHandler<UserEvent> for App {
                         ime,
                         &mut close_window,
                     );
-                    // The keyboard map's cross. Its Escape is handled where the
-                    // keys are; a click has to come back from the frame, because
-                    // only the frame knows the card was drawn.
-                    if keymap_close {
-                        self.keymap_open = false;
-                        self.repaint("keymap closed");
+                    // The keyboard map's answers. Its Escape and its captured
+                    // key are handled where the keys are; a click has to come back
+                    // from the frame, because only the frame knows the card was
+                    // drawn.
+                    if let Some(asked) = keymap_event {
+                        self.keymap_event(asked);
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -4771,9 +4888,9 @@ impl Gpu {
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
         settings: Option<&crate::settings::Settings>,
-        keymap: bool,
+        keymap: Option<&crate::keymap::Overlay>,
         keymap_bindings: &crate::keys::Keymap,
-        keymap_close: &mut bool,
+        keymap_event: &mut Option<crate::keymap::Event>,
         serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
         serial_event: &mut Option<crate::serial_dialog::Event>,
         tabs: &[String],
@@ -4974,12 +5091,10 @@ impl Gpu {
             // The keyboard map sits above the palette and the pager: it is the
             // thing a person opens precisely because they do not know what is
             // open behind it.
-            if keymap {
+            if let Some(keymap) = keymap {
                 crate::ui::overlay(ui, "dtr-keymap", |ui| {
-                    if crate::keymap::ui(ui, look, keymap_bindings)
-                        == Some(crate::keymap::Event::Close)
-                    {
-                        *keymap_close = true;
+                    if let Some(asked) = crate::keymap::ui(ui, look, keymap_bindings, keymap) {
+                        *keymap_event = Some(asked);
                     }
                 });
             }

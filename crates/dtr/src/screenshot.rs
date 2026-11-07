@@ -253,7 +253,13 @@ pub fn capture(
             serial_dialog.ui(ui, look);
         }
         if let Some(keymap) = keymap {
-            crate::keymap::ui(ui, look, keymap);
+            // The capture shows the list, not a rebind in progress: the popup is
+            // a state of the live window, and `--keymap` has no keys to press.
+            let card = crate::keymap::Overlay {
+                open: true,
+                edit: None,
+            };
+            crate::keymap::ui(ui, look, keymap, &card);
         }
         if let Some(preedit) = preedit {
             if let Some(pane) = panes.iter().find(|pane| pane.cursor) {

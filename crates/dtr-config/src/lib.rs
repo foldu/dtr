@@ -375,6 +375,40 @@ pub fn set_value(path: &Path, key: &str, raw: &str) -> Result<(), Error> {
     std::fs::write(path, updated).map_err(|err| Error::Io(err.to_string()))
 }
 
+/// Remove a key, so whatever the program's own default is applies again.
+///
+/// This is what "reset" means for a key binding: the default lives in the
+/// binary, so the way to restore it is to stop overriding it. Deleting the line
+/// is also the only honest answer when the config never had one — writing the
+/// default's own text back would freeze a future default at today's chord.
+pub fn remove_value(path: &Path, key: &str) -> Result<(), Error> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(Error::Io(err.to_string())),
+    };
+    let updated = remove_in_text(&text, key)?;
+    std::fs::write(path, updated).map_err(|err| Error::Io(err.to_string()))
+}
+
+/// The pure half of [`remove_value`].
+pub fn remove_in_text(text: &str, key: &str) -> Result<String, Error> {
+    let mut document: DocumentMut = text
+        .parse()
+        .map_err(|err| Error::Syntax(format!("{err}")))?;
+    match key.split_once('.') {
+        None => {
+            document.remove(key);
+        }
+        Some((section, name)) => {
+            if let Some(table) = document.get_mut(section).and_then(Item::as_table_mut) {
+                table.remove(name);
+            }
+        }
+    }
+    Ok(document.to_string())
+}
+
 /// The pure half of [`set_value`], so it can be tested without a file.
 pub fn set_in_text(text: &str, key: &str, raw: &str) -> Result<String, Error> {
     let mut document: DocumentMut = text
@@ -737,6 +771,29 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
         assert!(after.contains("# my config"), "{after}");
         assert!(after.contains("theme = \"kanagawa wave\""), "{after}");
         assert!(after.contains("size = 14"), "{after}");
+    }
+
+    #[test]
+    fn removing_a_key_leaves_the_rest_alone() {
+        use super::remove_in_text;
+        let before =
+            "# mine\n[keys]\nnew-tab = \"ctrl-x\"\ncopy = \"ctrl-shift-c\"\n\n[font]\nsize = 14\n";
+        let after = remove_in_text(before, "keys.new-tab").unwrap();
+        assert!(!after.contains("ctrl-x"), "{after}");
+        assert!(after.contains("copy = \"ctrl-shift-c\""), "{after}");
+        assert!(after.contains("# mine"), "{after}");
+        assert!(after.contains("size = 14"), "{after}");
+    }
+
+    #[test]
+    fn removing_a_key_that_is_not_there_changes_nothing() {
+        use super::remove_in_text;
+        let before = "[font]\nsize = 14\n";
+        assert_eq!(remove_in_text(before, "keys.new-tab").unwrap(), before);
+        assert_eq!(
+            remove_in_text(before, "no-such-section.key").unwrap(),
+            before
+        );
     }
 
     #[test]
