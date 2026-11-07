@@ -18,6 +18,10 @@
 //!   that senses clicks, so a chevron drawn on top of a text field would take
 //!   half the presses. The field and its dropdown arrow are disjoint rectangles.
 
+mod block;
+mod check;
 mod combo;
 
+pub use block::{label_cell, row, section};
+pub use check::check;
 pub use combo::{Edit, Editable};

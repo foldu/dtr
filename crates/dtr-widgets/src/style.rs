@@ -104,6 +104,10 @@ pub struct Style {
     pub card_radius: u8,
     /// A tab chip, a segmented choice: smaller than a card, larger than nothing.
     pub chip_radius: u8,
+    /// The side of a checkbox. Windows draws a 20-point box; dtr's sheet is
+    /// denser and asks for 16, which is also the smallest size the tick inside
+    /// it stays legible at.
+    pub check_size: f32,
     /// Border width in points; the platform's hairline is 1.
     pub border: f32,
     pub card_margin: Margin,
@@ -130,6 +134,7 @@ impl Style {
             control_radius: 4,
             card_radius: 10,
             chip_radius: 4,
+            check_size: 16.0,
             border: 1.0,
             card_margin: Margin::symmetric(20, 18),
             title: Title::Eyebrow,
@@ -159,6 +164,7 @@ impl Style {
             control_radius: 4,
             card_radius: 8,
             chip_radius: 4,
+            check_size: 20.0,
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
             title: Title::Bar,

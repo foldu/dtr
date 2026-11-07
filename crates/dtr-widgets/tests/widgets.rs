@@ -2,17 +2,16 @@
 //!
 //! The gallery is the serial connection sheet: every row the real one has, in
 //! the same order, because a style judged on four rows is not a style judged on
-//! the dialog. The widgets are egui's *stock* ones for now — this is a test of
-//! `Skin::egui_style`, the derivation that used to leave egui's own grey next to
-//! a hand-painted card; the painted primitives arrive next and replace them
-//! without changing the shape of the sheet.
+//! the dialog. The rows, the section headers and the checkboxes are the crate's
+//! own; the segmented choice and the buttons are still stock egui, and the
+//! painted ones replace them without changing the shape of the sheet.
 //!
 //! Both presets render on Linux: the Windows skin is a palette and a token
 //! table, not a call into Windows — the same trick `chrome::buttons_for` uses
 //! for the two captions. If the Windows look could only be seen on Windows, it
 //! would only be checked when somebody remembered to.
 
-use dtr_widgets::{Edit, Editable, Footer, Palette, Section, Skin};
+use dtr_widgets::{Edit, Editable, Footer, Palette, Skin, check, row, section};
 use egui::{RichText, Stroke, vec2};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,10 +23,13 @@ const BAUDS: &[u32] = &[
 ];
 
 /// What the sheet holds while it is open. The widgets report, so the caller owns
-/// the values — which is what lets a harness type into them.
+/// the values — which is what lets a harness type into them, and what lets a
+/// painted checkbox be pressed in a gallery as well as in the sheet.
 struct State {
     profile: String,
     baud: String,
+    signals: [(&'static str, bool); 2],
+    terminal: [(&'static str, bool); 2],
 }
 
 impl Default for State {
@@ -35,6 +37,8 @@ impl Default for State {
         Self {
             profile: "gps module".to_owned(),
             baud: "9600".to_owned(),
+            signals: [("DTR", true), ("RTS", true)],
+            terminal: [("CR to CRLF", true), ("auto reconnect", true)],
         }
     }
 }
@@ -45,62 +49,6 @@ fn dtr_skin() -> Skin {
         [0xdc, 0xdf, 0xdd],
         [0xff, 0xb0, 0x00],
     ))
-}
-
-fn label_cell(ui: &mut egui::Ui, skin: &Skin, label: &str) {
-    let (rect, _) = ui.allocate_exact_size(
-        vec2(skin.style.label_width, skin.style.row),
-        egui::Sense::hover(),
-    );
-    ui.painter().text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        label,
-        skin.style.label_font.clone(),
-        skin.palette.dim,
-    );
-}
-
-fn row(ui: &mut egui::Ui, skin: &Skin, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        label_cell(ui, skin, label);
-        add(ui);
-    });
-    ui.add_space(skin.style.gap);
-}
-
-/// A group header: dtr rules a dim caption, native sets a bold title.
-fn section(ui: &mut egui::Ui, skin: &Skin, title: &str) {
-    let p = skin.palette;
-    let s = &skin.style;
-    match s.section {
-        Section::Rule => {
-            let (rect, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 20.0), egui::Sense::hover());
-            let galley = ui.painter().layout_no_wrap(
-                title.to_owned(),
-                egui::FontId::new(s.label_font.size - 1.0, s.label_font.family.clone()),
-                p.dim,
-            );
-            let rule_from = rect.left() + galley.size().x + 10.0;
-            let centre = rect.center().y - galley.size().y / 2.0;
-            ui.painter()
-                .galley(egui::pos2(rect.left(), centre), galley, p.dim);
-            ui.painter().line_segment(
-                [egui::pos2(rule_from, rect.center().y), rect.right_center()],
-                Stroke::new(1.0, p.divider),
-            );
-        }
-        Section::Bold => {
-            ui.add_space(s.gap);
-            ui.label(
-                RichText::new(title)
-                    .font(s.value_font.clone())
-                    .strong()
-                    .color(p.text),
-            );
-        }
-    }
 }
 
 /// A segmented choice. Stock egui's `selectable_label` is the closest thing to a
@@ -122,15 +70,14 @@ fn segmented<T: Copy + PartialEq>(
     });
 }
 
-fn checks(ui: &mut egui::Ui, skin: &Skin, items: &[(&str, bool)]) {
+/// Two or more checks in a row, which is how the sheet asks the question.
+fn checks(ui: &mut egui::Ui, skin: &Skin, items: &mut [(&str, bool)]) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
-        for (label, on) in items {
-            let mut on = *on;
-            let _ = ui.checkbox(
-                &mut on,
-                RichText::new(*label).font(skin.style.value_font.clone()),
-            );
+        for (label, on) in items.iter_mut() {
+            if let Some(value) = check(ui, skin, *on, label) {
+                *on = value;
+            }
         }
     });
 }
@@ -257,13 +204,13 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin, state: &mut State) {
                     // What the port is opened with, before a byte moves.
                     section(ui, skin, "signals at open");
                     ui.add_space(s.gap);
-                    checks(ui, skin, &[("DTR", true), ("RTS", true)]);
+                    checks(ui, skin, &mut state.signals);
                     ui.add_space(s.gap);
 
                     // What the terminal does to the session afterwards.
                     section(ui, skin, "terminal");
                     ui.add_space(s.gap);
-                    checks(ui, skin, &[("CR to CRLF", true), ("auto reconnect", true)]);
+                    checks(ui, skin, &mut state.terminal);
                     ui.add_space(s.gap * 2.0);
 
                     // Footer: the keys, and the two answers.

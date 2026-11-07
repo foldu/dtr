@@ -36,4 +36,4 @@ mod widgets;
 pub use palette::Palette;
 pub use skin::Skin;
 pub use style::{Focus, Footer, Preset, Section, Style, Title};
-pub use widgets::{Edit, Editable};
+pub use widgets::{Edit, Editable, check, label_cell, row, section};

@@ -545,12 +545,15 @@ tag mirroring on.
   `egui::Style` so stock egui widgets inherit the same look. `Preset::{Dtr, Native}`
   picks a skin; `native` is system colours and the default, though on Linux it is the dtr
   skin until `Skin::system` reads the desktop's. **Painted controls belong in
-  `crates/dtr-widgets/src/widgets/`**: `Editable` — a text field with a dropdown arrow,
-  reporting `Edit::Typed` and `Edit::Picked` as different answers — is the first. The
-  serial sheet's `row`, `section`, `segmented`, `check`, `keycap` and `close_cross` are
-  still local to `crates/dtr/src/serial_dialog.rs` and are being moved across; a surface
-  that needs one of them waits for the move instead of growing a second copy, and a new
-  primitive arrives with a gallery snapshot in `crates/dtr-widgets/tests/`.
+  `crates/dtr-widgets/src/widgets/`**: `Editable` (a text field with a dropdown arrow,
+  reporting `Edit::Typed` and `Edit::Picked` as different answers), the layout primitives
+  `label_cell`/`row`/`section`, and `check`. The serial sheet's `segmented`, `button` and
+  `close_cross` are still local to `crates/dtr/src/serial_dialog.rs` and are being moved
+  across; a surface that needs one of them waits for the move instead of growing a second
+  copy, and a new primitive arrives with a gallery snapshot in
+  `crates/dtr-widgets/tests/`. **A tick is drawn, not lent**: `check` is two line
+  segments, because egui's faces have no check mark and an icon would make every harness
+  install an image loader first.
 - **The egui layer is tested with `egui_kittest`, not a window**: `cargo test` drives a
   `Harness` with real layout and AccessKit, so clicks, keys and rendering are assertable —
   query a widget by accessible label, `.click()`, `harness.run()`, assert what it
@@ -721,6 +724,8 @@ not a slow terminal.
 - `docs/bench.md` — what a vtebench number means, what a `.dat` is worth, and the `.meta`
   sidecar.
 - `docs/themes.md` — which terminal theme formats dtr could read.
+- `docs/ui.md` — why the chrome has a skin at all, what a token is, and what
+  `native` means on each platform.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost; §2.1
   carries the measurement at 125 %.

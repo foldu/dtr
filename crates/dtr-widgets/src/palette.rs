@@ -35,6 +35,11 @@ pub struct Palette {
     pub border: Color32,
     /// The border a hovered or focused control has.
     pub border_strong: Color32,
+    /// The stroke of a control that has to be *seen* before anything points at
+    /// it: a checkbox's box, a text field's resting edge. WinUI's
+    /// `ControlStrongStrokeColorDefault` is far stronger than the hairline — a
+    /// checkbox painted in `border` is one nobody can find, let alone tick.
+    pub control_strong: Color32,
     /// A rule between groups; carries its own alpha.
     pub divider: Color32,
     pub text: Color32,
@@ -77,6 +82,7 @@ impl Palette {
             control_active: mix(card, accent, 0.16),
             border: mix(card, text, 0.16),
             border_strong: mix(card, text, 0.28),
+            control_strong: mix(card, text, 0.40),
             divider: with_alpha(mix(card, text, 0.16), 46),
             text,
             dim,
@@ -131,6 +137,8 @@ impl Palette {
         } else {
             (0x0F00_0000, 0x2900_0000, 0x0F00_0000)
         };
+        // `ControlStrongStrokeColorDefault`: the checkbox and text-field edge.
+        let strong = if dark { 0x8AFF_FFFF } else { 0x7200_0000 };
         let on_accent = if dark { Color32::BLACK } else { Color32::WHITE };
         let (focus_outer, focus_inner) = if dark {
             (Color32::WHITE, argb(0xB300_0000))
@@ -151,6 +159,7 @@ impl Palette {
             control_active: over(base, argb(active)),
             border: over(base, argb(stroke)),
             border_strong: over(base, argb(stroke_strong)),
+            control_strong: over(base, argb(strong)),
             divider: over(base, argb(divider)),
             text: over(base, text),
             dim: over(base, dim),
@@ -255,6 +264,7 @@ mod tests {
                 ("control_active", palette.control_active),
                 ("border", palette.border),
                 ("border_strong", palette.border_strong),
+                ("control_strong", palette.control_strong),
                 ("text", palette.text),
                 ("dim", palette.dim),
                 ("disabled", palette.disabled),
@@ -276,6 +286,28 @@ mod tests {
         assert!(dark.is_dark());
         // White text on a dark card, near-black text on a light one.
         assert!(dark.text.r() > 200 && light.text.r() < 60);
+    }
+
+    /// `strong` has to be stronger than the hairline in every palette, or a
+    /// checkbox is drawn in a colour that reads as "disabled".
+    #[test]
+    fn the_strong_stroke_is_stronger_than_the_hairline() {
+        let distance = |a: Color32, b: Color32| {
+            (i32::from(a.r()) - i32::from(b.r())).abs()
+                + (i32::from(a.g()) - i32::from(b.g())).abs()
+                + (i32::from(a.b()) - i32::from(b.b())).abs()
+        };
+        for palette in [
+            Palette::dtr([0x0b, 0x0f, 0x0e], [0xdc, 0xdf, 0xdd], [0xff, 0xb0, 0x00]),
+            Palette::windows(true, Color32::from_rgb(0x60, 0xCD, 0xFF)),
+            Palette::windows(false, Color32::from_rgb(0x00, 0x5F, 0xB8)),
+        ] {
+            assert!(
+                distance(palette.control_strong, palette.card)
+                    > distance(palette.border, palette.card),
+                "control_strong is no stronger than the hairline"
+            );
+        }
     }
 
     #[test]
