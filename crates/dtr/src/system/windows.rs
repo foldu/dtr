@@ -31,26 +31,15 @@ impl Platform for Registry {
     }
 
     async fn read(&self) -> Result<Reading, String> {
-        // `AppsUseLightTheme`: 1 is light and 0 is dark. Absent means the user
-        // never chose, and Windows 11's default is light.
-        let light = read_dword(
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            "AppsUseLightTheme",
-        )
-        .map_or(true, |value| value != 0);
-        Ok(Reading {
-            dark: !light,
-            accent: read_dword(r"Software\Microsoft\Windows\DWM", "AccentColor")
-                .map(accent_from_dwm),
-            // The ladder Windows keeps for its own controls, so a hover lands on
-            // the same variant a WinUI button's would instead of an alpha blend of
-            // the base.
-            ladder: read_binary(
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent",
-                "AccentPalette",
-            )
-            .and_then(|bytes| ladder_from_registry(&bytes)),
-        })
+        // The two values live in `HKCU`, an already-mapped hive, so reading them
+        // is microseconds — but "microseconds on the thread that draws" is the
+        // assumption a cross-platform reader gets wrong once, and a hive can be
+        // paged in under a roaming profile. A blocking thread makes the rule the
+        // same on both platforms: the OS call happens where the OS call happens,
+        // and the future that wraps it is the same shape as the portal's.
+        tokio::task::spawn_blocking(facts)
+            .await
+            .map_err(|err| format!("the registry read did not finish: {err}"))
     }
 
     fn skin(&self, reading: &Reading) -> Skin {
@@ -67,6 +56,32 @@ impl Platform for Registry {
                 }),
             reading.ladder,
         )
+    }
+}
+
+/// The registry, read synchronously: `AppsUseLightTheme`, DWM's `AccentColor` and
+/// the Explorer accent palette.
+///
+/// `AppsUseLightTheme` is 1 for light and 0 for dark; absent means the user never
+/// chose, and Windows 11's default is light.
+#[cfg(windows)]
+fn facts() -> Reading {
+    let light = read_dword(
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "AppsUseLightTheme",
+    )
+    .map_or(true, |value| value != 0);
+    Reading {
+        dark: !light,
+        accent: read_dword(r"Software\Microsoft\Windows\DWM", "AccentColor").map(accent_from_dwm),
+        // The ladder Windows keeps for its own controls, so a hover lands on the
+        // same variant a WinUI button's would instead of an alpha blend of the
+        // base.
+        ladder: read_binary(
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent",
+            "AccentPalette",
+        )
+        .and_then(|bytes| ladder_from_registry(&bytes)),
     }
 }
 

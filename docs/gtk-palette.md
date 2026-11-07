@@ -559,7 +559,10 @@ scanning):
   at all; re-reading both registry values on any of them costs less than deciding
   which one meant what. The procedure cannot await — and must not block a message
   loop — so it calls `system::changed()`, which `notify_one`s the watcher (a
-  permit keeps a change that arrives between two readings).
+  permit keeps a change that arrives between two readings). The read itself runs
+  on a blocking thread (`spawn_blocking`): Win32 has no asynchronous registry API,
+  so that is the floor rather than a shortcut (see the comment in
+  `crates/dtr/src/system/windows.rs`).
 - The watcher re-reads, stores, logs `chrome changed`, and asks for a repaint
   through `UserEvent::Frame` — the same door every background result uses, because
   a skin that changed under a frame that never draws again did not change.
