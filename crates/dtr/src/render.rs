@@ -1218,6 +1218,24 @@ fn lay_out(
         height: height * scale_y,
     };
     (ink.x, ink.y) = constraint.place(&metrics, ink, cells);
+    // A graphics element whose ink already fills the cell is a *solid*: `█`,
+    // `▓`, `▒`, `░`. Drawing it into the cell exactly is what closes the seam
+    // between two of them, and unlike stretching a line it cannot go wrong. A
+    // half block (`▀`) or a box-drawing line (`─`) fails the test and is left
+    // exactly as its font drew it — the same reason they do not get
+    // `Constraint::TILE` (`constraint_for`).
+    if constraint.size == Fit::None && is_graphics_element(ch) {
+        let solid =
+            ink.width >= 0.9 * metrics.cell_width && ink.height >= 0.9 * metrics.cell_height;
+        if solid {
+            ink = Ink {
+                x: 0.0,
+                y: 0.0,
+                width: metrics.cell_width,
+                height: metrics.cell_height,
+            };
+        }
+    }
     Some(Laid {
         colour: image.content == swash::scale::image::Content::Color,
         image,
@@ -2247,6 +2265,39 @@ mod font_tests {
         // `█` followed by an icon is not a row of icons.
         let frame = row(&[("█", false), ("\u{f015}", false), ("", false)]);
         assert_eq!(constraint_width(&frame, 1), 2);
+    }
+
+    /// A full block covers its cell exactly, which is what closes the seam
+    /// between two of them — and a line is left alone, because a line's ink is
+    /// the line.
+    #[test]
+    fn a_full_block_covers_its_cell_and_a_line_is_left_alone() {
+        let Some((m, ink, _)) = drawn('█', 1) else {
+            return; // no font here has a block element
+        };
+        assert_eq!(
+            (ink.x, ink.y, ink.width, ink.height),
+            (0.0, 0.0, m.cell_width, m.cell_height),
+            "a full block is not the cell"
+        );
+        let Some((m, line, _)) = drawn('─', 1) else {
+            return;
+        };
+        assert!(
+            line.height < m.cell_height * 0.5,
+            "a box-drawing line is {} px tall in a {} px cell: it was tiled",
+            line.height,
+            m.cell_height
+        );
+        let Some((m, half, _)) = drawn('▀', 1) else {
+            return;
+        };
+        assert!(
+            half.height < m.cell_height * 0.75,
+            "an upper-half block is {} px tall in a {} px cell: it was tiled",
+            half.height,
+            m.cell_height
+        );
     }
 
     /// A braille cell fills its cell exactly, which is the whole point of

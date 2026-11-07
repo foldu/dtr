@@ -239,7 +239,7 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 | 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | **done**, M4: configured list, then dtr's, then the platform's, then the walk — monospaced first |
 | 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | **done**, M4: scale by ideographic width at load (x-height was 8 % too small) |
 | 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | **done**, M5: a second RGBA atlas and swash's colour sources |
-| 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | M6: a sprite face — **not** a stretch, which turns a 3 px line into a block |
+| 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | **partly done**, M6: a solid block is drawn into the cell exactly; box-drawing lines still overhang 1 px and wait for a sprite face |
 | 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
 | 9 | no per-cell shaper | combining marks stack on the base; VS15/VS16 do nothing | not scheduled: shape a cell's cluster before placing |
 | 10 | cursor is one cell | a block cursor covers half a Han character | **done**, M2: `wide_tail`, 2-cell block |
@@ -505,7 +505,7 @@ effect; `❤` is monochrome from the text face rather than colour from the emoji
 face. Fixing it needs a per-cell shaper (`docs/cjk.md` §4, gap 9), which is a
 different piece of work from a second atlas.
 
-### M6 — graphics elements tile
+### M6 — graphics elements tile — partly done
 
 * Cheap version: give box drawing, block elements, braille and powerline a
   `stretch` constraint so they exactly fill their cell(s). Kills the 10×18 in
@@ -521,6 +521,29 @@ Acceptance: a full block covers its cell exactly at 3×, 9×17 and 10×19 cells;
 edges.
 Risk: stretching distorts any glyph that is not meant to tile — keep the range
 list narrow and do not apply it to general symbols.
+
+*Landed, and the cheap version above is wrong.* Stretching the whole graphics
+range turns `─` — three pixels of ink — into a solid block, and `▀` into `█`.
+There is no rule on the ink box that separates those from a full block, which is
+why Ghostty draws the range itself from a sprite face instead of constraining it.
+What *is* safe is narrower:
+
+* **A block whose ink already fills the cell is a solid**, and is drawn into the
+  cell exactly. `█` was 19×34 at (−1,−1) in a 17×33 cell — a pixel of overlap on
+  every side, so two blocks side by side showed a seam and a row of them showed
+  one above. It is now `17×33 at (0,0)`. The test is "covers 90 % of the cell in
+  both axes", which `▓▒░` pass and `▀▄` and `─│` fail.
+* Everything else in the range is left exactly as its font drew it, because a
+  line and a half-block are ink whose *shape* is the meaning.
+
+Not done: the sprite face, which is the only way `┌` sits exactly on the cell's
+left and top edges at a fractional cell size, and the only way to kill the
+remaining 1 px overhang of a box-drawing line (19 px of ink in a 17 px cell). The
+sketch is `sprite.zig` in Ghostty: a synthetic face that answers for box drawing,
+block elements, braille and powerline by generating the geometry per cell instead
+of rasterising a font, plus the `Constraint` this milestone already ported to
+size and place it. It is a weekend, not an afternoon, and nothing else in the
+plan waits on it.
 
 ---
 
@@ -602,6 +625,8 @@ the rasteriser-disagreement problem the UI snapshots already have). Landed:
   corner.
 * `a_configured_fallback_family_wins_over_the_built_in_list` — `[font] fallback`
   beats dtr's own list, even when its answer is proportional.
+* `a_full_block_covers_its_cell_and_a_line_is_left_alone` — `█` is the cell
+  exactly, `─` and `▀` keep the ink their font gave them.
 * `an_emoji_is_drawn_in_colour_inside_its_cells` — `😀` comes back as RGBA, two
   cells wide, inside them.
 * `text_is_not_drawn_from_the_colour_atlas` — and a letter does not, or it would

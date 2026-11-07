@@ -409,6 +409,14 @@ numbers and on screen. It is in `FONT_REPORT_SAMPLE` (`dtr --font-report`) and i
 placement tests; use it for a new CJK test or capture rather than inventing another
 character, so two people comparing two builds are looking at the same glyph.
 
+**A block that fills its cell is drawn into the cell; a line is not.** `█▓▒░` are
+solids, so `lay_out` snaps any graphics element whose ink already covers 90 % of the
+cell in both axes to the cell exactly — that is what closes the seam between two blocks
+and the row above. `─│` and `▀▄` keep the ink their font gave them, because a line's
+three pixels *are* the line and a half block's half is its meaning: stretching the
+whole range turns one into a block and the other into a full one, which is why Ghostty
+draws that range from a sprite face instead (`docs/cjk.md` §5, M6).
+
 **A wide character is two cells, not one, and neither is a box to fill.** The width
 is the terminal's (`Cell::wide()` → `Narrow`/`Wide`/`SpacerTail`/`SpacerHead`), taken
 in `fill_cells`; a spacer is not drawn. The glyph is drawn at its design size across
