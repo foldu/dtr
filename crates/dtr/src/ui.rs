@@ -238,6 +238,15 @@ pub const TAB_HEIGHT: f32 = 30.0;
 /// that fills its panel makes any rounding in egui's layout paint over the first
 /// terminal row.
 pub const TAB_CHIP_HEIGHT: f32 = 20.0;
+/// How much room a chip's *text* may take before it is elided, in points.
+///
+/// A title is whatever the session called itself: a working directory, a serial
+/// device path, an ssh alias with a command after it. Unbounded, one tab on the
+/// path you happen to be in pushes every other tab — and the `+` — off the
+/// strip, so the strip stops being a list and becomes one tab with its tail
+/// cut off by the window edge. The full name stays in the tooltip and in the
+/// accessibility node; only the painted line is shortened.
+pub const TAB_LABEL_MAX_WIDTH: f32 = 180.0;
 /// Breathing room between the last row of text and the status strip. Without
 /// it the grid ends exactly on the strip's edge, and a prompt with a descender
 /// looks like it is behind the bar rather than above it.
@@ -374,9 +383,18 @@ pub fn tab_bar(
             } else {
                 Look::colour(look.foreground)
             };
-            let galley = ui
-                .painter()
-                .layout_no_wrap(text, egui::FontId::monospace(12.0), fg);
+            // One row, broken anywhere, elided with `…` — the three settings
+            // that make a long title stop at the cap instead of widening the
+            // chip (`TextWrapping::max_rows` is what enables elision at all).
+            let mut job = egui::text::LayoutJob::simple(
+                text,
+                egui::FontId::monospace(12.0),
+                fg,
+                TAB_LABEL_MAX_WIDTH,
+            );
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let galley = ui.painter().layout_job(job);
             // Two hit targets in one chip: the label switches, the cross closes.
             // A keyboard-focusable widget here would be activated by Enter and
             // by Space — pressing Enter in the shell must not touch the strip,
@@ -402,6 +420,14 @@ pub fn tab_bar(
                 egui::Id::unique(("dtr-tab", index)),
                 egui::Sense::click(),
             );
+            // Only when something was actually cut: a tooltip repeating a
+            // two-word title is noise, and it would also change every snapshot
+            // taken with the pointer over a short chip.
+            if galley.elided {
+                response
+                    .clone()
+                    .on_hover_text(format!("{} {}", index + 1, label));
+            }
             let close = ui.interact(
                 close_rect,
                 egui::Id::unique(("dtr-tab-close", index)),
@@ -783,6 +809,63 @@ mod kittest_tests {
             "Enter must reach the terminal, not the focused chip: {:?}",
             seen.borrow()
         );
+    }
+
+    /// A long title makes a long chip, unless the chip has a ceiling.
+    ///
+    /// The titles are not ours — a working directory or an ssh alias with a
+    /// command after it is as long as it is — so an unbounded chip is a strip
+    /// that scrolls its own tabs off the right edge.
+    #[test]
+    fn a_long_title_stops_at_the_cap() {
+        let look = Look::default();
+        let long = "/home/somebody/src/a/directory/with/a/deliberately/long/name".to_owned();
+        let labels = vec![long.clone(), "shell".to_owned()];
+        let mut harness = Harness::new_ui(move |ui| {
+            tab_bar(ui, &labels, 0, &[], &look);
+        });
+        harness.run();
+
+        // The full name is still the chip's accessible name, so nothing was
+        // lost from the model — only from the painted line.
+        let name = format!("1 {long}");
+        let node = harness.get_by_label(&name);
+        let label_width = node.rect().width();
+        // The chip is the label plus its padding and the cross; the node's rect
+        // is the label target, which is the chip minus that furniture.
+        assert!(
+            label_width <= TAB_LABEL_MAX_WIDTH + 10.0,
+            "a {label_width} point label is wider than the {TAB_LABEL_MAX_WIDTH} cap"
+        );
+
+        let short = harness.get_by_label("2 shell");
+        assert!(
+            short.rect().width() < label_width,
+            "a short title should not be padded to the cap"
+        );
+    }
+
+    /// The elided state, painted: a title that was cut ends in `…`, and the
+    /// `+` is still reachable on the right of it.
+    ///
+    /// Worth a baseline of its own because the glyph is the only part of this
+    /// that can go wrong quietly: `break_anywhere` without a right font, or a
+    /// chip width computed from the *unclipped* galley, both still pass a test
+    /// that only looks at numbers.
+    #[test]
+    fn a_shortened_title_ends_in_an_ellipsis() {
+        let look = Look::default();
+        let labels = vec![
+            "/home/somebody/src/a/directory/with/a/deliberately/long/name".to_owned(),
+            "shell".to_owned(),
+        ];
+        let mut harness = Harness::new_ui(move |ui| {
+            tab_bar(ui, &labels, 0, &[], &look);
+        });
+        harness.run();
+        harness.get_by_label("2 shell").hover();
+        harness.run();
+        harness.snapshot("tab_bar_elided");
     }
 
     /// Hover is the strip's only feedback, and it is painted by hand: a

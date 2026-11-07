@@ -791,6 +791,13 @@ both made the winner depend on allocation order — the cross closed sometimes, 
 `+` lost its press to its own icon. Disjoint rects, and `Image::paint_at` for anything
 that must not sense anything.
 
+**A chip is as wide as its title, unless the title is longer than a strip.** A tab's
+name is whatever the session called itself — a working directory, an ssh alias with a
+command after it — so it is elided at `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, one
+row, broken anywhere. The full name stays in the tooltip and in the accessibility
+node; only the painted line is shortened. Unbounded, one deep directory pushes every
+other tab and the `+` off the strip.
+
 **A chip has two hit targets**: the label switches tabs, a cross on the right closes
 that tab — whichever is active. Both declare accessibility names (`2 shell`, `close tab
 2`). The cross is *drawn* with two lines, not `×`: egui's font has no multiplication
