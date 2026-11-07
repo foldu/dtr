@@ -110,7 +110,45 @@ GitHub: if the mirror does not copy tags, nothing publishes — push it by hand
   offscreen from injected state; `--capture PATH --capture-after MS` copies the live
   window's surface. When a menu or a font differs between them, `--capture` is the
   one that tells the truth — and the offscreen path renders at 1×, so it cannot show a
-  HiDPI bug at all (`docs/windows.md` §2).
+  HiDPI bug at all (`docs/windows.md` §2). The next bullet is how to get a live window
+  on a machine with no display, which is what makes a scale test possible here.
+- **The real window runs on Linux without a display, and at any scale.** `--capture`
+  needs a `Window` and a surface, which a headless shell does not have; Xvfb provides
+  both, and `WINIT_X11_SCALE_FACTOR` forces a factor the machine does not have — the
+  only way to see a DPI bug without a HiDPI screen, and it is how the grid-scaling fix
+  was verified at 2× (`docs/windows.md` §2.1). Nothing in dtr knows Xvfb exists; this
+  is the ordinary X11 path:
+
+  ```sh
+  nix build nixpkgs#xvfb --no-link --print-out-paths   # Xvfb is not on PATH
+  Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -ac &   # a managed background job
+  DISPLAY=:99 WINIT_X11_SCALE_FACTOR=2 nix develop .#default --command bash -c \
+    './target/debug/dtr --shell "bash --norc --noprofile" \
+       --send "bash /tmp/sample.sh\n" \
+       --capture /tmp/shot.png --capture-after 3000 --exit-after 5000'
+  ```
+
+  `--capture` writes the file and carries on drawing, so `--exit-after` is what ends
+  the process; without it the command hangs until something kills it. Read the
+  result three ways: the PNG's size is the window in *physical* pixels (900 × 620 at
+  1×, 1800 × 1240 at 2×), `magick identify` catches a window that did not scale at
+  all, and `stty size` written to a file from inside the shell is the pane's cell
+  count — that is the number that changes when the *cell* scales (100 × 34 at 1×,
+  105 × 35 at 2×, the five extra columns being the whole-pixel ceiling). Two traps:
+  the capture needs a frame at that moment, so the sample has to still be printing
+  (a `tick` line every 500 ms) or the deadline finds an idle window and writes
+  nothing; and there is no window manager, which does not matter — the window maps at
+  its requested size and nothing needs focus.
+- **Capture with a shell that does not read the user's bash rc.** dtr launches
+  `$SHELL`, so a broken `~/.bashrc` ends up *in the grid*: readline's `\[` and `\]`
+  prompt markers are printed literally, the prompt grows to half a screen, and it
+  reads like a renderer bug. Use `--shell "bash --norc --noprofile"` (the flag
+  splits on whitespace) for any capture, screenshot or font comparison, and the
+  same for a payload that a shell rc would otherwise decorate.
+- **A captured sample must print `\r\n`, not `\n`.** The pty is raw, so nothing turns
+  a line feed into a carriage return for the child: a script that ends its lines with
+  `\n` draws a *staircase*, each line starting where the last one ended, and the
+  glyphs look misplaced. It is the harness, not the renderer.
 - Commits end with the co-author trailer.
 
 ## The event loop, redraws, and doing work off the UI thread
@@ -216,11 +254,19 @@ over a 30 **point** strip), which is why it reproduced on the laptop and not in 
 captures here. `scale()` is `window.scale_factor()` now, and `-v` logs `strip
 geometry` once per scale. The units rule: egui works in points and applies the DPI
 factor itself; `top_inset` and grid rects are physical pixels. Layout constants are
-points, grid sizes are physical, and the scale is applied exactly once — with one
-known, unfixed exception: the **grid font size** is documented in points and used as
-physical pixels, so the cells never scale with the display while the chrome does
-(`docs/windows.md` §2). The status panel also still multiplies `STATUS_HEIGHT` by the
-scale in *points*, which is how it ends up taller than the space reserved for it.
+points, grid sizes are physical, and the scale is applied exactly once.
+
+**The grid's font size is a point size and the rasteriser wants pixels, so the
+multiply happens in `Fonts::load`.** That was the last exception to the rule above,
+and it was a visible one: at 125 % the cell stayed 9 × 17 while the tab strip grew,
+so the text was smaller than the UI and the pane gained 25 columns
+(`docs/windows.md` §2.1). `GridRenderer::new` and `Fonts::load` take the factor,
+`Metrics` and the atlas key are physical from there on, and everything downstream —
+the cell, the fallback `adjust`, the sprite canvas — inherits it for free. A scale
+change sets `fonts_dirty`, which rebuilds the grid and lets `fit_panes` re-fit the
+pty; nothing else may multiply by the scale. `STATUS_HEIGHT` is drawn in *points*
+(egui multiplies) over a reservation in pixels — multiplying it by the scale in
+points is how the bar grew as `scale²` and covered the bottom row.
 
 **A shell has no status bar; the strip is reserved even for one tab.** The bar exists
 for a serial port's counters and modem lines and is not drawn (nor reserved) when the
@@ -363,23 +409,111 @@ fallback faces already loaded, then walks every installed family loading one and
 testing its charmap, caching per character — 2000 distinct Han characters cost one
 extra font load, not 2000.
 
-Which family answers is decided by `fonts::FALLBACK`, not fontconfig's order: Sarasa
-Mono first, then the Noto CJK families, monospaced ahead of proportional. A terminal
-wants a monospaced CJK face or the wide characters carry their own advance and the
-grid stops lining up. `-v` logs `fallback face` naming the winner, which is how to
-tell whether the list does anything on a given machine.
+Which family answers is a written policy, not fontconfig's order — that order used to
+change between runs, which is the bug (`docs/cjk.md` §5, M4). `Fonts::face_for` asks:
+the faces already loaded, then `[font] fallback` from the config, then
+`fonts::FALLBACK` (Sarasa Mono, then the Noto CJK families, then the Nerd Font
+families), then the platform's script preference from fontique, then a walk over every
+installed family with **Nerd Fonts first and monospaced before proportional**. The
+first four are opinions, so they win even when proportional; the walk is a search, so
+monospace decides there — a proportional face with a stray private-use glyph must not
+draw an icon. A terminal wants a monospaced CJK face or the wide characters carry
+their own advance and the grid stops lining up. `-v` logs `fallback face` with the
+family, its adjustment and where it came from.
+
+**A charmap entry is not ink.** Noto Color Emoji maps every emoji and has no outlines,
+so the walk accepted it and drew nothing; `has_ink` rasterises the candidate glyph and
+skips a face whose box is empty. A terminal that draws nothing is worse than one that
+draws the wrong glyph.
+
+**No grid face is not an empty grid, it is Emoji.** `load_faces` tries a preference
+list (`GRID_CANDIDATES`), and every entry in it used to be a Linux family, with
+`"monospace"` last — which is a *generic* family, not a name, so `family_by_name` never
+resolved it. On a fresh Windows the grid therefore had no face at all, `face_for` fell
+through to the first fallback with a glyph, and every Latin character was drawn by Segoe
+UI Emoji at 1.6× the cell advance: `Microsoft` came out `M crosoft` and an SGR sequence
+arrived as literal `[0m`. After the list runs out the platform is asked
+(`generic_families(GenericFamily::Monospace)`), which is the part that works on a machine
+this repository has never run on; adding a family to `GRID_CANDIDATES` or
+`fonts::FALLBACK` is how a new OS gets its faces. `--font-report` in the `winvm` guest is
+how the answer is checked (`docs/cjk.md` §5, M7). A *pictograph* (U+1F000–1FAFF, no
+script) also skips the already-loaded shortcut, or the symbol face that answered a
+powerline arrow hands it a monochrome `😀`.
+
+**A fallback is rasterised at its own optical size.** `Loaded::adjust` is the ratio of
+the *ideographic widths* — the advance of `一`, else `min(ascii ink height, two
+cells)` — and it has to be that metric: x-height gave 0.92 and cap height 0.89 on
+DejaVu/Noto CJK, both of which shrink every Han character, because a CJK face has a
+small x-height by design. The bearings still land on the grid's baseline, so only the
+ink changes.
 
 Two consequences: the glyph atlas key includes the *face index* (glyph ids collide
-between fonts), and a glyph is placed by the ascent of the face that produced it.
+between fonts), and every glyph is placed on the **grid's** baseline — `Metrics::baseline`,
+from the grid face — not on the ascent of the face that produced it. A fallback's own
+ascent only decides where its ink sits relative to that baseline (Ghostty's
+`cell_baseline`, `docs/cjk.md` §3.1).
 
-**A wide character is two cells, not one.** The render iterator does not report cell
-width, so width comes from `unicode-width` and a two-cell character is drawn across
-both, scaled to fit. Without it the grid shows a one-cell glyph and a one-cell hole.
+**`啊` is the CJK test character.** `U+554A`: full-width Han with ink in all four
+quadrants, so a baseline error, a wrong size or a half-drawn cell shows up in its
+numbers and on screen. It is in `FONT_REPORT_SAMPLE` (`dtr --font-report`) and in the
+placement tests; use it for a new CJK test or capture rather than inventing another
+character, so two people comparing two builds are looking at the same glyph.
+
+**Box drawing, blocks and braille are drawn, not borrowed.** `crates/dtr/src/sprite.rs`
+is a port of Ghostty's sprite face (`src/font/sprite/draw/*.zig`): box drawing (the
+light/heavy/double arms and every junction, from a table of edges per codepoint, plus
+the dashes), block elements (fractions, quadrants, shades as flat alpha) and braille
+(eight dots with Ghostty's order of concessions when the cell is too small). The cell
+*is* the canvas, so a line reaches the cell's edge and a block fills it at any cell
+size — which is the whole point, because a font draws these at its own thickness and
+side bearings (`─` in DejaVu is 19 px of ink in a 17 px cell, and two of them
+overlap). Not ported, and still from a font: the arcs `╭╮╯╰`, the diagonals `╱╲╳`, the
+legacy-computing blocks and the geometric shapes.
+
+Two traps. A sprite's mask is the *whole cell*, so its ink box says nothing about how
+much was drawn — assert on the mask's pixels, not on the rectangle. And the sprite is
+keyed in the atlas by codepoint in place of a glyph id: with one shared id every box
+character draws the first one it cached.
+
+**A wide character is two cells, not one, and neither is a box to fill.** The width
+is the terminal's (`Cell::wide()` → `Narrow`/`Wide`/`SpacerTail`/`SpacerHead`), taken
+in `fill_cells`; a spacer is not drawn. The glyph is drawn at its design size across
+the pair — the old code scaled the *ink* to fill the box, which made a full-width full
+stop a 17×17 square (`docs/cjk.md` §1).
 
 **A placed offset is not a length.** `glyph.top` is the distance from the cell's top
-edge to the glyph, not a size — scaling it with the bitmap moved wide glyphs by the
-wrong amount and piled CJK on its neighbours. Wide glyphs are fitted from the bitmap:
-scaled uniformly into the two-cell box, centred, resting on the cell's bottom.
+edge to the glyph, not a size: the bearings come from the rasteriser relative to the
+baseline and were never proportional to the bitmap. One placement rule, in
+`render::placement`, shared with `--font-report`; do not add a second copy of it here.
+
+**A glyph is drawn as its font drew it unless a rule says otherwise, and the rules
+are Ghostty's.** `render::Constraint` is a port of `RenderOptions.Constraint`
+(`font/Glyph.zig`): five size rules, five alignments, pads in thousandths of the face
+box, a maximum number of cells, and two height metrics. `constraint_for(codepoint)` is
+the only policy: private use and the symbol blocks get `fit_cover1` centred on the
+first cell, powerline and braille `stretch`, everything else nothing. Two traps. A
+uniform scale belongs on the **outlines** — re-rasterise at `size × factor`, or an
+enlarged icon is grey mush, and only `stretch` (which changes the aspect ratio) may
+scale the bitmap. And `stretch` is only right where the ink *is* the shape: `─` is
+three pixels of ink and stretching it draws a solid block, so box drawing and block
+elements are left alone until there is a sprite face (`docs/cjk.md` §5, M6).
+
+**How many cells a glyph may use is the neighbours' answer.** `constraint_width` is
+Ghostty's `renderer/cell.zig` rule: a symbol may borrow the cell to its right when
+that cell is blank, the glyph to its left was not also a symbol, and it is not the
+last column of its row. It changes the *glyph's* room, never the grid — and without
+it every other icon in a row drifts right.
+
+**A colour glyph keeps its own pixels, and a mask is tinted.** There are two atlases —
+`R8Unorm` for masks and `Rgba8Unorm` for colour bitmaps — and an `f32` flag on the
+instance picks which the fragment shader samples. One draw call is the point of this
+renderer, so it is a flag and not a second pipeline. `swash`'s source list is
+`[ColorOutline(0), ColorBitmap(BestFit), Outline]` and `Image::content` says which one
+answered; `has_ink` uses the same list, which is why an outline-only renderer saw Noto
+Color Emoji as "draws nothing" and an emoji came out blank. A colour glyph must not be
+tinted with the cell's foreground, and a letter must never reach the colour atlas or it
+stops being tinted. Presentation selectors (VS15/VS16) do not work: each codepoint of a
+cell is drawn on its own, so `❤️` is `❤` (`docs/cjk.md` §4, gap 9).
 
 **egui's default fonts have no arrows.** `↑↓` and `←→` panicked the harness and had
 been drawing empty boxes in the window; hints are words now (`up/down`).
@@ -821,10 +955,14 @@ enough.
   worth doing it in. `crates/dtr-ttl/tests/field/` is where real macros go: the
   corpus is upstream's bug reports, and nobody's job depends on them.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
+- `docs/cjk.md` — measured memo and plan for everything outside the grid face:
+  Han/kana, fullwidth punctuation, Nerd Font icons, emoji. Read it before
+  changing `prepare_pane`'s placement rules. **§9 is the list of what is left**,
+  in the order a person would notice it.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost, and the
-  instrument each open item still needs.
+  instrument each open item still needs. §2.1 now carries the measurement at 125 %.
 - `docs/chrome.md` — how the tabs get into the title bar: client chrome on Windows and
   Linux, the winit/egui mechanics that make it mostly one implementation, and the
   per-platform metrics and glyphs that keep the buttons looking native.

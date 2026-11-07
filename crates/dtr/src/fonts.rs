@@ -136,7 +136,54 @@ pub const FALLBACK: &[&str] = &[
     "Noto Sans CJK",
     "Noto Sans Mono",
     "Noto Sans",
+    // Then Windows' own CJK families, for the machine that has none of the
+    // above. MS Gothic is the fixed-pitch one — the one a terminal wants, since
+    // a proportional CJK face carries its own advance and the grid stops
+    // lining up — and the rest are what is left on a stock install.
+    "MS Gothic",
+    "MS Mincho",
+    "SimSun",
+    "NSimSun",
+    "MingLiU",
+    "Batang",
+    "Malgun Gothic",
+    "Yu Gothic UI",
+    "Meiryo",
+    // Then the Nerd Font families. They are last because they are the answer to
+    // a different question — three thousand icons that no text face has — and
+    // first only among the private use area, where nothing else answers at all.
+    // A patched family this list has not heard of is still found before a
+    // hundred text faces: `is_nerd_font` sorts the walk by name.
+    "Symbols Nerd Font Mono",
+    "Symbols Nerd Font",
+    "0xProto Nerd Font Mono",
+    "JetBrainsMono Nerd Font Mono",
+    "Hack Nerd Font Mono",
+    "MesloLGL Nerd Font Mono",
+    "MesloLGSDZ Nerd Font Mono",
+    "FiraCode Nerd Font Mono",
+    "CaskaydiaCove Nerd Font Mono",
+    "VictorMono Nerd Font Mono",
+    "NerdFontsSymbolsOnly",
+    // Then the colour emoji. They have bitmaps and no outlines at all, which is
+    // why they were left out until the colour atlas existed: before it, the walk
+    // rejected them for drawing nothing, and correctly — an outline renderer
+    // asked Noto Color Emoji for `😀` and got an empty image.
+    "Noto Color Emoji",
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Twemoji Mozilla",
 ];
+
+/// Does this family's name say it carries the Nerd Font patches?
+///
+/// The patcher does not rename to a scheme, it *appends* — every variant is
+/// `<original> Nerd Font [Mono|Propo]` — so a substring is the portable test,
+/// and it is what lets the walk put a family nobody listed ahead of the text
+/// families that would never answer for `U+F015`.
+pub fn is_nerd_font(name: &str) -> bool {
+    name.to_lowercase().contains("nerd font")
+}
 
 /// Bytes of an installed family that can draw CJK, for egui's UI text.
 ///

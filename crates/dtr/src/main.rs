@@ -22,6 +22,7 @@ mod serial;
 mod serial_dialog;
 mod settings;
 mod sources;
+mod sprite;
 mod theme;
 mod thumb;
 mod ui;
@@ -83,6 +84,11 @@ struct Args {
     /// List the installed families that can be a terminal grid, then exit
     #[arg(long)]
     fonts: bool,
+
+    /// Print the glyph pipeline's decisions for a fixed sample — cell metrics,
+    /// and the face, size and rectangle behind each character — then exit
+    #[arg(long)]
+    font_report: bool,
 
     /// Prefer the GPU whose name contains TEXT, e.g. --gpu nvidia
     #[arg(long, value_name = "TEXT")]
@@ -516,12 +522,21 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let look = ui::Look::themed(
+    let mut look = ui::Look::themed(
         config.font.size,
         config.font.family.clone(),
         config.font.path.clone(),
         theme.as_ref(),
     );
+    look.fallback = config.font.fallback.clone();
+
+    // After the Look, so the report describes the font the terminal would
+    // actually use — config, family and theme included — and before anything
+    // opens a window or a port.
+    if args.font_report {
+        render::font_report(&look);
+        return Ok(());
+    }
 
     // Never fatal: a broken or read-only state file must not stop a terminal
     // from opening a port.

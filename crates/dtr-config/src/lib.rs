@@ -50,6 +50,15 @@ pub struct Font {
     /// first face in the file is used. Hand-edited only: the settings menu
     /// offers families, because a path you cannot verify is a broken terminal.
     pub path: Option<PathBuf>,
+    /// Families to try, in order, when the grid face has no glyph for a
+    /// character — before dtr's own list and before the walk over everything
+    /// installed.
+    ///
+    /// This is the answer to "which font should draw CJK on *this* machine":
+    /// dtr's list is a good guess (Sarasa, then Noto), and the platform's
+    /// answer is a different guess, but only the person looking at the screen
+    /// knows which of the six installed Han faces they want.
+    pub fallback: Vec<String>,
 }
 
 /// Who paints the window's frame.
@@ -90,6 +99,7 @@ impl Default for Config {
                 size: 14.0,
                 family: None,
                 path: None,
+                fallback: Vec::new(),
             },
             chrome: Chrome::default(),
             theme: None,
@@ -216,6 +226,24 @@ impl Config {
                     .as_str()
                     .ok_or_else(|| Error::Value("font.path must be a string".into()))?;
                 config.font.path = Some(PathBuf::from(text));
+            }
+            if let Some(fallback) = font.get("fallback") {
+                let list = fallback.as_array().ok_or_else(|| {
+                    Error::Value("font.fallback must be an array of family names".into())
+                })?;
+                let mut names = Vec::with_capacity(list.len());
+                for item in list {
+                    let name = item.as_str().ok_or_else(|| {
+                        Error::Value("font.fallback must be an array of family names".into())
+                    })?;
+                    // An empty string is how the settings menu would write
+                    // "none"; a family called "" matches nothing, so drop it
+                    // rather than carry a lookup that can never succeed.
+                    if !name.trim().is_empty() {
+                        names.push(name.trim().to_owned());
+                    }
+                }
+                config.font.fallback = names;
             }
         }
 
@@ -404,6 +432,36 @@ path = "/tmp/mono.ttf"
             config.font.path.as_deref(),
             Some(std::path::Path::new("/tmp/mono.ttf"))
         );
+    }
+
+    /// `[font] fallback` is the only way to say "draw CJK with *this* face"
+    /// without replacing the grid face, so it has to survive a round trip
+    /// through the settings menu's writer as well as a hand-written file.
+    #[test]
+    fn the_fallback_list_is_read_in_order() {
+        let config = Config::parse(
+            r#"
+[font]
+fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.font.fallback,
+            ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
+        );
+        // An empty string is how "no family" would be written, and a family
+        // called "" matches nothing: drop it rather than carry the lookup.
+        let config = Config::parse("[font]\nfallback = [\"\", \" Hack \"]\n").unwrap();
+        assert_eq!(config.font.fallback, ["Hack"]);
+    }
+
+    #[test]
+    fn a_fallback_that_is_not_a_list_says_so() {
+        let error = Config::parse("[font]\nfallback = \"Noto Sans CJK SC\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("font.fallback"), "{error}");
     }
 
     #[test]

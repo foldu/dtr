@@ -2490,13 +2490,15 @@ impl App {
         }
 
         let font_changed = draft.font.size != self.config.font.size
-            || draft.font.family != self.config.font.family;
+            || draft.font.family != self.config.font.family
+            || draft.font.fallback != self.config.font.fallback;
         let theme_changed = draft.theme != self.config.theme;
         let serial_changed = draft.serial != self.config.serial;
 
         self.config = draft;
         self.look.size = self.config.font.size;
         self.look.family = self.config.font.family.clone();
+        self.look.fallback = self.config.font.fallback.clone();
 
         if theme_changed {
             let theme = self
@@ -3708,8 +3710,18 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             // Dragged to another monitor: the refresh rate may not be the one
             // the gate was computed from.
-            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                self.refresh_frame_budget();
+            WindowEvent::Moved(_) => self.refresh_frame_budget(),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // The grid was rasterised at the old factor, so every cell is
+                // now the wrong size for the display; the next frame rebuilds it
+                // (`fonts_dirty` is that hook) and `fit_panes` then re-fits the
+                // pty from the new metrics. Without the rebuild the terminal
+                // keeps the cell of the monitor it came from.
+                //
+                // The refresh-rate budget is not refreshed here: it follows the
+                // monitor (`Moved`), not the factor.
+                self.fonts_dirty = true;
+                gpu.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
@@ -4439,8 +4451,14 @@ impl Gpu {
     /// Rebuild the grid for a new face or size. Cheap enough to do on a settings
     /// change: it is a fresh atlas, not a reload of the whole renderer.
     fn rebuild_grid(&mut self, look: &Look) {
-        self.grid = crate::render::GridRenderer::new(&self.device, self.config.format, look);
-        tracing::info!(family = ?look.family, size = look.size, "grid rebuilt");
+        let scale = self.scale();
+        self.grid = crate::render::GridRenderer::new(&self.device, self.config.format, look, scale);
+        tracing::info!(
+            family = ?look.family,
+            size = look.size,
+            scale,
+            "grid rebuilt"
+        );
     }
 
     fn new(
@@ -4530,7 +4548,12 @@ impl Gpu {
             config.format,
             egui_wgpu::RendererOptions::default(),
         );
-        let grid = crate::render::GridRenderer::new(&device, config.format, look);
+        let grid = crate::render::GridRenderer::new(
+            &device,
+            config.format,
+            look,
+            window.scale_factor() as f32,
+        );
         tracing::info!(
             format = ?config.format,
             width = config.width,
@@ -4796,7 +4819,13 @@ impl Gpu {
                     // sizes to its content and its margins, comes out a couple of
                     // pixels taller than STATUS_HEIGHT, and covers the bottom row —
                     // which is where a shell puts its prompt.
-                    .exact_size(crate::ui::STATUS_HEIGHT * self.scale())
+                    //
+                    // In *points*, because that is what egui sizes a panel in: it
+                    // multiplies by `pixels_per_point` itself. Doing it here too
+                    // made the bar `24 × scale²` pixels tall over a `24 × scale`
+                    // reservation, so at 150 % it covered most of the bottom row
+                    // (`docs/windows.md` §2.2).
+                    .exact_size(crate::ui::STATUS_HEIGHT)
                     .frame(
                         egui::Frame::new()
                             .fill(crate::ui::Look::colour(look.surface))

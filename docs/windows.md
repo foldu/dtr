@@ -34,20 +34,63 @@ until there is an on-screen counter.
 
 `dtr-config` documents the grid font size in **points** — "Grid font size in points"
 (`crates/dtr-config/src/lib.rs:42`) — and the settings menu presents it as a font size. The
-renderer then uses that number as **physical pixels**: `Fonts::load` divides the face's
-advance by units-per-em and multiplies by `look.size` (`crates/dtr/src/render.rs:677`,
-`crates/dtr/src/render.rs:689`), and the cell width and height come out of that directly
-(`crates/dtr/src/render.rs:706`). Nothing multiplies by the window's scale factor;
-`look.size` is assigned straight from config at `crates/dtr/src/app.rs:2448` and the grid
-is rebuilt only when the font setting changes (`crates/dtr/src/app.rs:4195`).
+renderer used that number as **physical pixels**, and nothing multiplied by the window's
+scale factor. So on Windows at 150 % the terminal drew 14 physical pixels where 21 were
+asked for, and because the cell was smaller it fitted ~1.5× too many columns while the egui
+chrome — tab strip, status bar, settings — grew correctly.
 
-So on Windows at 150% the terminal draws 14 physical pixels where 21 were asked for, and
-because the cell is smaller it also fits ~1.5× too many columns. The egui chrome — tab
-strip, status bar, settings — does apply the DPI factor, so the chrome grows while the grid
-does not. That is the visual that reads as "needs HiDPI support".
+**Measured, not inferred** (2026-11-07, the `winvm` guest, display scale set in Settings →
+Display, `--capture` for the window and `mode con` inside the shell for the pane; the guest
+reset to `base` between the runs so only the scale differed):
 
-A point is not a pixel; egui already encodes this rule for the chrome, and the same rule was
-applied to layout constants (`ui.rs`), but never to the grid's font size.
+| scale | build | window (`--capture`) | cell | pane (`mode con`) |
+|---|---|---|---|---|
+| 100 % | either | 900 × 620 | 9 × 17 | 100 × 34 |
+| 125 % | before | 1125 × 775 | 9 × 17 | **125 × 43** |
+| 125 % | after | 1125 × 775 | 11 × 22 | **102 × 34** |
+
+`winit` honours the requested `LogicalSize(900, 620)`, so the window — and with it the tab
+strip, the settings menu and every inset — grows by the factor. Before the fix the grid did
+not: the same 14 pt was still 14 physical pixels, so the cell stayed 9 × 17 and the pane
+*gained* 25 columns and 9 rows in the same window. In one line: at 125 % a five-letter word
+was the same 39 px wide as at 100 %, while the tab above it was 25 % taller.
+
+**The fix, and what it is not.** `GridRenderer::new` and `Fonts::load` take the DPI factor,
+`look.size * scale` is the size every face is rasterised at, and `Metrics`, `Loaded::adjust`
+and the atlas key are physical from there on — so the cell, the fallback adjustment and the
+sprite canvas all inherit it without a second multiplication anywhere. `Gpu::new` passes
+`window.scale_factor()`, `ScaleFactorChanged` sets `fonts_dirty` (which rebuilds the grid)
+and `fit_panes` then re-fits the pty. The offscreen `--screenshot` path passes 1.0, because
+a committed baseline must compare against the same raster on every machine.
+
+The cell does not come out at exactly 1.25 × 9 × 17: widths and heights are `ceil`ed to whole
+pixels so glyphs land on pixel boundaries, and `ceil(1.25 × 8.43) = 11` against
+`1.25 × ceil(8.43) = 11.25`. That is the 102 columns instead of 100 in the table above, and
+it is the same trade the 1× path makes.
+
+The status bar is the other half of this section: it is drawn in points and reserved in
+pixels (§2.2), so a serial session at 125 % no longer covers its bottom row. That half is
+**reasoned, not observed** — the guest has no serial device, and the bar is only drawn for
+one.
+
+**Also measured on Linux**, because the code has no platform in it: Xvfb at 1280 × 800 with
+`WINIT_X11_SCALE_FACTOR` forcing the factor, the same `--capture`, and `stty size` inside the
+shell for the pane:
+
+| factor | window (`--capture`) | pane (`stty size`) | cell, from the two |
+|---|---|---|---|
+| 1 | 900 × 620 | 100 × 34 | 9 × 17 |
+| 2 | 1800 × 1240 | 105 × 35 | 17 × 34 |
+
+The cell doubles; the five extra columns are the ceiling again (`ceil(2 × 8.43) = 17` where
+`2 × ceil(8.43) = 18`), not the terminal growing. That is the harness to use for a scale
+question on the host — `Xvfb :99 -screen 0 1280x800x24`, `DISPLAY=:99
+WINIT_X11_SCALE_FACTOR=2 dtr … --capture PNG --capture-after MS --exit-after MS` — and it
+needs no window manager.
+
+The guest offers only 100 % and 125 % at 1280 × 800 on `virtio-vga`, so 150 % has no
+observation on either platform. At an integer factor the `ceil` costs the least; 1.5 is
+where a half-pixel cell would show, and it is the number to try next.
 
 ### 2.2 Why the status bar covers the bottom row
 
@@ -75,6 +118,12 @@ That is "Statusbar(rx/tx) hides text": bottom rows disappear under the bar, and 
 sessions draw it at all (`status_visible`, `crates/dtr/src/app.rs:2982`), which is exactly
 where the rx/tx counters are.
 
+**Fixed**: the panel is `.exact_size(STATUS_HEIGHT)` in points now, which is what egui
+scales, so the drawn height is `24s` against a `28s` reservation at every scale. The rule
+is the same one the tab strip already had, and it is worth stating as a rule: a constant
+that is drawn through egui is in points; a reservation `fit_panes` makes is in pixels; the
+scale goes on exactly one side of that boundary.
+
 **Why this was not caught:** the offscreen screenshot path uses the correct
 `.exact_size(status_height)` (`crates/dtr/src/screenshot.rs:215`) and renders at 1×
 (`screen_rect` in physical pixels with `pixels_per_point` left at 1.0,
@@ -84,29 +133,33 @@ only instrument that can.
 
 ### 2.3 Moving between monitors
 
-`ScaleFactorChanged` only refreshes the publish gate (`crates/dtr/src/app.rs:3535`). It does
-not rebuild the grid renderer and does not re-derive metrics. `fit_panes` does run every
-frame (`crates/dtr/src/app.rs:3774`), so the *reservations* follow the new scale on the next
-frame — but there is nothing to recover for the glyphs, because the metrics never depended on
-the scale: the grid is equally unscaled on every display and the chrome is not. The mismatch
-is present from the first frame on a HiDPI display, not just after a monitor move.
+**Fixed**: `ScaleFactorChanged` sets `fonts_dirty`, which is the hook that already rebuilt
+the grid after a settings change. The next frame rasterises at the new factor and
+`fit_panes` — which runs every frame — re-fits the pty from the new metrics. The window
+keeps its *physical* size across the move (Windows suggests a new rect via
+`WM_DPICHANGED`; winit does not adopt it for us), so a moved window keeps its pixel size and
+changes how many cells it holds, which is the behaviour a terminal should have. The refresh
+rate is still refreshed on `Moved` only, because that follows the monitor rather than the
+factor.
 
-### 2.4 What a fix has to touch
+### 2.4 What the fix touched
 
-- `GridRenderer` needs the scale: either a `scale` field or a `size_px = look.size * scale`
-  argument into `Fonts::load` and `glyph()`/`rasterise()` (`crates/dtr/src/render.rs:367`,
-  `crates/dtr/src/render.rs:677`).
-- `Gpu::rebuild_grid` is the existing hook; call it from `ScaleFactorChanged` too
-  (`crates/dtr/src/app.rs:3535`, `crates/dtr/src/app.rs:4195`).
-- The status panel becomes `exact_size(STATUS_HEIGHT)`, like the tab strip.
-- The screenshot path must pass scale 1.0 explicitly, so committed baselines stay put.
-- A test: the grid metrics are a pure function of face + size, so a unit test can assert
-  `metrics_at(2.0).cell_width == 2 * metrics_at(1.0).cell_width` without a window. The
-  status-bar overlap is a layout assertion (`reserved >= drawn`) and can be checked without
-  pixels.
+- `GridRenderer::new(device, format, look, scale)` and `Fonts::load(look, scale)`:
+  `let size = look.size * scale` is the single place points become pixels. `Metrics`,
+  `Loaded::adjust`, the atlas key and the sprite canvas are all derived from it.
+- `Gpu::new` passes `window.scale_factor()`; `rebuild_grid` passes `self.scale()`.
+- `ScaleFactorChanged` → `fonts_dirty` (one line, reusing the existing rebuild hook).
+- The status panel is `exact_size(STATUS_HEIGHT)`; the reservation in `fit_panes` keeps its
+  `* scale`.
+- `screenshot.rs` passes 1.0 twice — the offscreen path is a 1× renderer on purpose.
+- `render::font_tests::a_cell_scales_with_the_display`: loads at 1.0 and 2.0 and asserts the
+  cell, the baseline and the box thickness double to within the whole-pixel rounding. It is
+  the test that would have failed every day since the grid got a font size.
 
-Do not "fix" note 8 or 9 before this: every glyph is currently rasterised at 14 px, so on a
-2× display icons are half-size and aliased no matter what the glyph path does.
+Left alone, deliberately: notes 8 and 9 (icon sizing, the π artefact). The original memo
+put this fix in front of them because every glyph was rasterised at 14 physical pixels, so
+reproducing a *size* problem at 2× was measuring the wrong frame. That condition is gone;
+those two now have a rasterised size that matches the display.
 
 ---
 
@@ -335,7 +388,17 @@ These came from a Windows run and cannot be judged from this tree alone:
 | Whether the Nerd Font is even visible to dtr | `dtr --fonts` on that machine, and the configured family |
 | Is latency the gate, vsync, or the panel | `-v` (`loop`, `publish gate`, `slow frame`) and the counter from §5.2 |
 | How much of resize is ConPTY | the same drag on Linux under a pty, plus timing from §5.2 |
-| Whether Windows DPI is reported as expected | `-v` logs `strip geometry` once per scale — read that line |
+
+Answered: **Windows DPI is reported as expected** — `winit` hands dtr 1.25, and since §2.1
+the grid uses it too (102 × 34 cells at 125 %, against 125 × 43 before). The scale itself is
+a *setting*, so a run can no longer be ambiguous about which one it happened at; write the
+number down.
+
+Still open on this machine: 150 % and 200 % have no observation, because the guest offers
+only 100 % and 125 % at 1280 × 800. A bigger `virtio-vga` mode (or a second head) would be
+where a fix at a *non-integer* factor is checked before anyone trusts it at 2×, and where
+the status bar (§2.2, drawn in points over a reservation in pixels) can finally be seen at a
+scale above 1 — a serial session is required for that and the guest has no serial device.
 
 There is also no Windows test coverage at all: CI runs the suite on Linux and only
 cross-compiles `.#windows`. ConPTY resize, DX12 presentation and DPI are unexercised by
