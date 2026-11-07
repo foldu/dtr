@@ -392,6 +392,8 @@ pub fn tab_bar(
     // Idempotent, and here rather than only at startup so every caller — the
     // window, a capture, a kittest harness — gets a working loader.
     install_image_loaders(ui.ctx());
+    let skin = look.skin();
+    let palette = skin.palette;
     let mut clicked = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -399,16 +401,16 @@ pub fn tab_bar(
             let is_active = index == active;
             let text = format!("{} {}", index + 1, label);
             let fg = if is_active {
-                Look::colour(look.background)
+                palette.on_accent
             } else {
-                Look::colour(look.foreground)
+                palette.text
             };
             // One row, broken anywhere, elided with `…` — the three settings
             // that make a long title stop at the cap instead of widening the
             // chip (`TextWrapping::max_rows` is what enables elision at all).
             let mut job = egui::text::LayoutJob::simple(
                 text,
-                egui::FontId::monospace(12.0),
+                skin.style.label_font.clone(),
                 fg,
                 TAB_LABEL_MAX_WIDTH,
             );
@@ -448,46 +450,41 @@ pub fn tab_bar(
                     .clone()
                     .on_hover_text(format!("{} {}", index + 1, label));
             }
-            let close = ui.interact(
-                close_rect,
-                egui::Id::unique(("dtr-tab-close", index)),
-                egui::Sense::click(),
-            );
-
             // Hover is the strip's own affordance: a chip that looks the same
-            // under the pointer as away from it reads as decoration.
-            let hovered = response.hovered() || close.hovered();
+            // under the pointer as away from it reads as decoration. The cross's
+            // own hover is asked by rect, because its widget is created after
+            // the chip is painted — the cross's highlight has to land on top.
+            let hovered = response.hovered() || ui.rect_contains_pointer(close_rect);
             let fill = match (is_active, hovered) {
-                (true, true) => Look::colour(look.accent).gamma_multiply(1.15),
-                (true, false) => Look::colour(look.accent),
-                (false, true) => Look::colour(look.surface).gamma_multiply(1.6),
-                (false, false) => Look::colour(look.surface),
+                (true, true) => palette.accent_hover,
+                (true, false) => palette.accent,
+                (false, true) => palette.control_hover,
+                (false, false) => palette.control,
             };
             let painter = ui.painter();
-            painter.rect_filled(rect, 4.0, fill);
+            painter.rect_filled(rect, skin.style.chip_radius, fill);
             painter.galley(
                 egui::pos2(rect.left() + 7.0, rect.center().y - galley.size().y / 2.0),
                 galley,
                 fg,
             );
-            // Lucide's `x`, fetched by the lucide-icons skill and embedded, so
-            // the one-file build still has it. Tinted rather than recoloured:
-            // the SVG keeps `currentColor` and stays byte-identical upstream.
-            // `paint_at`, not `ui.put`: an image added as a widget is another
-            // click target sitting on top of the cross, and it wins the press
-            // half the time. Painting cannot sense anything.
-            egui::Image::new(egui::include_image!("../assets/icons/x.svg"))
-                .fit_to_exact_size(close_rect.shrink(2.0).size())
-                .tint(fg)
-                .paint_at(ui, close_rect.shrink(2.0));
+            // The cross is the crate's: two strokes, drawn, with a target of
+            // its own so a press near the right-hand end closes and one on the
+            // label switches. It is created after the chip is painted, or its
+            // hover fill would be painted over.
+            let close = dtr_widgets::cross_at(
+                ui,
+                &skin,
+                close_rect,
+                egui::Id::unique(("dtr-tab-close", index)),
+                &format!("close tab {}", index + 1),
+            );
 
-            // Painted by hand, so the accessibility nodes are declared by hand
-            // too — otherwise a screen reader (and the test harness) sees a
-            // strip with no tabs in it at all.
+            // Painted by hand, so the label's accessibility node is declared by
+            // hand too — otherwise a screen reader (and the test harness) sees a
+            // strip with no tabs in it at all. The cross declares its own.
             let name = format!("{} {}", index + 1, &labels[index]);
             response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
-            let close_name = format!("close tab {}", index + 1);
-            close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &close_name));
 
             // `Sense::click()` is not enough to be pointer-only: egui activates
             // any focused click-sensing widget on Enter, so a chip that once had
@@ -501,8 +498,10 @@ pub fn tab_bar(
                     stolen.surrender_focus();
                 }
             }
+            // Both responses are pointer-only: `cross_at` strips the synthetic
+            // click, and the chip's own is checked against the pointer below.
             let pointer = ui.input(|i| i.pointer.any_click());
-            if close.clicked() && pointer {
+            if close.clicked() {
                 clicked = Some(TabHit::Close(index));
             } else if response.clicked() && pointer {
                 clicked = Some(TabHit::Select(index));
@@ -512,38 +511,17 @@ pub fn tab_bar(
         // The new-tab button. Its menu is where a terminal's destinations live:
         // the local shell first, then the serial ports and the ssh hosts, each
         // group behind a separator. Pointer only, like the chips, so Enter in
-        // the shell never opens a menu.
-        let (rect, response) = ui.allocate_exact_size(
+        // the shell never opens a menu — `plus` returns a response that cannot
+        // have been clicked by a key.
+        let response = dtr_widgets::plus(
+            ui,
+            &skin,
+            "new tab",
             egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
-            egui::Sense::click(),
         );
-        let fill = if response.hovered() {
-            Look::colour(look.surface).gamma_multiply(1.6)
-        } else {
-            Look::colour(look.surface)
-        };
-        ui.painter().rect_filled(rect, 4.0, fill);
-        // Painted, for the same reason as the cross: a widget here would sit on
-        // top of the button and eat its clicks.
-        egui::Image::new(egui::include_image!("../assets/icons/plus.svg"))
-            .fit_to_exact_size(rect.shrink(4.0).size())
-            .tint(Look::colour(look.foreground))
-            .paint_at(ui, rect.shrink(4.0));
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "new tab"));
-
-        // Same trap as the chips: a focused click-sensing widget is activated by
-        // Enter, and the popup opens on a click. The fake click is cleared so
-        // only the pointer opens the menu, and the focus is given back.
-        if response.has_focus() {
-            response.surrender_focus();
-        }
-        let mut pointer_only = response;
-        pointer_only
-            .flags
-            .remove(egui::response::Flags::FAKE_PRIMARY_CLICKED);
-        let menu = egui::Popup::menu(&pointer_only).show(|ui| {
+        let menu = egui::Popup::menu(&response).show(|ui| {
             ui.set_min_width(220.0);
-            if ui.button("local shell").clicked() {
+            if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
                 clicked = Some(TabHit::New(None));
                 ui.close();
             }
@@ -563,7 +541,7 @@ pub fn tab_bar(
                 }
                 ui.separator();
                 for destination in group {
-                    if ui.button(destination.label()).clicked() {
+                    if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
                         clicked = Some(TabHit::New(Some(destination.clone())));
                         ui.close();
                     }
@@ -572,8 +550,11 @@ pub fn tab_bar(
             if destinations.is_empty() {
                 ui.label(
                     egui::RichText::new("no serial ports and no ssh hosts")
-                        .size(11.0)
-                        .color(Look::colour(look.dim)),
+                        .font(egui::FontId::new(
+                            skin.style.label_font.size - 1.0,
+                            skin.style.label_font.family.clone(),
+                        ))
+                        .color(palette.dim),
                 );
             }
         });
@@ -587,50 +568,46 @@ pub fn tab_bar(
 }
 
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
+    let skin = look.skin();
+    let p = skin.palette;
+    let s = &skin.style;
+    let small = egui::FontId::new(s.label_font.size - 0.5, s.label_font.family.clone());
+    let body_font = s.value_font.clone();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         if status.tabs.1 > 1 {
             ui.label(
                 RichText::new(format!("{}/{}", status.tabs.0, status.tabs.1))
-                    .monospace()
-                    .size(11.0)
-                    .color(Look::colour(look.accent)),
+                    .font(small.clone())
+                    .color(p.accent),
             );
         }
         ui.label(
             RichText::new(status.label)
-                .monospace()
-                .size(12.0)
-                .color(Look::colour(look.foreground).gamma_multiply(0.8)),
+                .font(body_font.clone())
+                .color(p.text),
         );
         if let Some((dtr, rts)) = status.modem {
             for (label, level) in [("DTR", dtr), ("RTS", rts)] {
                 ui.label(
                     RichText::new(format!("{label}{}", if level { "●" } else { "○" }))
-                        .monospace()
-                        .size(11.0)
-                        .color(if level {
-                            Look::colour(look.accent)
-                        } else {
-                            Look::colour(look.dim)
-                        }),
+                        .font(small.clone())
+                        .color(if level { p.accent } else { p.dim }),
                 );
             }
         }
         if status.scrollback > 0 {
             ui.label(
                 RichText::new(format!("{} lines up", status.scrollback))
-                    .monospace()
-                    .size(11.0)
-                    .color(Look::colour(look.accent)),
+                    .font(small.clone())
+                    .color(p.accent),
             );
         }
         if !status.connected {
             ui.label(
                 RichText::new("reconnecting…")
-                    .monospace()
-                    .size(12.0)
-                    .color(Look::colour(look.accent)),
+                    .font(body_font.clone())
+                    .color(p.accent),
             );
         }
         if !status.counters {
@@ -644,9 +621,8 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
                 human_bytes(status.tx as f64),
                 human_bytes(status.tx_rate),
             ))
-            .monospace()
-            .size(12.0)
-            .color(Look::colour(look.dim)),
+            .font(body_font.clone())
+            .color(p.dim),
         );
     });
 }

@@ -32,13 +32,12 @@ pub fn menu_row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool) -> bool {
         .max(galley.size().x + style.padding.x * 2.0 + TICK_GUTTER);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, style.row), Sense::click());
 
-    let fill = if response.hovered() {
-        palette.control_hover
-    } else {
-        palette.card
-    };
     let painter = ui.painter();
-    painter.rect_filled(rect, style.control_radius, fill);
+    // Only the pointer's row is filled: a menu's own background is the frame's,
+    // and painting every row with the card colour bands the list instead.
+    if response.hovered() {
+        painter.rect_filled(rect, style.control_radius, palette.control_hover);
+    }
     if selected {
         let side = (style.row * 0.5).min(14.0);
         let centre = egui::pos2(rect.left() + style.padding.x + side / 2.0, rect.center().y);
@@ -61,5 +60,5 @@ pub fn menu_row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool) -> bool {
     if response.has_focus() {
         response.surrender_focus();
     }
-    response.clicked() && ui.input(|input| input.pointer.any_click())
+    super::pointer_only(response).clicked()
 }

@@ -120,6 +120,6 @@ impl<'a> Button<'a> {
             response.surrender_focus();
         }
         // Enter belongs to the sheet, not to a button that happens to be focused.
-        self.enabled && response.clicked() && ui.input(|input| input.pointer.any_click())
+        self.enabled && super::pointer_only(response).clicked()
     }
 }

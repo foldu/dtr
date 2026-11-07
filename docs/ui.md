@@ -109,6 +109,13 @@ colour, radius or stroke width, and its row heights and gaps come from
 `Look::skin()`. `menu_row` and `cross` exist because the sheet was the second
 place to need them.
 
+**Still to move**: the tab strip paints its own chip (the elided label and the
+two hit targets are the strip's own rules, but its colours and radii are the
+skin's now), and the settings menu, the palette overlay, the file explorer, the
+link menu and the pager still mix their own colours from `Look`'s three RGB
+triples. Those are the sites where a `native` skin would be ignored, so they are
+the next thing to convert rather than a style done.
+
 Every painted widget declares an accessibility node for its response, refuses
 the Enter that egui turns into a click, and keeps its hit targets disjoint.
 Those are not style decisions; they were each a bug once.

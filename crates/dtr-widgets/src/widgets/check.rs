@@ -69,9 +69,8 @@ pub fn check(ui: &mut Ui, skin: &Skin, on: bool, label: &str) -> Option<bool> {
     if response.has_focus() {
         response.surrender_focus();
     }
-    // A focused click-sensing widget is also activated by Enter, and Enter is the
-    // sheet's own key: only the pointer is a click.
-    (response.clicked() && ui.input(|input| input.pointer.any_click())).then_some(!on)
+    // Enter is the sheet's own key, so only the pointer toggles the box.
+    super::pointer_only(response).clicked().then_some(!on)
 }
 
 /// Two segments scaled to the box: down from the left shoulder, then up to the

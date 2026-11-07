@@ -66,9 +66,8 @@ pub fn segmented<T: Copy + PartialEq>(
             if response.has_focus() {
                 response.surrender_focus();
             }
-            // A radio button's own group keys are the sheet's: only the pointer
-            // chooses here, or Enter would answer a question nobody asked yet.
-            if response.clicked() && ui.input(|input| input.pointer.any_click()) {
+            // Enter answers nothing here: the sheet's keys are the sheet's.
+            if super::pointer_only(response).clicked() {
                 picked = Some(*option);
             }
         }

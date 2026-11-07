@@ -588,10 +588,12 @@ tag mirroring on.
   full name stays in the tooltip and the accessibility node — unbounded, one deep
   directory pushes every tab and the `+` off the strip. **A chip has two hit targets**:
   the label switches tabs, a cross on the right closes that tab, whichever is active, and
-  both declare accessibility names (`2 shell`, `close tab 2`); the cross is *drawn* with
-  two lines, not `×`, because egui's font has no multiplication sign. The active tab's
-  title follows its focused session, and every switch goes through `App::set_active`,
-  which logs `active tab from=… to=… why=…`.
+  both declare accessibility names (`2 shell`, `close tab 2`); the cross is
+  `dtr_widgets::cross_at`, two strokes in the chip's own reserved rect, not `×`, because
+  egui's font has no multiplication sign. The active tab's title follows its focused
+  session, and every switch goes through `App::set_active`, which logs
+  `active tab from=… to=… why=…`. The chip's colours and radii are the skin's; its
+  elision and its two rects are the strip's, and `New tab`'s menu is `menu_row` rows.
 - **`egui::Window` renders nothing inside `Context::run_ui`**, which is why the palette is
   an overlay drawn into the same `Ui`. **A widget's background painted after its text
   hides the text** — the palette's selected row was invisible until the highlight was

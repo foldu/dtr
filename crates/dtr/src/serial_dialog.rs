@@ -338,7 +338,7 @@ impl SerialDialog {
                     .color(p.dim),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if cross(ui, skin, "close serial connection", 24.0) {
+                if cross(ui, skin, "close serial connection", 24.0).clicked() {
                     *event = Some(Event::Cancel);
                 }
             });
