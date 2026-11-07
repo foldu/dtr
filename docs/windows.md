@@ -49,6 +49,26 @@ does not. That is the visual that reads as "needs HiDPI support".
 A point is not a pixel; egui already encodes this rule for the chrome, and the same rule was
 applied to layout constants (`ui.rs`), but never to the grid's font size.
 
+**Measured, not inferred** (2026-11-07, the `winvm` guest, display scale set in Settings →
+Display, `--capture` for the window and `mode con` inside the shell for the pane; the guest
+reset to `base` between the runs so only the scale differed):
+
+| scale | window (`--capture`) | cell | pane (`mode con`) |
+|---|---|---|---|
+| 100 % | 900 × 620 | 9 × 17 | 100 × 34 |
+| 125 % | 1125 × 775 | 9 × 17 | 125 × 43 |
+
+`winit` honours the requested `LogicalSize(900, 620)`, so the window — and with it the tab
+strip, the settings menu and every inset — grows by the factor. The grid does not: the same
+14 pt is still 14 physical pixels, so the cell stays 9 × 17 and the pane *gains* 25 more
+columns and 9 more rows in the same window. In one line: at 125 % a five-letter word is the
+same 39 px wide as at 100 %, while the tab above it is 25 % taller. Nothing is misplaced —
+glyph placement, CJK and the sprite face are all exactly as correct as at 100 % — the grid is
+simply drawn at the wrong size for the display.
+
+The guest offers only 100 % and 125 % at 1280 × 800 on `virtio-vga`, so 150 % and 200 % are
+still arithmetic (the §2.2 table) rather than observation.
+
 ### 2.2 Why the status bar covers the bottom row
 
 egui panels are dimensioned in **points**, and `fit_panes` reserves space in **physical
@@ -335,7 +355,15 @@ These came from a Windows run and cannot be judged from this tree alone:
 | Whether the Nerd Font is even visible to dtr | `dtr --fonts` on that machine, and the configured family |
 | Is latency the gate, vsync, or the panel | `-v` (`loop`, `publish gate`, `slow frame`) and the counter from §5.2 |
 | How much of resize is ConPTY | the same drag on Linux under a pty, plus timing from §5.2 |
-| Whether Windows DPI is reported as expected | `-v` logs `strip geometry` once per scale — read that line |
+
+Answered: **Windows DPI is reported as expected** — `winit` hands dtr 1.25, the chrome
+scales by it, and the grid does not (§2.1 table). The scale itself is a *setting*, so a run
+can no longer be ambiguous about which one it happened at; write the number down.
+
+Still open on this machine: 150 % and 200 % have no observation, because the guest offers
+only 100 % and 125 % at 1280 × 800. A bigger `virtio-vga` mode (or a second head) would let
+§2.2's arithmetic be measured instead of asserted, and would be the place a grid-size fix is
+verified before anyone trusts it at 2×.
 
 There is also no Windows test coverage at all: CI runs the suite on Linux and only
 cross-compiles `.#windows`. ConPTY resize, DX12 presentation and DPI are unexercised by

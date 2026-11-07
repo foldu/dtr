@@ -921,11 +921,12 @@ enough.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face:
   Han/kana, fullwidth punctuation, Nerd Font icons, emoji. Read it before
-  changing `prepare_pane`'s placement rules.
+  changing `prepare_pane`'s placement rules. **§9 is the list of what is left**,
+  in the order a person would notice it.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost, and the
-  instrument each open item still needs.
+  instrument each open item still needs. §2.1 now carries the measurement at 125 %.
 - `docs/chrome.md` — how the tabs get into the title bar: client chrome on Windows and
   Linux, the winit/egui mechanics that make it mostly one implementation, and the
   per-platform metrics and glyphs that keep the buttons looking native.
