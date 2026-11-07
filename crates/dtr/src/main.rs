@@ -21,6 +21,7 @@ mod screenshot;
 mod serial;
 mod settings;
 mod sources;
+mod sprite;
 mod theme;
 mod thumb;
 mod ui;

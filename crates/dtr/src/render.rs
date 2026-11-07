@@ -113,6 +113,10 @@ pub struct Metrics {
     /// constraint matches what the font designer drew for one cell.
     pub icon_height: f32,
     pub icon_height_single: f32,
+    /// How thick a "light" line is in the sprite face: the face's own box and
+    /// underline thickness, because a 1 px box drawing character disappears in a
+    /// 28 pt cell and a 3 px one is a blob in a 9 px cell.
+    pub box_thickness: f32,
 }
 
 /// Where a glyph's bitmap sits inside its cell, in pixels from the cell's
@@ -544,11 +548,10 @@ fn constraint_for(ch: char) -> Constraint {
     if matches!(cp, 0xE0B0..=0xE0D7) {
         return Constraint::POWERLINE;
     }
-    // Box drawing and block elements are meant to tile too, and stretching
-    // their ink is *not* the fix: `─` is three pixels of ink that would become a
-    // solid block, and `▀` would lose the half that makes it a half. Ghostty
-    // draws these itself, from a sprite face, for exactly this reason
-    // (`docs/cjk.md` §5, M6).
+    // Box drawing and block elements never reach a font: `crate::sprite` draws
+    // them, because their geometry *is* the cell. The ranges it does not own
+    // (the arcs, the diagonals, legacy computing) fall through to a font
+    // untouched, which is what they got before.
     if is_graphics_element(ch) {
         return Constraint::NONE;
     }
@@ -1067,21 +1070,28 @@ impl GridRenderer {
         size: f32,
         cells: u8,
     ) -> Option<Glyph> {
-        let face = self.fonts.face_for(style, ch)?;
-        let glyph_id = self.fonts.glyph_id(face, ch)?;
+        // A sprite has no face and no glyph id; the sentinel keeps the atlas key
+        // unique without a second cache.
+        let sprite = crate::sprite::supported(ch);
+        // The codepoint stands in for the glyph id: with a single id every
+        // sprite would share one atlas entry and every box character would draw
+        // the first one.
+        let (face, glyph_id) = if sprite {
+            (u32::MAX, ch as u32 as u16)
+        } else {
+            let face = self.fonts.face_for(style, ch)?;
+            (face as u32, self.fonts.glyph_id(face, ch)?)
+        };
         let constraint = constraint_for(ch);
-        let key = (
-            face as u32,
-            glyph_id,
-            (size * 4.0) as u32,
-            constraint,
-            cells,
-        );
+        let key = (face, glyph_id, (size * 4.0) as u32, constraint, cells);
         if let Some(glyph) = self.glyphs.get(&key) {
             return Some(*glyph);
         }
 
-        let laid = lay_out(&mut self.fonts, face, glyph_id, ch, size, cells)?;
+        let laid = match laid_sprite(ch, &self.fonts.metrics) {
+            Some(laid) => laid,
+            None => lay_out(&mut self.fonts, face as usize, glyph_id, ch, size, cells)?,
+        };
         let colour = laid.colour;
         let image = &laid.image;
         let (width, height) = (image.placement.width, image.placement.height);
@@ -1218,30 +1228,48 @@ fn lay_out(
         height: height * scale_y,
     };
     (ink.x, ink.y) = constraint.place(&metrics, ink, cells);
-    // A graphics element whose ink already fills the cell is a *solid*: `█`,
-    // `▓`, `▒`, `░`. Drawing it into the cell exactly is what closes the seam
-    // between two of them, and unlike stretching a line it cannot go wrong. A
-    // half block (`▀`) or a box-drawing line (`─`) fails the test and is left
-    // exactly as its font drew it — the same reason they do not get
-    // `Constraint::TILE` (`constraint_for`).
-    if constraint.size == Fit::None && is_graphics_element(ch) {
-        let solid =
-            ink.width >= 0.9 * metrics.cell_width && ink.height >= 0.9 * metrics.cell_height;
-        if solid {
-            ink = Ink {
-                x: 0.0,
-                y: 0.0,
-                width: metrics.cell_width,
-                height: metrics.cell_height,
-            };
-        }
-    }
     Some(Laid {
         colour: image.content == swash::scale::image::Content::Color,
         image,
         ink,
         constraint,
         cells,
+    })
+}
+
+/// The sprite face's answer for `ch`, dressed as a rasteriser image.
+///
+/// The atlas and the placement rules then cannot tell a sprite from a font
+/// glyph, which is the point: a box drawing character is a *diagram* of the
+/// cell, and drawing it means the cell's edges are its edges by construction,
+/// at any cell size (`crate::sprite`).
+fn sprite_image(ch: char, metrics: &Metrics) -> Option<swash::scale::image::Image> {
+    let sprite = crate::sprite::draw(ch, metrics)?;
+    let mut image = swash::scale::image::Image::new();
+    image.content = swash::scale::image::Content::Mask;
+    image.placement.left = sprite.left;
+    image.placement.top = sprite.top;
+    image.placement.width = sprite.width;
+    image.placement.height = sprite.height;
+    image.data = sprite.data;
+    Some(image)
+}
+
+/// A sprite, laid out. One cell, no constraint: the mask already is the cell.
+fn laid_sprite(ch: char, metrics: &Metrics) -> Option<Laid> {
+    let image = sprite_image(ch, metrics)?;
+    let (x, y, width, height) = placement(metrics, &image);
+    Some(Laid {
+        image,
+        colour: false,
+        ink: Ink {
+            x,
+            y,
+            width,
+            height,
+        },
+        constraint: Constraint::NONE,
+        cells: 1,
     })
 }
 
@@ -1535,6 +1563,19 @@ impl Fonts {
                         face_top: baseline - ascent - line_gap / 2.0,
                         icon_height: face_height,
                         icon_height_single: (2.0 * cap_height + face_height) / 3.0,
+                        // Ghostty: `max(1, ceil(underline_thickness))`, and the
+                        // underline thickness is `0.15 * ex_height` when the
+                        // face does not declare one.
+                        box_thickness: {
+                            let declared = scale(font.metrics(&[]).stroke_size);
+                            if declared >= 1.0 {
+                                declared.round()
+                            } else {
+                                let x = scale(font.metrics(&[]).x_height);
+                                let x = if x > 0.0 { x } else { ascent * 0.52 };
+                                (0.15 * x).max(1.0).round()
+                            }
+                        },
                     }
                 }
                 None => Metrics {
@@ -1546,6 +1587,7 @@ impl Fonts {
                     face_top: 0.0,
                     icon_height: look.size * 1.2,
                     icon_height_single: look.size * 1.2,
+                    box_thickness: (look.size / 14.0).max(1.0),
                 },
             }
         };
@@ -1924,6 +1966,21 @@ pub fn font_report(look: &Look) {
     println!();
 
     for &ch in FONT_REPORT_SAMPLE {
+        // A sprite has no face at all, which is the row that says the box
+        // drawing ranges are drawn rather than borrowed.
+        if let Some(laid) = laid_sprite(ch, &metrics) {
+            println!(
+                "U+{:04X} {ch}  sprite                        ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}  drawn",
+                ch as u32,
+                laid.image.placement.width,
+                laid.image.placement.height,
+                laid.ink.x,
+                laid.ink.y,
+                laid.ink.width,
+                laid.ink.height,
+            );
+            continue;
+        }
         let Some(face) = fonts.face_for(Face::Regular, ch) else {
             println!("U+{:04X} {ch}  no face has this character", ch as u32);
             continue;
@@ -2176,6 +2233,9 @@ mod font_tests {
     fn drawn(ch: char, cells: u8) -> Option<(Metrics, Ink, u8)> {
         let look = Look::default();
         let mut fonts = Fonts::load(&look);
+        if let Some(laid) = laid_sprite(ch, &fonts.metrics) {
+            return Some((fonts.metrics, laid.ink, laid.cells));
+        }
         let face = fonts.face_for(Face::Regular, ch)?;
         let glyph_id = fonts.glyph_id(face, ch)?;
         let laid = lay_out(&mut fonts, face, glyph_id, ch, look.size, cells)?;
@@ -2267,37 +2327,24 @@ mod font_tests {
         assert_eq!(constraint_width(&frame, 1), 2);
     }
 
-    /// A full block covers its cell exactly, which is what closes the seam
-    /// between two of them — and a line is left alone, because a line's ink is
-    /// the line.
+    /// The graphics ranges are *drawn*, not borrowed, and the drawn mask is the
+    /// cell: that is what makes a block seam-free and a line join its
+    /// neighbour at any cell size. The pixel-level assertions live in
+    /// `sprite::tests`, which can look inside the mask; this one is here to say
+    /// the renderer took that path and did not constrain a font's glyph.
     #[test]
-    fn a_full_block_covers_its_cell_and_a_line_is_left_alone() {
-        let Some((m, ink, _)) = drawn('█', 1) else {
-            return; // no font here has a block element
-        };
-        assert_eq!(
-            (ink.x, ink.y, ink.width, ink.height),
-            (0.0, 0.0, m.cell_width, m.cell_height),
-            "a full block is not the cell"
-        );
-        let Some((m, line, _)) = drawn('─', 1) else {
-            return;
-        };
-        assert!(
-            line.height < m.cell_height * 0.5,
-            "a box-drawing line is {} px tall in a {} px cell: it was tiled",
-            line.height,
-            m.cell_height
-        );
-        let Some((m, half, _)) = drawn('▀', 1) else {
-            return;
-        };
-        assert!(
-            half.height < m.cell_height * 0.75,
-            "an upper-half block is {} px tall in a {} px cell: it was tiled",
-            half.height,
-            m.cell_height
-        );
+    fn a_graphics_element_is_drawn_by_the_sprite_face() {
+        for ch in ['─', '│', '┌', '┼', '█', '▀', '░', '⠿'] {
+            let m = Look::default();
+            let laid = laid_sprite(ch, &Fonts::load(&m).metrics)
+                .unwrap_or_else(|| panic!("{ch} is not drawn as geometry"));
+            assert_eq!(laid.cells, 1);
+            assert_eq!(laid.constraint, Constraint::NONE);
+            assert!(
+                laid.ink.x.abs() < 0.01 && laid.ink.y.abs() < 0.01,
+                "{ch} is not at the cell's corner"
+            );
+        }
     }
 
     /// A braille cell fills its cell exactly, which is the whole point of

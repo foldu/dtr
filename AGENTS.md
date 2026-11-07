@@ -409,13 +409,21 @@ numbers and on screen. It is in `FONT_REPORT_SAMPLE` (`dtr --font-report`) and i
 placement tests; use it for a new CJK test or capture rather than inventing another
 character, so two people comparing two builds are looking at the same glyph.
 
-**A block that fills its cell is drawn into the cell; a line is not.** `█▓▒░` are
-solids, so `lay_out` snaps any graphics element whose ink already covers 90 % of the
-cell in both axes to the cell exactly — that is what closes the seam between two blocks
-and the row above. `─│` and `▀▄` keep the ink their font gave them, because a line's
-three pixels *are* the line and a half block's half is its meaning: stretching the
-whole range turns one into a block and the other into a full one, which is why Ghostty
-draws that range from a sprite face instead (`docs/cjk.md` §5, M6).
+**Box drawing, blocks and braille are drawn, not borrowed.** `crates/dtr/src/sprite.rs`
+is a port of Ghostty's sprite face (`src/font/sprite/draw/*.zig`): box drawing (the
+light/heavy/double arms and every junction, from a table of edges per codepoint, plus
+the dashes), block elements (fractions, quadrants, shades as flat alpha) and braille
+(eight dots with Ghostty's order of concessions when the cell is too small). The cell
+*is* the canvas, so a line reaches the cell's edge and a block fills it at any cell
+size — which is the whole point, because a font draws these at its own thickness and
+side bearings (`─` in DejaVu is 19 px of ink in a 17 px cell, and two of them
+overlap). Not ported, and still from a font: the arcs `╭╮╯╰`, the diagonals `╱╲╳`, the
+legacy-computing blocks and the geometric shapes.
+
+Two traps. A sprite's mask is the *whole cell*, so its ink box says nothing about how
+much was drawn — assert on the mask's pixels, not on the rectangle. And the sprite is
+keyed in the atlas by codepoint in place of a glyph id: with one shared id every box
+character draws the first one it cached.
 
 **A wide character is two cells, not one, and neither is a box to fill.** The width
 is the terminal's (`Cell::wide()` → `Narrow`/`Wide`/`SpacerTail`/`SpacerHead`), taken
