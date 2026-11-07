@@ -203,6 +203,13 @@ window — still open.
 runtime and a `LocalSet`; everything that touches the terminal happens there and the
 UI talks to it with commands and slots.
 
+**A terminal without a scrollback limit is a memory leak with a schedule.** The VT
+core's default is *unlimited*, so a benchmark flood grew one to **50 GB of anonymous
+memory** and the kernel killed it mid-run. `pane::new_terminal` sets the limit for
+every terminal from `config.terminal.scrollback_limit`; there is no unlimited spelling,
+`dtr_config::SCROLLBACK_LIMIT` (100 MB) is both default and ceiling, and the parser
+refuses more. A 200 MB flood now peaks at ~470 MB RSS (mostly lavapipe).
+
 **A pty is cooked until somebody says otherwise.** `openpty` hands back a terminal in
 the kernel's default mode, so a second line discipline sits in front of the VT core:
 output post-processing, `\n` rewritten to `\r\n` a character at a time, input
@@ -936,6 +943,7 @@ enough.
 | Caps Lock remapped to Escape does nothing, while every menu still closes on it | the physical key is `CapsLock` and the encoder has no bytes for it; `input::key_of` trusts the layout for legend keys, and menus read the logical key so they never noticed |
 | A custom caption's maximize button does nothing even though `WM_NCHITTEST` answers `HTMAXBUTTON` | winit does not forward `WM_NCLBUTTONDOWN` to `DefWindowProc`; the subclass sends `SC_MAXIMIZE`/`SC_RESTORE` itself (`crates/dtr/src/chrome/windows.rs`) |
 | Windows 11 snap layouts never appear over a custom maximize button | the hit test is necessary, not sufficient: `HTMAXBUTTON` is answered (verified with `SendMessage`), and the flyout still does not show in the guest while Edge's does — `docs/chrome.md` §11 |
+| A dtr tab grows to tens of GB and the kernel OOM-kills it | the VT core defaults to unlimited scrollback; `pane::new_terminal` sets a 100 MB limit (`dtr_config::SCROLLBACK_LIMIT`, also the ceiling), so a hit here means a *new* terminal escaped that helper |
 | A stray console window next to dtr on Windows | the exe is console-subsystem; a process started without a console gets one allocated. Launching from `cmd` or Windows Terminal reuses theirs |
 | The exe shows the generic blank in Explorer and in the taskbar's pin menu, while the running window has an icon | those read a resource out of the *file*; `WM_SETICON` is only a window. `crates/dtr/build.rs` compiles `assets/logo/dtr.ico` with `zig rc` — regenerate the artwork with `./scripts/icon.sh` |
 | `include_image!` paints a small red ⚠ where the picture should be | egui_extras has no decoder enabled for that format: PNG needs its `image` feature, and only `svg` was on. `ui::every_embedded_image_decodes` is the test that fails instead |

@@ -256,6 +256,9 @@ pub struct Startup {
     pub palette: bool,
     pub look: Look,
     pub theme: Option<crate::theme::Theme>,
+    /// Bytes of scrollback per tab; `dtr_config::SCROLLBACK_LIMIT` is the
+    /// ceiling and the default. Never unlimited — see `pane::new_terminal`.
+    pub scrollback: usize,
     /// Write a PNG of the live window once, `capture_after` milliseconds in.
     /// The only way to see what the window draws, as opposed to what the
     /// offscreen capture path draws.
@@ -310,6 +313,7 @@ pub fn capture_headless(
         startup.transport,
         startup.log.clone(),
         startup.theme.clone(),
+        startup.scrollback,
         // No window, so nothing to ask about a refresh rate: the 60 Hz default.
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
             crate::pane::frame_budget(None).as_nanos() as u64,
@@ -488,6 +492,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         startup.transport,
         startup.log.clone(),
         startup.theme.clone(),
+        startup.scrollback,
         std::sync::Arc::clone(&frame_budget),
         {
             let proxy = proxy.clone();
@@ -2649,6 +2654,7 @@ impl App {
             transport.clone(),
             self.log.clone(),
             self.theme.clone(),
+            self.config.terminal.scrollback_limit,
             std::sync::Arc::clone(&self.frame_budget),
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);
@@ -2765,6 +2771,7 @@ impl App {
             transport.clone(),
             self.log.clone(),
             self.theme.clone(),
+            self.config.terminal.scrollback_limit,
             std::sync::Arc::clone(&self.frame_budget),
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);

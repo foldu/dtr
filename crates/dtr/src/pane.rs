@@ -30,6 +30,30 @@ use crate::keys::KeyStroke;
 use crate::pty;
 use crate::serial::{self, CrToCrlf};
 
+/// A terminal with dtr's scrollback policy already applied.
+///
+/// The VT core's own default is *unlimited*, and a terminal that keeps every
+/// line a program prints grows until the kernel steps in: a benchmark flood
+/// took one to 50 GB of anonymous memory and it was OOM-killed mid-run. So the
+/// limit is set here, once, for every terminal dtr creates — there is no
+/// "unlimited" to configure, only how small to make it
+/// (`dtr_config::SCROLLBACK_LIMIT` is the ceiling).
+fn new_terminal(
+    cols: u16,
+    rows: u16,
+    scrollback: usize,
+) -> anyhow::Result<Terminal<'static, 'static>> {
+    let mut term = Terminal::new(cols, rows)?;
+    term.set_scrollback_max_bytes(Some(scrollback))?;
+    tracing::info!(
+        cols,
+        rows,
+        scrollback_bytes = scrollback,
+        "terminal created"
+    );
+    Ok(term)
+}
+
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
@@ -448,6 +472,7 @@ impl Pane {
         transport: Transport,
         log: Option<(PathBuf, serial::LogFormat)>,
         theme: Option<crate::theme::Theme>,
+        scrollback: usize,
         budget: FrameBudget,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
@@ -498,6 +523,7 @@ impl Pane {
                         Arc::clone(&ended_flag),
                         Arc::clone(&cwd_seen),
                         theme,
+                        scrollback,
                         budget,
                     )
                     .await
@@ -833,6 +859,7 @@ async fn run(
     ended: Arc<std::sync::atomic::AtomicBool>,
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     theme: Option<crate::theme::Theme>,
+    scrollback: usize,
     budget: FrameBudget,
 ) -> anyhow::Result<()> {
     // Raw bytes as they arrive, before any mapping: this is what the wire said,
@@ -861,7 +888,7 @@ async fn run(
     let replies: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
     let reply_sink = Rc::clone(&replies);
 
-    let mut term = Terminal::new(COLS, ROWS)?;
+    let mut term = new_terminal(COLS, ROWS, scrollback)?;
 
     // OSC 52: a program (tmux, vim, an agent over ssh) asks the terminal to put
     // something on the user's clipboard. The write arrives here; the UI does the
@@ -3498,7 +3525,15 @@ mod session_tests {
         all.extend(args);
         config.args = all;
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
-        Pane::spawn(Transport::Shell(config), None, None, budget, || {}).expect("a shell pane")
+        Pane::spawn(
+            Transport::Shell(config),
+            None,
+            None,
+            dtr_config::SCROLLBACK_LIMIT,
+            budget,
+            || {},
+        )
+        .expect("a shell pane")
     }
 
     /// Poll the published frames until `needle` is on screen, and hand back what
@@ -4319,8 +4354,15 @@ mod session_tests {
             ..Default::default()
         };
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
-        let pane =
-            Pane::spawn(Transport::Shell(config), None, None, budget, || {}).expect("an nvim pane");
+        let pane = Pane::spawn(
+            Transport::Shell(config),
+            None,
+            None,
+            dtr_config::SCROLLBACK_LIMIT,
+            budget,
+            || {},
+        )
+        .expect("an nvim pane");
         pane.send(Command::Resize {
             cols: 80,
             rows: 24,
@@ -4515,8 +4557,15 @@ mod session_tests {
             ..Default::default()
         };
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
-        let pane =
-            Pane::spawn(Transport::Shell(config), None, None, budget, || {}).expect("an nvim pane");
+        let pane = Pane::spawn(
+            Transport::Shell(config),
+            None,
+            None,
+            dtr_config::SCROLLBACK_LIMIT,
+            budget,
+            || {},
+        )
+        .expect("an nvim pane");
         let shape = |pane: &Pane| {
             pane.take_frame()
                 .and_then(|frame| frame.cursor)
@@ -4573,5 +4622,32 @@ mod session_tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use super::new_terminal;
+
+    /// Scrollback is bounded, and by the number the config carries. The VT
+    /// core's own default is unlimited, which is how a flood grew one of these
+    /// to 50 GB of anonymous memory before the kernel killed it mid-benchmark.
+    #[test]
+    fn a_terminal_keeps_no_more_than_its_scrollback_limit() {
+        let limit = 200_000;
+        let mut term = new_terminal(80, 24, limit).expect("a terminal");
+        assert_eq!(term.scrollback_max_bytes().unwrap(), Some(limit));
+
+        // ~700 KB of lines, three and a half times over the byte limit. Written
+        // as CR LF because the session is raw, exactly as the pty delivers it.
+        for _ in 0..20_000 {
+            term.vt_write(b"0123456789abcdef0123456789abcdef\r\n");
+        }
+
+        let rows = term.scrollbar().unwrap().total;
+        assert!(
+            rows < 2_000,
+            "kept {rows} rows of scrollback at a {limit}-byte limit"
+        );
     }
 }

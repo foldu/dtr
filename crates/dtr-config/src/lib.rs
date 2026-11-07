@@ -12,6 +12,15 @@ use toml_edit::{DocumentMut, Item, Table, value};
 
 pub mod keys;
 
+/// The most scrollback a tab may keep, in bytes, and the default.
+///
+/// There is no "unlimited": the VT core's own default *is* unlimited, and a
+/// terminal that keeps every line a program prints is a terminal that grows
+/// until the kernel kills it — measured at 50 GB of anonymous memory after a
+/// benchmark flood, which took the terminal and the run with it. A ceiling is
+/// therefore part of the type, not a recommendation in a comment.
+pub const SCROLLBACK_LIMIT: usize = 100_000_000;
+
 /// Everything configurable. Defaults are what a fresh install gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -25,6 +34,17 @@ pub struct Config {
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
     /// terminal's built-in colours.
     pub theme: Option<String>,
+    pub terminal: Terminal,
+}
+
+/// Facts about the terminal itself, as opposed to what it is showing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Terminal {
+    /// Bytes of scrollback a tab keeps before the oldest pages are dropped.
+    ///
+    /// Clamped to `[0, SCROLLBACK_LIMIT]` when the file is read: a value above
+    /// the ceiling is a mistake, not an instruction, and the error says so.
+    pub scrollback_limit: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +123,15 @@ impl Default for Config {
             },
             chrome: Chrome::default(),
             theme: None,
+            terminal: Terminal::default(),
+        }
+    }
+}
+
+impl Default for Terminal {
+    fn default() -> Self {
+        Self {
+            scrollback_limit: SCROLLBACK_LIMIT,
         }
     }
 }
@@ -200,6 +229,21 @@ impl Config {
             // The settings menu writes an empty string to mean "no theme";
             // reading it back must not produce a theme called "".
             config.theme = (!name.is_empty()).then(|| name.to_owned());
+        }
+
+        if let Some(terminal) = document.get("terminal").and_then(Item::as_table) {
+            if let Some(limit) = terminal.get("scrollback_limit") {
+                let value = limit.as_integer().ok_or_else(|| {
+                    Error::Value("terminal.scrollback_limit must be a number of bytes".into())
+                })?;
+                if value < 0 || value as usize > SCROLLBACK_LIMIT {
+                    return Err(Error::Value(format!(
+                        "terminal.scrollback_limit {value} is outside 0 to {SCROLLBACK_LIMIT} bytes; \
+                         dtr does not offer unlimited scrollback"
+                    )));
+                }
+                config.terminal.scrollback_limit = value as usize;
+            }
         }
 
         if let Some(font) = document.get("font").and_then(Item::as_table) {
@@ -361,6 +405,13 @@ auto_reconnect = true
 # manager, with the tabs underneath.
 chrome = "client"
 
+[terminal]
+# Bytes of scrollback a tab keeps before the oldest pages are dropped. There is
+# no unlimited setting: a program that prints without end would grow the process
+# until the kernel killed it. 100 MB is the ceiling, and the default; lower it
+# if you would rather not hold that much.
+scrollback_limit = 100000000
+
 [font]
 # Grid font size in points.
 size = 14
@@ -404,13 +455,40 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, set_in_text};
+    use super::{Config, SCROLLBACK_LIMIT, set_in_text};
 
     #[test]
     fn a_missing_file_is_the_defaults() {
         let config = Config::load(std::path::Path::new("/nonexistent/dtr/config.toml")).unwrap();
         assert!(config.serial.auto_reconnect);
         assert_eq!(config.font.size, 14.0);
+    }
+
+    /// Scrollback is bounded by default, and there is no spelling that makes it
+    /// unbounded: the VT core's unlimited default is what grew a dtr to 50 GB
+    /// and got it OOM-killed.
+    #[test]
+    fn scrollback_is_always_bounded() {
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.terminal.scrollback_limit, SCROLLBACK_LIMIT);
+
+        let lower = Config::parse("[terminal]\nscrollback_limit = 4194304\n").unwrap();
+        assert_eq!(lower.terminal.scrollback_limit, 4 * 1024 * 1024);
+
+        // 0 is "no scrollback", which is a limit, not the absence of one.
+        let none = Config::parse("[terminal]\nscrollback_limit = 0\n").unwrap();
+        assert_eq!(none.terminal.scrollback_limit, 0);
+
+        for too_much in [
+            format!("[terminal]\nscrollback_limit = {}\n", SCROLLBACK_LIMIT + 1),
+            "[terminal]\nscrollback_limit = -1\n".to_owned(),
+        ] {
+            let error = Config::parse(&too_much).expect_err("the ceiling should refuse this");
+            assert!(
+                format!("{error}").contains("unlimited"),
+                "the message should say why: {error}"
+            );
+        }
     }
 
     #[test]
