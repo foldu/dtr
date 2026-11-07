@@ -203,6 +203,12 @@ state belongs there.
 of a taller area and the first prompt row was drawn underneath it. Both ask
 `App::top_inset`.
 
+**With `chrome = "client"` that strip is also the window's title bar.** The same 30 points
+hold the drag region, the eight resize borders and the platform's three buttons, and the
+reservation is unchanged — the row moved, its height did not (`crate::chrome`). The drag
+region is keyed off what `ui::tab_bar` allocated and stops at `buttons_rect`, because a
+drag area laid over the chips is how a press becomes "sometimes unresponsive".
+
 **`inner_size()` is already physical, so a "scale" divided by it is always 1.0.**
 `Gpu::scale()` was physical/physical and the DPI factor never entered it; every
 consumer then reserved half the space it needed on a HiDPI display (a 34 px inset
@@ -794,6 +800,9 @@ enough.
 | A removed pane takes two panes with it | the recursive remove returned "delete me" and the grandparent deleted the collapsed subtree; only the direct parent may collapse |
 | Line height is far too small | swash reports `descent` as a *positive* distance below the baseline; negating it halves the cell |
 | Caps Lock remapped to Escape does nothing, while every menu still closes on it | the physical key is `CapsLock` and the encoder has no bytes for it; `input::key_of` trusts the layout for legend keys, and menus read the logical key so they never noticed |
+| A custom caption's maximize button does nothing even though `WM_NCHITTEST` answers `HTMAXBUTTON` | winit does not forward `WM_NCLBUTTONDOWN` to `DefWindowProc`; the subclass sends `SC_MAXIMIZE`/`SC_RESTORE` itself (`crates/dtr/src/chrome/windows.rs`) |
+| Windows 11 snap layouts never appear over a custom maximize button | the hit test is necessary, not sufficient: `HTMAXBUTTON` is answered (verified with `SendMessage`), and the flyout still does not show in the guest while Edge's does — `docs/chrome.md` §11 |
+| A stray console window next to dtr on Windows | the exe is console-subsystem; a process started without a console gets one allocated. Launching from `cmd` or Windows Terminal reuses theirs |
 
 ## Where to look
 

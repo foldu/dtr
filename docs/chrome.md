@@ -1,9 +1,10 @@
 # Window chrome: the tabs are the title bar
 
-Status: design memo, 2026-11-07 · Answers note 4 of [windows.md](windows.md) — "the tabs
-should be in the header". §3 records the mechanisms considered, §4 the one chosen (client
-chrome on Windows and Linux; platform-looking buttons, dtr-looking tabs), §7 the build
-order. Nothing here is implemented yet.
+Status: design memo, then implemented, 2026-11-07 · Answers note 4 of
+[windows.md](windows.md) — "the tabs should be in the header". §3 records the mechanisms
+considered, §4 the one chosen (client chrome on Windows and Linux; platform-looking
+buttons, dtr-looking tabs), §7 the build order, and §11 what was built and what the
+Windows guest verified. The code is `crates/dtr/src/chrome.rs`.
 
 ---
 
@@ -259,3 +260,45 @@ All three were answered on 2026-11-07, before any code:
    detects a tiling WM.
 2. **Windows 11 flyout** — in scope, worth the `windows-sys` dependency (§7 step 4).
 3. **Caption title** — none. The lit chip is enough; §4 says so.
+
+---
+
+## 11. What was built, and what the guest verified
+
+Everything in §7 landed: `[window] chrome` with its config test, decorations off at
+creation (plus the Windows undecorated shadow), the drag region and double-click, the OS
+title following the active tab, both button styles with their hover and accessibility
+names, Segoe Fluent Icons through fontique with Lucide as the fallback, the painted
+Adwaita shapes, the compiled-in window icon, the caption icon opening the system menu, the
+eight resize borders, and the `WM_NCHITTEST`/`HTMAXBUTTON` subclass.
+
+Checked on the Windows 11 guest (build 26300), driving the exe as an interactive scheduled
+task and injecting input over QMP:
+
+| Claim | How | Result |
+|---|---|---|
+| the window has no visible frame | window styles dumped from the guest | `0x16CF0000`: `WS_CAPTION`/`WS_THICKFRAME` kept, frame hidden by `WM_NCCALCSIZE` — exactly the retained-styles design |
+| the hit test answers `HTMAXBUTTON` | `SendMessage(WM_NCHITTEST)` at the button's centre | `9` |
+| the button maximizes and restores | QMP click, then the window rect | `-8,-8,1288,760` and back |
+| the close button exits | QMP click, then the process | gone, and the window with it |
+| the caption icon opens the real system menu | QMP click | Restore/Move/Size/Minimize/Maximize/Close (Alt+F4) |
+| the buttons look like Windows' | screenshot, enlarged | 46-point buttons, Fluent glyphs, the close hover in `#C42B1C` |
+
+**One thing did not reproduce: the snap-layout flyout.** The hit test answers
+`HTMAXBUTTON` when asked directly, which is the documented requirement
+([learn.microsoft.com](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/ui/apply-snap-layout-menu)),
+but hovering the button in the guest shows no flyout — while Edge, in the same guest,
+shows one. The remaining difference between Edge and dtr is plausibly
+`DwmExtendFrameIntoClientArea`, which Chromium calls and dtr does not. Treat the flyout as
+unverified on real hardware; the hit test and the button itself are not affected, and the
+`WM_NCLBUTTONDOWN` handler exists because winit does not forward a non-client click to
+`DefWindowProc` (that bug made the button dead until it was added).
+
+Two smaller findings from the same session, neither caused by this change:
+
+- **A stray console window sits behind dtr on Windows.** The exe is console-subsystem, and
+  a process started without a console gets one allocated. Launching from `cmd` or Windows
+  Terminal reuses theirs and the extra window does not appear.
+- **The caption icon is dark artwork on a dark strip.** `dtr-mark-32.png` is nearly
+  invisible at 16 points against the strip's surface; a light/mono variant exists in
+  `assets/logo/` if that reads badly on a real screen.

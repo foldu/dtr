@@ -278,10 +278,11 @@ expectation is a modest improvement, not a transformation.
 
 ## 6. Tabs in the header (note 4)
 
-**Decided**: client-side chrome on both platforms, tabs in dtr's style, window buttons in
+**Done**: client-side chrome on both platforms, tabs in dtr's style, window buttons in
 the platform's — the design, the per-platform levers and the build order are in
-[chrome.md](chrome.md). The rest of this section is the reasoning that led there, kept
-because it still explains what the merge costs.
+[chrome.md](chrome.md), and its §11 has what the Windows guest verified (including the one
+thing it did not: the snap-layout flyout). The rest of this section is the reasoning that
+led there, kept because it still explains what the merge costs.
 
 Today there are two rows above the grid: the OS title bar (default decorations,
 `crates/dtr/src/app.rs:3255`) and a 30-point tab strip inside the client area
@@ -314,8 +315,8 @@ list that blocks nothing, which is why it is last in §7.
 4. **Baud in the connect flow (§3.1).**
 5. **Autobaud (§3.2)** — after the safety decision in §9.
 6. **Resize (§5.3)** — after the counter says where the milliseconds are.
-7. **Tabs in the header (§6)** — design settled in [chrome.md](chrome.md), four steps
-   there. Last, blocks nothing.
+7. **Tabs in the header (§6)** — implemented; [chrome.md](chrome.md) §11 is the record,
+   including the flyout that did not reproduce in the guest.
 
 Note 9 is not in the list because it is not actionable until §8's capture exists; if it turns
 out to be DPI, step 2 closes it.
