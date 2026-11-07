@@ -6,6 +6,13 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Reading the XDG settings portal, and with it following the desktop when it
+# changes. Off, the Linux reader is `gsettings` and nothing watches: a build
+# that cannot take zbus's tree still gets Adwaita's palette, just not a live one.
+portal = ["dep:zbus"]
+default = ["portal"]
+
 [dependencies]
 anyhow.workspace = true
 dtr-sftp.workspace = true
@@ -65,6 +72,10 @@ tempfile.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 pprof.workspace = true
 rustc-demangle.workspace = true
+# The native palette: `org.freedesktop.portal.Settings.Read` is how a GNOME
+# session states its scheme and its accent without dtr linking GLib. Optional —
+# see the `portal` feature.
+zbus = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

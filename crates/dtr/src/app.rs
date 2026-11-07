@@ -677,6 +677,18 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     if let Some(path) = startup.files.clone() {
         app.split_files(Some(path));
     }
+    // The desktop's chrome is live: the watcher re-reads it when the platform says
+    // it changed — `WM_SETTINGCHANGE` on Windows, `SettingChanged` from the portal
+    // on Linux — and asks for a repaint through the same door as every other
+    // background result.
+    if let Some(worker) = app.worker.as_ref() {
+        crate::system::watch(worker.handle(), {
+            let proxy = app.proxy.clone();
+            move || {
+                let _ = proxy.send_event(UserEvent::Frame);
+            }
+        });
+    }
     event_loop.run_app(&mut app)?;
     match app.fatal {
         Some(err) => anyhow::bail!("{err}"),
@@ -5051,14 +5063,10 @@ impl Gpu {
                             if let Some(at) = crate::chrome::caption_icon(ui, strip, &look) {
                                 self.show_system_menu(at);
                             }
-                            // The drag region stops where the buttons begin: a
-                            // press that starts a drag must never be a press on
-                            // the close button's neighbour.
-                            let buttons = crate::chrome::buttons_rect(strip, crate::chrome::kind());
                             // The drag region stops at the menu's left edge: the
-                            // menu is a button inside the caption area, and a
-                            // press on it that also started a drag would move
-                            // the window instead of opening it.
+                            // menu and the buttons are both inside the caption
+                            // area, and a press on either that also started a
+                            // drag would move the window instead of pressing it.
                             let caption = egui::Rect::from_min_max(
                                 strip.min,
                                 egui::pos2(menu_rect.left(), strip.bottom()),

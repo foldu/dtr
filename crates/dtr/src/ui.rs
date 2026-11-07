@@ -99,7 +99,8 @@ impl Look {
     /// palette is a few dozen mixes, which is nothing next to a frame.
     ///
     /// `native` resolves to the platform's palette where this crate can read one
-    /// and to `dtr` everywhere else — see `dtr_widgets::Skin::system`.
+    /// and to `dtr` everywhere else — see `crate::system`, which reads it once and
+    /// then keeps it current when the desktop changes it.
     pub fn skin(&self) -> dtr_widgets::Skin {
         dtr_widgets::Skin::resolve(
             self.preset,

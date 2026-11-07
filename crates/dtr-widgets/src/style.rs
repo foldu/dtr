@@ -104,6 +104,11 @@ pub struct Style {
     pub card_radius: u8,
     /// A tab chip, a segmented choice: smaller than a card, larger than nothing.
     pub chip_radius: u8,
+    /// The radius of a checkbox's box, which is not a chip's: Adwaita rounds a
+    /// 20-point box by 6 (`check { border-radius: 6px }`) while a tab is a pill,
+    /// and one radius for both draws either a circle that is not a checkbox or a
+    /// chip that does not look like one.
+    pub check_radius: u8,
     /// The side of a checkbox. Windows draws a 20-point box; dtr's sheet is
     /// denser and asks for 16, which is also the smallest size the tick inside
     /// it stays legible at.
@@ -134,6 +139,7 @@ impl Style {
             control_radius: 4,
             card_radius: 10,
             chip_radius: 4,
+            check_radius: 4,
             check_size: 16.0,
             border: 1.0,
             card_margin: Margin::symmetric(20, 18),
@@ -142,6 +148,51 @@ impl Style {
             footer: Footer::PrimaryLast,
             focus: Focus::None,
             shadow: None,
+        }
+    }
+
+    /// GNOME's, from the metrics in libadwaita 1.9.3's stylesheet: a 34-point
+    /// entry (`spinbutton, entry { min-height: 34px }`), a 9-point control
+    /// radius (`border-radius: 9px`), a 12-point card (`.card { border-radius:
+    /// 12px }`) wearing that rule's own shadow, and a bold section label.
+    ///
+    /// The font sizes are the one part not measured: GNOME's is a font *name*
+    /// (`Cantarell 11`) resolved by fontconfig, and egui's fallback chain finds
+    /// the same face on the same desktop. A headerbar, where a GNOME window
+    /// puts its title, is a `Title::Bar`.
+    pub fn adwaita() -> Self {
+        Self {
+            mono: false,
+            label_font: FontId::proportional(12.0),
+            value_font: FontId::proportional(12.0),
+            title_font: FontId::proportional(20.0),
+            row: 34.0,
+            gap: 8.0,
+            label_width: 110.0,
+            padding: Vec2::new(12.0, 5.0),
+            control_radius: 9,
+            card_radius: 12,
+            // A chip is a control, and Adwaita gives controls one radius.
+            chip_radius: 9,
+            // ...but a checkbox is a rounded square: `check { border-radius:
+            // 6px }`, against `radio { border-radius: 100% }` a few lines later.
+            check_radius: 6,
+            check_size: 20.0,
+            border: 1.0,
+            card_margin: Margin::symmetric(24, 20),
+            title: Title::Bar,
+            section: Section::Bold,
+            // A GNOME dialog's suggested action is the right-hand one.
+            footer: Footer::PrimaryLast,
+            focus: Focus::Ring,
+            // `.card`'s box-shadow is three layers; the middle one (`0 1px 3px
+            // 1px RGB(0 0 6/7%)`) is the part that says "raised".
+            shadow: Some(Shadow {
+                offset: [0, 1],
+                blur: 3,
+                spread: 1,
+                color: Color32::from_rgba_unmultiplied(0, 0, 6, 18),
+            }),
         }
     }
 
@@ -164,6 +215,7 @@ impl Style {
             control_radius: 4,
             card_radius: 8,
             chip_radius: 4,
+            check_radius: 4,
             check_size: 20.0,
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
@@ -214,5 +266,26 @@ mod tests {
         assert_eq!(dtr.title, Title::Eyebrow);
         assert_eq!(native.title, Title::Bar);
         assert!(native.shadow.is_some() && dtr.shadow.is_none());
+    }
+
+    /// GNOME's metrics, from the numbers in libadwaita 1.9.3's stylesheet rather
+    /// than from a guess: a 34-point entry, a 9-point control radius, a 12-point
+    /// card. A native skin on Linux that kept dtr's 23-point rows would be a
+    /// palette over the wrong shape, which reads as "theming" rather than as
+    /// "a window on this desktop".
+    #[test]
+    fn adwaita_takes_its_metrics_from_the_stylesheet() {
+        let adwaita = Style::adwaita();
+        // `spinbutton, entry { min-height: 34px }`.
+        assert_eq!(adwaita.row, 34.0);
+        // `border-radius: 9px` on the same rule; `.card { border-radius: 12px }`.
+        assert_eq!(adwaita.control_radius, 9);
+        assert_eq!(adwaita.card_radius, 12);
+        // GNOME's UI text is proportional, its dialogs put the suggested action on
+        // the right, and its sections are bold labels rather than rules.
+        assert!(!adwaita.mono);
+        assert_eq!(adwaita.footer, Footer::PrimaryLast);
+        assert_eq!(adwaita.section, Section::Bold);
+        assert!(adwaita.shadow.is_some());
     }
 }

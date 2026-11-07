@@ -553,16 +553,33 @@ fn main() -> anyhow::Result<()> {
         preset,
     );
     let skin = look.skin();
-    tracing::debug!(
-        skin = crate::system::describe(&skin),
-        requested = look.preset.as_str(),
-        accent = crate::system::accent_hex(&skin),
-        // The hover the platform's own ladder chose, when there is one: it is the
-        // difference between "read the system accent" and "read the system's
-        // hover for it", and only one of those is visible without the log.
-        hover = crate::system::hex(skin.palette.accent_hover),
-        "chrome"
-    );
+    // Where the platform's answer came from, and why there is none where there is
+    // none: "asked for native and got dtr" with no cause is the log line this pair
+    // exists for. The `skin()` above is what performs the read.
+    let native = crate::system::resolution();
+    // The hover the platform's own ladder chose, when there is one: it is the
+    // difference between "read the system accent" and "read the system's hover for
+    // it", and only one of those is visible without the log.
+    let hover = crate::system::hex(skin.palette.accent_hover);
+    match &native.reason {
+        Some(reason) => tracing::debug!(
+            skin = crate::system::describe(&skin),
+            requested = look.preset.as_str(),
+            accent = crate::system::accent_hex(&skin),
+            hover = ?hover,
+            source = native.source,
+            reason = %reason,
+            "chrome"
+        ),
+        None => tracing::debug!(
+            skin = crate::system::describe(&skin),
+            requested = look.preset.as_str(),
+            accent = crate::system::accent_hex(&skin),
+            hover = ?hover,
+            source = native.source,
+            "chrome"
+        ),
+    }
     look.fallback = config.font.fallback.clone();
 
     // After the Look, so the report describes the font the terminal would

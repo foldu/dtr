@@ -26,11 +26,35 @@ use crate::style::{Preset, Style};
 pub const WINDOWS_ACCENT_LIGHT: Color32 = Color32::from_rgb(0x00, 0x5F, 0xB8);
 pub const WINDOWS_ACCENT_DARK: Color32 = Color32::from_rgb(0x60, 0xCD, 0xFF);
 
+/// Adwaita's default accent — `--accent-blue` in libadwaita 1.9.3.
+///
+/// The portal always states an accent on a GNOME session that has a preference;
+/// this is what a session that has none gets, because Adwaita's own default is
+/// blue rather than "whatever the theme's cursor was".
+pub const ADWAITA_ACCENT: Color32 = Color32::from_rgb(0x35, 0x84, 0xE4);
+
+/// Which platform's chrome a skin is.
+///
+/// Stored rather than inferred. `-v` used to guess from the style — a monospace
+/// label meant dtr, otherwise the palette's own lightness — which calls an
+/// Adwaita skin "dtr" (it borrows that layout) and would call any non-monospace
+/// light skin "windows", and neither is what a person reading the log needs to
+/// know when `native` on their desktop produced something unexpected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Dtr,
+    Windows,
+    Adwaita,
+}
+
 /// Everything a widget draws with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Skin {
     pub palette: Palette,
     pub style: Style,
+    /// Which platform's chrome this is, for `-v` and for a test that has to
+    /// tell two palettes apart without looking at a pixel.
+    pub origin: Origin,
 }
 
 impl Skin {
@@ -39,6 +63,16 @@ impl Skin {
         Self {
             palette,
             style: Style::dtr(),
+            origin: Origin::Dtr,
+        }
+    }
+
+    /// GNOME's chrome: Adwaita's palette and metrics, over the user's accent.
+    pub fn adwaita(dark: bool, accent: Color32) -> Self {
+        Self {
+            palette: Palette::adwaita(dark, accent),
+            style: Style::adwaita(),
+            origin: Origin::Adwaita,
         }
     }
 
@@ -57,6 +91,7 @@ impl Skin {
         Self {
             palette: Palette::windows_with_accent(dark, accent, ladder),
             style: Style::native(),
+            origin: Origin::Windows,
         }
     }
 
@@ -72,9 +107,8 @@ impl Skin {
     ///
     /// `native` is the platform's own when the caller could read one, and the
     /// dtr skin otherwise. The reading lives in the caller rather than here
-    /// because it is platform code — the Windows registry, and nothing on Linux,
-    /// where there is no portable system palette and `native` is the dtr style by
-    /// decision rather than by accident.
+    /// because it is platform code — the Windows registry, the XDG portal — and
+    /// this crate stays free of I/O.
     pub fn resolve(preset: Preset, dtr: Palette, native: Option<Self>) -> Self {
         match preset {
             Preset::Dtr => Self::dtr(dtr),
@@ -284,14 +318,33 @@ mod tests {
     /// there is one and `dtr` never does, even then.
     #[test]
     fn the_system_skin_is_used_by_native_alone() {
-        let system = Skin::windows_dark();
+        // Both platforms' skins, because "the system skin" is not a Windows idea:
+        // on a GNOME desktop it is Adwaita's, and `resolve` does not care which.
+        for system in [
+            Skin::windows_dark(),
+            Skin::adwaita(true, crate::skin::ADWAITA_ACCENT),
+        ] {
+            assert_eq!(
+                Skin::resolve(Preset::Native, dtr_palette(), Some(system.clone())),
+                system
+            );
+            assert_eq!(
+                Skin::resolve(Preset::Dtr, dtr_palette(), Some(system)),
+                Skin::dtr(dtr_palette())
+            );
+        }
+    }
+
+    /// The origin is what `-v` reads, so a constructor that forgets it would make
+    /// the log name the wrong platform. The dtr skin in particular is *not*
+    /// identified by its monospace style: an Adwaita skin borrows neither.
+    #[test]
+    fn every_constructor_names_its_platform() {
+        assert_eq!(Skin::dtr(dtr_palette()).origin, Origin::Dtr);
+        assert_eq!(Skin::windows_dark().origin, Origin::Windows);
         assert_eq!(
-            Skin::resolve(Preset::Native, dtr_palette(), Some(system.clone())),
-            system
-        );
-        assert_eq!(
-            Skin::resolve(Preset::Dtr, dtr_palette(), Some(system)),
-            Skin::dtr(dtr_palette())
+            Skin::adwaita(false, crate::skin::ADWAITA_ACCENT).origin,
+            Origin::Adwaita
         );
     }
 }

@@ -23,25 +23,30 @@ So:
 
 - read the portal over the session bus with **`zbus`** (a pure-Rust D-Bus
   client, MIT, no GLib link) on its **`tokio`** transport, because dtr already
-  runs tokio: one `Connection::session()` and two `Proxy::call`s; `busctl
-  --json=short` is the zero-dependency fallback and returns the same values as
-  JSON, so the fallback is not text parsing either;
+  runs tokio: one connection and two `Read` calls, with a 500 ms ceiling on the
+  whole reading;
 - fall back to `gsettings` (a subprocess) when the portal is absent, then to
   `settings.ini` for the *theme name*, then to `None`;
 - build `Palette::adwaita(dark, accent)` from constants measured out of
-  `libadwaita-1.so`, and `Skin::linux(dark, accent)` from it;
+  `libadwaita-1.so`, and `Skin::adwaita(dark, accent)` from it — which also
+  carries `Style::adwaita()`, because Adwaita's *metrics* are in the same
+  stylesheet and a palette over dtr's 23-point rows is theming, not a window on
+  this desktop (measured in §6.1);
+- keep reading: the portal publishes `SettingChanged` and Windows sends
+  `WM_SETTINGCHANGE`, so the skin a window started with is not the one it has to
+  keep (§6.2);
 - do **not** parse libadwaita's gresource and do **not** parse user CSS in v1.
   A parser that cannot evaluate `color-mix()`, `oklab()` or the injected accent
   would produce a palette GTK does not show, which is worse than the dtr skin.
 
-The only new dependency is **`zbus` 5** (MIT), on its `tokio` transport. It is
-a D-Bus client, not a toolkit: it links no GLib, it reuses the runtime dtr
-already runs, and it reads the same service `rfd`'s `xdg-portal` backend already
-uses for the file dialog. It does bring a tree — 77 lock entries in a probe,
-against zero crates for the `busctl --json=short` variant in §4.2, which is the
-same design with a subprocess instead of a client. That is the trade to decide,
-not a detail: about 2 ms once per process against a dependency tree that every
-future `cargo deny` run has to re-approve.
+The only new dependency is **`zbus` 5** (MIT), on its `tokio` transport, and it
+was taken (§6.3). It is a D-Bus client, not a toolkit: it links no GLib, it
+reuses the runtime dtr already runs, and it reads the same service `rfd`'s
+`xdg-portal` backend already uses for the file dialog. It does bring a tree — 77
+lock entries in a probe, against zero crates for the `busctl --json=short`
+variant in §4.2, which is the same design with a subprocess instead of a client.
+That was the trade: about 2 ms once per process against a dependency tree that
+every future `cargo deny` run has to re-approve.
 
 **Measured against GTK itself.** A throwaway GTK4/libadwaita probe (§3.2.1)
 resolves `window_bg_color #222226`, `accent_bg_color #3584E4`,
@@ -439,117 +444,163 @@ Why these choices:
   v2 would read. The failure prevented: a half-parsed override producing a
   palette that is neither GTK's nor dtr's.
 
-## 6. What `native` becomes
+## 6. What `native` became
 
-**`dtr-widgets` gains one constructor and one origin tag; the binary gains a
-reader.**
+**Implemented.** `dtr-widgets` gained one palette, one style and one origin tag;
+the binary gained a reader, a trait, and a watcher.
 
 ```rust
 // dtr-widgets
-impl Palette {
-    /// Adwaita 1.9.3's surfaces, composed with the user's scheme and accent.
-    pub fn adwaita(dark: bool, accent: Color32) -> Self;
-}
-impl Skin {
-    pub fn linux(dark: bool, accent: Color32) -> Self {
-        Self {
-            palette: Palette::adwaita(dark, accent),
-            style: Style::dtr(),
-            origin: Origin::Adwaita,
-        }
-    }
+impl Palette { pub fn adwaita(dark: bool, accent: Color32) -> Self; }
+impl Style   { pub fn adwaita() -> Self; }
+impl Skin    { pub fn adwaita(dark: bool, accent: Color32) -> Self; }
+
+// dtr/src/system.rs — one shape for both platforms
+pub trait Platform {
+    fn source(&self) -> &'static str;
+    async fn read(&self) -> Result<Reading, String>;
+    fn skin(&self, reading: &Reading) -> Skin;
 }
 ```
 
-`Skin::resolve` is unchanged: `native` uses the `Some` skin, `dtr` never does.
-`accent_hex` is unchanged.
+`Reading` is the three facts a platform can state — dark or light, the accent, and
+the accent ladder where the OS keeps one (Windows does; Adwaita computes it). A
+platform is a reader plus a palette, and `resolve` turns `Reading` into the
+`Resolution` that `-v` prints: `{ skin, source, reason }`. `source` is the
+reader's own name (`windows-registry`, `portal`, `preview`, `none`) and `reason`
+is why there is no skin, so "the theme is Breeze" and "there is no session bus"
+cannot look alike in the log.
 
-`describe` **must change**, and this is the part that is easy to miss. It
-currently infers the platform from the style:
+Three things changed shape from the sketch this section used to carry:
 
-```rust
-if skin.style.mono { "dtr" }
-else if skin.palette.is_dark() { "windows-dark" }
-else { "windows-light" }
+- **`describe` reads an origin, not a style.** `Skin` carries
+  `Origin::{Dtr, Windows, Adwaita}` set by its constructor. The old guess —
+  `style.mono` means dtr, else the palette's lightness — calls an Adwaita skin
+  "dtr" (it borrows neither that style's fonts nor its metrics now) and would
+  call any non-monospace light skin "windows".
+- **The reading is async, and the first one is the only blocking one.** The
+  portal call, `gsettings` and the timeout are all `async`; `Platform::read` is an
+  `async fn` and Linux's `gsettings` runs on `spawn_blocking` rather than pulling
+  tokio's `process` feature in for one call. The *first* reading happens inside a
+  current-thread runtime from a caller that cannot wait for an answer it is about
+  to draw (`-v` is about to print it), which is the smallest way to have one
+  implementation serve both.
+- **The answer lives in a cell, not in a `OnceLock`.** A frame asks
+  `Look::skin()` for it with no access to the app, so `system` keeps the
+  `Resolution` behind an `RwLock` and hands out a clone; the watcher replaces it.
+  In a test that cell is filled with "a test does not read the desktop" rather
+  than with the real desktop, because a baseline that changes with the
+  developer's accent is a baseline CI cannot compare.
+
+**`-v` now says where the answer came from**, which is the whole reason the pair
+of fields exists:
+
+```
+chrome skin="adwaita-dark" requested="native" accent="#3584E4" hover="#4990E7" source="portal"
+chrome skin="dtr" requested="native" accent="#FFB000" source="none" reason="theme \"Materia\" is not Adwaita"
+chrome skin="adwaita-light" requested="native" accent="#3584E4" hover="#357CD3" source="preview"
 ```
 
-A Linux skin built on `Style::dtr()` is `mono`, so it would log `dtr`; one built
-on a non-mono style would log `windows-light`. Neither is true. The minimal fix
-is an origin on `Skin` (`Dtr`, `Windows`, `Adwaita`) set by the constructor,
-with `describe` matching it. The alternative — matching on `style.row == 32.0`
-— is a heuristic that breaks the first time a metric changes. The failure
-prevented: a `-v` line that says `windows-light` on a Linux machine, which is
-worse than no line.
+The first is this machine's real session, with `DTR_NATIVE_SKIN` unset.
 
-The reader lives beside the Windows one, not in `dtr-widgets`:
+### 6.1 The metrics are Adwaita's too
 
-```rust
-fn platform_skin() -> Option<Skin> {
-    #[cfg(windows)] { registry_skin() }
-    #[cfg(target_os = "linux")] { crate::system::linux::skin() }
-    #[cfg(not(any(windows, target_os = "linux")))] { None }
-}
-```
+The earlier version of this section proposed `Style::dtr()` under an Adwaita
+palette. That is a themed terminal, not a window on the desktop: dtr's 23-point
+rows and monospace labels are the *terminal's* chrome, and libadwaita's are not.
+`Style::adwaita()` is measured from the same stylesheet §3.2 extracted:
 
-`crates/dtr/src/system/linux.rs` (or `system/linux/` with `css.rs` for v2) owns
-the connection, the fallbacks and the files. The `zbus` dependency is
-target-specific, so the Windows build does not see it:
+| Token | Value | Where |
+|---|---|---|
+| `row` | 34 | `spinbutton, entry { min-height: 34px }` |
+| `control_radius` | 9 | `border-radius: 9px` on the same rule |
+| `card_radius` | 12 | `.card { border-radius: 12px }` |
+| `check_radius` | 6 | `check { border-radius: 6px }` |
+| `shadow` | `0 1px 3px 1px RGB(0 0 6/7%)` | `.card`'s second shadow layer |
+| `footer` | primary last | a GNOME dialog's suggested action is the right-hand one |
+
+`check_radius` is a new token, not a reuse of `chip_radius`: Adwaita rounds a
+20-point box by 6 and a `radio` by 100 %, and a checkbox drawn with the chip
+radius (9 here) is a *circle*, which is a radio button. The gallery caught it —
+`widgets_adwaita_dark.png` is the baseline that says so.
+
+The font sizes are the one part not measured: GNOME names a font (`Cantarell 11`)
+and leaves the size to fontconfig, and egui's fallback chain finds the same face
+on the same desktop.
+
+### 6.2 It is live
+
+A desktop changes its scheme at sunset and its accent when the user picks one. The
+watcher is one task on the worker runtime (`App::worker`, which already exists for
+scanning):
+
+- **Linux**: `org.freedesktop.portal.Settings.SettingChanged`, subscribed once per
+  reading. The portal re-emits from `gsettings`, so this covers the settings app,
+  `gsettings` in a terminal, and a theme switcher. A session with no portal has no
+  signal to subscribe to — that is the price of the `gsettings` fallback, and the
+  skin then stays at what it started with.
+- **Windows**: `WM_SETTINGCHANGE`, from the window procedure
+  `crates/dtr/src/chrome/windows.rs` already subclasses for the maximise button's
+  hit test. winit forwards the *theme* half as `ThemeChanged` and the accent half
+  not at all, so re-reading both registry values on the one message costs less
+  than deciding which changed. The procedure cannot await: it calls
+  `system::changed()`, which `notify_one`s the watcher (a permit keeps a change
+  that arrives between two readings).
+- The watcher re-reads, stores, logs `chrome changed`, and asks for a repaint
+  through `UserEvent::Frame` — the same door every background result uses, because
+  a skin that changed under a frame that never draws again did not change.
+
+A `DTR_NATIVE_SKIN` preview is not overruled by the desktop: the watcher keeps
+running, and it writes the preview back, so the look a developer asked for is the
+look they keep.
+
+**What is not verified here.** The signal itself. This sandbox mounts
+`/run/user/1000/dconf/user` read-only, so `gsettings set` cannot change the
+session and nothing emits `SettingChanged` — the subscription is proved (a `-v`
+line), the read is proved (the `chrome` line), and the gap between them is one
+line of `receive_signal`. Changing the setting on a desktop where it is writable
+is the check that closes it.
+
+### 6.3 The dependency, as taken
+
+`zbus = { version = "5", default-features = false, features = ["tokio"] }`, under
+`[target.'cfg(target_os = "linux")'.dependencies]`, so the Windows build does not
+see it. The `tokio` transport reuses the runtime dtr already runs; `async-io`
+(zbus's default) would add a second reactor beside it. The probe that resolved the
+same two keys locks 78 packages in total, `zbus` and `zvariant` included; what the
+transport costs *this* tree is **23** packages, because dtr already has tokio.
+
+`blocking-api` is **not** enabled: the first reading is an `async fn` awaited
+under `Runtime::block_on`, and the clock is the async `tokio::time::timeout` over
+the whole reading. `blocking-api` existed for the probe.
+
+The dependency is behind a cargo feature so the tree is a choice:
 
 ```toml
-[target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
+[features]
+portal = ["dep:zbus"]
+default = ["portal"]
 ```
 
-**Measured, the transport matters to the tree.** The `tokio` feature reuses the
-runtime dtr already has; `async-io` (zbus's default) would add a second reactor
-beside it. A throwaway probe resolving the same two keys:
+Off, `Portal` is a `gsettings`-only reader: `source="gsettings"`, one palette, and
+a watcher parked on `std::future::pending()` because `gsettings` has no
+notification a plain reader can subscribe to. `cargo check -p dtr
+--no-default-features` is the build that proves it.
 
-| Features | Lock entries | Result |
-|---|---|---|
-| `async-io` + `blocking-api` | 86 | `Value(U32(1))`, `(ddd) 0.2078 0.5176 0.8941` |
-| `tokio` + `blocking-api` | 77 | the same two values |
+### 6.4 Tests
 
-zbus wants tokio ≥ 1.37 with `rt`, `rt-multi-thread`, `net`, `time`, `fs`,
-`io-util`; `Cargo.toml` already asks for `1` with the first three of those, so
-cargo unifies the features and no second runtime appears. The flake's
-`rust-bin.stable.latest.default` is newer than zbus 5.19's Rust 1.87 MSRV, so
-the crate is not a toolchain bump.
-
-The reader opens one `zbus::blocking::Connection::session()` and calls `Read`
-twice; a missing session bus or portal is `None`, not a panic. The return is an
-`OwnedValue`: `Value::U32` for the scheme, `Value::Structure` of three `F64`s
-for the accent (the probe in the appendix is the working example). The
-blocking API is used once at startup; it is not on the per-frame path. The
-`busctl` variant is a one-function swap behind the same `portal()` interface,
-for a build that does not want the crate.
-
-`OnceLock` stays where it is: the portal read is once per process, not once per
-frame.
-
-**`-v` (proposed).** The existing line becomes:
-
-```
-chrome skin="adwaita-dark" requested="native" accent="#3584E4" source="portal"
-chrome skin="dtr" requested="native" accent="#FFB000" source="none" reason="theme \"Materia\" is not Adwaita"
-```
-
-`source` and `reason` are the Linux reader's own `tracing::debug!` fields;
-`main.rs` needs no more than `describe`'s new answer. The failure prevented:
-"asked for native and got dtr" with no cause, which `docs/ui.md` already calls
-out as the reason the line exists.
-
-**Timeouts.** 500 ms for the whole read (the `zbus` call or the `busctl`
-fallback); a local call measured at 2–2.6 ms, so the ceiling is a stuck-portal
-guard, not a delay. Any failure is `None`, logged once. The failure prevented:
-a hung D-Bus daemon freezing the first frame.
-
-**Tests.** `Palette::adwaita` gets the same shape of tests as `Palette::windows`:
-light and dark differ, `control_strong` is stronger than `border`, every slot is
-opaque after compositing. The pure parsers (portal stdout, `gsettings` stdout,
-`settings.ini`, accent name) get table-driven unit tests. `Skin::resolve` gets a
-`Some(linux)` case. The serial sheet is snapshotted in `adwaita-dark` on Linux,
-as the Windows skins are snapshotted on Linux — a look that can only be seen on
-its own OS is a look nobody checks.
+`Palette::adwaita` has the same shape of tests as `Palette::windows`: the
+measured surfaces are pinned (`#222226`, `#36363a`, `#1d1d20`), the derived slots
+are checked against `mix(card, currentColor, …)`, `is_dark` follows the card, and
+`on_accent` is white for the yellow and orange accents too, because libadwaita
+injects it that way. `Style::adwaita` pins the four measured metrics. The pure
+pieces of the reader — the theme gate, the scheme a name states, `settings.ini`,
+the accent-name table, and the portal's `(ddd)` → `#RRGGBB` rounding — have unit
+tests, and both skins are in the widget gallery
+(`widgets_adwaita_dark.png`, `widgets_adwaita_light.png`), rendered on Linux the
+way the Windows skins already were. The serial sheet is snapshotted in the dtr
+skin, so the Adwaita chrome on the *app's* own screens is what a person sees when
+they run it on GNOME, not a baseline.
 
 ## 7. The mapping, slot by slot
 
@@ -750,11 +801,12 @@ display.
   Adding `Palette::gtk_default` would make bare GTK4 apps match too; the apps
   checked here link libadwaita, and no bare GTK4 app was found to compare, so
   it is not worth the table yet.
-- **Adwaita metrics.** v1 keeps `Style::dtr()`. GTK's metrics are measurable from
-  the same stylesheet (34 px controls, 6 px control radius, 9 px row radius,
-  15 px window radius), but a wrong row height is a worse lie than a wrong
-  corner radius, and this memo is about colour. A `Style::adwaita()` is its own
-  measurement.
+- **Adwaita metrics beyond the four measured ones.** `Style::adwaita()` takes
+  the 34-point row, the 9-point control radius, the 12-point card and the 6-point
+  checkbox from the stylesheet (§6.1). What is still guessed: the label column
+  width, the gap, and the font sizes, which GNOME leaves to fontconfig. A window
+  radius of 15 is measurable and not used — dtr draws no window corner, the
+  compositor does.
 - **KDE/Breeze.** `adw-gtk3` proves a readable theme can be parsed; a Breeze
   GTK4 theme would be a second dialect (its `@define-color` names are
   `*_breeze`), and v1 says dtr. The `gtk-theme` gate is where that decision
@@ -770,12 +822,10 @@ display.
 - **Whether the GTK probe becomes a `scripts/` check.** It is the only way to
   see a libadwaita upgrade change a surface, and it needs a display, so it would
   be a manual command — never a `nix flake check` gate.
-- **`zbus`'s tree.** `zbus` 5 is MIT and pure Rust, but it is a D-Bus stack
-  (`zvariant`, `async-io`, …) and locks ~85 packages. The `busctl` fallback is
-  the zero-dependency variant; which one ships is a packaging decision, not a
-  palette one. The crate is MIT, its tree is permissive, and `cargo deny` is
-  the gate; the fallback exists so a target that cannot take it still gets a
-  native skin.
+- **The `busctl` fallback.** `zbus` shipped (§6.3), so the zero-dependency
+  variant in §4.2 is now the escape hatch rather than the plan: it is the same
+  two values behind the same `Platform` reader, for a target that cannot take the
+  tree. Nothing implements it today.
 - **A linked GTK helper, if the constraint is ever relaxed.** §9.1 gives the
   shape and the costs; it is not a recommendation, and it should not happen
   without an explicit reversal.
@@ -951,11 +1001,13 @@ The `zbus` route is the shipping transport, and it is the one that was measured
 against the same portal:
 
 ```sh
-$ cd /tmp/zbusprobe && cargo run
-# The tokio transport, and the tree it pulls: 77 lock entries against 86 for
-# async-io, and the same two values out.
-$ cd /tmp/zbustokio && cargo build --offline && ./target/debug/zbustokio
+$ cd /tmp/zbustokio && cargo run
+# The whole probe locks 78 packages; what it adds to dtr, which already has
+# tokio, is 23.
 $ grep -c '^name = ' /tmp/zbustokio/Cargo.lock
+78
+$ git -C ~/src/dtr diff Cargo.lock | grep -c '^+name = '
+23
 color-scheme = OwnedValue(Value(U32(1)))
 accent-color = OwnedValue(Value(Structure(Structure { fields: [F64(0.2078431397676468), F64(0.5176470875740051), F64(0.8941176533699036)], signature: Structure(Dynamic { fields: [F64, F64, F64] }) })))
 $ time (for i in $(seq 20); do ./target/debug/zbusprobe >/dev/null 2>&1; done)

@@ -224,6 +224,74 @@ impl Palette {
         }
     }
 
+    /// GNOME's palette, from libadwaita 1.9.3's own stylesheet.
+    ///
+    /// The surfaces are measured out of the gresource — `window_bg_color`,
+    /// `view_bg_color`, `dialog_bg_color` — and the light foreground is the
+    /// `RGB(0 0 6 / 80%)` that stylesheet declares, composited over the window
+    /// because a slot here has to be a colour. The rest is Adwaita's own rule
+    /// applied to them: a control is `color-mix(currentColor 10%, transparent)`
+    /// over the card, a border 15 %, dim text 55 %, disabled 50 % — the three
+    /// opacities in the sheet's `:root` — and a focus ring is the accent at 50 %.
+    ///
+    /// `on_accent` is white for *every* accent, the yellow and orange ones
+    /// included, because that is what libadwaita injects. Matching the desktop
+    /// means matching this rather than improving on it; the contrast complaint
+    /// belongs to the library.
+    pub fn adwaita(dark: bool, accent: Color32) -> Self {
+        let (window, card, well, fg, danger) = if dark {
+            (
+                rgb([0x22, 0x22, 0x26]),
+                rgb([0x36, 0x36, 0x3A]),
+                rgb([0x1D, 0x1D, 0x20]),
+                Color32::WHITE,
+                rgb([0xC0, 0x1C, 0x28]),
+            )
+        } else {
+            (
+                rgb([0xFA, 0xFA, 0xFB]),
+                rgb([0xFA, 0xFA, 0xFB]),
+                rgb([0xFF, 0xFF, 0xFF]),
+                // `window_fg_color` is 80 % of `#000006`; over the window that is
+                // `#323237`, which is what a label actually shows.
+                over(rgb([0xFA, 0xFA, 0xFB]), argb(0xCC00_0006)),
+                rgb([0xE0, 0x1B, 0x24]),
+            )
+        };
+        // `currentColor` in Adwaita is the foreground, so every derived slot is
+        // a mix of it over the surface it is drawn on.
+        let tinted = |t: f32| mix(card, fg, t);
+        Self {
+            window,
+            card,
+            well,
+            control: tinted(0.10),
+            control_hover: tinted(0.15),
+            control_active: tinted(0.30),
+            border: tinted(0.15),
+            // Adwaita has no stronger border, and dtr needs one it can see.
+            border_strong: tinted(0.25),
+            control_strong: tinted(0.40),
+            divider: with_alpha(tinted(0.15), 46),
+            text: fg,
+            dim: tinted(0.55),
+            disabled: tinted(0.50),
+            accent,
+            accent_hover: mix(accent, fg, 0.10),
+            accent_active: mix(accent, fg, 0.06),
+            on_accent: Color32::WHITE,
+            // A row selection is `color-mix(accent 25%, transparent)` over the
+            // view, not a solid accent: the text on top stays readable.
+            selection: mix(well, accent, 0.25),
+            on_selection: fg,
+            scrim: Color32::from_black_alpha(140),
+            danger,
+            on_danger: Color32::WHITE,
+            focus_outer: mix(card, accent, 0.50),
+            focus_inner: card,
+        }
+    }
+
     /// Whether the card is dark, which decides egui's `dark_mode` and the
     /// glyph tints that have to follow it.
     pub fn is_dark(&self) -> bool {
@@ -376,12 +444,79 @@ mod tests {
             Palette::dtr([0x0b, 0x0f, 0x0e], [0xdc, 0xdf, 0xdd], [0xff, 0xb0, 0x00]),
             Palette::windows(true, Color32::from_rgb(0x60, 0xCD, 0xFF)),
             Palette::windows(false, Color32::from_rgb(0x00, 0x5F, 0xB8)),
+            Palette::adwaita(true, Color32::from_rgb(0x35, 0x84, 0xE4)),
+            Palette::adwaita(false, Color32::from_rgb(0x35, 0x84, 0xE4)),
         ] {
             assert!(
                 distance(palette.control_strong, palette.card)
                     > distance(palette.border, palette.card),
                 "control_strong is no stronger than the hairline"
             );
+        }
+    }
+
+    /// GNOME's surfaces are libadwaita's own constants, so these are the values a
+    /// libadwaita window actually shows — `window_bg_color`, `view_bg_color`,
+    /// `dialog_bg_color` — not a dark grey invented for the occasion.
+    #[test]
+    fn adwaita_surfaces_are_libadwaita_measured() {
+        let accent = Color32::from_rgb(0x35, 0x84, 0xE4);
+        let dark = Palette::adwaita(true, accent);
+        assert_eq!(dark.window, rgb([0x22, 0x22, 0x26]));
+        assert_eq!(dark.card, rgb([0x36, 0x36, 0x3A]));
+        assert_eq!(dark.well, rgb([0x1D, 0x1D, 0x20]));
+        assert_eq!(dark.text, Color32::WHITE);
+        assert_eq!(dark.danger, rgb([0xC0, 0x1C, 0x28]));
+        assert!(dark.is_dark());
+
+        let light = Palette::adwaita(false, accent);
+        assert_eq!(light.window, rgb([0xFA, 0xFA, 0xFB]));
+        assert_eq!(light.card, rgb([0xFA, 0xFA, 0xFB]));
+        assert_eq!(light.well, Color32::WHITE);
+        // `window_fg_color` is 80 % of `#000006`, composited over the window.
+        assert_eq!(light.text, rgb([0x32, 0x32, 0x37]));
+        assert_eq!(light.danger, rgb([0xE0, 0x1B, 0x24]));
+        assert!(!light.is_dark());
+
+        // `is_dark` follows the card, and the card is the measured value — a
+        // palette that says "dark" while its card is light flips egui's theme, the
+        // glyph tints and the popup style together.
+        assert!(dark.is_dark() && !light.is_dark());
+    }
+
+    /// The derived slots follow from the measured ones by Adwaita's own rule:
+    /// 10 %, 15 % and 30 % of `currentColor` over the card for a control, its hover
+    /// and its press; 55 % for dim text.
+    #[test]
+    fn adwaita_derives_its_controls_from_the_card() {
+        let card = rgb([0x36, 0x36, 0x3A]);
+        let palette = Palette::adwaita(true, Color32::from_rgb(0x35, 0x84, 0xE4));
+        assert_eq!(palette.control, mix(card, Color32::WHITE, 0.10));
+        assert_eq!(palette.control_hover, mix(card, Color32::WHITE, 0.15));
+        assert_eq!(palette.control_active, mix(card, Color32::WHITE, 0.30));
+        assert_eq!(palette.border, mix(card, Color32::WHITE, 0.15));
+        // The memo's worked example: 55 % white over `#36363a`.
+        assert_eq!(palette.dim, rgb([0xA5, 0xA5, 0xA6]));
+        // A row selection is the accent at 25 % over the view, not a solid fill,
+        // or the text on top stops being readable.
+        assert_eq!(palette.selection, mix(palette.well, palette.accent, 0.25));
+        assert_ne!(palette.selection, palette.accent);
+    }
+
+    /// libadwaita 1.9.3 injects white `accent_fg_color` for every accent,
+    /// including the yellow ones. Matching the desktop means matching this; the
+    /// contrast complaint belongs to the library, not to a palette that quietly
+    /// improves on it and disagrees with every native app.
+    #[test]
+    fn adwaita_puts_white_on_every_accent() {
+        for accent in [
+            Color32::from_rgb(0x35, 0x84, 0xE4), // blue
+            Color32::from_rgb(0xC8, 0x88, 0x00), // yellow
+            Color32::from_rgb(0xED, 0x5B, 0x00), // orange
+        ] {
+            for dark in [true, false] {
+                assert_eq!(Palette::adwaita(dark, accent).on_accent, Color32::WHITE);
+            }
         }
     }
 

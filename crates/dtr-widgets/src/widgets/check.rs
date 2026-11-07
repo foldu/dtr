@@ -60,10 +60,10 @@ fn boxed(ui: &mut Ui, skin: &Skin, on: bool, visible: Option<&str>, name: &str) 
     };
 
     let painter = ui.painter();
-    painter.rect_filled(box_rect, style.chip_radius, fill);
+    painter.rect_filled(box_rect, style.check_radius, fill);
     painter.rect_stroke(
         box_rect,
-        style.chip_radius,
+        style.check_radius,
         Stroke::new(style.border, border),
         StrokeKind::Inside,
     );

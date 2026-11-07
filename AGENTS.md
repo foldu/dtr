@@ -546,12 +546,18 @@ tag mirroring on.
   picks a skin; `[ui] widgets` (or `--widgets`) says which, and `native` is the default.
   **A preset is a request**: `Skin::resolve` takes the platform's skin as an argument and
   falls back to dtr, because reading the system palette is platform code and lives in
-  `crates/dtr/src/system.rs` — `AppsUseLightTheme` and DWM's `AccentColor` on Windows,
-  plus the **accent ladder** (`AccentPalette` under `...\Explorer\Accent`) so a hover
-  lands on the variant Windows' own controls use; nothing on Linux, where there is no
-  portable palette and `native` is the dtr style by decision (a measured design for
-  fixing that is `docs/gtk-palette.md`). `-v` logs `chrome skin=… requested=…`, which is the difference between a
-  preference and an outcome. **Painted controls belong in
+  `crates/dtr/src/system.rs`, where both platforms are written to one trait: a reader
+  answers "dark or light, which accent, which ladder" and the crate turns that into a
+  skin. Windows reads `AppsUseLightTheme`, DWM's `AccentColor` and the **accent ladder**
+  (`AccentPalette` under `...\Explorer\Accent`) so a hover lands on the variant
+  Windows' own controls use; Linux asks the XDG portal for the scheme and the accent and
+  refuses a theme that is not Adwaita rather than painting Adwaita's surfaces on Breeze
+  (`docs/gtk-palette.md` §6). **It is live**: the answer sits in a cell a frame reads, and
+  a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE` through the
+  window procedure that already subclasses the window, `SettingChanged` from the portal —
+  then asks for a repaint. `-v` logs
+  `chrome skin=… requested=… accent=… source=…`, which is the difference between a
+  preference and an outcome, and `source=` names the reader that answered. **Painted controls belong in
   `crates/dtr-widgets/src/widgets/`**: `Editable` (a text field with a dropdown arrow,
   reporting `Edit::Typed` and `Edit::Picked` as different answers), the layout primitives
   `label_cell`/`row`/`section`, and `check`, `Button`, `segmented`, `menu_row` and `cross`.
@@ -764,9 +770,10 @@ not a slow terminal.
 - `docs/bench.md` — what a vtebench number means, what a `.dat` is worth, and the `.meta`
   sidecar.
 - `docs/themes.md` — which terminal theme formats dtr could read.
-- `docs/gtk-palette.md` — how `native` could read the GTK4/libadwaita palette on
-  Linux without linking GLib: the XDG portal for scheme and accent, constants
-  measured out of libadwaita's gresource, and why v1 does not parse user CSS.
+- `docs/gtk-palette.md` — how `native` reads the GTK4/libadwaita palette on Linux
+  without linking GLib: the XDG portal for scheme and accent, constants measured
+  out of libadwaita's gresource, the metrics that come with them, the live signal,
+  and why v1 does not parse user CSS.
 - `docs/ui.md` — why the chrome has a skin at all, what a token is, and what
   `native` means on each platform.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,

@@ -10,7 +10,9 @@
 //! for the two captions. If the Windows look could only be seen on Windows, it
 //! would only be checked when somebody remembered to.
 
-use dtr_widgets::{Button, Edit, Editable, Footer, Palette, Skin, check, row, section, segmented};
+use dtr_widgets::{
+    ADWAITA_ACCENT, Button, Edit, Editable, Footer, Palette, Skin, check, row, section, segmented,
+};
 use egui::{RichText, Stroke, vec2};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -295,4 +297,24 @@ fn the_windows_light_skin_renders() {
     let mut harness = harness(Skin::windows_light());
     harness.run();
     harness.snapshot("widgets_windows_light");
+}
+
+/// GNOME in dark mode: libadwaita's own surfaces, over the same sheet. Rendered on
+/// Linux like the Windows skins are, because a look that can only be seen on its
+/// own desktop is a look nobody checks.
+#[test]
+fn the_adwaita_dark_skin_renders() {
+    let mut harness = harness(Skin::adwaita(true, ADWAITA_ACCENT));
+    harness.run();
+    harness.snapshot("widgets_adwaita_dark");
+}
+
+/// And in light mode, where a style that quietly kept the dark derived slots —
+/// the border and the dim text are mixed from `currentColor`, not listed — shows
+/// up immediately.
+#[test]
+fn the_adwaita_light_skin_renders() {
+    let mut harness = harness(Skin::adwaita(false, ADWAITA_ACCENT));
+    harness.run();
+    harness.snapshot("widgets_adwaita_light");
 }

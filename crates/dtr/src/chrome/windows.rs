@@ -21,7 +21,7 @@ use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-    WM_SYSCOMMAND,
+    WM_SETTINGCHANGE, WM_SYSCOMMAND,
 };
 
 /// Identifies dtr's subclass, in case anything else subclasses the window too.
@@ -108,6 +108,14 @@ unsafe extern "system" fn procedure(
         // SAFETY: `hwnd` is the window this procedure was called for.
         unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command, 0) };
         return 0;
+    }
+    if message == WM_SETTINGCHANGE {
+        // The desktop's colours changed — the scheme, the accent, or both. Windows
+        // announces all of it through this one message (its own
+        // `WM_DWMCOLORIZATIONCOLORCHANGED` is not forwarded by winit at all), so
+        // the watcher re-reads and lets the answer be the same either way.
+        // Re-reading two registry values costs less than deciding which changed.
+        crate::system::changed();
     }
     // SAFETY: passing the message through to the previous procedure, which is
     // what makes this a subclass and not a replacement.
