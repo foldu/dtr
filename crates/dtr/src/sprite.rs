@@ -66,24 +66,13 @@ impl Canvas {
 /// exact.
 type Eighths = u8;
 
-/// The left/top edge of a fraction of `size`.
-///
-/// Rounded against the *complement*, so that `start → half` and `half → end`
-/// are the same width when the size is odd (Ghostty's `Fraction.min`): a 7 px
-/// cell split in half is 4 + 3 whichever order you look at it in.
-fn frac_min(eighths: Eighths, size: u32) -> i32 {
-    let fraction = f64::from(eighths) / 8.0;
-    let size = f64::from(size);
-    (size - (1.0 - fraction).mul_add(size, 0.0).round()) as i32
-}
-
 /// The right/bottom edge of a fraction of `size`.
+///
+/// Rounded the way Ghostty rounds (`Fraction.max`): a 7 px cell's half is at 4,
+/// so the block covers 4 px and the next one starts there — the two halves are
+/// one cell between them with no gap and no overlap.
 fn frac_max(eighths: Eighths, size: u32) -> i32 {
     (f64::from(eighths) / 8.0 * f64::from(size)).round() as i32
-}
-
-fn half(width: u32) -> i32 {
-    (width / 2) as i32
 }
 
 /// How thick a light line is, doubled for a heavy one.

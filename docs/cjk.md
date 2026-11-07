@@ -100,6 +100,7 @@ every TUI box leaks by a pixel.
 | what | where |
 |---|---|
 | cell metrics and the one baseline | `render.rs` `Metrics`, computed in `Fonts::load` |
+| which family is the grid | `render.rs` `GRID_CANDIDATES` + `load_faces` — the configured family, then the fixed-pitch names, then the platform's own monospace family |
 | which face has a character | `render.rs` `Fonts::face_for` — preferred list (`fonts::FALLBACK`), then every family |
 | rasterise | `render.rs` `Fonts::rasterise` — swash, `Source::Outline` only, `.hint(true)` |
 | place it | `render.rs` `placement` — the bearings on `Metrics::baseline`, shared with `--font-report` |
@@ -243,6 +244,8 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 | 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
 | 9 | no per-cell shaper | combining marks stack on the base; VS15/VS16 do nothing | not scheduled: shape a cell's cluster before placing |
 | 10 | cursor is one cell | a block cursor covers half a Han character | **done**, M2: `wide_tail`, 2-cell block |
+| 11 | the grid face is a list of Linux families | a fresh Windows drew every character from Segoe UI Emoji at 1.6× the cell: `Microsoft` → `M crosoft`, SGR as literal `[0m` | **done**, M7: the platform's generic monospace family, and the fixed-pitch names each OS ships |
+| 12 | the first face with a glyph answers | emoji come out monochrome once a symbol face has loaded | **done**, M7: a pictograph skips the already-loaded shortcut and asks the preference list |
 
 ---
 
@@ -567,6 +570,77 @@ the cell already meets its neighbour, and the screenshot says so.
 
 ---
 
+### M7 — the grid face on a machine that is not this one — done
+
+Not planned. Found by running the Windows build in the test guest
+(`docs/windows.md`, the `winvm` skill): the window opened, drew its tab strip,
+and printed its first line as `M crosoft  Wi ndows` with SGR sequences leaking
+through as literal `[0m`.
+
+`--font-report` said `grid (none)`, and the log said *no monospace family found;
+the grid will draw backgrounds only*. `load_faces` was trying a list of families
+that exist on a Linux desktop — JetBrains Mono, Hack, DejaVu Sans Mono, … — and
+its last entry, `"monospace"`, is a *generic* family, which
+`fontique::family_by_name` cannot resolve because a generic is not a name. On a
+machine with none of the listed families the grid therefore had no face at all,
+and `face_for` fell through to its last resort: *the first fallback with a glyph
+for the character*. On Windows that was **Segoe UI Emoji** — loaded for the
+emoji block, and it happens to carry Latin — whose advance at 14 pt is 12.57 px
+in a 9 px cell, so every letter was painted over by the one after it.
+
+Three changes, in the order they matter:
+
+* `load_faces` asks `Collection::generic_families(GenericFamily::Monospace)`
+  once the named list runs out. That is the portable answer: fontconfig's
+  `monospace` alias on Linux, DirectWrite's recommendation on Windows. In the
+  guest it picks **Cascadia Mono** — cell 9 × 17, baseline 13, the same
+  proportions DejaVu gives at 14 pt here.
+* The named list grew the fixed-pitch families Windows ships — Cascadia Mono,
+  Cascadia Code, Consolas, Lucida Console, Courier New — because "whatever the
+  OS recommends" is a worse terminal face than Cascadia, and the list is the
+  opinion.
+* `fonts::FALLBACK` grew the Windows CJK families, **MS Gothic first**: it is the
+  fixed-pitch one, and a proportional CJK face carries its own advance. 啊 now
+  comes from MS Gothic across two cells at `adj 1.07` — the size adjustment from
+  M4 only starts working once there *is* a grid face to measure `一` against.
+
+**The emoji went monochrome on the same run**, which is the second half of one
+bug. The face that answered `U+E0B0` (the powerline arrow) is `Segoe UI Symbol`,
+which also carries the emoji block as outlines, and the *already-loaded* shortcut
+— the cache that makes 2000 distinct Han characters cost one font load — handed
+it `😀` as well. `is_pictograph` exempts `U+1F000–1FAFF` (the emoji blocks, which
+have no script) from that shortcut, so the preference list answers instead and
+the colour families at its end win: `Segoe UI Emoji`, 15 × 15 in colour, `cw2`.
+Text that merely looks like an emoji is not exempt: `。` is wide and scriptless
+too, and it stays on the shortcut.
+
+Measured in the guest, `--font-report` at 14 pt (Cascadia Mono, cell 9 × 17,
+baseline 13):
+
+| char | face | ink | placement |
+|---|---|---|---|
+| `M` | Cascadia Mono | 8×10 | (+0,+3) |
+| 啊 | MS Gothic | 14×14 | (+1,+1), cw2, adj 1.07 |
+| あ | MS Gothic | 12×15 | (+2,+0), cw2 |
+| 。 | MS Gothic | 5×5 | (+1,+10), cw2 |
+| ─ | sprite | 9×17 | (+0,+0) |
+| █ | sprite | 9×17 | (+0,+0) |
+| 😀 | Segoe UI Emoji | 15×15, colour | (+0,+1), cw2 |
+
+A live `--capture` of that build is the whole sample on one screen — 啊 あ ア,
+한국어, colour emoji, light/heavy/double box drawing, shades, eighths, braille and
+mixed Latin/CJK rows — and the box drawing joins at 9 px cells as it does at 17.
+
+Not covered by this run: **no Nerd Font is installed in the guest**, so `U+F015`
+answers *no face has this character* there and the powerline arrow stretches
+Segoe UI Symbol's glyph. That is the fallback policy doing what it is told, not a
+Windows behaviour, and the Nerd Font path is measured on the host (§5 M3). The
+display in the guest is also at 100 % scale, so the grid-font-size DPI bug in
+`docs/windows.md` §2 is not exercised here — it needs `--capture` at a raised
+scale, and is still open.
+
+---
+
 ## 6. Config surface
 
 `fallback` landed with M4, and it is the only key the three milestones needed:
@@ -704,6 +778,19 @@ read like renderer bugs:
   the child: every line starts where the previous one ended. Print `\r\n` from
   the sample, or the picture is unreadable and the glyphs look misplaced.
 
+A third, which cost an hour in the guest: **a settled window has no frame to
+capture**, so `--capture` fires and writes nothing (the deadline passes with the
+window drawing none). The sample has to still be printing when
+`--capture-after` comes round — `run.cmd` echoes a blank line every two seconds
+past the end of the sample for exactly that reason. A `virsh screenshot` of the
+desktop always works, and is also what shows a stray console window or a window
+in the wrong session.
+
+And one that reads as a font bug and is not: at a 9 px cell a `─` is a 9 × 1 line
+and a `┌` is two arms — a 3× nearest-neighbour zoom of the *whole row* of box
+characters looks like scattered marks with gaps. Crop one character, or dump the
+mask as text, before concluding anything; the mask is what the renderer draws.
+
 ---
 
 ## 8. Provenance and unknowns
@@ -729,6 +816,17 @@ Read (§3): Ghostty `5813c94`, `src/font/Metrics.zig` (`calc`, `apply`),
 (`getIndex`), `src/font/Collection.zig` (`scaleFactor`,
 `default_fallback_adjustment`), `src/font/nerd_font_attributes.zig` and
 `nerd_font_codegen.py`, `src/font/sprite/Face.zig`, `src/font/discovery.zig`.
+
+Measured for M7 on Windows 11 Pro (build 26300.9711, the `winvm` guest, 1280 ×
+800 at 100 % scale), with the cross-built `.#windows` executable and no
+`fontconfig` at all: `--fonts` reports thirteen fixed-pitch families (Cascadia
+Code/Mono, Consolas, Courier New, Lucida Console, MS Gothic, NSimSun, SimSun and
+the MingLiU-ExtB pair), and the glyph decisions are the table in §5 M7. Cascadia
+Mono is what DirectWrite recommends for `GenericFamily::Monospace`; MS Gothic is
+what the new `FALLBACK` entries pick for CJK; Segoe UI Emoji is the only colour
+face on the machine. Wrap the sample in `cmd`'s `chcp 65001` and print it through
+`type` — PowerShell 5.1 reads a `.ps1` without a BOM as ANSI and a UTF-8 sample
+arrives as `Ã¥â€`.
 
 Unknown / not decided:
 

@@ -489,6 +489,20 @@ fn ascii_height(
     rise + drop
 }
 
+/// Is this a character that wants a *symbol* face rather than a text one?
+///
+/// The emoji blocks, and nothing else: a pictograph is two cells wide and has no
+/// script of its own, but so does `。`, which MS Gothic draws perfectly well and
+/// which therefore stays on the shortcut every other CJK character takes.
+///
+/// The distinction matters because a text face answers for one: Segoe UI Symbol,
+/// which a powerline arrow loads, carries the emoji block as monochrome
+/// outlines, and a terminal that takes the first face with a glyph then draws
+/// `😀` in the same ink as `A`.
+fn is_pictograph(ch: char) -> bool {
+    (0x1F000..=0x1FAFF).contains(&(ch as u32)) && script_of(ch).is_none()
+}
+
 /// The script a character belongs to, for the platform's fallback table.
 ///
 /// `swash::text::Script` and `fontique::Script` (parlance's) are different
@@ -1651,10 +1665,19 @@ impl Fonts {
 
         // Already-loaded fallbacks first: one CJK family covers most CJK, and
         // re-scanning every family per character would be a font load per cell.
-        for index in self.fallback_order.clone() {
-            if self.glyph_id(index, ch).is_some() {
-                self.resolved.insert((style as u8, ch), Some(index));
-                return Some(index);
+        //
+        // A pictograph is the exception. On Windows the face that answered
+        // `U+E0B0` is Segoe UI Symbol, which has every emoji as a monochrome
+        // outline, so taking that shortcut for `😀` is how a colour emoji came
+        // out black and white the moment a powerline arrow had loaded first. The
+        // preference list knows better — the colour families are in it — so a
+        // pictograph asks it instead.
+        if !is_pictograph(ch) {
+            for index in self.fallback_order.clone() {
+                if self.glyph_id(index, ch).is_some() {
+                    self.resolved.insert((style as u8, ch), Some(index));
+                    return Some(index);
+                }
             }
         }
 
@@ -1994,10 +2017,12 @@ pub fn font_report(look: &Look) {
             println!("U+{:04X} {ch}  face {face} has no glyph", ch as u32);
             continue;
         };
-        // The report shows the room a *lone* glyph gets: the second cell a
-        // symbol may borrow when its neighbour is blank. Whether it has one on
-        // screen is the neighbours' answer, not the report's.
-        let offered = if is_symbol(ch) { 2 } else { 1 };
+        // The report shows the room a *lone* glyph gets: a wide character always
+        // has its pair, and a symbol may borrow the cell beside it when that
+        // cell is blank. Whether it has one on screen is the neighbours' answer,
+        // not the report's.
+        let wide = unicode_width::UnicodeWidthChar::width(ch) == Some(2);
+        let offered = if wide || is_symbol(ch) { 2 } else { 1 };
         let Some(laid) = lay_out(&mut fonts, face, glyph_id, ch, look.size, offered) else {
             continue;
         };
@@ -2082,84 +2107,45 @@ fn load_faces(look: &Look) -> ([Loaded; 4], String) {
     }
 
     let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
-    // The configured family is tried first; the rest are only fallbacks, so a
+    // The configured family is tried first; the rest are only preferences, so a
     // family that has been uninstalled degrades instead of failing.
     let mut candidates: Vec<String> = Vec::new();
     if let Some(family) = look.family.clone() {
         candidates.push(family);
     }
-    candidates.extend(
-        [
-            "JetBrains Mono",
-            "Hack",
-            "DejaVu Sans Mono",
-            "Liberation Mono",
-            "Fira Code",
-            "Ubuntu Mono",
-            "Noto Sans Mono",
-            "monospace",
-        ]
-        .iter()
-        .map(|name| (*name).to_owned()),
-    );
+    candidates.extend(GRID_CANDIDATES.iter().map(|name| (*name).to_owned()));
     for family in candidates.iter().map(String::as_str) {
         let Some(info) = collection.family_by_name(family) else {
             continue;
         };
-
-        let mut faces: Vec<Option<Loaded>> = Vec::with_capacity(4);
-        for (style, weight) in [
-            (fontique::FontStyle::Normal, fontique::FontWeight::NORMAL),
-            (fontique::FontStyle::Normal, fontique::FontWeight::BOLD),
-            (fontique::FontStyle::Italic, fontique::FontWeight::NORMAL),
-            (fontique::FontStyle::Italic, fontique::FontWeight::BOLD),
-        ] {
-            // `synthesize_style: false`: a slanted copy of the regular face is
-            // worse than the regular face, and we can tell the difference.
-            let font = info.match_font(fontique::FontWidth::NORMAL, style, weight, false);
-            let loaded = font.and_then(|font| {
-                let blob = font.load(None)?;
-                Some(Loaded {
-                    bytes: blob.data().to_vec(),
-                    index: font.index() as usize,
-                    adjust: 1.0,
-                })
-            });
-            faces.push(loaded);
+        if let Some(grid) = try_family(&info, family) {
+            return grid;
         }
+    }
 
-        // Bold without an italic face keeps the bold shape, and vice versa.
-        let regular = faces[0].take();
-        let clone = |face: &Option<Loaded>| face.as_ref().map(Loaded::clone_face);
-        let bold = faces[1].take().or_else(|| clone(&regular));
-        let italic = faces[2].take().or_else(|| clone(&regular));
-        let bold_italic = faces[3]
-            .take()
-            .or_else(|| clone(&bold))
-            .or_else(|| clone(&italic))
-            .or_else(|| clone(&regular));
-
-        if let Some(regular) = regular {
-            tracing::info!(
-                family,
-                bold = bold.is_some(),
-                italic = italic.is_some(),
-                "grid font"
-            );
-            let empty = Loaded {
-                bytes: Vec::new(),
-                index: 0,
-                adjust: 1.0,
-            };
-            return (
-                [
-                    regular,
-                    bold.unwrap_or_else(|| empty.clone_face()),
-                    italic.unwrap_or_else(|| empty.clone_face()),
-                    bold_italic.unwrap_or(empty),
-                ],
-                family.to_owned(),
-            );
+    // None of the names above is installed. Ask the platform what "monospace"
+    // *means* rather than guessing more names: fontconfig's alias and
+    // DirectWrite's recommendation both answer here, and a machine whose only
+    // fixed-pitch face is the one its OS ships must still get a grid.
+    //
+    // Without this a fresh Windows found nothing, and every character was then
+    // drawn by whichever fallback happened to have a Latin `M` — Segoe UI Emoji
+    // — at an advance 1.6× the cell, so letters were painted over by their
+    // neighbours and escape sequences came out as `[0m` (`docs/cjk.md` §5, M7).
+    let generic: Vec<_> = collection
+        .generic_families(fontique::GenericFamily::Monospace)
+        .collect();
+    for id in generic {
+        // The name borrows the collection, so it is copied before the family is
+        // asked for (`family` needs it mutably).
+        let Some(name) = collection.family_name(id).map(str::to_owned) else {
+            continue;
+        };
+        let Some(info) = collection.family(id) else {
+            continue;
+        };
+        if let Some(grid) = try_family(&info, &name) {
+            return grid;
         }
     }
 
@@ -2178,6 +2164,88 @@ fn load_faces(look: &Look) -> ([Loaded; 4], String) {
         ],
         String::new(),
     )
+}
+
+/// The families to try as the grid, best first.
+///
+/// A preference list, not a requirement: which of these is installed varies by
+/// machine, and the platform's own monospace family is the answer when none of
+/// them are (`load_faces` asks for that after this list runs out).
+const GRID_CANDIDATES: &[&str] = &[
+    "JetBrains Mono",
+    "Hack",
+    // Windows: Cascadia ships with Windows Terminal and Visual Studio, Consolas
+    // with the OS itself, and the last two are on every machine.
+    "Cascadia Mono",
+    "Cascadia Code",
+    "Consolas",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Fira Code",
+    "Ubuntu Mono",
+    "Noto Sans Mono",
+    "Lucida Console",
+    "Courier New",
+];
+
+/// All four styles of one family, or `None` when it has no regular face to
+/// build them from.
+///
+/// The style chain is bold-italic → italic → bold → regular, which is what a
+/// terminal does when a family ships only two weights; only the regular face is
+/// required.
+fn try_family(info: &fontique::FamilyInfo, family: &str) -> Option<([Loaded; 4], String)> {
+    let mut faces: Vec<Option<Loaded>> = Vec::with_capacity(4);
+    for (style, weight) in [
+        (fontique::FontStyle::Normal, fontique::FontWeight::NORMAL),
+        (fontique::FontStyle::Normal, fontique::FontWeight::BOLD),
+        (fontique::FontStyle::Italic, fontique::FontWeight::NORMAL),
+        (fontique::FontStyle::Italic, fontique::FontWeight::BOLD),
+    ] {
+        // `synthesize_style: false`: a slanted copy of the regular face is
+        // worse than the regular face, and we can tell the difference.
+        let font = info.match_font(fontique::FontWidth::NORMAL, style, weight, false);
+        let loaded = font.and_then(|font| {
+            let blob = font.load(None)?;
+            Some(Loaded {
+                bytes: blob.data().to_vec(),
+                index: font.index() as usize,
+                adjust: 1.0,
+            })
+        });
+        faces.push(loaded);
+    }
+
+    // Bold without an italic face keeps the bold shape, and vice versa.
+    let regular = faces[0].take()?;
+    let bold = faces[1].take().or_else(|| Some(regular.clone_face()));
+    let italic = faces[2].take().or_else(|| Some(regular.clone_face()));
+    let bold_italic = faces[3]
+        .take()
+        .or_else(|| bold.as_ref().map(Loaded::clone_face))
+        .or_else(|| italic.as_ref().map(Loaded::clone_face))
+        .or_else(|| Some(regular.clone_face()));
+
+    tracing::info!(
+        family,
+        bold = bold.is_some(),
+        italic = italic.is_some(),
+        "grid font"
+    );
+    let empty = Loaded {
+        bytes: Vec::new(),
+        index: 0,
+        adjust: 1.0,
+    };
+    Some((
+        [
+            regular,
+            bold.unwrap_or_else(|| empty.clone_face()),
+            italic.unwrap_or_else(|| empty.clone_face()),
+            bold_italic.unwrap_or(empty),
+        ],
+        family.to_owned(),
+    ))
 }
 
 impl Loaded {

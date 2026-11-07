@@ -136,6 +136,19 @@ pub const FALLBACK: &[&str] = &[
     "Noto Sans CJK",
     "Noto Sans Mono",
     "Noto Sans",
+    // Then Windows' own CJK families, for the machine that has none of the
+    // above. MS Gothic is the fixed-pitch one — the one a terminal wants, since
+    // a proportional CJK face carries its own advance and the grid stops
+    // lining up — and the rest are what is left on a stock install.
+    "MS Gothic",
+    "MS Mincho",
+    "SimSun",
+    "NSimSun",
+    "MingLiU",
+    "Batang",
+    "Malgun Gothic",
+    "Yu Gothic UI",
+    "Meiryo",
     // Then the Nerd Font families. They are last because they are the answer to
     // a different question — three thousand icons that no text face has — and
     // first only among the private use area, where nothing else answers at all.

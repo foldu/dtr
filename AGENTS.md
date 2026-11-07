@@ -390,6 +390,20 @@ so the walk accepted it and drew nothing; `has_ink` rasterises the candidate gly
 skips a face whose box is empty. A terminal that draws nothing is worse than one that
 draws the wrong glyph.
 
+**No grid face is not an empty grid, it is Emoji.** `load_faces` tries a preference
+list (`GRID_CANDIDATES`), and every entry in it used to be a Linux family, with
+`"monospace"` last — which is a *generic* family, not a name, so `family_by_name` never
+resolved it. On a fresh Windows the grid therefore had no face at all, `face_for` fell
+through to the first fallback with a glyph, and every Latin character was drawn by Segoe
+UI Emoji at 1.6× the cell advance: `Microsoft` came out `M crosoft` and an SGR sequence
+arrived as literal `[0m`. After the list runs out the platform is asked
+(`generic_families(GenericFamily::Monospace)`), which is the part that works on a machine
+this repository has never run on; adding a family to `GRID_CANDIDATES` or
+`fonts::FALLBACK` is how a new OS gets its faces. `--font-report` in the `winvm` guest is
+how the answer is checked (`docs/cjk.md` §5, M7). A *pictograph* (U+1F000–1FAFF, no
+script) also skips the already-loaded shortcut, or the symbol face that answered a
+powerline arrow hands it a monochrome `😀`.
+
 **A fallback is rasterised at its own optical size.** `Loaded::adjust` is the ratio of
 the *ideographic widths* — the advance of `一`, else `min(ascii ink height, two
 cells)` — and it has to be that metric: x-height gave 0.92 and cap height 0.89 on
