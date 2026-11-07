@@ -190,8 +190,7 @@ impl<'a> Editable<'a> {
                 for choice in choices {
                     let label = choice.as_ref();
                     let selected = label == self.text;
-                    let text = egui::RichText::new(label).font(s.value_font.clone());
-                    if ui.selectable_label(selected, text).clicked() {
+                    if super::menu::menu_row(ui, skin, label, selected) {
                         picked = Some(Edit::Picked(label.to_owned()));
                         ui.close();
                     }

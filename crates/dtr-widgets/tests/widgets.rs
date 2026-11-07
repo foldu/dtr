@@ -2,16 +2,15 @@
 //!
 //! The gallery is the serial connection sheet: every row the real one has, in
 //! the same order, because a style judged on four rows is not a style judged on
-//! the dialog. The rows, the section headers and the checkboxes are the crate's
-//! own; the segmented choice and the buttons are still stock egui, and the
-//! painted ones replace them without changing the shape of the sheet.
+//! the dialog. Every control in it is the crate's own, so this file is the one
+//! place a new primitive is seen before a screen adopts it.
 //!
 //! Both presets render on Linux: the Windows skin is a palette and a token
 //! table, not a call into Windows — the same trick `chrome::buttons_for` uses
 //! for the two captions. If the Windows look could only be seen on Windows, it
 //! would only be checked when somebody remembered to.
 
-use dtr_widgets::{Edit, Editable, Footer, Palette, Skin, check, row, section};
+use dtr_widgets::{Button, Edit, Editable, Footer, Palette, Skin, check, row, section, segmented};
 use egui::{RichText, Stroke, vec2};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -49,25 +48,6 @@ fn dtr_skin() -> Skin {
         [0xdc, 0xdf, 0xdd],
         [0xff, 0xb0, 0x00],
     ))
-}
-
-/// A segmented choice. Stock egui's `selectable_label` is the closest thing to a
-/// chip until the painted one lands; the shape of the row is what is being
-/// compared here, not the chip's corners.
-fn segmented<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    skin: &Skin,
-    value: T,
-    options: &[(T, &'static str)],
-) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (option, label) in options {
-            let selected = *option == value;
-            let text = RichText::new(*label).font(skin.style.value_font.clone());
-            let _ = ui.selectable_label(selected, text);
-        }
-    });
 }
 
 /// Two or more checks in a row, which is how the sheet asks the question.
@@ -157,11 +137,7 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin, state: &mut State) {
                             };
                         }
                         // A name is not a profile until it is saved under one.
-                        let save =
-                            egui::Button::new(RichText::new("save").font(s.value_font.clone()))
-                                .corner_radius(s.control_radius)
-                                .min_size(vec2(54.0, s.row));
-                        let _ = ui.add(save);
+                        Button::new("save").width(54.0).show(ui, skin);
                     });
                     ui.add_space(s.gap * 2.0);
 
@@ -183,18 +159,31 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin, state: &mut State) {
                         }
                     });
                     row(ui, skin, "data bits", |ui| {
-                        segmented(ui, skin, 7u8, &[(5, "5"), (6, "6"), (7, "7"), (8, "8")]);
+                        segmented(
+                            ui,
+                            skin,
+                            "data bits",
+                            7u8,
+                            &[(5, "5"), (6, "6"), (7, "7"), (8, "8")],
+                        );
                     });
                     row(ui, skin, "parity", |ui| {
-                        segmented(ui, skin, 1u8, &[(0, "none"), (1, "even"), (2, "odd")]);
+                        segmented(
+                            ui,
+                            skin,
+                            "parity",
+                            1u8,
+                            &[(0, "none"), (1, "even"), (2, "odd")],
+                        );
                     });
                     row(ui, skin, "stop bits", |ui| {
-                        segmented(ui, skin, 1u8, &[(1, "1"), (2, "2")]);
+                        segmented(ui, skin, "stop bits", 1u8, &[(1, "1"), (2, "2")]);
                     });
                     row(ui, skin, "flow control", |ui| {
                         segmented(
                             ui,
                             skin,
+                            "flow control",
                             0u8,
                             &[(0, "none"), (1, "software"), (2, "hardware")],
                         );
@@ -224,33 +213,20 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin, state: &mut State) {
                                 .color(p.dim),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let primary = egui::Button::new(
-                                RichText::new("connect")
-                                    .font(s.value_font.clone())
-                                    .color(p.on_accent),
-                            )
-                            .fill(p.accent)
-                            .corner_radius(s.control_radius)
-                            .min_size(vec2(88.0, s.row));
-                            let secondary = egui::Button::new(
-                                RichText::new("cancel")
-                                    .font(s.value_font.clone())
-                                    .color(p.text),
-                            )
-                            .corner_radius(s.control_radius)
-                            .min_size(vec2(76.0, s.row));
+                            let primary = Button::new("connect").primary().width(88.0);
+                            let secondary = Button::new("cancel").width(76.0);
                             // `right_to_left` lays out from the corner inwards, so the
                             // first one added is the rightmost.
                             match s.footer {
                                 Footer::PrimaryLast => {
-                                    let _ = ui.add(primary);
+                                    primary.show(ui, skin);
                                     ui.add_space(s.gap);
-                                    let _ = ui.add(secondary);
+                                    secondary.show(ui, skin);
                                 }
                                 Footer::PrimaryFirst => {
-                                    let _ = ui.add(secondary);
+                                    secondary.show(ui, skin);
                                     ui.add_space(s.gap);
-                                    let _ = ui.add(primary);
+                                    primary.show(ui, skin);
                                 }
                             }
                         });

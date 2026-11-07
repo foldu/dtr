@@ -76,7 +76,7 @@ pub fn check(ui: &mut Ui, skin: &Skin, on: bool, label: &str) -> Option<bool> {
 
 /// Two segments scaled to the box: down from the left shoulder, then up to the
 /// right, which is where a tick carries its weight.
-fn tick(painter: &Painter, box_rect: Rect, colour: Color32) {
+pub(super) fn tick(painter: &Painter, box_rect: Rect, colour: Color32) {
     let centre = box_rect.center();
     let r = box_rect.width() / 2.0;
     let stroke = Stroke::new((box_rect.width() * 0.115).max(1.4), colour);
