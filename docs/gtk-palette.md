@@ -25,8 +25,10 @@ So:
   client, MIT, no GLib link) on its **`tokio`** transport, because dtr already
   runs tokio: one connection and two `Read` calls, with a 500 ms ceiling on the
   whole reading;
-- fall back to `gsettings` (a subprocess) when the portal is absent, then to
-  `settings.ini` for the *theme name*, then to `None`;
+- read the *theme name* from `GTK_THEME` and `settings.ini` — the two places a
+  plain reader can look — and refuse a name that is not Adwaita rather than
+  painting Adwaita's surfaces on Breeze; no subprocess, and `None` when nothing
+  says which scheme it is;
 - build `Palette::adwaita(dark, accent)` from constants measured out of
   `libadwaita-1.so`, and `Skin::adwaita(dark, accent)` from it — which also
   carries `Style::adwaita()`, because Adwaita's *metrics* are in the same
@@ -395,16 +397,18 @@ NixOS behaviour.
 and loses the schema defaults. Rejected.
 
 The costs are per read (one connection for `zbus`, one process per key for
-`busctl`, one process for `gsettings`). `OnceLock` is what makes them
-acceptable: `Look::skin()` is asked by every surface on every frame, and
-2–2.6 ms × 60 is 120–156 ms/s — the same reason the Windows registry read is
-cached (`crates/dtr/src/system.rs`).
+`busctl`, one process for `gsettings`). The first read is the only one a frame
+waits for — after that the answer sits in a cell (§6) — and 2–2.6 ms once is why
+that is acceptable rather than a per-frame cost: `Look::skin()` is asked by every
+surface on every frame, and 2–2.6 ms × 60 is 120–156 ms/s, the same reason the
+Windows registry read is cached (`crates/dtr/src/system.rs`).
 
-**Reasoned read order.** `zbus` first (cross-desktop, resolved values, no GLib,
-typed); `busctl` if the crate is not in the build (the same portal, zero new
-dependencies); `gsettings` when the portal is absent (a GLib CLI, but only a
-subprocess; applies defaults); `settings.ini` for the theme *name*; then
-`None`, which `Skin::resolve` turns into the dtr skin.
+**Read order, as shipped.** `zbus` first (cross-desktop, resolved values, no GLib,
+typed). Then `settings.ini` and `GTK_THEME` for the theme *name*, which is the
+gate and, when the portal has no preference, the scheme. Then `None`, which
+`Skin::resolve` turns into the dtr skin. **`gsettings` is not used**: it was the
+third source for the theme name, and it costs a subprocess for a value the two
+files above already hold on every desktop that sets one (§4.2, §5).
 
 ## 5. Precedence and fallbacks
 
@@ -439,6 +443,14 @@ Why these choices:
 - **`GTK_THEME` is read, but it cannot supply a palette.** It is a name; a
   non-Adwaita name has no colour we can read in v1. The failure prevented:
   treating a debug knob as a palette source.
+- **The settings daemon is not asked.** `gsettings` would be a third source for
+  the theme name, and reading it means running a subprocess: dconf exposes no read
+  API on the bus, by design, so this is not something zbus can do instead. A
+  terminal that forks a program to find out what colour its own chrome is has
+  spent more than the answer is worth. The failure prevented: a 30 ms subprocess
+  on the startup path, and a `gsettings` that waits on a dconf lock. What is lost:
+  a KDE user whose `gtk-theme-name` lives only in dconf keeps the dtr skin —
+  which is the same answer Plasma's own `settings.ini` would have given.
 - **The user's `gtk.css` is not read in v1.** It is an override, not the system
   palette; the one on this machine is a dangling import. §8 specifies what a
   v2 would read. The failure prevented: a half-parsed override producing a
@@ -537,8 +549,8 @@ scanning):
 - **Linux**: `org.freedesktop.portal.Settings.SettingChanged`, subscribed once per
   reading. The portal re-emits from `gsettings`, so this covers the settings app,
   `gsettings` in a terminal, and a theme switcher. A session with no portal has no
-  signal to subscribe to — that is the price of the `gsettings` fallback, and the
-  skin then stays at what it started with.
+  signal to subscribe to, and the scheme then comes from the theme's name and
+  stays there.
 - **Windows**: `WM_SETTINGCHANGE`, from the window procedure
   `crates/dtr/src/chrome/windows.rs` already subclasses for the maximise button's
   hit test. winit forwards the *theme* half as `ThemeChanged` and the accent half
@@ -582,10 +594,12 @@ portal = ["dep:zbus"]
 default = ["portal"]
 ```
 
-Off, `Portal` is a `gsettings`-only reader: `source="gsettings"`, one palette, and
-a watcher parked on `std::future::pending()` because `gsettings` has no
-notification a plain reader can subscribe to. `cargo check -p dtr
---no-default-features` is the build that proves it.
+Off, `Portal` is a name-only reader: `source="gtk-config"`, the scheme from
+`GTK_THEME`/`settings.ini`, Adwaita's blue accent, and a watcher parked on
+`std::future::pending()` because a file has no notification. `cargo check -p dtr
+--no-default-features` is the build that proves it, and this machine's is
+`skin="adwaita-dark" source="gtk-config"` — its `settings.ini` says
+`gtk-theme-name=Adwaita-dark`.
 
 ### 6.4 Tests
 

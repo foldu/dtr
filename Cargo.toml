@@ -99,7 +99,8 @@ tokio-serial = "5"
 # putting `async-io`'s second reactor beside them (77 lock entries against 86,
 # measured; see `docs/gtk-palette.md` §6). Optional, because it is a whole D-Bus
 # stack for two numbers (23 packages added to `Cargo.lock`): without it the Linux
-# reader is `gsettings` alone, which is a palette but not a live one.
+# reader takes the scheme from the theme's name, which is a palette but not a live
+# one.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

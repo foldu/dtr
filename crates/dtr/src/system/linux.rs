@@ -1,10 +1,9 @@
 //! What a GNOME session says its chrome looks like.
 //!
-//! Two facts decide the native skin: the scheme, and the accent. libadwaita
-//! itself reads both from the XDG settings portal (`org.freedesktop.appearance`)
-//! and falls back to `gsettings`, and so does this — in that order, because the
-//! portal is what the session has already agreed on and it survives a settings
-//! daemon that is slow or missing. The theme *name* is the gate: see
+//! Two facts decide the native skin: the scheme, and the accent, and both come
+//! from the XDG settings portal (`org.freedesktop.appearance`) — the same service
+//! libadwaita itself asks. The theme *name* is the gate, and it comes from the two
+//! places a plain reader can look, `GTK_THEME` and `settings.ini`: see
 //! [`adwaita_like`].
 //!
 //! Nothing here parses CSS. The surfaces are libadwaita 1.9.3's own constants,
@@ -12,9 +11,9 @@
 //! only values a session can change are the two above — see `docs/gtk-palette.md`
 //! §8 for what a second version would have to read to change the rest.
 //!
-//! The portal half is behind the `portal` feature: without it this reads
-//! `gsettings` only, and the skin does not follow the desktop. That is the build
-//! for a target that will not take zbus's tree (`docs/gtk-palette.md` §10).
+//! The portal half is behind the `portal` feature: without it the scheme comes
+//! from the theme's own name and nothing watches, which is the build for a target
+//! that will not take zbus's tree (`docs/gtk-palette.md` §10).
 
 // The portal helpers are the dead half of a `--no-default-features` build.
 #![cfg_attr(not(feature = "portal"), allow(dead_code))]
@@ -29,8 +28,8 @@ use super::{Platform, Reading};
 /// The ceiling on one reading.
 ///
 /// The portal answers in 2–2.6 ms measured, so this is a guard against a stuck
-/// D-Bus daemon or a `gsettings` waiting on a lock, not a delay: the first frame
-/// must not wait for the desktop to wake up.
+/// D-Bus daemon, not a delay: the first frame must not wait for the desktop to
+/// wake up.
 const BUDGET: Duration = Duration::from_millis(500);
 
 /// How long to wait before trying to watch again after the bus or the portal
@@ -43,18 +42,17 @@ const PORTAL_IFACE: &str = "org.freedesktop.portal.Settings";
 /// The namespace the appearance keys live in; `Read` takes it as its first
 /// argument rather than as part of the interface.
 const APPEARANCE: &str = "org.freedesktop.appearance";
-const DESKTOP_INTERFACE: &str = "org.gnome.desktop.interface";
 
 pub(super) struct Portal;
 
 impl Platform for Portal {
     fn source(&self) -> &'static str {
         // Whichever reader will answer: with the feature off there is no portal
-        // call to name.
+        // call to name, only the theme's name in a file.
         if cfg!(feature = "portal") {
             "portal"
         } else {
-            "gsettings"
+            "gtk-config"
         }
     }
 
@@ -77,11 +75,11 @@ impl Platform for Portal {
 impl Portal {
     /// Wait for the desktop to say one of the appearance keys changed.
     ///
-    /// The portal re-emits these from `gsettings`, so this covers a GNOME session
-    /// whatever set the value: the settings app, `gsettings` in a terminal, or a
-    /// theme switcher. A session with no portal never gets here — `read` already
-    /// fell back to `gsettings`, and there is no notification to subscribe to for
-    /// that, so the skin stays at what it was.
+    /// The portal re-emits these from the settings daemon, so this covers a GNOME
+    /// session whatever set the value: the settings app, `gsettings` in a
+    /// terminal, or a theme switcher. A session with no portal never gets here,
+    /// because there is nothing to subscribe to then and the skin stays at what it
+    /// was.
     #[cfg(feature = "portal")]
     pub(super) async fn changed(&self) {
         loop {
@@ -121,10 +119,10 @@ impl Portal {
         }
     }
 
-    /// Without the portal there is no change to wait for: `gsettings` has no
-    /// notification a plain reader can subscribe to, so the skin is whatever it
-    /// was at startup. A future that never resolves is the honest spelling of
-    /// that — the watcher stays parked instead of polling a subprocess.
+    /// Without the portal there is no change to wait for: a theme name in a file
+    /// has no notification, so the skin is whatever it was at startup. A future
+    /// that never resolves is the honest spelling of that, rather than polling a
+    /// file on a timer to notice an edit nobody makes.
     #[cfg(not(feature = "portal"))]
     pub(super) async fn changed(&self) {
         std::future::pending::<()>().await;
@@ -140,35 +138,28 @@ async fn next_signal(stream: &mut zbus::proxy::SignalStream<'_>) -> Option<zbus:
 }
 
 async fn gather() -> Result<Reading, String> {
-    let theme = theme_name().await;
+    let theme = theme_name();
     if !adwaita_like(&theme) {
         return Err(format!("theme {theme:?} is not Adwaita"));
     }
-    // The two portal values over one connection: the bus is the expensive
-    // part, and asking twice would mean two of them.
+    // The two portal values over one connection: the bus is the expensive part,
+    // and asking twice would mean two of them.
     let (scheme, accent) = portal_values().await.unwrap_or((None, None));
     let dark = match scheme {
-        // 0 is "no preference", which is not "light": it means the scheme is
-        // the theme's, and guessing here is how a white chrome lands on a
-        // dark desktop.
+        // 0 is "no preference", which is not "light": it means the scheme is the
+        // theme's, and guessing here is how a white chrome lands on a dark
+        // desktop.
         Some(1) => true,
         Some(2) => false,
-        _ => gsettings_scheme()
-            .await
-            .or_else(|| theme_scheme(&theme))
-            .ok_or_else(|| format!("theme {theme:?} does not say whether it is light or dark"))?,
-    };
-    let accent = match accent {
-        Some(accent) => accent,
-        None => gsettings("accent-color")
-            .await
-            .as_deref()
-            .and_then(accent_named)
-            .unwrap_or(ADWAITA_ACCENT),
+        _ => theme_scheme(&theme).ok_or_else(|| {
+            format!("no portal, and theme {theme:?} does not say whether it is light or dark")
+        })?,
     };
     Ok(Reading {
         dark,
-        accent: Some(accent),
+        // No portal means no accent either. Blue is libadwaita's own default, so
+        // this is the desktop's colour rather than a guess at the user's.
+        accent: Some(accent.unwrap_or(ADWAITA_ACCENT)),
         ladder: None,
     })
 }
@@ -216,19 +207,20 @@ fn theme_scheme(theme: &str) -> Option<bool> {
     }
 }
 
-/// The theme's name, from the three places GTK would look: the debug override,
-/// the settings daemon, and the config file. `Adwaita` is GTK's own default when
-/// none of them says anything.
-async fn theme_name() -> String {
+/// The theme's name, from the two places a plain reader can look: the debug
+/// override and the config file. `Adwaita` is GTK's own default when neither says
+/// anything, and it is what a GNOME session with no `settings.ini` is running.
+///
+/// The settings *daemon* would be a third, and reading it means running
+/// `gsettings`: there is no read API on dconf's bus interface, by design. dtr does
+/// not spawn a process to find out what colour its own chrome is.
+fn theme_name() -> String {
     if let Ok(value) = std::env::var("GTK_THEME") {
         if !value.trim().is_empty() {
             return value;
         }
     }
-    match gsettings("gtk-theme").await {
-        Some(name) => name,
-        None => settings_ini_theme().unwrap_or_else(|| "Adwaita".to_owned()),
-    }
+    settings_ini_theme().unwrap_or_else(|| "Adwaita".to_owned())
 }
 
 /// `gtk-theme-name` from `$XDG_CONFIG_HOME/gtk-4.0/settings.ini`.
@@ -264,45 +256,11 @@ fn theme_in_ini(text: &str) -> Option<String> {
     None
 }
 
-/// A value from the settings daemon, unquoted.
-///
-/// `gsettings` prints a GVariant, so a string arrives as `'prefer-dark'` and a
-/// number as `1`; the quotes are trimmed rather than parsed, and a missing schema
-/// exits non-zero rather than printing a sentence worth interpreting.
-///
-/// On a blocking thread, because spawning a process is blocking and the caller is
-/// a runtime: `tokio::process` would be one Cargo feature for one call.
-async fn gsettings(key: &'static str) -> Option<String> {
-    tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new("gsettings")
-            .args(["get", DESKTOP_INTERFACE, key])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let text = text.trim().trim_matches('\'');
-        (!text.is_empty()).then(|| text.to_owned())
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-async fn gsettings_scheme() -> Option<bool> {
-    match gsettings("color-scheme").await?.as_str() {
-        "prefer-dark" => Some(true),
-        "prefer-light" => Some(false),
-        _ => None,
-    }
-}
-
 /// The portal's scheme (as `u`) and accent (as `(ddd)`), over one connection.
 ///
 /// A missing bus, a missing portal and a portal that answers an error are all
-/// `None`: each of them means "ask `gsettings`", and none of them is worth
-/// stopping a terminal for.
+/// `None`: each of them means "the theme's name decides", and none of them is
+/// worth stopping a terminal for.
 #[cfg(feature = "portal")]
 async fn portal_values() -> Option<(Option<u32>, Option<Color32>)> {
     let connection = zbus::connection::Builder::session()
@@ -321,8 +279,8 @@ async fn portal_values() -> Option<(Option<u32>, Option<Color32>)> {
     Some((scheme, accent))
 }
 
-/// Without the portal there is nothing to ask: both values come from `gsettings`,
-/// which is what `gather` falls back to when this is `None`.
+/// Without the feature there is nothing to ask: the scheme comes from the theme's
+/// name, and the accent is libadwaita's default.
 #[cfg(not(feature = "portal"))]
 async fn portal_values() -> Option<(Option<u32>, Option<Color32>)> {
     None
@@ -361,23 +319,6 @@ fn accent_of(value: zbus::zvariant::OwnedValue) -> Option<Color32> {
 fn from_unit(r: f64, g: f64, b: f64) -> Color32 {
     let channel = |c: f64| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgb(channel(r), channel(g), channel(b))
-}
-
-/// GNOME 47's accent names and the colours libadwaita gives them.
-fn accent_named(name: &str) -> Option<Color32> {
-    let (r, g, b) = match name {
-        "blue" => (0x35, 0x84, 0xE4),
-        "teal" => (0x21, 0x90, 0xA4),
-        "green" => (0x3A, 0x94, 0x4A),
-        "yellow" => (0xC8, 0x88, 0x00),
-        "orange" => (0xED, 0x5B, 0x00),
-        "red" => (0xE6, 0x2D, 0x42),
-        "pink" => (0xD5, 0x61, 0x99),
-        "purple" => (0x91, 0x41, 0xAC),
-        "slate" => (0x6F, 0x83, 0x96),
-        _ => return None,
-    };
-    Some(Color32::from_rgb(r, g, b))
 }
 
 #[cfg(test)]
@@ -451,15 +392,5 @@ gtk-icon-theme-name=Adwaita
         let elsewhere = "[Other]\ngtk-theme-name=Breeze\n";
         assert_eq!(theme_in_ini(elsewhere), None);
         assert_eq!(theme_in_ini("[Settings]\ngtk-theme-name=\n"), None);
-    }
-
-    #[test]
-    fn the_accent_names_are_libadwaitas() {
-        assert_eq!(accent_named("blue"), Some(ADWAITA_ACCENT));
-        assert_eq!(
-            accent_named("slate"),
-            Some(Color32::from_rgb(0x6F, 0x83, 0x96))
-        );
-        assert_eq!(accent_named("chartreuse"), None);
     }
 }

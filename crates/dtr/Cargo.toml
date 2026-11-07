@@ -8,8 +8,9 @@ publish.workspace = true
 
 [features]
 # Reading the XDG settings portal, and with it following the desktop when it
-# changes. Off, the Linux reader is `gsettings` and nothing watches: a build
-# that cannot take zbus's tree still gets Adwaita's palette, just not a live one.
+# changes. Off, the scheme comes from the theme's own name and nothing watches: a
+# build that cannot take zbus's tree still gets Adwaita's palette, just not a live
+# one.
 portal = ["dep:zbus"]
 default = ["portal"]
 
