@@ -20,8 +20,8 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-    WM_SETTINGCHANGE, WM_SYSCOMMAND,
+    HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_DWMCOLORIZATIONCOLORCHANGED,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_THEMECHANGED,
 };
 
 /// Identifies dtr's subclass, in case anything else subclasses the window too.
@@ -109,12 +109,19 @@ unsafe extern "system" fn procedure(
         unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command, 0) };
         return 0;
     }
-    if message == WM_SETTINGCHANGE {
-        // The desktop's colours changed — the scheme, the accent, or both. Windows
-        // announces all of it through this one message (its own
-        // `WM_DWMCOLORIZATIONCOLORCHANGED` is not forwarded by winit at all), so
-        // the watcher re-reads and lets the answer be the same either way.
-        // Re-reading two registry values costs less than deciding which changed.
+    if matches!(
+        message,
+        WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED | WM_THEMECHANGED
+    ) {
+        // The desktop's colours changed — the scheme, the accent, or both — and
+        // Windows has three messages for it: `WM_SETTINGCHANGE` (the theme, and on
+        // Windows 11 the accent, both as `ImmersiveColorSet`),
+        // `WM_DWMCOLORIZATIONCOLORCHANGED` (the accent, classically) and
+        // `WM_THEMECHANGED` (a theme file swapped). winit forwards only the first,
+        // and only when the light/dark answer differs, so the other two are heard
+        // here or not at all. Re-reading two registry values costs less than
+        // deciding which message meant what.
+        tracing::debug!(message, "the desktop says its colours changed");
         crate::system::changed();
     }
     // SAFETY: passing the message through to the previous procedure, which is

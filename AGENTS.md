@@ -553,9 +553,12 @@ tag mirroring on.
   Windows' own controls use; Linux asks the XDG portal for the scheme and the accent and
   refuses a theme that is not Adwaita rather than painting Adwaita's surfaces on Breeze
   (`docs/gtk-palette.md` §6). **It is live**: the answer sits in a cell a frame reads, and
-  a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE` through the
-  window procedure that already subclasses the window, `SettingChanged` from the portal —
-  then asks for a repaint. `-v` logs
+  a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE`,
+  `WM_DWMCOLORIZATIONCOLORCHANGED` or `WM_THEMECHANGED` through the window procedure that
+  already subclasses the window (winit forwards only the first, and only when light/dark
+  differs), `SettingChanged` from the portal — then asks for a repaint. The Windows half is
+  verified on the guest and takes two messages per change, which is why it re-reads both
+  registry values rather than deciding which message meant what. `-v` logs
   `chrome skin=… requested=… accent=… source=…`, which is the difference between a
   preference and an outcome, and `source=` names the reader that answered. **Painted controls belong in
   `crates/dtr-widgets/src/widgets/`**: `Editable` (a text field with a dropdown arrow,

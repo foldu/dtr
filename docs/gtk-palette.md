@@ -551,13 +551,15 @@ scanning):
   `gsettings` in a terminal, and a theme switcher. A session with no portal has no
   signal to subscribe to, and the scheme then comes from the theme's name and
   stays there.
-- **Windows**: `WM_SETTINGCHANGE`, from the window procedure
+- **Windows**: three messages, from the window procedure
   `crates/dtr/src/chrome/windows.rs` already subclasses for the maximise button's
-  hit test. winit forwards the *theme* half as `ThemeChanged` and the accent half
-  not at all, so re-reading both registry values on the one message costs less
-  than deciding which changed. The procedure cannot await: it calls
-  `system::changed()`, which `notify_one`s the watcher (a permit keeps a change
-  that arrives between two readings).
+  hit test — `WM_SETTINGCHANGE` (0x1A), `WM_DWMCOLORIZATIONCOLORCHANGED` (0x320)
+  and `WM_THEMECHANGED` (0x31A). winit forwards the *theme* half of the first as
+  `ThemeChanged` and nothing else at all, so the other two are heard here or not
+  at all; re-reading both registry values on any of them costs less than deciding
+  which one meant what. The procedure cannot await — and must not block a message
+  loop — so it calls `system::changed()`, which `notify_one`s the watcher (a
+  permit keeps a change that arrives between two readings).
 - The watcher re-reads, stores, logs `chrome changed`, and asks for a repaint
   through `UserEvent::Frame` — the same door every background result uses, because
   a skin that changed under a frame that never draws again did not change.
@@ -566,7 +568,28 @@ A `DTR_NATIVE_SKIN` preview is not overruled by the desktop: the watcher keeps
 running, and it writes the preview back, so the look a developer asked for is the
 look they keep.
 
-**What is not verified here.** The signal itself. This sandbox mounts
+**Measured on the Windows guest.** A clean `winvm reset`, `dtr.exe` started in
+the console session, then the accent written the way Windows writes it —
+`AccentColor` as `AABBGGRR`, `AccentPalette` as eight RGBx entries — and a
+`WM_SETTINGCHANGE`/`ImmersiveColorSet` broadcast, which is what the Settings app
+does:
+
+```
+chrome skin="windows-light" … accent="#0078D4" hover="#0067C0" source="windows-registry"
+dtr::chrome::windows: the desktop says its colours changed 26     ← our broadcast
+dtr::chrome::windows: the desktop says its colours changed 794    ← Windows' own relay
+dtr::system: chrome changed … accent="#FFB900" hover="#E6A400" source="windows-registry"
+```
+
+Two things that only a real desktop shows. The accent **and its ladder** both
+arrived (`#E6A400` is `dark1` from the new palette), so a hover lands on
+Windows' own variant rather than a blend. And a single change arrives as *two*
+messages — 0x1A and 0x31A — so it is read twice; two registry values are not
+worth a debounce. `WM_DWMCOLORIZATIONCOLORCHANGED` did not fire for a raw
+registry write (DWM only sends it when DWM makes the change), which is why all
+three are handled rather than the one that happened to be observable here.
+
+**What is still not verified.** The Linux signal. This sandbox mounts
 `/run/user/1000/dconf/user` read-only, so `gsettings set` cannot change the
 session and nothing emits `SettingChanged` — the subscription is proved (a `-v`
 line), the read is proved (the `chrome` line), and the gap between them is one
