@@ -64,11 +64,13 @@ impl Look {
         family: Option<String>,
         path: Option<PathBuf>,
         theme: Option<&crate::theme::Theme>,
+        preset: Preset,
     ) -> Self {
         let mut look = Self {
             size,
             family,
             path,
+            preset,
             ..Self::default()
         };
         let Some(theme) = theme else { return look };
@@ -102,6 +104,7 @@ impl Look {
         dtr_widgets::Skin::resolve(
             self.preset,
             dtr_widgets::Palette::dtr(self.background, self.foreground, self.accent),
+            crate::system::native_skin(),
         )
     }
 }

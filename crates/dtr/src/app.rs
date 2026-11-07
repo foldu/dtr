@@ -2535,6 +2535,7 @@ impl App {
                 self.look.family.clone(),
                 self.look.path.clone(),
                 theme.as_ref(),
+                self.look.preset,
             );
             self.theme = theme.clone();
             for tab in &mut self.tabs {
@@ -3258,6 +3259,7 @@ impl App {
                         self.look.family.clone(),
                         self.look.path.clone(),
                         Some(&theme),
+                        self.look.preset,
                     );
                     let tab = &mut self.tabs[self.active];
                     for pane in tab.leaves.values_mut() {

@@ -31,6 +31,8 @@ pub struct Config {
     pub font: Font,
     /// Who paints the window frame. `[window] chrome`.
     pub chrome: Chrome,
+    /// What the controls look like. `[ui] widgets`.
+    pub ui: Ui,
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
     /// terminal's built-in colours.
     pub theme: Option<String>,
@@ -108,6 +110,47 @@ impl fmt::Display for Chrome {
     }
 }
 
+/// What the chrome's controls are drawn as.
+///
+/// `Native` is the platform's own look — the system palette and Windows 11's
+/// metrics — and `Dtr` is the terminal's: monospace, tighter, accent-lit. On a
+/// machine with no system palette `native` resolves to the dtr skin, so this is a
+/// preference, not a guarantee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Widgets {
+    Dtr,
+    Native,
+}
+
+impl Default for Widgets {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl fmt::Display for Widgets {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Dtr => "dtr",
+            Self::Native => "native",
+        })
+    }
+}
+
+/// The controls' look. `[ui]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ui {
+    pub widgets: Widgets,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            widgets: Widgets::default(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -122,6 +165,7 @@ impl Default for Config {
                 fallback: Vec::new(),
             },
             chrome: Chrome::default(),
+            ui: Ui::default(),
             theme: None,
             terminal: Terminal::default(),
         }
@@ -216,6 +260,23 @@ impl Config {
                     other => {
                         return Err(Error::Value(format!(
                             "window.chrome is {other:?}; it must be \"client\" or \"native\""
+                        )));
+                    }
+                };
+            }
+        }
+
+        if let Some(ui) = document.get("ui").and_then(Item::as_table) {
+            if let Some(widgets) = ui.get("widgets") {
+                let text = widgets
+                    .as_str()
+                    .ok_or_else(|| Error::Value("ui.widgets must be a string".into()))?;
+                config.ui.widgets = match text {
+                    "dtr" => Widgets::Dtr,
+                    "native" => Widgets::Native,
+                    other => {
+                        return Err(Error::Value(format!(
+                            "ui.widgets is {other:?}; it must be \"dtr\" or \"native\""
                         )));
                     }
                 };
@@ -405,6 +466,13 @@ auto_reconnect = true
 # manager, with the tabs underneath.
 chrome = "client"
 
+[ui]
+# What the chrome's controls look like. "native" is the platform's own — the
+# system palette, Windows 11's metrics — and is the default; "dtr" is the
+# terminal's: monospace labels, tighter rows, the theme's accent. On a machine
+# with no system palette (Linux) "native" is the dtr style anyway.
+widgets = "native"
+
 [terminal]
 # Bytes of scrollback a tab keeps before the oldest pages are dropped. There is
 # no unlimited setting: a program that prints without end would grow the process
@@ -574,6 +642,28 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
             .to_string();
         assert!(error.contains("window.chrome"), "{error}");
         assert!(error.contains("client"), "{error}");
+    }
+
+    #[test]
+    fn the_controls_are_native_unless_asked_otherwise() {
+        assert_eq!(Config::default().ui.widgets, super::Widgets::Native);
+        assert_eq!(
+            Config::parse("[ui]\nwidgets = \"dtr\"\n")
+                .unwrap()
+                .ui
+                .widgets,
+            super::Widgets::Dtr
+        );
+    }
+
+    #[test]
+    fn a_wrong_widget_style_names_the_key_and_the_values() {
+        let error = Config::parse("[ui]\nwidgets = \"fancy\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ui.widgets"), "{error}");
+        assert!(error.contains("native"), "{error}");
+        assert!(error.contains("dtr"), "{error}");
     }
 
     #[test]

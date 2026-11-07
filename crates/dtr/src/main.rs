@@ -23,6 +23,7 @@ mod serial_dialog;
 mod settings;
 mod sources;
 mod sprite;
+mod system;
 mod theme;
 mod thumb;
 mod ui;
@@ -93,6 +94,11 @@ struct Args {
     /// Prefer the GPU whose name contains TEXT, e.g. --gpu nvidia
     #[arg(long, value_name = "TEXT")]
     gpu: Option<String>,
+
+    /// What the controls look like: "native" (the platform's own) or "dtr".
+    /// Overrides `[ui] widgets` in the config.
+    #[arg(long, value_name = "STYLE")]
+    widgets: Option<String>,
 
     /// Write a PNG of the live window once, MS after it opens. This is the only
     /// way to capture what the window draws: the offscreen path is a different
@@ -522,11 +528,28 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    let preset = match args.widgets.as_deref() {
+        Some("dtr") => dtr_widgets::Preset::Dtr,
+        Some("native") => dtr_widgets::Preset::Native,
+        Some(other) => {
+            anyhow::bail!("--widgets is {other:?}; it must be \"dtr\" or \"native\"")
+        }
+        None => match config.ui.widgets {
+            dtr_config::Widgets::Dtr => dtr_widgets::Preset::Dtr,
+            dtr_config::Widgets::Native => dtr_widgets::Preset::Native,
+        },
+    };
     let mut look = ui::Look::themed(
         config.font.size,
         config.font.family.clone(),
         config.font.path.clone(),
         theme.as_ref(),
+        preset,
+    );
+    tracing::debug!(
+        skin = crate::system::describe(&look.skin()),
+        requested = look.preset.as_str(),
+        "chrome"
     );
     look.fallback = config.font.fallback.clone();
 

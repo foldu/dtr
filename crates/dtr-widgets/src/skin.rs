@@ -58,25 +58,17 @@ impl Skin {
         Self::windows(true, WINDOWS_ACCENT_DARK)
     }
 
-    /// The platform's own chrome, when this crate can produce it.
+    /// The skin a preset names.
     ///
-    /// `None` today: reading the system palette — light or dark from
-    /// `AppsUseLightTheme`, the accent from DWM, both under
-    /// `HKCU\Software\Microsoft\Windows\CurrentVersion` — arrives with the commit
-    /// that wires this crate into the window, because that is the commit where the
-    /// `winvm` guest can check it. Everywhere else there is no system palette to
-    /// be native to: Linux has no portable one, and `native` is the dtr style there
-    /// by decision rather than by accident.
-    pub fn system() -> Option<Self> {
-        None
-    }
-
-    /// The skin a preset names, with the dtr palette the caller already derived
-    /// from its theme as the fallback.
-    pub fn resolve(preset: Preset, dtr: Palette) -> Self {
+    /// `native` is the platform's own when the caller could read one, and the
+    /// dtr skin otherwise. The reading lives in the caller rather than here
+    /// because it is platform code — the Windows registry, and nothing on Linux,
+    /// where there is no portable system palette and `native` is the dtr style by
+    /// decision rather than by accident.
+    pub fn resolve(preset: Preset, dtr: Palette, native: Option<Self>) -> Self {
         match preset {
             Preset::Dtr => Self::dtr(dtr),
-            Preset::Native => Self::system().unwrap_or_else(|| Self::dtr(dtr)),
+            Preset::Native => native.unwrap_or_else(|| Self::dtr(dtr)),
         }
     }
 
@@ -268,15 +260,27 @@ mod tests {
     /// silent failure.
     #[test]
     fn native_falls_back_to_dtr_where_there_is_no_system_palette() {
-        if Skin::system().is_some() {
-            return;
-        }
         assert_eq!(
-            Skin::resolve(Preset::Native, dtr_palette()),
+            Skin::resolve(Preset::Native, dtr_palette(), None),
             Skin::dtr(dtr_palette())
         );
         assert_eq!(
-            Skin::resolve(Preset::Dtr, dtr_palette()),
+            Skin::resolve(Preset::Dtr, dtr_palette(), None),
+            Skin::dtr(dtr_palette())
+        );
+    }
+
+    /// A preset is a request, not a promise: `native` uses the system skin when
+    /// there is one and `dtr` never does, even then.
+    #[test]
+    fn the_system_skin_is_used_by_native_alone() {
+        let system = Skin::windows_dark();
+        assert_eq!(
+            Skin::resolve(Preset::Native, dtr_palette(), Some(system.clone())),
+            system
+        );
+        assert_eq!(
+            Skin::resolve(Preset::Dtr, dtr_palette(), Some(system)),
             Skin::dtr(dtr_palette())
         );
     }

@@ -543,8 +543,13 @@ tag mirroring on.
   (row height, gaps, radii, fonts, and the `Title`/`Section`/`Footer`/`Focus`
   behaviours) and `Skin` (the pair), plus `Skin::egui_style`, which derives an
   `egui::Style` so stock egui widgets inherit the same look. `Preset::{Dtr, Native}`
-  picks a skin; `native` is system colours and the default, though on Linux it is the dtr
-  skin until `Skin::system` reads the desktop's. **Painted controls belong in
+  picks a skin; `[ui] widgets` (or `--widgets`) says which, and `native` is the default.
+  **A preset is a request**: `Skin::resolve` takes the platform's skin as an argument and
+  falls back to dtr, because reading the system palette is platform code and lives in
+  `crates/dtr/src/system.rs` — `AppsUseLightTheme` and DWM's `AccentColor` on Windows,
+  nothing on Linux, where there is no portable palette and `native` is the dtr style by
+  decision. `-v` logs `chrome skin=… requested=…`, which is the difference between a
+  preference and an outcome. **Painted controls belong in
   `crates/dtr-widgets/src/widgets/`**: `Editable` (a text field with a dropdown arrow,
   reporting `Edit::Typed` and `Edit::Picked` as different answers), the layout primitives
   `label_cell`/`row`/`section`, and `check`, `Button`, `segmented`, `menu_row` and `cross`.

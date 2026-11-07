@@ -61,8 +61,8 @@ should do so unless asked otherwise.
   gets a translucent control.
 - **`native` on Linux** resolves to the `dtr` skin, by decision: there is no
   portable system palette, and "read the GTK theme and the portal" is a project
-  of its own. `Skin::system()` is the one function that decides, and it returns
-  `None` here.
+  of its own. `Skin::resolve` takes the platform's skin as an argument, so a
+  caller with no answer passes `None` and gets dtr.
 - **`native` on macOS** has no palette either, so it is the dtr skin for now.
   A `windows()`-shaped constructor exists for Windows only, which is the honest
   state rather than a guess at the macOS look.
@@ -70,6 +70,22 @@ should do so unless asked otherwise.
 The Windows palettes are rendered and snapshot-tested **on Linux** on purpose.
 A look that can only be seen on Windows is a look that is only checked when
 somebody remembers to boot the VM.
+
+## Choosing one
+
+`[ui] widgets` in the config file, or `--widgets dtr|native` on the command line,
+which wins over the file. The default is `native`.
+
+The Windows read is in `crates/dtr/src/system.rs`: `AppsUseLightTheme` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` for light
+or dark, and `AccentColor` under `...\DWM` for the user's accent — stored there
+as `0xAABBGGRR`, which is the byte order of a `COLORREF`, so reading it as
+`AARRGGBB` swaps red and blue and turns a blue accent amber. Absent means the
+user never chose, and the answer is WinUI's own default. It is read once and
+cached: `Look::skin()` is asked by every surface on every frame.
+
+`-v` logs `chrome skin=… requested=…` at startup. On Linux that line reads
+`requested="native" skin="dtr"`, which is the design, not a failure.
 
 ## The rule that keeps it from rotting
 
@@ -133,6 +149,9 @@ and must be regenerated inside the devShell, through lavapipe.
 
 - The macOS palette, and whether `native` should read the desktop's accent on
   Linux through the XDG portal.
+- Whether the settings menu's ComboBoxes should become a `Combo` primitive: they
+  are the last stock egui controls with a popup list, and their rows are painted
+  by `menu_row` but the closed control is still egui's.
 - Whether a chip and a checkbox should share `chip_radius` (they do today).
 - Where a key hint is drawn: the serial sheet's footer writes `enter connect`
   as text, and nothing paints a keycap yet.
