@@ -54,9 +54,11 @@ renderer is deliberately a throwaway layer behind a trait.
 | D17 | **Pin the Rust wrapper to git `9ede35b`, not crates.io 0.2.2** | 0.2.2's pregenerated bindings call three C functions that do not exist at its own pinned ghostty commit (§12) |
 | D18 | **Name: `dtr`** | Data **T**erminal **R**eady — the RS-232 line a terminal asserts to announce itself. Three characters, technically exact, and the joke only lands for the audience |
 
-Pinned upstream: ghostty commit **`521cf2c5d30bd48028ca61546c64e7913764073d`** — the commit
-`libghostty-vt-sys` 0.2.2's bindings were generated against. Do **not** float this: the generated
-FFI is ABI-specific to that revision.
+Pinned upstream: ghostty commit **`0b8b9984ee560456194262d190aa850224edb1f4`** (2026-10-28) — the
+commit `libghostty-vt-sys`' bindings are generated against at the `libghostty-rs` rev `Cargo.toml`
+pins. Do **not** float this: the generated FFI is ABI-specific to that revision. It is the last
+commit before libghostty-vt's pre-1.0 ABI freeze; see §12.6 for why the `vt-1.0.0` tag is not
+reachable yet.
 
 ---
 
@@ -921,8 +923,8 @@ parameterized by zig target:
 
 ```nix
 libghostty-vt = { zigTarget ? null }: pkgs.stdenv.mkDerivation {
-  pname = "libghostty-vt"; version = "0.2.2+521cf2c";
-  src = ghostty-src;                       # fetchFromGitHub @ 521cf2c
+  pname = "libghostty-vt"; version = "0.2.1+0b8b998";
+  src = ghostty-src;                       # fetchFromGitHub @ 0b8b998
   nativeBuildInputs = [ pkgs.zig_0_17 pkgs.git pkgs.pkg-config ];
   dontSetZigDefaultFlags = true;           # upstream derivation sets this
   zigBuildFlags = [
@@ -941,7 +943,7 @@ that file and `build-support/fetch-zig-cache.sh`), export `ZIG_GLOBAL_CACHE_DIR`
 `$cache/p` as `$out/p` so `--system $out` resolves. One hash to seed on first build.
 
 Why not nixpkgs' own `libghostty-vt`: it is 2026-08-06, older than our pinned commit, and the
-Rust bindings are ABI-tied to `521cf2c`. Consistency across Linux/Windows matters more than
+Rust bindings are ABI-tied to `0b8b998`. Consistency across Linux/Windows matters more than
 reusing the packaged one.
 
 Keep `simd = true` (upstream's default) and install both `.pc` modules; the crate probes
@@ -1264,8 +1266,8 @@ and result symlinks stay out of the store.
 
 ```nix
 outputHashes = {
-  "libghostty-vt-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
-  "libghostty-vt-sys-0.2.1" = "sha256-Zojd1ziCw9+tbhmGYaFHFPlaxgbNbtmVBR99Otmg+o0=";
+  "libghostty-vt-0.2.1" = "sha256-tLVqh8p9H8N54XlmNS3qbQGGRRaSkn04aC93DHAvwak=";
+  "libghostty-vt-sys-0.2.1" = "sha256-tLVqh8p9H8N54XlmNS3qbQGGRRaSkn04aC93DHAvwak=";
 };
 ```
 
@@ -1273,6 +1275,50 @@ Bumping the wrapper rev means recomputing that hash
 (`nix hash path $(nix eval --raw --impure --expr 'builtins.fetchGit { url = …; rev = …; }')`) and
 updating three places: `Cargo.toml`, and both derivations. Worth a `just bump-wrapper` when it
 starts to annoy.
+
+### 12.6 Where the 1.0 line actually is (2026-11-07)
+
+libghostty-vt got its first release: ghostty tag **`vt-1.0.0`** (`0fa3d57`, 2026-11-06). The
+release commit itself changes no C API — "the ABI goldens are untouched", and the tag skips
+`0.1.0` entirely. But the week *before* it was an ABI freeze, and that is what stops us using it:
+between our old pin `521cf2c` and `vt-1.0.0` the public headers changed **+3926 / −3638 lines**
+(frozen value structs, one sized-struct rule, `GridRef`/`Selection` losing their size field, the
+selection format functions removed, mode macros renamed, `INVALID=0` key enums, `version.h`).
+
+The Rust wrapper has not followed. Measured on 2026-11-07:
+
+| | |
+|---|---|
+| `libghostty-rs` releases | `v0.2.0`–`v0.2.2` only; crates.io max `0.2.2`; no 1.x tag or branch |
+| `master` workspace version | still `0.2.1` |
+| `master` `GHOSTTY_COMMIT` | `0b8b9984` (2026-10-28) — **245 commits before `vt-1.0.0`** |
+| that bump landed | 2026-11-06 22:24 UTC; `vt-1.0.0` was tagged 22:28 UTC |
+
+So the bindings are mid-rewrite rather than merely stale: PR #114 (bump to ghostty 1.4.0) was
+closed unmerged — "I'd rather just break the api and do it properly" — and the breaking PRs that
+replaced it (#119, #120, #122, #123) were still open on 2026-11-07. `bindings.rs` is generated
+for the `0b8b998` ABI, so pinning ghostty to `vt-1.0.0` against it is not a hash bump, it is a
+wrong struct layout.
+
+**What we did instead.** Moved both sides to `0b8b998` / `libghostty-rs` `84373f8d`, the newest
+pair that agrees. That is also the pair carrying the two libghostty-vt security fixes `521cf2c`
+lacked — both fixed 2026-10-26, both reachable from terminal output alone:
+
+| Advisory | Fixed by | What |
+|---|---|---|
+| GHSA-w9q4-5jvv-mcv4 (moderate) | `e257bb45` | cursor style/hyperlink ids survive a `scrollClear` that prunes their page, and are then used on the wrong page |
+| GHSA-jqr7-69mm-v35h | `0af5c9e5` | a 16-bit row count overflows when a very wide page is narrowed |
+| GHSA-mhff-mv4q-fp63 | 1.4.0 | Kitty graphics validation; we do not call that API |
+
+The cost was zero source changes: a `cargo check` of `dtr` against the newer wrapper passes
+untouched. The wrapper's removed items (`vt_write_until_ground`, `set_terminfo_name`,
+`paste::is_safe`, the kitty graphics helpers) are unused here, and the colour parsers we do call
+— `RgbColor::parse`, `Palette::parse_palette_entry` — only widened `&str` to
+`impl AsRef<[u8]>`, which `&str` still satisfies.
+
+**When a bindings release targets the 1.0 ABI**, the bump is the same three places, plus whatever
+the freeze renamed. Re-read `include/ghostty/vt/version.h` and `types.h` first; that is where the
+sized-struct rule lives.
 
 ## 13. Tera Term Language (TTL)
 
