@@ -1,6 +1,7 @@
 //! dtr — a serial-first terminal.
 
 mod app;
+mod chrome;
 mod explorer;
 mod fonts;
 mod ime;

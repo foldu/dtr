@@ -299,9 +299,8 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
 
 /// The tab strip: one chip per tab, the active one lit, each clickable.
 ///
-/// Returns the index the pointer clicked, if any. Drawing and hit-testing are
-/// the same rectangle on purpose — a click that misses the chip the eye sees is
-/// the classic way to make tabs feel broken.
+/// Drawing and hit-testing are the same rectangle on purpose — a click that
+/// misses the chip the eye sees is the classic way to make tabs feel broken.
 /// What a click in the tab strip asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TabHit {
@@ -314,13 +313,25 @@ pub enum TabHit {
     New(Option<crate::sources::Destination>),
 }
 
+/// What the strip drew, and how much of the row it took.
+///
+/// The rectangle is not decoration. With a client-side frame the rest of the
+/// strip is the window's drag region, and "the rest" has to start exactly where
+/// the chips stop — otherwise a press on a chip moves the window, which is the
+/// overlapping-hit-targets bug in a new place.
+#[derive(Clone, Debug)]
+pub struct TabStrip {
+    pub hit: Option<TabHit>,
+    pub used: egui::Rect,
+}
+
 pub fn tab_bar(
     ui: &mut Ui,
     labels: &[String],
     active: usize,
     destinations: &[crate::sources::Destination],
     look: &Look,
-) -> Option<TabHit> {
+) -> TabStrip {
     // Idempotent, and here rather than only at startup so every caller — the
     // window, a capture, a kittest harness — gets a working loader.
     install_image_loaders(ui.ctx());
@@ -494,7 +505,11 @@ pub fn tab_bar(
         });
         let _ = menu;
     });
-    clicked
+    // What the horizontal actually took, so a drag region can start after it.
+    // Taken from the ui rather than computed from the chips: the `+` is part of
+    // the strip too, and a drag that started on it would be a drag on a menu.
+    let used = ui.min_rect();
+    TabStrip { hit: clicked, used }
 }
 
 pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
@@ -613,7 +628,7 @@ mod kittest_tests {
             },
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 0, &destinations, &look) {
+            if let Some(hit) = tab_bar(ui, &labels, 0, &destinations, &look).hit {
                 *sink.borrow_mut() = Some(hit);
             }
         });
@@ -718,7 +733,7 @@ mod kittest_tests {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = std::rc::Rc::clone(&seen);
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look) {
+            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look).hit {
                 sink.borrow_mut().push(hit);
             }
         });
@@ -779,7 +794,7 @@ mod kittest_tests {
             // (Installed per harness, not per process — each has its own ctx.)
             // Accumulate: a click is reported on the frame it happens and the
             // next frame starts from `None`.
-            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look) {
+            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look).hit {
                 *sink.borrow_mut() = Some(index);
             }
         });

@@ -3252,9 +3252,25 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        // Who paints the frame: the tab strip (`client`) or the window manager
+        // (`native`). Read once, here: on Wayland `xdg_decoration` is a request a
+        // compositor may refuse, and on X11 the motif hint is a hint, so
+        // "switch it later" is not something that can be promised.
+        let client_frame = self.config.chrome == dtr_config::Chrome::Client;
         let attrs = Window::default_attributes()
             .with_title("dtr")
+            .with_decorations(!client_frame)
             .with_inner_size(LogicalSize::new(900.0, 620.0));
+        // A frameless window with no shadow reads as a rectangle pasted onto the
+        // desktop; winit draws one only when asked, and only for a window whose
+        // decorations are off.
+        #[cfg(target_os = "windows")]
+        let attrs = if client_frame {
+            use winit::platform::windows::WindowAttributesExtWindows as _;
+            attrs.with_undecorated_shadow(true)
+        } else {
+            attrs
+        };
         // The desktop entry says `StartupWMClass=dtr` and `Icon=dtr`, so the
         // window has to say it is called that. Without a name, X11 derives
         // `WM_CLASS` from argv[0] — which under the nix wrapper is
@@ -3282,7 +3298,12 @@ impl ApplicationHandler<UserEvent> for App {
         // the corner of the screen.
         window.set_ime_allowed(true);
 
-        match Gpu::new(window, &self.look, self.gpu_hint.as_deref()) {
+        match Gpu::new(
+            window,
+            &self.look,
+            self.gpu_hint.as_deref(),
+            self.config.chrome == dtr_config::Chrome::Client,
+        ) {
             Ok(gpu) => {
                 gpu.window.request_redraw();
                 self.gpu = Some(gpu);
@@ -3801,6 +3822,12 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         })
                         .collect();
+                    // The strip is the title bar now, so the active tab is the
+                    // window's name too: the taskbar and Alt-Tab read this, and
+                    // with several sessions "dtr" names none of them.
+                    if let Some(label) = tabs.get(self.active) {
+                        gpu.set_window_title(label);
+                    }
                     let mut tab_click = None;
                     let mut settings_change = None;
                     let capture_path = match self.capture.take() {
@@ -3915,6 +3942,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut pager = std::mem::take(&mut self.pager);
                     let mut link_menu = std::mem::take(&mut self.link_menu);
                     let mut menu_choice = None;
+                    let mut close_window = false;
                     let rendered = gpu.render(
                         &panes,
                         self.frames_drawn,
@@ -3944,7 +3972,14 @@ impl ApplicationHandler<UserEvent> for App {
                         capture_path.as_deref(),
                         &look,
                         ime,
+                        &mut close_window,
                     );
+                    // The caption's × is the window's close button. Same exit as
+                    // the window manager's, so there is one shutdown path.
+                    if close_window {
+                        event_loop.exit();
+                        return;
+                    }
                     self.palette = palette;
                     // The pager comes back with the scroll the frame measured, which is
                     // the only place that knows how tall the text turned out.
@@ -4098,12 +4133,19 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// Whether dtr paints the window frame, from `[window] chrome`. Read once,
+    /// at creation: it decides whether the strip is a drag region and whether
+    /// the buttons are drawn.
+    client_frame: bool,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     /// When the current frame started, and how much of it was CPU work rather
     /// than waiting for the compositor.
     frame_began: std::time::Instant,
     cpu_ms: f32,
+    /// The title the window was last told, so a frame that changes nothing does
+    /// not talk to the window manager — which on Wayland is a round trip.
+    title: String,
     window: Arc<Window>,
 }
 
@@ -4197,7 +4239,12 @@ impl Gpu {
         tracing::info!(family = ?look.family, size = look.size, "grid rebuilt");
     }
 
-    fn new(window: Arc<Window>, look: &Look, hint: Option<&str>) -> anyhow::Result<Self> {
+    fn new(
+        window: Arc<Window>,
+        look: &Look,
+        hint: Option<&str>,
+        client_frame: bool,
+    ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = instance();
         let surface = instance.create_surface(Arc::clone(&window))?;
@@ -4293,12 +4340,29 @@ impl Gpu {
             device,
             queue,
             config,
+            client_frame,
             egui_ctx,
             egui_state,
             frame_began: std::time::Instant::now(),
             cpu_ms: 0.0,
+            title: String::new(),
             window,
         })
+    }
+
+    /// Keep the OS title in step with the active tab.
+    ///
+    /// With a client-side frame the strip is the only place the session's name
+    /// is written, so this is what the taskbar and Alt-Tab show. A window called
+    /// `dtr` is anonymous when three sessions are open, and `set_title` is a
+    /// window-manager round trip on Wayland, hence the comparison.
+    fn set_window_title(&mut self, label: &str) {
+        let title = format!("{label} — dtr");
+        if self.title == title {
+            return;
+        }
+        self.window.set_title(&title);
+        self.title = title;
     }
 
     /// Cell size in physical pixels, for hit-testing.
@@ -4366,6 +4430,9 @@ impl Gpu {
         // The composition being typed, and where its box belongs. Both are
         // absent unless an input method is in the middle of something.
         ime: Option<(crate::ime::Anchor, &crate::ime::Preedit)>,
+        // The caption's close button: the drawing code knows it was pressed, but
+        // only the event loop can close the window.
+        close: &mut bool,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -4400,23 +4467,66 @@ impl Gpu {
                     // over a 60 *pixel* reservation and the first rows slid
                     // underneath it — invisible at scale 1.
                     .exact_size(crate::ui::TAB_HEIGHT)
-                    .frame(
-                        egui::Frame::new()
-                            .fill(crate::ui::Look::colour(look.surface))
-                            .inner_margin(egui::Margin {
-                                left: 6,
-                                right: 6,
-                                top: ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0)
-                                    .floor() as i8,
-                                bottom: ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0)
-                                    .ceil() as i8,
-                            }),
-                    )
+                    // No inner margin: with a client-side frame the buttons run
+                    // the strip's full height and the drag region is the whole
+                    // row, so the inset belongs to the chips alone (below).
+                    .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.surface)))
                     .show(ui, |ui| {
-                        if let Some(hit) =
-                            crate::ui::tab_bar(ui, tabs, active_tab, destinations, &look)
-                        {
+                        let strip = ui.max_rect();
+                        // The chips keep the inset the panel used to give them:
+                        // 6 points at the sides, centred vertically.
+                        let inset = egui::vec2(
+                            6.0,
+                            ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0).floor(),
+                        );
+                        let mut chips = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(strip.shrink2(inset))
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+                        let bar =
+                            crate::ui::tab_bar(&mut chips, tabs, active_tab, destinations, &look);
+                        if let Some(hit) = bar.hit {
                             *tab_click = Some(hit);
+                        }
+                        // The rest of the row is the title bar. In `native` mode
+                        // the window manager already gave us one, and a strip
+                        // that also moved the window would be two title bars in
+                        // one place.
+                        if self.client_frame {
+                            let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                            // The drag region stops where the buttons begin: a
+                            // press that starts a drag must never be a press on
+                            // the close button's neighbour.
+                            let buttons = crate::chrome::buttons_rect(strip, crate::chrome::kind());
+                            let caption = egui::Rect::from_min_max(
+                                strip.min,
+                                egui::pos2(buttons.left(), strip.bottom()),
+                            );
+                            match crate::chrome::drag_area(ui, caption, bar.used) {
+                                Some(crate::chrome::Drag::Move) => {
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                                }
+                                Some(crate::chrome::Drag::ToggleMaximize) => {
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                                        !maximized,
+                                    ));
+                                }
+                                None => {}
+                            }
+                            match crate::chrome::buttons(ui, strip, maximized, &look) {
+                                Some(crate::chrome::Hit::Minimize) => {
+                                    ui.ctx()
+                                        .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                                }
+                                Some(crate::chrome::Hit::Maximize) => {
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                                        !maximized,
+                                    ));
+                                }
+                                Some(crate::chrome::Hit::Close) => *close = true,
+                                None => {}
+                            }
                         }
                     });
             }

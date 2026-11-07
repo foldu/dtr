@@ -20,6 +20,8 @@ pub struct Config {
     pub keys: std::collections::BTreeMap<String, keys::Sequence>,
     pub serial: Serial,
     pub font: Font,
+    /// Who paints the window frame. `[window] chrome`.
+    pub chrome: Chrome,
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
     /// terminal's built-in colours.
     pub theme: Option<String>,
@@ -50,6 +52,33 @@ pub struct Font {
     pub path: Option<PathBuf>,
 }
 
+/// Who paints the window's frame.
+///
+/// `Client` means dtr's own caption: the tab strip is the title bar, with the
+/// window buttons drawn on it. `Native` is the old layout — the window manager's
+/// decorations above a tab strip — which is also the escape hatch for a
+/// compositor or a tiling WM that does the chrome better.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chrome {
+    Client,
+    Native,
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Self::Client
+    }
+}
+
+impl fmt::Display for Chrome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Client => "client",
+            Self::Native => "native",
+        })
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -62,6 +91,7 @@ impl Default for Config {
                 family: None,
                 path: None,
             },
+            chrome: Chrome::default(),
             theme: None,
         }
     }
@@ -133,6 +163,23 @@ impl Config {
                 let sequence = keys::parse_sequence(text)
                     .map_err(|err| Error::Value(format!("keys.{action}: {}", err.reason)))?;
                 config.keys.insert(action.to_owned(), sequence);
+            }
+        }
+
+        if let Some(window) = document.get("window").and_then(Item::as_table) {
+            if let Some(chrome) = window.get("chrome") {
+                let text = chrome
+                    .as_str()
+                    .ok_or_else(|| Error::Value("window.chrome must be a string".into()))?;
+                config.chrome = match text {
+                    "client" => Chrome::Client,
+                    "native" => Chrome::Native,
+                    other => {
+                        return Err(Error::Value(format!(
+                            "window.chrome is {other:?}; it must be \"client\" or \"native\""
+                        )));
+                    }
+                };
             }
         }
 
@@ -280,6 +327,12 @@ auto_reconnect = true
 # Name of a theme file to apply; see `dtr --themes`.
 # theme = "kanagawa wave"
 
+[window]
+# Who paints the window's frame. "client" puts the tab strip in the title bar
+# and draws the window buttons there; "native" leaves both to the window
+# manager, with the tabs underneath.
+chrome = "client"
+
 [font]
 # Grid font size in points.
 size = 14
@@ -365,6 +418,26 @@ path = "/tmp/mono.ttf"
             .unwrap_err()
             .to_string();
         assert!(error.contains("6–48"), "{error}");
+    }
+
+    #[test]
+    fn the_window_frame_is_the_terminal_by_default() {
+        assert_eq!(Config::default().chrome, super::Chrome::Client);
+        assert_eq!(
+            Config::parse("[window]\nchrome = \"native\"\n")
+                .unwrap()
+                .chrome,
+            super::Chrome::Native
+        );
+    }
+
+    #[test]
+    fn a_wrong_chrome_names_the_key_and_the_values() {
+        let error = Config::parse("[window]\nchrome = \"fancy\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("window.chrome"), "{error}");
+        assert!(error.contains("client"), "{error}");
     }
 
     #[test]
