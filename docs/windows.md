@@ -343,12 +343,11 @@ status-bar bug's class, but not the status-bar bug itself (that needs a non-1.0 
 
 ## 9. Open questions for the person who ran it
 
-1. "Tabs in the header" — answered: [chrome.md](chrome.md) §4, client chrome everywhere.
-   Still open: is the Windows 11 snap-layout flyout worth a Win32 module by then, or is it
-   polish?
-2. Autobaud — may it transmit a probe, or must it be listen-only? On what hardware will it be
+("Tabs in the header" is no longer one of them — [chrome.md](chrome.md) answered it.)
+
+1. Autobaud — may it transmit a probe, or must it be listen-only? On what hardware will it be
    used?
-3. Icons — is the Nerd Font configured as the grid family, or is dtr falling back to whatever
+2. Icons — is the Nerd Font configured as the grid family, or is dtr falling back to whatever
    it finds? (`dtr --fonts` answers half of this.)
-4. The π artifact — from an interactive program or a script? In the grid or in egui chrome?
+3. The π artifact — from an interactive program or a script? In the grid or in egui chrome?
    Does it change when the window moves to a 100% display?

@@ -105,14 +105,13 @@ with no buttons and no drag code. A cheap taste of D, and a feature in its own r
 
 ## 4. The chosen design
 
-`chrome = "auto" | "client" | "native"` in `[window]`, default `auto`:
+`chrome = "client" | "native"` in `[window]`, default `client`:
 
-- **Windows and Wayland: `client`.** Wayland has no server-side decorations at all — GNOME
-  Terminal and kgx draw their own header bars — so this is the platform's normal shape
-  there.
-- **X11: `client` too**, for one look across Linux, with `native` documented for tiling
-  window managers (where there is no bar to merge with, and three buttons that mostly do
-  nothing would be worse than none).
+- **Everywhere: `client`.** Wayland has no server-side decorations at all — GNOME Terminal
+  and kgx draw their own header bars — so this is the platform's normal shape; Windows and
+  X11 get it for the one look, with no platform detection and no special case for tiling WMs.
+- **`native`** is the escape hatch: the WM's frame with our strip under it, exactly today's
+  layout. Nothing reads it except the startup attributes.
 - **macOS later**, and not with custom buttons: `with_titlebar_transparent`,
   `with_title_hidden` and the real traffic lights, which winit already exposes.
 
@@ -123,7 +122,9 @@ The strip is the title bar:
 ```
 
 - **Tabs** keep dtr's chips, palette and hit targets unchanged (`ui::tab_bar`,
-  `ui.rs:317`), so its two kittest baselines (`ui.rs:760`, `ui.rs:837`) stay valid.
+  `ui.rs:317`), so its two kittest baselines (`ui.rs:760`, `ui.rs:837`) stay valid. The
+  lit chip is the whole name: there is no separate session title in the caption, and the
+  OS title (taskbar, Alt-Tab) is the only place the name is also written as text.
 - **Buttons** take the platform's metrics, glyphs and hover structure (§5), because that is
   what the eye reads as native. Their *colours* come from the strip's own palette, so a
   dark theme never gets light-mode greys glued to it — with the Windows close-hover red as
@@ -205,8 +206,9 @@ Linux), so the shared code never branches on platform except to pick one.
    the chips, accessibility names, `--capture` at 100% and 150%.
 3. **Platform glyphs and the icon** (S). Segoe Fluent Icons on Windows, painted Adwaita
    shapes on Linux, `with_window_icon`, icon → `show_window_menu`.
-4. **Snap flyout** (M, Windows). The `WM_NCHITTEST` subclass over the maximise button;
-   winvm to see the flyout.
+4. **Snap flyout** (M, Windows). The `WM_NCHITTEST` subclass over the maximise button —
+   the `windows-sys` dependency is worth it, so this is in scope rather than polish; winvm
+   to see the flyout.
 
 Afterwards, when it bites: tab overflow (the 138 points make it arrive sooner), and macOS.
 
@@ -249,11 +251,11 @@ driven by the WM's own title bar (there no longer is one).
 
 ---
 
-## 10. Open questions
+## 10. What was open, and the answers
 
-1. X11 default: `client` everywhere, as this memo assumes, or `native` until the tiling-WM
-   users complain?
-2. Is the Win11 flyout worth a Win32 module and a `windows-sys` dependency now, or is it
-   polish for later?
-3. Does the caption want a session title beside the chips (Windows Terminal shows the
-   profile name), or is the lit chip enough?
+All three were answered on 2026-11-07, before any code:
+
+1. **X11** — `client`, no special case: one look, `native` is the escape hatch, and nothing
+   detects a tiling WM.
+2. **Windows 11 flyout** — in scope, worth the `windows-sys` dependency (§7 step 4).
+3. **Caption title** — none. The lit chip is enough; §4 says so.
