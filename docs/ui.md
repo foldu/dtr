@@ -84,8 +84,24 @@ as `0xAABBGGRR`, which is the byte order of a `COLORREF`, so reading it as
 user never chose, and the answer is WinUI's own default. It is read once and
 cached: `Look::skin()` is asked by every surface on every frame.
 
-`-v` logs `chrome skin=… requested=…` at startup. On Linux that line reads
-`requested="native" skin="dtr"`, which is the design, not a failure.
+`-v` logs `chrome skin=… requested=… accent=…` at startup. On Linux that line
+reads `requested="native" skin="dtr"`, which is the design, not a failure.
+
+**Verified in the `winvm` guest, 2026-11-07** (a light-theme Windows 11 with
+`AccentColor = 0xFFD47800`):
+
+    chrome skin="windows-light" requested="native" accent="#0078D4"
+    chrome skin="dtr" requested="dtr" accent="#FFB000"
+
+The first is the registry read; the second is the same binary a flag away, still
+on the theme's amber. The run is over ssh, so the process is in session 0 and
+cannot create a window — `Surface::configure` fails there, which is why only the
+line before window creation is usable. A visual check of the native chrome needs
+the console session, as `docs/windows.md` §2 did for `--capture`.
+
+That measurement found a bug the unit tests could not: `AccentColor` is under
+`HKCU\Software\Microsoft\Windows\DWM`, not under `...\CurrentVersion\DWM`, and
+a wrong key silently produced WinUI's default blue instead of an error.
 
 ## The rule that keeps it from rotting
 
