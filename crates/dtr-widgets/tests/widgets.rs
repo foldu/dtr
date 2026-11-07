@@ -12,8 +12,32 @@
 //! for the two captions. If the Windows look could only be seen on Windows, it
 //! would only be checked when somebody remembered to.
 
-use dtr_widgets::{Footer, Palette, Section, Skin};
+use dtr_widgets::{Edit, Editable, Footer, Palette, Section, Skin};
 use egui::{RichText, Stroke, vec2};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// The rates the sheet offers behind the baud chevron. The real list lives in
+/// the binary; this is a sample long enough to make the dropdown worth opening.
+const BAUDS: &[u32] = &[
+    300, 1_200, 2_400, 4_800, 9_600, 19_200, 38_400, 57_600, 115_200, 230_400,
+];
+
+/// What the sheet holds while it is open. The widgets report, so the caller owns
+/// the values — which is what lets a harness type into them.
+struct State {
+    profile: String,
+    baud: String,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            profile: "gps module".to_owned(),
+            baud: "9600".to_owned(),
+        }
+    }
+}
 
 fn dtr_skin() -> Skin {
     Skin::dtr(Palette::dtr(
@@ -112,7 +136,7 @@ fn checks(ui: &mut egui::Ui, skin: &Skin, items: &[(&str, bool)]) {
 }
 
 /// One card, laid out like the real sheet.
-fn gallery(ui: &mut egui::Ui, skin: &Skin) {
+fn gallery(ui: &mut egui::Ui, skin: &Skin, state: &mut State) {
     skin.apply(ui.ctx());
     let p = skin.palette;
     let s = &skin.style;
@@ -171,39 +195,21 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin) {
                     );
                     ui.add_space(s.gap * 3.0);
 
-                    // Profiles: pick one, or name the current form.
+                    // Profile and name are one control: type the name, or pick a
+                    // saved one. That is the whole reason the dropdown is editable,
+                    // and it saves a row.
                     row(ui, skin, "profile", |ui| {
-                        let mut picked = String::from("gps module");
-                        let response = egui::ComboBox::from_id_salt("profile")
-                            .selected_text(RichText::new(picked.clone()).font(s.value_font.clone()))
-                            .width(300.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut picked,
-                                    "gps module".to_owned(),
-                                    "gps module",
-                                );
-                                ui.selectable_value(
-                                    &mut picked,
-                                    "bench board".to_owned(),
-                                    "bench board",
-                                );
-                            });
-                        response.response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "profile value")
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        label_cell(ui, skin, "name");
-                        let mut name = String::from("gps module");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut name)
-                                .font(egui::TextStyle::Body)
-                                .desired_width(300.0 - 62.0),
-                        );
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "name value")
-                        });
+                        let width = (ui.available_width() - 62.0).max(120.0);
+                        let names = ["gps module", "bench board"];
+                        let edit = Editable::new("profile", &state.profile, "profile value")
+                            .width(width)
+                            .show(ui, skin, &names);
+                        if let Some(edit) = edit {
+                            state.profile = match edit {
+                                Edit::Typed(text) | Edit::Picked(text) => text,
+                            };
+                        }
+                        // A name is not a profile until it is saved under one.
                         let save =
                             egui::Button::new(RichText::new("save").font(s.value_font.clone()))
                                 .corner_radius(s.control_radius)
@@ -216,11 +222,18 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin) {
                     section(ui, skin, "line");
                     ui.add_space(s.gap);
                     row(ui, skin, "baud", |ui| {
-                        let mut baud = 9_600;
-                        let response = ui.add(egui::DragValue::new(&mut baud).suffix(" baud"));
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::SpinButton, true, "baud value")
-                        });
+                        let choices: Vec<String> = BAUDS.iter().map(u32::to_string).collect();
+                        let edit = Editable::new("baud", &state.baud, "baud value")
+                            .width(150.0)
+                            // A half-typed rate stays in the field and says so with
+                            // the border, rather than being reverted under the cursor.
+                            .valid(state.baud.parse::<u32>().is_ok())
+                            .show(ui, skin, &choices);
+                        if let Some(edit) = edit {
+                            state.baud = match edit {
+                                Edit::Typed(text) | Edit::Picked(text) => text,
+                            };
+                        }
                     });
                     row(ui, skin, "data bits", |ui| {
                         segmented(ui, skin, 7u8, &[(5, "5"), (6, "6"), (7, "7"), (8, "8")]);
@@ -301,9 +314,13 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin) {
 }
 
 fn harness(skin: Skin) -> egui_kittest::Harness<'static> {
+    let state = Rc::new(RefCell::new(State::default()));
     egui_kittest::Harness::builder()
-        .with_size(vec2(580.0, 820.0))
-        .build_ui(move |ui| gallery(ui, &skin))
+        .with_size(vec2(580.0, 760.0))
+        .build_ui(move |ui| {
+            let mut state = state.borrow_mut();
+            gallery(ui, &skin, &mut state);
+        })
 }
 
 #[test]
@@ -315,6 +332,18 @@ fn the_dtr_skin_renders() {
 
 /// Windows in dark mode: the palette the OS actually uses, not a dark grey
 /// invented for the occasion.
+/// The whole point of the editable dropdown is the list under it, and a
+/// snapshot of a closed one says nothing about it.
+#[test]
+fn the_dropdown_opens_under_its_field() {
+    use egui_kittest::kittest::Queryable;
+    let mut harness = harness(dtr_skin());
+    harness.run();
+    harness.get_by_label("baud value choices").click();
+    harness.run();
+    harness.snapshot("widgets_dtr_open");
+}
+
 #[test]
 fn the_windows_dark_skin_renders() {
     let mut harness = harness(Skin::windows_dark());
