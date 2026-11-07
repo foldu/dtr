@@ -3320,6 +3320,25 @@ impl ApplicationHandler<UserEvent> for App {
         // the corner of the screen.
         window.set_ime_allowed(true);
 
+        // The caption's maximise button must answer Windows' hit test as
+        // `HTMAXBUTTON`, or Windows 11 never offers the snap-layout flyout.
+        // winit has no hook for a hit test, so the window procedure is
+        // subclassed — once, here, for the lifetime of the window.
+        #[cfg(target_os = "windows")]
+        if client_frame {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = window.window_handle() {
+                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    // `raw-window-handle` hands the handle over as a non-zero
+                    // `isize`; Win32 wants the pointer it really is.
+                    let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
+                    // SAFETY: the window was just created on this thread and
+                    // lives for as long as the process uses it.
+                    unsafe { crate::chrome::windows::install(hwnd) };
+                }
+            }
+        }
+
         match Gpu::new(
             window,
             &self.look,
@@ -4599,6 +4618,13 @@ impl Gpu {
                                 Some(crate::chrome::Hit::Close) => *close = true,
                                 None => {}
                             }
+                            // Where the maximise button is this frame, for the
+                            // Win32 hit test that offers the snap layouts.
+                            #[cfg(target_os = "windows")]
+                            crate::chrome::windows::set_maximize_rect(
+                                crate::chrome::maximize_rect(strip, crate::chrome::kind()),
+                                self.scale(),
+                            );
                         }
                     });
             }

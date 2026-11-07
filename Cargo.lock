@@ -837,6 +837,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "wgpu",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

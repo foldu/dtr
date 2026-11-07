@@ -28,6 +28,11 @@ use egui::{Color32, Id, Rect, Sense, Ui, Vec2};
 
 use crate::ui::Look;
 
+// The maximise button's hit test, the one thing here that has to be Win32:
+// Windows 11 offers its snap layouts only for `HTMAXBUTTON`.
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 /// Windows 11's close-hover fill. Every other colour in the caption is derived
 /// from the theme; this one is a platform fact, and the caption looks wrong
 /// without it.
@@ -143,6 +148,12 @@ pub fn buttons_rect(strip: Rect, kind: Kind) -> Rect {
         egui::pos2(strip.right() - t.inset - total, strip.top()),
         strip.max,
     )
+}
+
+/// The maximise button alone, for Windows' hit test to answer `HTMAXBUTTON`.
+#[cfg(target_os = "windows")]
+pub fn maximize_rect(strip: Rect, kind: Kind) -> Rect {
+    boxes(strip, kind)[1].1
 }
 
 /// Draw the window buttons, right-aligned in `strip`, and report a press.

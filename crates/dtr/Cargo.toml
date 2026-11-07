@@ -65,3 +65,9 @@ rustc-demangle.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# The caption's maximise button answers WM_NCHITTEST with HTMAXBUTTON, which is
+# what makes Windows 11 show the snap-layout flyout. winit exposes no hook for a
+# hit test, so this is a subclassed window procedure.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys.workspace = true

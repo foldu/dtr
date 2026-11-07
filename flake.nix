@@ -56,13 +56,16 @@
       postFixup = "";
     });
 
-    # Only source files; keeps target/ and results out of the store.
+    # Only source files; keeps target/ and results out of the store. `assets` is
+    # source too: the window icon and the desktop entry's artwork are compiled
+    # into the binary, so a build without them does not compile.
     src = lib.fileset.toSource {
       root = ./.;
       fileset = lib.fileset.unions [
         ./Cargo.toml
         ./Cargo.lock
         ./crates
+        ./assets
       ];
     };
 
