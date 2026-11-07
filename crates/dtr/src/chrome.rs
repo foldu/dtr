@@ -178,7 +178,7 @@ pub fn buttons_for(
     glyphs: Glyphs,
 ) -> Option<Hit> {
     let t = tokens(kind, strip.height());
-    let fg = Look::colour(look.foreground);
+    let fg = look.skin().palette.text;
     let mut hit = None;
 
     for (action, rect) in boxes(strip, kind) {
@@ -372,12 +372,8 @@ pub fn caption_icon(ui: &mut Ui, strip: Rect, look: &Look) -> Option<egui::Pos2>
         response.surrender_focus();
     }
     if response.hovered() {
-        let fg = Look::colour(look.foreground);
-        ui.painter().rect_filled(
-            rect.expand(2.0),
-            0.0,
-            Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 26),
-        );
+        ui.painter()
+            .rect_filled(rect.expand(2.0), 0.0, look.skin().palette.control_hover);
     }
     // The app's own icon, painted untinted: it is artwork, not a mask. The same
     // file the window and the executable carry, so the caption, the taskbar and

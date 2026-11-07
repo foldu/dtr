@@ -28,7 +28,7 @@ mod segmented;
 
 pub use block::{label_cell, row, section};
 pub use button::Button;
-pub use check::check;
+pub use check::{check, check_box};
 pub use combo::{Edit, Editable};
 pub use icons::{cross, cross_at, plus};
 pub use menu::menu_row;

@@ -221,7 +221,7 @@ pub fn capture(
             .exact_size(status_height)
             .frame(
                 egui::Frame::new()
-                    .fill(crate::ui::Look::colour(look.surface))
+                    .fill(look.skin().palette.card)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ui, |ui| crate::ui::status_bar(ui, &status, look));

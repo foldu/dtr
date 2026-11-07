@@ -12,7 +12,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
-use egui::{Align2, FontId, Stroke};
+use egui::{Align2, Stroke};
 
 use crate::ui::Look;
 
@@ -385,20 +385,25 @@ impl Explorer {
         if rect.width() < 8.0 || rect.height() < 8.0 {
             return;
         }
+        let skin = look.skin();
+        let palette = skin.palette;
+        let style = &skin.style;
+        let body_font = style.value_font.clone();
+        let small = egui::FontId::new(style.label_font.size - 1.5, style.label_font.family.clone());
         let painter = ui.painter().with_clip_rect(rect);
 
-        painter.rect_filled(rect, 0.0, Look::colour(look.surface));
+        painter.rect_filled(rect, 0.0, palette.card);
 
         // Header: the path, and how many real entries the listing has.
         let header_bottom = (rect.top() + HEADER_HEIGHT).min(rect.bottom());
         let header = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), header_bottom));
-        painter.rect_filled(header, 0.0, Look::colour(look.background));
+        painter.rect_filled(header, 0.0, palette.window);
         painter.text(
             egui::pos2(header.left() + 8.0, header.center().y),
             Align2::LEFT_CENTER,
             self.header(),
-            FontId::monospace(12.0),
-            Look::colour(look.foreground),
+            body_font.clone(),
+            palette.text,
         );
         let count = self
             .entries
@@ -409,15 +414,15 @@ impl Explorer {
             egui::pos2(header.right() - 8.0, header.center().y),
             Align2::RIGHT_CENTER,
             count.to_string(),
-            FontId::monospace(10.0),
-            Look::colour(look.dim),
+            small.clone(),
+            palette.dim,
         );
         painter.line_segment(
             [
                 egui::pos2(rect.left(), header_bottom),
                 egui::pos2(rect.right(), header_bottom),
             ],
-            Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.35)),
+            Stroke::new(style.border, palette.divider),
         );
 
         let footer_top = (rect.bottom() - FOOTER_HEIGHT).max(header_bottom);
@@ -442,29 +447,29 @@ impl Explorer {
                     painter.rect_filled(
                         row.shrink2(egui::vec2(4.0, 1.0)),
                         2.0,
-                        Look::colour(look.accent).gamma_multiply(0.28),
+                        palette.control_active,
                     );
                 }
 
                 let entry = &self.entries[index];
                 let (label, colour) = if entry.is_parent() {
-                    ("../".to_owned(), Look::colour(look.dim))
+                    ("../".to_owned(), palette.dim)
                 } else if entry.is_dir {
                     (
                         format!("{}/", entry.name),
                         if selected {
-                            Look::colour(look.accent)
+                            palette.accent
                         } else {
-                            Look::colour(look.foreground)
+                            palette.text
                         },
                     )
                 } else {
                     (
                         entry.name.clone(),
                         if selected {
-                            Look::colour(look.accent)
+                            palette.accent
                         } else {
-                            Look::colour(look.foreground)
+                            palette.text
                         },
                     )
                 };
@@ -472,7 +477,7 @@ impl Explorer {
                     egui::pos2(row.left() + 8.0, row.center().y),
                     Align2::LEFT_CENTER,
                     label,
-                    FontId::monospace(12.0),
+                    body_font.clone(),
                     colour,
                 );
                 if let Some(size) = entry.size {
@@ -480,8 +485,8 @@ impl Explorer {
                         egui::pos2(row.right() - 8.0, row.center().y),
                         Align2::RIGHT_CENTER,
                         human_size(size),
-                        FontId::monospace(10.0),
-                        Look::colour(look.dim),
+                        small.clone(),
+                        palette.dim,
                     );
                 }
             }
@@ -497,8 +502,8 @@ impl Explorer {
                 egui::pos2(footer.left() + 8.0, footer.center().y),
                 Align2::LEFT_CENTER,
                 message,
-                FontId::monospace(11.0),
-                Look::colour(look.accent),
+                small.clone(),
+                palette.accent,
             );
         } else if let Some(entry) = self.selected_entry() {
             let path = if entry.is_parent() {
@@ -512,28 +517,35 @@ impl Explorer {
                 egui::pos2(footer.left() + 8.0, footer.center().y),
                 Align2::LEFT_CENTER,
                 path,
-                FontId::monospace(10.0),
-                Look::colour(look.dim).gamma_multiply(0.8),
+                small.clone(),
+                palette.dim,
             );
         } else if self.message.is_none() {
             painter.text(
                 footer.center(),
                 Align2::CENTER_CENTER,
                 "empty directory",
-                FontId::monospace(10.0),
-                Look::colour(look.dim),
+                small.clone(),
+                palette.dim,
             );
         }
 
         let border = if focused {
-            Look::colour(look.accent).gamma_multiply(0.8)
+            palette.accent
         } else {
-            Look::colour(look.dim).gamma_multiply(0.4)
+            palette.border
         };
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(if focused { 1.5 } else { 1.0 }, border),
+            Stroke::new(
+                if focused {
+                    style.border * 1.5
+                } else {
+                    style.border
+                },
+                border,
+            ),
             egui::StrokeKind::Inside,
         );
     }

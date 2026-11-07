@@ -124,12 +124,15 @@ impl Palette {
             vec2(width, 300.0),
         );
 
+        let skin = look.skin();
+        let palette = skin.palette;
+        let style = &skin.style;
         let painter = ui.painter();
-        painter.rect_filled(rect, 6.0, Look::colour(look.surface));
+        painter.rect_filled(rect, style.card_radius, palette.card);
         painter.rect_stroke(
             rect,
-            6.0,
-            egui::Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.5)),
+            style.card_radius,
+            egui::Stroke::new(style.border, palette.border),
             egui::StrokeKind::Inside,
         );
 
@@ -182,9 +185,11 @@ impl Palette {
                 }
             }
 
+            let query_font =
+                FontId::new(style.value_font.size + 2.5, style.value_font.family.clone());
             let response = TextEdit::singleline(&mut self.input)
                 .hint_text("connect, ssh, shell, replay, files, demo…")
-                .font(FontId::monospace(15.0))
+                .font(query_font.clone())
                 .desired_width(f32::INFINITY)
                 .show(ui);
             if response.response.changed() {
@@ -201,8 +206,8 @@ impl Palette {
                     origin,
                     Align2::LEFT_TOP,
                     &inline.suffix,
-                    FontId::monospace(15.0),
-                    Look::colour(look.dim).gamma_multiply(0.7),
+                    query_font,
+                    palette.disabled,
                 );
             }
 
@@ -210,8 +215,8 @@ impl Palette {
             if self.completions.is_empty() {
                 ui.label(
                     RichText::new("nothing matches")
-                        .size(12.0)
-                        .color(Look::colour(look.dim)),
+                        .font(style.value_font.clone())
+                        .color(palette.dim),
                 );
                 return;
             }
@@ -222,7 +227,7 @@ impl Palette {
             // see at once beats one you have to scroll.
             let visible = 10.min(self.completions.len());
             let first = self.selected.saturating_sub(visible - 1);
-            let row_height = 20.0;
+            let row_height = style.row;
             for index in first..(first + visible).min(self.completions.len()) {
                 let completion = &self.completions[index];
                 let selected = index == self.selected;
@@ -235,27 +240,27 @@ impl Palette {
                 if selected {
                     painter.rect_filled(
                         rect.expand2(vec2(4.0, 0.0)),
-                        3.0,
-                        Look::colour(look.dim).gamma_multiply(0.25),
+                        style.control_radius.saturating_sub(1),
+                        palette.control_active,
                     );
                 }
                 painter.text(
                     rect.left_center(),
                     Align2::LEFT_CENTER,
                     &completion.item.label,
-                    FontId::monospace(13.0),
+                    style.value_font.clone(),
                     if selected {
-                        Look::colour(look.accent)
+                        palette.accent
                     } else {
-                        Look::colour(look.foreground)
+                        palette.text
                     },
                 );
                 painter.text(
                     rect.right_center(),
                     Align2::RIGHT_CENTER,
                     &completion.item.detail,
-                    FontId::proportional(11.0),
-                    Look::colour(look.dim),
+                    FontId::new(style.label_font.size - 0.5, style.label_font.family.clone()),
+                    palette.dim,
                 );
                 if response.clicked() {
                     self.selected = index;
@@ -268,8 +273,11 @@ impl Palette {
                 RichText::new(
                     "up/down or ctrl-n/ctrl-p choose   tab complete   enter run   esc close",
                 )
-                .size(10.0)
-                .color(Look::colour(look.dim).gamma_multiply(0.7)),
+                .font(egui::FontId::new(
+                    style.label_font.size - 1.5,
+                    style.label_font.family.clone(),
+                ))
+                .color(palette.dim),
             );
             // The only place the keys are written down. Nothing else in the
             // window says that tabs exist, which is how a terminal ends up
@@ -280,8 +288,11 @@ impl Palette {
                          ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
                          ctrl+, settings",
                 )
-                .size(10.0)
-                .color(Look::colour(look.dim).gamma_multiply(0.55)),
+                .font(egui::FontId::new(
+                    style.label_font.size - 1.5,
+                    style.label_font.family.clone(),
+                ))
+                .color(palette.disabled),
             );
         });
 

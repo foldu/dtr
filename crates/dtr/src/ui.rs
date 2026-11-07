@@ -104,10 +104,6 @@ impl Look {
             dtr_widgets::Palette::dtr(self.background, self.foreground, self.accent),
         )
     }
-
-    pub fn colour(rgb: [u8; 3]) -> Color32 {
-        Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-    }
 }
 
 /// Linear blend of two colours; `t` of 0 is `a`, 1 is `b`.
@@ -319,39 +315,37 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
         .fixed_pos(egui::pos2(corner.x - 260.0, corner.y - 64.0))
         .interactable(false)
         .show(ui.ctx(), |ui| {
+            let skin = look.skin();
+            let palette = skin.palette;
+            let style = &skin.style;
             egui::Frame::new()
-                // Mixed between the theme's surface and its text, so the note
-                // reads as chrome rather than as terminal output — and with
-                // enough contrast to be read at a glance, which is the only
-                // way a toast is ever read.
-                .fill(Color32::from_rgba_unmultiplied(
-                    look.foreground[0],
-                    look.foreground[1],
-                    look.foreground[2],
-                    (36.0 * alpha) as u8,
-                ))
+                // A raised card rather than a wash over the grid: a note that
+                // let the terminal show through was unreadable over exactly the
+                // output it was reporting on.
+                .fill(faded(palette.card, alpha))
                 .stroke(egui::Stroke::new(
-                    1.0,
-                    Color32::from_rgba_unmultiplied(
-                        look.accent[0],
-                        look.accent[1],
-                        look.accent[2],
-                        (200.0 * alpha) as u8,
-                    ),
+                    style.border,
+                    faded(palette.border_strong, alpha),
                 ))
-                .corner_radius(6)
+                .corner_radius(style.chip_radius)
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
-                    ui.label(RichText::new(text).monospace().size(13.0).strong().color(
-                        Color32::from_rgba_unmultiplied(
-                            look.foreground[0],
-                            look.foreground[1],
-                            look.foreground[2],
-                            (255.0 * alpha) as u8,
-                        ),
-                    ));
+                    ui.label(
+                        RichText::new(text)
+                            .font(egui::FontId::new(
+                                style.value_font.size + 1.0,
+                                style.value_font.family.clone(),
+                            ))
+                            .color(faded(palette.text, alpha)),
+                    );
                 });
         });
+}
+
+/// A palette colour at the toast's current opacity.
+fn faded(colour: Color32, alpha: f32) -> Color32 {
+    let [r, g, b, _] = colour.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(r, g, b, (255.0 * alpha.clamp(0.0, 1.0)) as u8)
 }
 
 /// The tab strip: one chip per tab, the active one lit, each clickable.

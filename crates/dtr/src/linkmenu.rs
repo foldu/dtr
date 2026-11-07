@@ -88,22 +88,28 @@ impl LinkMenu {
             .constrain(true)
             .fade_in(false)
             .show(ui.ctx(), |ui| {
+                let skin = look.skin();
+                let palette = skin.palette;
+                let style = &skin.style;
                 egui::Frame::new()
-                    .fill(Look::colour(look.surface))
-                    .stroke(Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.7)))
-                    .corner_radius(4.0)
-                    .inner_margin(6)
+                    .fill(palette.card)
+                    .stroke(Stroke::new(style.border, palette.border_strong))
+                    .corner_radius(style.control_radius)
+                    .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
                         ui.set_min_width(190.0);
                         ui.label(
                             RichText::new(&title)
-                                .monospace()
-                                .color(Look::colour(look.foreground)),
+                                .font(style.value_font.clone())
+                                .color(palette.text),
                         );
                         ui.label(
                             RichText::new(&subtitle)
-                                .size(10.0)
-                                .color(Look::colour(look.dim)),
+                                .font(egui::FontId::new(
+                                    style.label_font.size - 1.5,
+                                    style.label_font.family.clone(),
+                                ))
+                                .color(palette.dim),
                         );
                         ui.separator();
                         for (label, wanted) in [

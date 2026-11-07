@@ -248,11 +248,14 @@ pub fn draw(ui: &mut egui::Ui, texture: &TextureHandle, size: Vec2, look: &Look)
         .interactable(false)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
+            let skin = look.skin();
+            let palette = skin.palette;
+            let style = &skin.style;
             egui::Frame::new()
-                .fill(Look::colour(look.surface))
-                .stroke(Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.7)))
-                .corner_radius(4.0)
-                .inner_margin(3)
+                .fill(palette.card)
+                .stroke(Stroke::new(style.border, palette.border_strong))
+                .corner_radius(style.control_radius)
+                .inner_margin(egui::Margin::same(3))
                 .show(ui, |ui| {
                     ui.add(egui::Image::new((texture.id(), size)));
                 });

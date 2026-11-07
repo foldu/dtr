@@ -373,11 +373,14 @@ impl Settings {
     /// for selection, and the values are a drag number, two combo boxes and two
     /// toggles. The keyboard still works, but nothing here needs it.
     pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) -> Option<Change> {
+        let skin = look.skin();
+        let palette = skin.palette;
+        let style = &skin.style;
         let mut change = None;
         let screen = ui.max_rect();
         let width = 420.0_f32.min(screen.width() - 32.0);
         let rows = self.rows().len() as f32;
-        let height = 44.0 + rows * 24.0 + 34.0;
+        let height = 44.0 + rows * (style.row + 1.0) + 34.0;
         let rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
         crate::ui::prime_area(
             ui.ctx(),
@@ -387,8 +390,7 @@ impl Settings {
             true,
         );
         // Dim the terminal behind the menu: the settings are the subject now.
-        ui.painter()
-            .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
+        ui.painter().rect_filled(screen, 0.0, palette.scrim);
         egui::Area::new(egui::Id::new("dtr-settings"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
@@ -397,19 +399,21 @@ impl Settings {
             // the first frame is the only one a capture has.
             .fade_in(false)
             .show(ui.ctx(), |ui| {
+                // The drag number and the combo boxes are still egui's own, so
+                // the menu hands them the skin's style rather than inheriting the
+                // frame's.
+                skin.apply(ui.ctx());
                 ui.set_min_size(rect.size());
                 egui::Frame::new()
-                    .fill(crate::ui::Look::colour(look.surface))
-                    .stroke(egui::Stroke::new(1.0, crate::ui::Look::colour(look.dim)))
-                    .corner_radius(8)
-                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .fill(palette.card)
+                    .stroke(egui::Stroke::new(style.border, palette.border))
+                    .corner_radius(style.card_radius)
+                    .inner_margin(style.card_margin)
                     .show(ui, |ui| {
                         ui.label(
                             egui::RichText::new("settings")
-                                .monospace()
-                                .size(13.0)
-                                .strong()
-                                .color(crate::ui::Look::colour(look.foreground)),
+                                .font(style.title_font.clone())
+                                .color(palette.text),
                         );
                         ui.add_space(8.0);
                         for (index, row) in self.rows().iter().enumerate() {
@@ -426,13 +430,13 @@ impl Settings {
                                 // a row does what the arrow keys do.
                                 let label = ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(name).monospace().size(12.0).color(
-                                            crate::ui::Look::colour(if selected {
-                                                look.foreground
+                                        egui::RichText::new(name)
+                                            .font(style.value_font.clone())
+                                            .color(if selected {
+                                                palette.text
                                             } else {
-                                                look.dim
+                                                palette.dim
                                             }),
-                                        ),
                                     )
                                     .sense(egui::Sense::click()),
                                 );
@@ -442,7 +446,7 @@ impl Settings {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if let Some(edit) = self.control(ui, *row, look) {
+                                        if let Some(edit) = self.control(ui, *row, &skin) {
                                             clicked.set(Some(edit));
                                         }
                                     },
@@ -458,9 +462,11 @@ impl Settings {
                         ui.add_space(6.0);
                         ui.label(
                             egui::RichText::new("click to change   enter save   esc cancel")
-                                .monospace()
-                                .size(11.0)
-                                .color(crate::ui::Look::colour(look.dim)),
+                                .font(egui::FontId::new(
+                                    style.label_font.size - 1.0,
+                                    style.label_font.family.clone(),
+                                ))
+                                .color(palette.dim),
                         );
                     });
             });
@@ -473,8 +479,8 @@ impl Settings {
     /// Each control names itself for accessibility. A combo box and a checkbox
     /// carry no text of their own here, so without this they are anonymous —
     /// invisible to a screen reader and impossible for the test harness to find.
-    fn control(&self, ui: &mut egui::Ui, row: Row, look: &crate::ui::Look) -> Option<Change> {
-        let dim = crate::ui::Look::colour(look.dim);
+    fn control(&self, ui: &mut egui::Ui, row: Row, skin: &dtr_widgets::Skin) -> Option<Change> {
+        let dim = skin.palette.dim;
         // `theme value`, not `theme`: the row's own label carries the bare name,
         // and two identical names make a control impossible to address.
         let name = format!("{} value", row.key());
@@ -506,15 +512,17 @@ impl Settings {
                     .selected_text(egui::RichText::new(&current).monospace().size(12.0))
                     .width(190.0)
                     .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.draft.font.family.is_none(), "default")
-                            .clicked()
-                        {
+                        if dtr_widgets::menu_row(
+                            ui,
+                            skin,
+                            "default",
+                            self.draft.font.family.is_none(),
+                        ) {
                             change = Some(Change::Family(None));
                         }
                         for family in families {
                             let picked = self.draft.font.family.as_deref() == Some(&family);
-                            if ui.selectable_label(picked, &family).clicked() {
+                            if dtr_widgets::menu_row(ui, skin, &family, picked) {
                                 change = Some(Change::Family(Some(family)));
                             }
                         }
@@ -538,15 +546,12 @@ impl Settings {
                     .selected_text(egui::RichText::new(&current).monospace().size(12.0))
                     .width(190.0)
                     .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.draft.theme.is_none(), "built-in")
-                            .clicked()
-                        {
+                        if dtr_widgets::menu_row(ui, skin, "built-in", self.draft.theme.is_none()) {
                             change = Some(Change::Theme(None));
                         }
                         for name in names {
                             let picked = self.draft.theme.as_deref() == Some(name.as_str());
-                            if ui.selectable_label(picked, &name).clicked() {
+                            if dtr_widgets::menu_row(ui, skin, &name, picked) {
                                 change = Some(Change::Theme(Some(name)));
                             }
                         }
@@ -557,11 +562,8 @@ impl Settings {
                 change
             }
             Row::AutoReconnect => {
-                let mut on = self.draft.serial.auto_reconnect;
-                let response = ui.checkbox(&mut on, "");
-                response
-                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name));
-                response.changed().then_some(Change::AutoReconnect(on))
+                let on = self.draft.serial.auto_reconnect;
+                dtr_widgets::check_box(ui, skin, on, &name).map(Change::AutoReconnect)
             }
             Row::Baud => {
                 let Some(serial) = self.serial.as_ref() else {
@@ -583,10 +585,8 @@ impl Settings {
                     .width(110.0)
                     .show_ui(ui, |ui| {
                         for &baud in BAUDS {
-                            if ui
-                                .selectable_label(serial.baud == baud, baud.to_string())
-                                .clicked()
-                            {
+                            let label = baud.to_string();
+                            if dtr_widgets::menu_row(ui, skin, &label, serial.baud == baud) {
                                 change = Some(Change::Baud(baud));
                             }
                         }
@@ -606,11 +606,7 @@ impl Settings {
                     );
                     return None;
                 };
-                let mut on = serial.cr_to_crlf;
-                let response = ui.checkbox(&mut on, "");
-                response
-                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name));
-                response.changed().then_some(Change::CrToCrlf(on))
+                dtr_widgets::check_box(ui, skin, serial.cr_to_crlf, &name).map(Change::CrToCrlf)
             }
         }
     }

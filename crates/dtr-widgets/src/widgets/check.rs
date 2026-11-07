@@ -23,17 +23,31 @@ const LABEL_GAP: f32 = 8.0;
 /// painted widget here it declares an accessibility node and refuses the Enter
 /// that egui turns into a click.
 pub fn check(ui: &mut Ui, skin: &Skin, on: bool, label: &str) -> Option<bool> {
+    boxed(ui, skin, on, Some(label), label)
+}
+
+/// A checkbox with no visible label: the row it sits in already says what it is,
+/// and the name is only for the accessibility node.
+///
+/// The settings menu is the shape this exists for — a label on the left, the
+/// control on the right — and a checkbox that repeated the row's name there
+/// would be the second node with that name.
+pub fn check_box(ui: &mut Ui, skin: &Skin, on: bool, name: &str) -> Option<bool> {
+    boxed(ui, skin, on, None, name)
+}
+
+fn boxed(ui: &mut Ui, skin: &Skin, on: bool, visible: Option<&str>, name: &str) -> Option<bool> {
     let palette = skin.palette;
     let style = &skin.style;
     let size = style.check_size;
 
-    let galley =
+    let galley = visible.map(|label| {
         ui.painter()
-            .layout_no_wrap(label.to_owned(), style.value_font.clone(), palette.text);
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(size + LABEL_GAP + galley.size().x, style.row.max(size)),
-        Sense::click(),
-    );
+            .layout_no_wrap(label.to_owned(), style.value_font.clone(), palette.text)
+    });
+    let width = size + galley.as_ref().map_or(0.0, |g| LABEL_GAP + g.size().x);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, style.row.max(size)), Sense::click());
     let box_rect = Rect::from_center_size(
         Pos2::new(rect.left() + size / 2.0, rect.center().y),
         Vec2::splat(size),
@@ -56,16 +70,18 @@ pub fn check(ui: &mut Ui, skin: &Skin, on: bool, label: &str) -> Option<bool> {
     if on {
         tick(painter, box_rect, palette.on_accent);
     }
-    painter.galley(
-        Pos2::new(
-            box_rect.right() + LABEL_GAP,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        palette.text,
-    );
+    if let Some(galley) = galley {
+        painter.galley(
+            Pos2::new(
+                box_rect.right() + LABEL_GAP,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            palette.text,
+        );
+    }
 
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, label));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, name));
     if response.has_focus() {
         response.surrender_focus();
     }

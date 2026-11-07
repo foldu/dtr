@@ -159,12 +159,15 @@ impl Pager {
             (screen.height() * 0.82).min(900.0).max(160.0),
         );
         let rect = egui::Rect::from_center_size(screen.center(), size);
+        let skin = look.skin();
+        let palette = skin.palette;
+        let style = &skin.style;
         let painter = ui.painter();
-        painter.rect_filled(rect, 6.0, Look::colour(look.surface));
+        painter.rect_filled(rect, style.card_radius, palette.card);
         painter.rect_stroke(
             rect,
-            6.0,
-            Stroke::new(1.0, Look::colour(look.dim).gamma_multiply(0.5)),
+            style.card_radius,
+            Stroke::new(style.border, palette.border),
             egui::StrokeKind::Inside,
         );
 
@@ -174,16 +177,19 @@ impl Pager {
                 ui.add(
                     egui::Label::new(
                         RichText::new(&self.title)
-                            .monospace()
-                            .color(Look::colour(look.foreground)),
+                            .font(style.value_font.clone())
+                            .color(palette.text),
                     )
                     .truncate(),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
                         RichText::new("esc closes   y copies")
-                            .small()
-                            .color(Look::colour(look.dim)),
+                            .font(egui::FontId::new(
+                                style.label_font.size - 1.5,
+                                style.label_font.family.clone(),
+                            ))
+                            .color(palette.dim),
                     );
                 });
             });
@@ -202,8 +208,8 @@ impl Pager {
                     ui.add(
                         egui::Label::new(
                             RichText::new(&self.text)
-                                .monospace()
-                                .color(Look::colour(look.foreground)),
+                                .font(style.value_font.clone())
+                                .color(palette.text),
                         )
                         .selectable(true)
                         .wrap(),

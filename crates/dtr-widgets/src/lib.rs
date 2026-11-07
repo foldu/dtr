@@ -37,6 +37,6 @@ pub use palette::Palette;
 pub use skin::Skin;
 pub use style::{Focus, Footer, Preset, Section, Style, Title};
 pub use widgets::{
-    Button, Edit, Editable, check, cross, cross_at, label_cell, menu_row, plus, row, section,
-    segmented,
+    Button, Edit, Editable, check, check_box, cross, cross_at, label_cell, menu_row, plus, row,
+    section, segmented,
 };

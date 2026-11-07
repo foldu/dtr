@@ -4765,7 +4765,7 @@ impl Gpu {
                     // No inner margin: with a client-side frame the buttons run
                     // the strip's full height and the drag region is the whole
                     // row, so the inset belongs to the chips alone (below).
-                    .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.surface)))
+                    .frame(egui::Frame::new().fill(look.skin().palette.card))
                     .show(ui, |ui| {
                         let strip = ui.max_rect();
                         // The chips keep the inset the panel used to give them,
@@ -4864,7 +4864,7 @@ impl Gpu {
                     .exact_size(crate::ui::STATUS_HEIGHT)
                     .frame(
                         egui::Frame::new()
-                            .fill(crate::ui::Look::colour(look.surface))
+                            .fill(look.skin().palette.card)
                             .inner_margin(egui::Margin::symmetric(8, 4)),
                     )
                     .show(ui, |ui| crate::ui::status_bar(ui, status, look));
