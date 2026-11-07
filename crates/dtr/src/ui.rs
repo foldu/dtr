@@ -360,11 +360,72 @@ fn faded(colour: Color32, alpha: f32) -> Color32 {
 pub enum TabHit {
     Select(usize),
     Close(usize),
+    /// The strip's own menu: the commands that belong to the window rather than
+    /// to a tab.
+    Menu(Menu),
     /// Open a new tab: `None` is the local shell, `Some(destination)` is a
     /// serial port or an ssh host. The destination travels *typed*: the app
     /// used to open every non-`None` answer as `ssh`, which ran
     /// `ssh /dev/ttyUSB0` when the entry picked was a serial port.
     New(Option<crate::sources::Destination>),
+}
+
+/// The window's own commands, the ones a menu can hold without a document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Settings,
+    Keymap,
+    About,
+}
+
+/// The strip's menu button: a burger at the right end, beside the window
+/// buttons.
+///
+/// It sits there rather than at the left because the left is where tabs start;
+/// putting it before them would move every tab whenever the menu was drawn. The
+/// same place on both platforms — Windows puts an app menu next to its caption
+/// buttons, and Linux has no caption buttons in a client frame but the same
+/// right-hand end reads the same way.
+pub fn app_menu(ui: &mut Ui, rect: egui::Rect, skin: &dtr_widgets::Skin) -> Option<Menu> {
+    let palette = skin.palette;
+    let response = ui.interact(rect, egui::Id::unique("dtr-menu"), egui::Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(
+            rect.shrink(2.0),
+            skin.style.control_radius,
+            palette.control_hover,
+        );
+    }
+    let icon = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+    egui::Image::new(egui::include_image!("../assets/icons/menu.svg"))
+        .fit_to_exact_size(icon.size())
+        .tint(palette.text)
+        .paint_at(ui, icon);
+    // Painted, so the node is declared: a screen reader hearing "button" at the
+    // end of a tab strip has learnt nothing.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "menu"));
+    if response.has_focus() {
+        response.surrender_focus();
+    }
+
+    let mut chosen = None;
+    // A menu of three words, not of a whole row: without a width it takes the
+    // strip's.
+    egui::Popup::menu(&response).width(180.0).show(|ui| {
+        ui.set_min_width(180.0);
+        for (label, item) in [
+            ("settings", Menu::Settings),
+            ("keyboard map", Menu::Keymap),
+            ("about", Menu::About),
+        ] {
+            if dtr_widgets::menu_row(ui, skin, label, false) {
+                chosen = Some(item);
+                ui.close();
+            }
+        }
+    });
+    chosen
 }
 
 /// What the strip drew, and how much of the row it took.
@@ -954,6 +1015,30 @@ mod kittest_tests {
         });
         harness.run();
         harness.snapshot("tab_bar");
+    }
+
+    /// The strip's menu: a burger, and a popup that holds the window's three
+    /// commands. The menu is the mouse's way in to surfaces that otherwise live
+    /// behind chords.
+    #[test]
+    fn the_strip_menu_opens() {
+        let look = Look::default();
+        let mut harness = Harness::new_ui(move |ui| {
+            install_image_loaders(ui.ctx());
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(32.0, crate::ui::TAB_HEIGHT),
+            );
+            let _ = app_menu(ui, rect, &look.skin());
+        });
+        harness.run_steps(2);
+        // A painted icon with no text needs the name it declares itself.
+        harness.get_by_label("menu").click();
+        harness.run_steps(3);
+        for item in ["settings", "keyboard map", "about"] {
+            harness.get_by_label(item);
+        }
+        harness.snapshot("app_menu");
     }
 
     /// Every embedded image has a decoder behind it.

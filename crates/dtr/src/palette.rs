@@ -25,6 +25,8 @@ pub enum Action {
     /// Show the keyboard map: the palette's own answer for somebody who does not
     /// know the chord yet.
     Keys,
+    /// The same page the strip's menu opens.
+    About,
 }
 
 pub struct Palette {
@@ -336,6 +338,7 @@ fn action_for(line: &str) -> Option<Action> {
         "demo" => Some(Action::Demo),
         "quit" => Some(Action::Quit),
         "keys" => Some(Action::Keys),
+        "about" => Some(Action::About),
         _ => None,
     }
 }

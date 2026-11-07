@@ -603,6 +603,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             }
             settings
         },
+        about_open: false,
         keymap_card: crate::keymap::Overlay {
             open: startup.keymap,
             edit: None,
@@ -1152,6 +1153,8 @@ struct App {
     held: Option<winit::keyboard::Key>,
     /// The settings menu, and the config it edits.
     settings: crate::settings::Settings,
+    /// The about card: a page with no state, so a flag.
+    about_open: bool,
     /// The keyboard map: the card's own state (whether it is up, and which row is
     /// waiting for a key), plus the bindings it draws, which are rebuilt whenever
     /// one is written.
@@ -1264,6 +1267,7 @@ impl App {
         !self.palette.open
             && !self.settings.open
             && !self.keymap_card.open
+            && !self.about_open
             && !self.pager.is_open()
             && self.serial_dialog.is_none()
     }
@@ -1419,6 +1423,24 @@ impl App {
                 self.keymap_card.edit = None;
                 self.repaint("keymap closed");
             }
+            return;
+        }
+
+        // The about card is a page: Escape is its only key, and everything else
+        // is swallowed so a keystroke cannot reach the shell behind it.
+        if self.about_open {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            if matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+            ) {
+                self.about_open = false;
+                self.repaint("about closed");
+            }
+            self.held = Some(stroke.key.clone());
             return;
         }
 
@@ -3471,6 +3493,10 @@ impl App {
                 self.open(Transport::Shell(crate::pty::Config::ssh(&host)));
             }
             Action::Keys => self.keymap_card.open = true,
+            Action::About => {
+                self.about_open = true;
+                self.repaint("about");
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -4325,6 +4351,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut menu_choice = None;
                     let mut close_window = false;
                     let mut keymap_event = None;
+                    let mut about_close = false;
                     let rendered = gpu.render(
                         &panes,
                         self.frames_drawn,
@@ -4348,6 +4375,8 @@ impl ApplicationHandler<UserEvent> for App {
                         self.keymap_card.open.then_some(&self.keymap_card),
                         &self.keymap,
                         &mut keymap_event,
+                        self.about_open,
+                        &mut about_close,
                         serial_dialog.as_ref(),
                         &mut serial_event,
                         &tabs,
@@ -4367,6 +4396,10 @@ impl ApplicationHandler<UserEvent> for App {
                     // drawn.
                     if let Some(asked) = keymap_event {
                         self.keymap_event(asked);
+                    }
+                    if about_close {
+                        self.about_open = false;
+                        self.repaint("about closed");
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -4431,6 +4464,22 @@ impl ApplicationHandler<UserEvent> for App {
                             self.repaint("tab clicked");
                         }
                         Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
+                        // The strip's menu: the three commands that belong to the
+                        // window rather than to a tab. Each opens the same surface
+                        // its chord does, so the menu is a second way in, never a
+                        // second implementation.
+                        Some(crate::ui::TabHit::Menu(menu)) => match menu {
+                            crate::ui::Menu::Settings => {
+                                self.dispatch(crate::keys::Action::Settings);
+                            }
+                            crate::ui::Menu::Keymap => {
+                                self.dispatch(crate::keys::Action::Keymap);
+                            }
+                            crate::ui::Menu::About => {
+                                self.about_open = true;
+                                self.repaint("about");
+                            }
+                        },
                         Some(crate::ui::TabHit::New(destination)) => match destination {
                             // A port goes through the palette's own connect, because
                             // somebody may have set a baud rate or CR translation for
@@ -4891,6 +4940,8 @@ impl Gpu {
         keymap: Option<&crate::keymap::Overlay>,
         keymap_bindings: &crate::keys::Keymap,
         keymap_event: &mut Option<crate::keymap::Event>,
+        about: bool,
+        about_close: &mut bool,
         serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
         serial_event: &mut Option<crate::serial_dialog::Event>,
         tabs: &[String],
@@ -4971,6 +5022,24 @@ impl Gpu {
                         if let Some(hit) = bar.hit {
                             *tab_click = Some(hit);
                         }
+                        // The window's own menu, at the right end of the strip
+                        // beside the caption buttons — or at the strip's own
+                        // right edge in `native` mode, where there are none. The
+                        // same place on both platforms: the left is where tabs
+                        // start, and a button there would move them.
+                        let menu_edge = if self.client_frame {
+                            crate::chrome::buttons_rect(strip, crate::chrome::kind()).left()
+                        } else {
+                            strip.right()
+                        };
+                        let menu_rect = egui::Rect::from_min_max(
+                            egui::pos2((menu_edge - 4.0 - 32.0).max(strip.left()), strip.top()),
+                            egui::pos2(menu_edge - 4.0, strip.bottom()),
+                        );
+                        let skin = look.skin();
+                        if let Some(chosen) = crate::ui::app_menu(ui, menu_rect, &skin) {
+                            *tab_click = Some(crate::ui::TabHit::Menu(chosen));
+                        }
                         // The rest of the row is the title bar. In `native` mode
                         // the window manager already gave us one, and a strip
                         // that also moved the window would be two title bars in
@@ -4986,9 +5055,13 @@ impl Gpu {
                             // press that starts a drag must never be a press on
                             // the close button's neighbour.
                             let buttons = crate::chrome::buttons_rect(strip, crate::chrome::kind());
+                            // The drag region stops at the menu's left edge: the
+                            // menu is a button inside the caption area, and a
+                            // press on it that also started a drag would move
+                            // the window instead of opening it.
                             let caption = egui::Rect::from_min_max(
                                 strip.min,
-                                egui::pos2(buttons.left(), strip.bottom()),
+                                egui::pos2(menu_rect.left(), strip.bottom()),
                             );
                             match crate::chrome::drag_area(ui, caption, bar.used) {
                                 Some(crate::chrome::Drag::Move) => {
@@ -5091,6 +5164,13 @@ impl Gpu {
             // The keyboard map sits above the palette and the pager: it is the
             // thing a person opens precisely because they do not know what is
             // open behind it.
+            if about {
+                crate::ui::overlay(ui, "dtr-about", |ui| {
+                    if crate::about::ui(ui, look) == Some(crate::about::Event::Close) {
+                        *about_close = true;
+                    }
+                });
+            }
             if let Some(keymap) = keymap {
                 crate::ui::overlay(ui, "dtr-keymap", |ui| {
                     if let Some(asked) = crate::keymap::ui(ui, look, keymap_bindings, keymap) {

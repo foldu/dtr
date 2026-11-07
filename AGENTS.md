@@ -599,6 +599,17 @@ tag mirroring on.
   session, and every switch goes through `App::set_active`, which logs
   `active tab from=… to=… why=…`. The chip's colours and radii are the skin's; its
   elision and its two rects are the strip's, and `New tab`'s menu is `menu_row` rows.
+  **The strip's own menu is a burger at the right-hand end, next to the caption
+  buttons**, on both platforms — `crate::ui::app_menu`, a Lucide `menu.svg` icon, a
+  `Popup::menu` of `menu_row`s: settings, keyboard map, about. The right end because
+  the left is where tabs start and a button there would move every tab; the *same*
+  place on Linux, where a client frame draws the same caption buttons. Its rect is
+  part of the caption's obstacle list, not just painted over it: the drag region stops
+  at the menu's left edge (`chrome::drag_area`), or a press on the menu starts a
+  window drag. **About is a card, not a dialog** (`crates/dtr/src/about.rs`): every
+  fact on it is a compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot
+  disagree with the binary, and it is opened by the menu and by `about` in the
+  palette.
 - **`egui::Window` renders nothing inside `Context::run_ui`**, which is why the palette is
   an overlay drawn into the same `Ui`. **A widget's background painted after its text
   hides the text** — the palette's selected row was invisible until the highlight was

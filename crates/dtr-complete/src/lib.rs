@@ -113,6 +113,11 @@ const COMMANDS: &[Command] = &[
         argument: Argument::Themes,
     },
     Command {
+        name: "about",
+        summary: "version and what this is",
+        argument: Argument::None,
+    },
+    Command {
         name: "demo",
         summary: "show the canned demo screen",
         argument: Argument::None,
