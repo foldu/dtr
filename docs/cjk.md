@@ -236,8 +236,8 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 | 1 | wide text is scaled to fill the box | Han 21 % too big and low; **。 is a square** | **done**, M1–M2: design size on the grid baseline |
 | 2 | baseline is per face | every fallback glyph floats or sinks by (face ascent − grid ascent) | **done**, M1: one baseline from the grid metrics |
 | 3 | symbols are unconstrained and 1 cell | powerline/block/Braille overlap their neighbours and the row above | **done**, M3: `fit_cover1` + centring for icons, `stretch` for powerline and braille, the 2-cell rule |
-| 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | M4: preferred list, monospace preference, per-codepoint policy |
-| 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | M4: scale by x-height/ic-width at load |
+| 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | **done**, M4: configured list, then dtr's, then the platform's, then the walk — monospaced first |
+| 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | **done**, M4: scale by ideographic width at load (x-height was 8 % too small) |
 | 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | M5: second atlas, swash colour sources |
 | 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | M6: a sprite face — **not** a stretch, which turns a 3 px line into a block |
 | 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
@@ -391,7 +391,7 @@ blank, which is the same compromise Ghostty's `constraintWidth` makes. `😀` ha
 no ink at all: Unifont Upper draws it monochrome and Noto Color Emoji has no
 outline. That is M5.
 
-### M4 — fallback choice becomes a policy
+### M4 — fallback choice becomes a policy — done
 
 * `[font] fallback = ["Noto Sans Mono CJK SC", "0xProto Nerd Font Mono", ...]`
   in the config, prepended to `fonts::FALLBACK`; extend the built-in list with
@@ -417,6 +417,48 @@ visually.
 Risk: the walk is still O(families) on the first new character; the preference
 list is what keeps it to one load in practice. Measure with the `fallback
 face` log.
+
+*Landed:* the order is now a written policy in `Fonts::face_for`, and it is the
+whole of the fix — the answer used to depend on which family fontconfig happened
+to list first, which changed between runs:
+
+1. the faces already loaded (so a second Han character is free);
+2. `[font] fallback` — the person at the screen;
+3. `fonts::FALLBACK` — dtr's opinion, "a monospaced CJK face";
+4. the platform's script preference, `fontique`'s fallback table;
+5. the walk over everything else: Nerd Font families first, and **monospaced
+   before proportional**.
+
+Steps 2–4 are opinions, so the first one with the glyph wins even when it is
+proportional. Step 5 is a search, so monospace decides there — the portable
+version of fontconfig's `spacing = mono`, and what stops a proportional face
+with a stray private-use glyph from drawing an icon. `fonts::is_nerd_font` sorts
+the walk by name, so a patched family nobody listed still comes before a hundred
+text families.
+
+Two rules arrived that the plan did not have, both because the obvious version
+was wrong:
+
+* **A charmap entry is not ink.** Noto Color Emoji maps every emoji and has no
+  outlines, so the walk accepted it and `😀` drew *nothing* — a regression on
+  what Unifont Upper had been drawing. `has_ink` rasterises the candidate glyph
+  and skips a face whose box is empty, which puts the monochrome emoji back and
+  leaves colour to M5.
+* **The size adjustment has to be `ic_width`.** x-height gave 0.92 and cap
+  height 0.89, both of which shrink every Han character, because a CJK face has
+  a small x-height *by design* and its capitals are not the size of its kanji.
+  Matching the *ideographic width* — the advance of `一`, else Ghostty's
+  `min(ascii height, two cells)` estimate — gives 1.04 here, which is a
+  measurement's rounding rather than a decision. The estimate is measured, not
+  read: the ASCII ink box, 95 glyphs, once per loaded face.
+
+Measured on this machine (DejaVu Sans Mono at 28 pt, cell 17×33): `啊` 25×27 →
+26×28 with `adj 1.04`; `あ` → 24×26; `。` → 10×10; `F015` from a monospaced
+Nerd Font at 19×17; the same answer three runs in a row and after `fc-cache -f`.
+
+Not done: emoji families are *not* in the built-in list. Putting Noto Color Emoji
+there before M5 would only make `😀` blank on purpose, so the list lands in M5
+where the glyphs do.
 
 ### M5 — colour emoji
 
@@ -457,16 +499,26 @@ list narrow and do not apply it to general symbols.
 
 ## 6. Config surface
 
-Not implemented yet; M1–M2 needed none of it. Keep it small and name it after
-Ghostty when it lands, so the mental model transfers:
+`fallback` landed with M4, and it is the only key the three milestones needed:
 
 ```toml
 [font]
-fallback = ["Noto Sans Mono CJK SC", "0xProto Nerd Font Mono"]  # M4
+size = 14
+family = "JetBrains Mono"
+fallback = ["Noto Sans Mono CJK SC", "0xProto Nerd Font Mono"]
+```
+
+It is prepended to `fonts::FALLBACK`, so it can only ever *add* an opinion — a
+family that has been uninstalled degrades to the built-in list instead of
+failing. The settings menu does not write it: choosing a fallback is a decision
+about *this* machine's fonts, not a control worth a drag value.
+
+Still not implemented, and still worth naming after Ghostty when it is:
+
+```toml
 adjust_cell_height = 0      # pixels; re-centres the baseline like Ghostty
-adjust_baseline = 0
 cjk_scale = 1.0             # opt-in; the old stretch-the-box behaviour
-icon_scale = 1.0            # M3
+icon_scale = 1.0            # scales Constraint::ICON
 ```
 
 `cjk_scale > 1` is the escape hatch for people who prefer Han filling its two
@@ -487,9 +539,11 @@ dtr --font-report --font-family 'Noto Sans Mono CJK SC'
 
 It loads the real `Fonts`, walks the same sample (`M`, `g`, `啊`, `あ`, `。`, `─`,
 `█`, a Nerd Font icon, a powerline arrow, an emoji), and prints for each: the
-face and family that answered, that face's own ascent, the advance, the ink box,
-and the rectangle `prepare_pane` would emit. No GPU, no atlas, no window — so it
-runs on a CI box with no `/dev/dri`.
+face and family that answered, that face's own ascent, the advance, the size
+adjustment, the ink box, the rectangle `prepare_pane` would emit, the constraint
+and how many cells it was given. No GPU, no atlas, no window — so it runs on a
+CI box with no `/dev/dri`. `-v` adds where the family came from (`configured`,
+`listed`, `script` or `walk`) and the adjustment it was given.
 
 `啊` is first among the CJK samples because it is the repository's CJK test
 character (`AGENTS.md`); the report and the tests look at the same glyph.
@@ -519,6 +573,16 @@ the rasteriser-disagreement problem the UI snapshots already have). Landed:
 * `a_powerline_arrow_fills_the_cell_height` — `E0B0` is the cell's height.
 * `a_braille_cell_fills_its_cell` — `U+28FF` is the cell exactly, and at its
   corner.
+* `a_configured_fallback_family_wins_over_the_built_in_list` — `[font] fallback`
+  beats dtr's own list, even when its answer is proportional.
+* `a_cjk_fallback_is_drawn_at_its_own_size` — the adjustment is within 10 % of
+  1.0 and the Han glyph is one em tall, which is what says the metric is
+  measuring the right thing.
+* `the_fallback_answer_is_the_same_twice` — two loads in one process agree;
+  cross-run and post-`fc-cache` agreement was checked by hand, because it needs
+  a new process.
+* `the_fallback_list_is_read_in_order`, `a_fallback_that_is_not_a_list_says_so`
+  (dtr-config) — the key parses, keeps order, and drops an empty name.
 
 Still to write, with the milestone that makes them mean something:
 

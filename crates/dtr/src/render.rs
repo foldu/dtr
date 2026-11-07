@@ -389,6 +389,135 @@ fn pad(thousandths: u16) -> f32 {
     f32::from(thousandths) / 1000.0
 }
 
+/// Does this face draw anything at all for `ch`?
+fn has_ink(
+    font: swash::FontRef<'_>,
+    context: &mut swash::scale::ScaleContext,
+    size: f32,
+    ch: char,
+) -> bool {
+    let id = font.charmap().map(ch);
+    if id == 0 {
+        return false;
+    }
+    let mut scaler = context.builder(font).size(size).hint(true).build();
+    let mut image = swash::scale::image::Image::new();
+    swash::scale::Render::new(&[swash::scale::Source::Outline]).render_into(
+        &mut scaler,
+        id,
+        &mut image,
+    );
+    image.placement.width > 0 && image.placement.height > 0
+}
+
+/// The width a face gives an ideograph, in pixels at `size`.
+///
+/// This is Ghostty's `SizeAdjustment::ic_width` — its default — and the reason
+/// it is not x-height or cap height: a CJK face has a *small* x-height by
+/// design (the em box is full of kanji), and its capital letters are not the
+/// size of its Han characters either, so normalising on either shrinks every
+/// Han character by 8–11 %. Measured on this machine: x-height gave 0.92, cap
+/// height 0.89, and the same point size is what those faces were drawn for, so
+/// the answer is 0.96 — close enough to 1.0 to be the rounding of a measurement
+/// rather than a decision.
+///
+/// A face declares its ideographic width only if it has CJK, so this asks for
+/// the advance of `一` first and falls back to Ghostty's estimate:
+/// `min(ascii height, two cells)`, the ink box of ASCII on one axis and the
+/// width of a Han character on the other.
+fn ic_width(font: swash::FontRef<'_>, context: &mut swash::scale::ScaleContext, size: f32) -> f32 {
+    let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
+    let px = |value: f32| value * size / units;
+    let charmap = font.charmap();
+    let ideograph = charmap.map('\u{4e00}');
+    if ideograph != 0 {
+        return px(font.glyph_metrics(&[]).advance_width(ideograph));
+    }
+    // The widest advance in ASCII is the cell this face draws text in.
+    let cell = (0x20u32..=0x7e)
+        .filter_map(char::from_u32)
+        .map(|ch| px(font.glyph_metrics(&[]).advance_width(charmap.map(ch))))
+        .fold(0.0f32, f32::max);
+    ascii_height(font, context, size).min(2.0 * cell)
+}
+
+/// The height of the ink box around printable ASCII, in pixels.
+///
+/// Measured rather than declared, because the point of the number is that `$`
+/// and `@` overshoot the lines the face declares and a declared ascent does not
+/// know that. One pass over 95 glyphs, once per loaded face.
+fn ascii_height(
+    font: swash::FontRef<'_>,
+    context: &mut swash::scale::ScaleContext,
+    size: f32,
+) -> f32 {
+    let charmap = font.charmap();
+    let mut scaler = context.builder(font).size(size).hint(true).build();
+    let mut image = swash::scale::image::Image::new();
+    let mut rise = 0.0f32;
+    let mut drop = 0.0f32;
+    for codepoint in 0x20u32..=0x7e {
+        let Some(ch) = char::from_u32(codepoint) else {
+            continue;
+        };
+        let id = charmap.map(ch);
+        if id == 0 {
+            continue;
+        }
+        swash::scale::Render::new(&[swash::scale::Source::Outline]).render_into(
+            &mut scaler,
+            id,
+            &mut image,
+        );
+        if image.placement.width == 0 || image.placement.height == 0 {
+            continue;
+        }
+        rise = rise.max(image.placement.top as f32);
+        drop = drop.max(image.placement.height as f32 - image.placement.top as f32);
+    }
+    rise + drop
+}
+
+/// The script a character belongs to, for the platform's fallback table.
+///
+/// `swash::text::Script` and `fontique::Script` (parlance's) are different
+/// enums, and swash does not expose the ISO 15924 tag its data is keyed by, so
+/// this is the bridge: a name for the scripts a terminal is actually asked to
+/// draw. Everything else answers `None` and goes to the family walk — which is
+/// the right answer for the private use area and the symbol blocks, since no
+/// script table has an opinion about an icon.
+fn script_of(ch: char) -> Option<fontique::Script> {
+    use swash::text::{Codepoint, Script as Swash};
+    let tag = match ch.script() {
+        Swash::Han => "Hani",
+        Swash::Hiragana => "Hira",
+        Swash::Katakana => "Kana",
+        Swash::Hangul => "Hang",
+        Swash::Arabic => "Arab",
+        Swash::Hebrew => "Hebr",
+        Swash::Thai => "Thai",
+        Swash::Devanagari => "Deva",
+        Swash::Bengali => "Beng",
+        Swash::Tamil => "Taml",
+        Swash::Telugu => "Telu",
+        Swash::Kannada => "Knda",
+        Swash::Malayalam => "Mlym",
+        Swash::Gujarati => "Gujr",
+        Swash::Gurmukhi => "Guru",
+        Swash::Oriya => "Orya",
+        Swash::Sinhala => "Sinh",
+        Swash::Khmer => "Khmr",
+        Swash::Lao => "Laoo",
+        Swash::Myanmar => "Mymr",
+        Swash::Georgian => "Geor",
+        Swash::Armenian => "Armn",
+        Swash::Ethiopic => "Ethi",
+        Swash::Cherokee => "Cher",
+        _ => return None,
+    };
+    fontique::Script::parse(tag).ok()
+}
+
 /// The constraint a codepoint asks for.
 ///
 /// The full answer is a generated table derived from the Nerd Font patcher's
@@ -1184,6 +1313,15 @@ fn face_for(bold: bool, italic: bool) -> Face {
 struct Loaded {
     bytes: Vec<u8>,
     index: usize,
+    /// The size this face is rasterised at, relative to the grid's point size.
+    ///
+    /// A fallback face is chosen for its *coverage*, not its proportions: Noto
+    /// CJK at 14 pt has a smaller x-height than DejaVu at 14 pt, so a Han
+    /// character beside Latin looks like it came from a smaller size even
+    /// though both are correct. Scaling by the ratio of the two x-heights — the
+    /// metric Ghostty uses, `SizeAdjustment` and the collection's
+    /// `scaleFactor` — closes the optical gap; the baseline is untouched.
+    adjust: f32,
 }
 
 /// The font family: four faces, loaded once, with swash doing the rasterising.
@@ -1197,11 +1335,27 @@ struct Fonts {
     size: f32,
     /// The family that answered as the grid face, for the report and the log.
     grid_name: String,
+    /// The width the grid face gives an ideograph, which every fallback is
+    /// scaled against.
+    ic_width: f32,
     /// Which face has each character in each style. `None` is cached too: a
     /// character nobody covers must not be searched for twice.
     resolved: HashMap<(u8, char), Option<usize>>,
-    /// Families to try, discovered on the first missing character.
-    candidates: Vec<fontique::FamilyId>,
+    /// Families to try before the walk, in order — the configured `[font]
+    /// fallback` list, then dtr's own — each with where the opinion came from.
+    /// Built on the first missing character.
+    preferred: Vec<(fontique::FamilyId, &'static str)>,
+    /// Everything else, Nerd Font families first. The walk over this one
+    /// prefers a monospaced family, which is what stops a proportional face
+    /// from answering for a private-use codepoint.
+    rest: Vec<fontique::FamilyId>,
+    /// Which families pass the monospace probe. Probed during the walk and
+    /// remembered: `fonts::works` parses the file, and a character that needs
+    /// the walk is rare after the first one of its script.
+    monospaced: HashMap<fontique::FamilyId, bool>,
+    /// The configured fallback families, kept so the log and the report can
+    /// say where an answer came from.
+    configured: Vec<String>,
     /// Family name of every face in `faces`, for logging and for tests that need
     /// to know *which* family answered.
     names: Vec<String>,
@@ -1218,7 +1372,8 @@ impl Fonts {
     fn load(look: &Look) -> Self {
         let (faces, grid_name) = load_faces(look);
 
-        let context = swash::scale::ScaleContext::new();
+        let mut context = swash::scale::ScaleContext::new();
+        let mut grid_ic = look.size;
         let metrics = {
             let font = swash::FontRef::from_index(
                 &faces[Face::Regular as usize].bytes,
@@ -1265,6 +1420,9 @@ impl Fonts {
                             ascent * 0.72
                         }
                     };
+                    // The size every fallback face is scaled against, and it
+                    // has to be measured: see `ic_width`.
+                    grid_ic = ic_width(font, &mut context, look.size);
                     Metrics {
                         cell_width,
                         cell_height,
@@ -1296,7 +1454,11 @@ impl Fonts {
             context,
             metrics,
             resolved: HashMap::new(),
-            candidates: Vec::new(),
+            preferred: Vec::new(),
+            rest: Vec::new(),
+            monospaced: HashMap::new(),
+            configured: look.fallback.clone(),
+            ic_width: grid_ic,
             names: Vec::new(),
             fallback_order: Vec::new(),
             // Built here, not on the first unmapped character: creating it is a
@@ -1316,6 +1478,23 @@ impl Fonts {
     /// the grid face is the wrong font to ask: the fallback is whichever
     /// installed family covers the character. Loaded lazily and remembered, so
     /// the search happens once per character, not once per cell.
+    ///
+    /// The order is a policy, and the policy is the whole of what makes two
+    /// runs agree (`docs/cjk.md` §5, M4):
+    ///
+    /// 1. the faces already loaded, so a second Han character is free;
+    /// 2. `[font] fallback` from the config — the person looking at the screen;
+    /// 3. `fonts::FALLBACK` — dtr's opinion, which is "a monospaced CJK face";
+    /// 4. the platform's own script preference, from fontique's fallback table;
+    /// 5. every other installed family: Nerd Fonts first, and monospaced
+    ///    before proportional.
+    ///
+    /// Steps 2–4 are opinions, so the first one that has the glyph wins even if
+    /// it is proportional. Step 5 is a *search*, so monospace decides there: a
+    /// proportional face with a stray private-use glyph must not answer for an
+    /// icon while a patched monospaced family is installed. That rule is the
+    /// portable version of fontconfig's `spacing = mono`, and it is what
+    /// actually fixes the answer being different on two runs.
     fn face_for(&mut self, style: Face, ch: char) -> Option<usize> {
         let primary = style as usize;
         if self.glyph_id(primary, ch).is_some() {
@@ -1328,35 +1507,13 @@ impl Fonts {
         // Already-loaded fallbacks first: one CJK family covers most CJK, and
         // re-scanning every family per character would be a font load per cell.
         for index in self.fallback_order.clone() {
-            if let Some(id) = self.glyph_id(index, ch) {
-                let _ = id;
+            if self.glyph_id(index, ch).is_some() {
                 self.resolved.insert((style as u8, ch), Some(index));
                 return Some(index);
             }
         }
 
-        if self.candidates.is_empty() {
-            if let Some(collection) = self.collection.as_mut() {
-                // The preference list first, then everything else: a terminal
-                // wants a monospaced CJK face, so the wide characters line up
-                // with the Latin grid instead of carrying their own advance.
-                let mut ordered: Vec<fontique::FamilyId> = Vec::new();
-                for name in crate::fonts::FALLBACK {
-                    if let Some(id) = collection.family_id(name) {
-                        ordered.push(id);
-                    }
-                }
-                ordered.extend(
-                    collection
-                        .family_ids()
-                        .filter(|id| !ordered.contains(id))
-                        .collect::<Vec<_>>(),
-                );
-                self.candidates = ordered;
-            }
-        }
-
-        let mut found = None;
+        self.build_candidates();
         let weight = match style {
             Face::Regular | Face::Italic => fontique::FontWeight::NORMAL,
             Face::Bold | Face::BoldItalic => fontique::FontWeight::BOLD,
@@ -1365,73 +1522,222 @@ impl Fonts {
             Face::Regular | Face::Bold => fontique::FontStyle::Normal,
             Face::Italic | Face::BoldItalic => fontique::FontStyle::Italic,
         };
-        // A fallback face is usually regular weight and upright even when the
-        // grid is bold or italic; asking for the exact style would miss it.
+
+        let mut opinions = self.preferred.clone();
+        opinions.extend(
+            self.script_fallbacks(ch)
+                .into_iter()
+                .map(|id| (id, "script")),
+        );
+        for (id, how) in opinions {
+            if let Some(index) = self.try_family(id, ch, slant, weight) {
+                return Some(self.remember(style, ch, index, how));
+            }
+        }
+
+        // The search. A proportional answer is remembered and only taken when
+        // no monospaced family has the glyph at all.
+        let mut proportional = None;
+        for id in self.rest.clone() {
+            let Some(index) = self.try_family(id, ch, slant, weight) else {
+                continue;
+            };
+            if self.monospaced(id, index) {
+                return Some(self.remember(style, ch, index, "walk"));
+            }
+            if proportional.is_none() {
+                proportional = Some(index);
+            }
+        }
+        let found = proportional.map(|index| self.remember(style, ch, index, "walk"));
+        self.resolved.insert((style as u8, ch), found);
+        found
+    }
+
+    /// Build the two candidate lists once.
+    ///
+    /// `fontique::FamilyId` is a cheap handle, so the lists are built once and
+    /// the expensive part — loading a file to ask its charmap — happens per
+    /// character as the lists are walked.
+    fn build_candidates(&mut self) {
+        if !self.preferred.is_empty() || !self.rest.is_empty() {
+            return;
+        }
+        let Some(collection) = self.collection.as_mut() else {
+            return;
+        };
+        let mut preferred: Vec<(fontique::FamilyId, &'static str)> = Vec::new();
+        let configured = self.configured.clone();
+        for name in configured
+            .iter()
+            .map(String::as_str)
+            .chain(crate::fonts::FALLBACK.iter().copied())
+        {
+            let how = if self.configured.iter().any(|c| c == name) {
+                "configured"
+            } else {
+                "listed"
+            };
+            let Some(id) = collection.family_id(name) else {
+                continue;
+            };
+            if !preferred.iter().any(|(seen, _)| *seen == id) {
+                preferred.push((id, how));
+            }
+        }
+        let ids: Vec<_> = collection.family_ids().collect();
+        let mut nerd = Vec::new();
+        let mut rest = Vec::new();
+        for id in ids {
+            if preferred.iter().any(|(seen, _)| *seen == id) {
+                continue;
+            }
+            let name = collection
+                .family(id)
+                .map(|family| family.name().to_owned())
+                .unwrap_or_default();
+            if crate::fonts::is_nerd_font(&name) {
+                nerd.push(id);
+            } else {
+                rest.push(id);
+            }
+        }
+        nerd.extend(rest);
+        self.preferred = preferred;
+        self.rest = nerd;
+    }
+
+    /// The platform's preference for the character's script, if it has one.
+    ///
+    /// fontique's fallback table is the data a browser uses to pick a readable
+    /// face when the primary font has no glyph for a script. It sits after
+    /// dtr's list, because that list is the terminal-specific opinion — a
+    /// *monospaced* CJK face — and before the walk, because it is still
+    /// somebody's considered answer rather than an alphabetical accident.
+    fn script_fallbacks(&mut self, ch: char) -> Vec<fontique::FamilyId> {
+        let Some(script) = script_of(ch) else {
+            return Vec::new();
+        };
+        let Some(collection) = self.collection.as_mut() else {
+            return Vec::new();
+        };
+        collection
+            .fallback_families(fontique::FallbackKey::new(script, None))
+            .take(4)
+            .collect()
+    }
+
+    /// Load one family and answer whether it has `ch`.
+    ///
+    /// Two style attempts, because a fallback face is usually regular weight
+    /// and upright even when the grid is bold or italic; asking for the exact
+    /// style would miss it entirely.
+    ///
+    /// The face is *loaded* even when the answer is no, and that is deliberate:
+    /// the walk is ordered by a rule, not by the first hit, so a rejected
+    /// family cannot be un-loaded without reading the file again. A rejected
+    /// face is never named in `fallback_order`, so nothing draws from it.
+    fn try_family(
+        &mut self,
+        id: fontique::FamilyId,
+        ch: char,
+        slant: fontique::FontStyle,
+        weight: fontique::FontWeight,
+    ) -> Option<usize> {
         for (slant, weight) in [
             (slant, weight),
             (fontique::FontStyle::Normal, fontique::FontWeight::NORMAL),
         ] {
-            for position in 0..self.candidates.len() {
-                let Some(collection) = self.collection.as_mut() else {
-                    break;
-                };
-                let Some(&id) = self.candidates.get(position) else {
-                    break;
-                };
-                let Some(family) = collection.family(id) else {
-                    continue;
-                };
-                let Some(font) =
-                    family.match_font(fontique::FontWidth::NORMAL, slant, weight, false)
-                else {
-                    continue;
-                };
-                let Some(bytes) = font.load(Some(&mut self.source_cache)) else {
-                    continue;
-                };
-                let index = font.index() as usize;
-                let Some(reference) = swash::FontRef::from_index(bytes.data(), index) else {
-                    continue;
-                };
-                if reference.charmap().map(ch) == 0 {
-                    continue;
-                }
-                // The face's own ascent, so `-v` shows why its glyphs sit
-                // where they do relative to the grid's baseline. Past this
-                // point the ascent must never move that baseline.
-                let ascent = {
-                    let metrics = reference.metrics(&[]);
-                    let units = f32::from(metrics.units_per_em).max(1.0);
-                    metrics.ascent * self.size / units
-                };
-                drop(bytes);
-                // Reload to own the bytes: `font.load` borrows from the cache.
-                let Some(bytes) = font.load(None) else {
-                    continue;
-                };
-                let family_name = family.name().to_owned();
-                self.names.push(family_name);
-                self.faces.push(Loaded {
-                    bytes: bytes.data().to_vec(),
-                    index,
-                });
-                found = Some(self.faces.len() - 1);
-                self.fallback_order.push(self.faces.len() - 1);
-                tracing::debug!(
-                    character = %ch,
-                    family = self.names.last().map(String::as_str),
-                    ascent,
-                    "fallback face"
-                );
-                break;
+            let Some(collection) = self.collection.as_mut() else {
+                return None;
+            };
+            let Some(family) = collection.family(id) else {
+                return None;
+            };
+            let Some(font) = family.match_font(fontique::FontWidth::NORMAL, slant, weight, false)
+            else {
+                continue;
+            };
+            let Some(bytes) = font.load(Some(&mut self.source_cache)) else {
+                continue;
+            };
+            let index = font.index() as usize;
+            let Some(reference) = swash::FontRef::from_index(bytes.data(), index) else {
+                continue;
+            };
+            if reference.charmap().map(ch) == 0 {
+                continue;
             }
-            if found.is_some() {
-                break;
+            // A charmap entry is not ink. Noto Color Emoji maps every emoji and
+            // has no outlines — its bitmaps live in a `CBDT` table the outline
+            // source cannot see — and a `.notdef` in a face that covers the
+            // block is a box with a codepoint. A terminal that draws nothing is
+            // worse than one that draws the wrong glyph, so the walk skips a
+            // face whose glyph is empty and keeps looking.
+            if !has_ink(reference, &mut self.context, self.size, ch) {
+                continue;
             }
+            // The face's own metrics, for `-v`: its ascent explains why its
+            // glyphs sit where they do, and its x-height is the ratio it is
+            // rasterised at. Neither moves the grid's baseline.
+            let ascent = self.scaled(reference, reference.metrics(&[]).ascent);
+            let own_ic = ic_width(reference, &mut self.context, self.size);
+            let adjust = if own_ic <= 0.5 || self.ic_width <= 0.5 {
+                1.0
+            } else {
+                // Clamped: a nonsense metric must not turn into a face drawn
+                // four times the size.
+                (self.ic_width / own_ic).clamp(0.5, 2.0)
+            };
+            drop(bytes);
+            // Reload to own the bytes: `font.load` borrows from the cache.
+            let Some(bytes) = font.load(None) else {
+                continue;
+            };
+            self.names.push(family.name().to_owned());
+            self.faces.push(Loaded {
+                bytes: bytes.data().to_vec(),
+                index,
+                adjust,
+            });
+            tracing::trace!(
+                family = self.names.last().map(String::as_str),
+                ascent,
+                adjust
+            );
+            return Some(self.faces.len() - 1);
         }
+        None
+    }
 
-        self.resolved.insert((style as u8, ch), found);
-        found
+    /// Design units to pixels at the grid's point size.
+    fn scaled(&self, font: swash::FontRef<'_>, value: f32) -> f32 {
+        let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
+        value * self.size / units
+    }
+
+    /// Is this family monospaced, by the same probe the settings menu uses?
+    fn monospaced(&mut self, id: fontique::FamilyId, face: usize) -> bool {
+        if let Some(known) = self.monospaced.get(&id) {
+            return *known;
+        }
+        let mono = self
+            .faces
+            .get(face)
+            .is_some_and(|loaded| crate::fonts::works(&loaded.bytes, loaded.index as u32));
+        self.monospaced.insert(id, mono);
+        mono
+    }
+
+    /// Record an answer: cache it, name the face as loaded, and say where it
+    /// came from.
+    fn remember(&mut self, style: Face, ch: char, index: usize, how: &'static str) -> usize {
+        self.resolved.insert((style as u8, ch), Some(index));
+        self.fallback_order.push(index);
+        let family = self.names.get(index - 4).cloned().unwrap_or_default();
+        let adjust = self.faces.get(index).map_or(1.0, |loaded| loaded.adjust);
+        tracing::debug!(character = %ch, family, adjust, how, "fallback face");
+        index
     }
 
     fn font(&self, face: usize) -> Option<swash::FontRef<'_>> {
@@ -1456,6 +1762,9 @@ impl Fonts {
         // split the borrow so both can be used at once.
         let loaded = self.faces.get(face)?;
         let font = swash::FontRef::from_index(&loaded.bytes, loaded.index)?;
+        // A fallback is drawn at its own optical size, not the grid's: its
+        // bearings still land on the grid's baseline, so only the ink changes.
+        let size = size * loaded.adjust;
         let context = &mut self.context;
         let mut scaler = context.builder(font).size(size).hint(true).build();
         let mut image = swash::scale::image::Image::new();
@@ -1546,11 +1855,13 @@ pub fn font_report(look: &Look) {
             let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
             font.glyph_metrics(&[]).advance_width(glyph_id) * look.size / units
         });
+        let adjust = fonts.faces.get(face).map_or(1.0, |loaded| loaded.adjust);
         println!(
-            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}  {} cw{}",
+            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  adj {:.2}  ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}  {} cw{}",
             ch as u32,
             ascent,
             advance,
+            adjust,
             laid.image.placement.width,
             laid.image.placement.height,
             laid.ink.x,
@@ -1563,12 +1874,21 @@ pub fn font_report(look: &Look) {
     }
 
     println!();
+    // Only the faces that answered: `names` holds every family the walk
+    // *loaded*, including the ones it rejected, and a report that lists those
+    // reads as if they had been used.
     println!(
         "fallbacks {}",
-        if fonts.names.is_empty() {
+        if fonts.fallback_order.is_empty() {
             "(none loaded)".to_owned()
         } else {
-            fonts.names.join(", ")
+            fonts
+                .fallback_order
+                .iter()
+                .filter_map(|&face| fonts.names.get(face - 4))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     );
 }
@@ -1585,7 +1905,11 @@ fn load_faces(look: &Look) -> ([Loaded; 4], String) {
     if let Some(path) = look.path.as_ref() {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let loaded = Loaded { bytes, index: 0 };
+                let loaded = Loaded {
+                    bytes,
+                    index: 0,
+                    adjust: 1.0,
+                };
                 return (
                     [
                         loaded.clone_face(),
@@ -1641,6 +1965,7 @@ fn load_faces(look: &Look) -> ([Loaded; 4], String) {
                 Some(Loaded {
                     bytes: blob.data().to_vec(),
                     index: font.index() as usize,
+                    adjust: 1.0,
                 })
             });
             faces.push(loaded);
@@ -1667,6 +1992,7 @@ fn load_faces(look: &Look) -> ([Loaded; 4], String) {
             let empty = Loaded {
                 bytes: Vec::new(),
                 index: 0,
+                adjust: 1.0,
             };
             return (
                 [
@@ -1684,6 +2010,7 @@ fn load_faces(look: &Look) -> ([Loaded; 4], String) {
     let empty = Loaded {
         bytes: Vec::new(),
         index: 0,
+        adjust: 1.0,
     };
     (
         [
@@ -1703,6 +2030,7 @@ impl Loaded {
         Loaded {
             bytes: self.bytes.clone(),
             index: self.index,
+            adjust: self.adjust,
         }
     }
 }
@@ -2045,6 +2373,78 @@ mod font_tests {
             ..block
         };
         assert_eq!(cursor_cell(&narrow, cell_w), (0.0, cell_w));
+    }
+
+    /// The configured list is an *opinion*, and it beats dtr's own: if it did
+    /// not, a `[font] fallback` entry for a proportional CJK face would be
+    /// silently overridden by the built-in monospaced preference and the key
+    /// would look broken.
+    #[test]
+    fn a_configured_fallback_family_wins_over_the_built_in_list() {
+        let mut look = Look::default();
+        look.fallback = vec!["Noto Sans CJK SC".to_owned()];
+        let mut fonts = Fonts::load(&look);
+        let Some(index) = fonts.face_for(Face::Regular, '啊') else {
+            return; // no CJK installed here
+        };
+        let name = fonts.names.get(index - 4).cloned().unwrap_or_default();
+        assert_eq!(
+            name, "Noto Sans CJK SC",
+            "the configured fallback was ignored in favour of {name}"
+        );
+    }
+
+    /// A fallback is rasterised at its own optical size, and for CJK that means
+    /// `adjust ≈ 1.0`: a Han character is about one em tall, so a scale that
+    /// differs from 1 by much is the adjustment measuring the wrong thing.
+    ///
+    /// This is what x-height (0.92) and cap height (0.89) got wrong before
+    /// `ic_width`: CJK faces have a small x-height *by design*.
+    #[test]
+    fn a_cjk_fallback_is_drawn_at_its_own_size() {
+        let look = Look::default();
+        let mut fonts = Fonts::load(&look);
+        let Some(index) = fonts.face_for(Face::Regular, '啊') else {
+            return; // no CJK installed here
+        };
+        let adjust = fonts.faces[index].adjust;
+        assert!(
+            (0.9..=1.1).contains(&adjust),
+            "{} is drawn at {adjust}x the grid's size",
+            fonts.names[index - 4]
+        );
+        let glyph_id = fonts.glyph_id(index, '啊').expect("the face has the glyph");
+        let image = fonts
+            .rasterise(index, glyph_id, look.size)
+            .expect("a raster");
+        // One em of ink, within a pixel: the face's own em is what a Han
+        // character fills, and the grid's point size is that em.
+        let height = image.placement.height as f32;
+        assert!(
+            (height - look.size).abs() <= look.size * 0.1,
+            "the Han glyph is {height} px tall at {} pt",
+            look.size
+        );
+    }
+
+    /// Two loads in one process must agree. The answer used to depend on which
+    /// family fontconfig happened to list first, which is the bug M4 exists to
+    /// kill; a cache that reorders between loads would bring it back.
+    #[test]
+    fn the_fallback_answer_is_the_same_twice() {
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            let mut fonts = Fonts::load(&Look::default());
+            answers.push((
+                fonts
+                    .face_for(Face::Regular, '啊')
+                    .map(|index| fonts.names[index - 4].clone()),
+                fonts
+                    .face_for(Face::Regular, '\u{f015}')
+                    .map(|index| fonts.names[index - 4].clone()),
+            ));
+        }
+        assert_eq!(answers[0], answers[1], "two loads disagreed");
     }
 
     #[test]

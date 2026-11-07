@@ -17,6 +17,9 @@ pub struct Look {
     pub family: Option<String>,
     pub size: f32,
     pub path: Option<PathBuf>,
+    /// Families to try before dtr's own list when the grid face lacks a glyph,
+    /// from `[font] fallback` in the config.
+    pub fallback: Vec<String>,
     /// The terminal's own background, used behind the grid and as the base from
     /// which the chrome is mixed.
     pub background: [u8; 3],
@@ -36,6 +39,7 @@ impl Default for Look {
             family: None,
             size: 14.0,
             path: None,
+            fallback: Vec::new(),
             background: [0x0b, 0x0f, 0x0e],
             foreground: [0xdc, 0xdf, 0xdd],
             accent: [0xff, 0xb0, 0x00],

@@ -2440,13 +2440,15 @@ impl App {
         }
 
         let font_changed = draft.font.size != self.config.font.size
-            || draft.font.family != self.config.font.family;
+            || draft.font.family != self.config.font.family
+            || draft.font.fallback != self.config.font.fallback;
         let theme_changed = draft.theme != self.config.theme;
         let serial_changed = draft.serial != self.config.serial;
 
         self.config = draft;
         self.look.size = self.config.font.size;
         self.look.family = self.config.font.family.clone();
+        self.look.fallback = self.config.font.fallback.clone();
 
         if theme_changed {
             let theme = self

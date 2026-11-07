@@ -503,12 +503,13 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let look = ui::Look::themed(
+    let mut look = ui::Look::themed(
         config.font.size,
         config.font.family.clone(),
         config.font.path.clone(),
         theme.as_ref(),
     );
+    look.fallback = config.font.fallback.clone();
 
     // After the Look, so the report describes the font the terminal would
     // actually use — config, family and theme included — and before anything

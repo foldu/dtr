@@ -373,11 +373,29 @@ fallback faces already loaded, then walks every installed family loading one and
 testing its charmap, caching per character — 2000 distinct Han characters cost one
 extra font load, not 2000.
 
-Which family answers is decided by `fonts::FALLBACK`, not fontconfig's order: Sarasa
-Mono first, then the Noto CJK families, monospaced ahead of proportional. A terminal
-wants a monospaced CJK face or the wide characters carry their own advance and the
-grid stops lining up. `-v` logs `fallback face` naming the winner, which is how to
-tell whether the list does anything on a given machine.
+Which family answers is a written policy, not fontconfig's order — that order used to
+change between runs, which is the bug (`docs/cjk.md` §5, M4). `Fonts::face_for` asks:
+the faces already loaded, then `[font] fallback` from the config, then
+`fonts::FALLBACK` (Sarasa Mono, then the Noto CJK families, then the Nerd Font
+families), then the platform's script preference from fontique, then a walk over every
+installed family with **Nerd Fonts first and monospaced before proportional**. The
+first four are opinions, so they win even when proportional; the walk is a search, so
+monospace decides there — a proportional face with a stray private-use glyph must not
+draw an icon. A terminal wants a monospaced CJK face or the wide characters carry
+their own advance and the grid stops lining up. `-v` logs `fallback face` with the
+family, its adjustment and where it came from.
+
+**A charmap entry is not ink.** Noto Color Emoji maps every emoji and has no outlines,
+so the walk accepted it and drew nothing; `has_ink` rasterises the candidate glyph and
+skips a face whose box is empty. A terminal that draws nothing is worse than one that
+draws the wrong glyph.
+
+**A fallback is rasterised at its own optical size.** `Loaded::adjust` is the ratio of
+the *ideographic widths* — the advance of `一`, else `min(ascii ink height, two
+cells)` — and it has to be that metric: x-height gave 0.92 and cap height 0.89 on
+DejaVu/Noto CJK, both of which shrink every Han character, because a CJK face has a
+small x-height by design. The bearings still land on the grid's baseline, so only the
+ink changes.
 
 Two consequences: the glyph atlas key includes the *face index* (glyph ids collide
 between fonts), and every glyph is placed on the **grid's** baseline — `Metrics::baseline`,
