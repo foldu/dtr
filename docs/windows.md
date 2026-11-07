@@ -281,8 +281,10 @@ expectation is a modest improvement, not a transformation.
 **Done**: client-side chrome on both platforms, tabs in dtr's style, window buttons in
 the platform's — the design, the per-platform levers and the build order are in
 [chrome.md](chrome.md), and its §11 has what the Windows guest verified (including the one
-thing it did not: the snap-layout flyout). The rest of this section is the reasoning that
-led there, kept because it still explains what the merge costs.
+thing it did not: the snap-layout flyout). That work also gave the exe an icon, which is
+where the taskbar and Explorer had been drawing the generic blank. The rest of this
+section is the reasoning that led there, kept because it still explains what the merge
+costs.
 
 Today there are two rows above the grid: the OS title bar (default decorations,
 `crates/dtr/src/app.rs:3255`) and a 30-point tab strip inside the client area

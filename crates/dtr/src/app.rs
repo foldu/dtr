@@ -3246,12 +3246,15 @@ fn report_loop(app: &App) {
     app.refresh_frame_budget();
 }
 
-/// The window's icon, decoded from the artwork the desktop entry names.
+/// The window's icon, decoded from the app icon the desktop entry names.
 ///
 /// `include_bytes!` and not a path: the one-file Windows build has no `share/`,
-/// which is the same reason the theme is compiled in.
+/// which is the same reason the theme is compiled in. Windows also wants the
+/// icon in the *executable* — that is `build.rs`, and it is what the taskbar
+/// falls back to for a window that has not been shown yet, for a pinned entry,
+/// and for Explorer.
 fn window_icon() -> Option<winit::window::Icon> {
-    let image = image::load_from_memory(include_bytes!("../../../assets/logo/dtr-mark-32.png"))
+    let image = image::load_from_memory(include_bytes!("../../../assets/logo/dtr-icon-32.png"))
         .ok()?
         .to_rgba8();
     let (width, height) = image.dimensions();

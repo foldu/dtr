@@ -875,4 +875,46 @@ mod kittest_tests {
         harness.run();
         harness.snapshot("tab_bar");
     }
+
+    /// Every embedded image has a decoder behind it.
+    ///
+    /// `include_image!` with no matching egui_extras feature does not fail to
+    /// compile; it fails at *paint* time, and egui's whole report is the ⚠ it
+    /// draws in the image's place — which sat in the corner of the title bar,
+    /// at 16 points, looking like the logo. The tab icons are SVG, so installing
+    /// only the SVG loader was enough for them and for nothing else.
+    ///
+    /// The decode itself happens on a worker thread, so this polls: the first
+    /// answer is `Pending` for any image that has a loader at all, and only the
+    /// absence of one is an immediate error.
+    #[test]
+    fn every_embedded_image_decodes() {
+        let ctx = egui::Context::default();
+        install_image_loaders(&ctx);
+        let size = egui::load::SizeHint::Size {
+            width: 16,
+            height: 16,
+            maintain_aspect_ratio: true,
+        };
+        for source in [
+            egui::include_image!("../../../assets/logo/dtr-icon-32.png"),
+            egui::include_image!("../assets/icons/minus.svg"),
+        ] {
+            let uri = source.uri().expect("embedded, so it has a uri").to_owned();
+            if let Err(err) = source.load(&ctx, egui::TextureOptions::LINEAR, size) {
+                panic!("{uri} has no loader: {err}");
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match ctx.try_load_texture(&uri, egui::TextureOptions::LINEAR, size) {
+                    Ok(egui::load::TexturePoll::Ready { .. }) => break,
+                    Ok(egui::load::TexturePoll::Pending { .. }) => {
+                        assert!(std::time::Instant::now() < deadline, "{uri} never decoded");
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(err) => panic!("{uri} did not decode: {err}"),
+                }
+            }
+        }
+    }
 }

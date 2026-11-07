@@ -379,8 +379,10 @@ pub fn caption_icon(ui: &mut Ui, strip: Rect, look: &Look) -> Option<egui::Pos2>
             Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 26),
         );
     }
-    // The logo is the window's own, painted untinted: it is artwork, not a mask.
-    egui::Image::new(egui::include_image!("../../../assets/logo/dtr-mark-32.png"))
+    // The app's own icon, painted untinted: it is artwork, not a mask. The same
+    // file the window and the executable carry, so the caption, the taskbar and
+    // Explorer never show three different marks.
+    egui::Image::new(egui::include_image!("../../../assets/logo/dtr-icon-32.png"))
         .fit_to_exact_size(rect.size())
         .paint_at(ui, rect);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "window menu"));

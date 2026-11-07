@@ -33,6 +33,24 @@ icon at 16 px, so the icon is drawn at icon resolution, on the same square-pixel
 same 2-unit stroke weight. This is the one place where two forms exist — a 16×16 icon glyph and
 an 8×16 text glyph; the lockup's `$` is the text form, the mark file is the icon form.
 
+## C. The app icon
+
+A window's icon is drawn on whatever surface the platform hands it: a light taskbar, a
+dark one, a white Explorer window, a coloured tile. A single-colour mark on transparency
+cannot hold its contrast across all of those — amber `#FFB000` is 10.5:1 on CRT black and
+1.8:1 on white, which is the finding the light lockup exists for. So the **app icon**
+carries its own surface: the mark on the rounded CRT-black square every Windows app wears.
+
+`dtr-icon.svg` is that icon, and it is the only place a mark and a background are
+combined. It is the bitmap mark unchanged — the pixel form is the identity, and the one
+that survives 16 px — on a `rx=3.2` tile. `scripts/icon.sh` renders it once per size
+(16, 32, 48, 64, 128, 256) and packs `dtr.ico`, and also writes `dtr-icon-32.png`, which
+is what the running window and the caption icon load. The executable's icon, the
+taskbar's and the title bar's therefore cannot disagree.
+
+The Linux desktop entry keeps the transparent masters: a desktop themes its own surface
+and composites the SVG onto it, which is the opposite of what Windows asks for.
+
 ## Three-way comparison and recommendation
 
 **Bitmap at large sizes.** At 1024 px the bitmap lockup is not better than the geometric one. An
@@ -60,7 +78,7 @@ a doubled cell (16×32) drawn for that size, not a stretched 8×16.
 
 | File | What it is | Use it on |
 | --- | --- | --- |
-| `dtr-mark.svg` | Geometric mark: amber `$`, transparent | Dark backgrounds, favicons, window icon |
+| `dtr-mark.svg` | Geometric mark: amber `$`, transparent | Dark backgrounds, favicons |
 | `dtr-mark-mono.svg` | Geometric mark in `currentColor`, transparent | One-colour stamps, print, inversion |
 | `dtr-mark-light.svg` | Geometric mark in deep amber `#924F00`, transparent | Light backgrounds |
 | `dtr-logo.svg` | Geometric lockup `~/dtr $ █`, black background baked in | READMEs, slides, dark UI |
@@ -70,14 +88,18 @@ a doubled cell (16×32) drawn for that size, not a stretched 8×16.
 | `dtr-mark-bitmap-light.svg` | 16×16 pixel mark in deep amber | Light backgrounds |
 | `dtr-logo-bitmap.svg` | 8×16-cell lockup, black background baked in | Small/retro lockup |
 | `dtr-logo-bitmap-light.svg` | 8×16-cell lockup, ink + deep amber on paper | Light documents |
+| `dtr-icon.svg` | **The app icon**: bitmap mark on a rounded CRT-black tile | Wherever the platform draws a window or file icon |
+| `dtr-icon-32.png` | The app icon at 32 px, transparent corners | The running window's icon and the caption icon |
+| `dtr.ico` | The app icon at 16/32/48/64 (DIB) and 128/256 (PNG) | The Windows executable's icon resource |
 | `dtr-mark-512.png`, `dtr-mark-32.png`, `dtr-mark-16.png` | Geometric mark previews on `#0B0F0E` | Preview |
 | `dtr-logo-1024.png`, `dtr-logo-light-1024.png` | Geometric lockup previews | Preview |
 | `dtr-mark-bitmap-512.png`, `-32.png`, `-16.png` | Bitmap mark previews on `#0B0F0E` | Preview |
 | `dtr-logo-bitmap-1024.png`, `dtr-logo-bitmap-light-1024.png` | Bitmap lockup previews | Preview |
 | `comparison.png` | The three-way comparison above | Review |
 
-The PNGs are previews with the brand background baked in. The SVGs are the masters, and the mark
-files are transparent.
+The PNGs are previews with the brand background baked in, except `dtr-icon-32.png`, which
+is the transparent icon the app loads. The SVGs are the masters, and the mark files are
+transparent.
 
 ## Palette
 
@@ -124,6 +146,16 @@ nix run nixpkgs#resvg -- -w 1024 assets/logo/dtr-logo.svg assets/logo/dtr-logo-1
 nix run nixpkgs#resvg -- -w 16 -h 16 --background '#0B0F0E' assets/logo/dtr-mark-bitmap.svg assets/logo/dtr-mark-bitmap-16.png
 nix run nixpkgs#resvg -- -w 1024 assets/logo/dtr-logo-bitmap.svg assets/logo/dtr-logo-bitmap-1024.png
 ```
+
+The app icon is generated, not drawn by hand at every size:
+
+```sh
+./scripts/icon.sh    # assets/logo/dtr.ico and dtr-icon-32.png from dtr-icon.svg
+```
+
+It renders each ICO entry from the vector at that size and packs them (DIB up to 64,
+PNG from 128), so regenerating after a change to the mark is one command and the
+executable, the window and the title bar stay in step.
 
 ## License
 

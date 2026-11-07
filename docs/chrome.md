@@ -272,6 +272,18 @@ names, Segoe Fluent Icons through fontique with Lucide as the fallback, the pain
 Adwaita shapes, the compiled-in window icon, the caption icon opening the system menu, the
 eight resize borders, and the `WM_NCHITTEST`/`HTMAXBUTTON` subclass.
 
+**The icon turned out to be three things, and only one of them is a window.** `WM_SETICON`
+covers a running window; Explorer, the taskbar's pin menu, the Start menu and Alt-Tab read
+a resource out of the PE, and that resource did not exist — so `dtr.exe` showed the
+generic blank wherever the *file* was named, which is most of the places a person meets an
+icon. `crates/dtr/build.rs` now compiles `assets/logo/dtr.ico` with `zig rc` — the
+Windows build's own toolchain, so no new dependency and no wine — and links the resulting
+`.rsrc` object. The artwork is new (`assets/logo/dtr-icon.svg`, rendered by
+`scripts/icon.sh`): the pixel mark on a rounded CRT-black tile, because a transparent
+amber glyph is 10.5:1 on the dark taskbar and 1.8:1 on the light one, and a tile is the
+only version that holds either. The same 32-pixel render is what the window and the
+caption icon load, so the three can no longer disagree.
+
 Checked on the Windows 11 guest (build 26300), driving the exe as an interactive scheduled
 task and injecting input over QMP:
 
@@ -283,6 +295,8 @@ task and injecting input over QMP:
 | the close button exits | QMP click, then the process | gone, and the window with it |
 | the caption icon opens the real system menu | QMP click | Restore/Move/Size/Minimize/Maximize/Close (Alt+F4) |
 | the buttons look like Windows' | screenshot, enlarged | 46-point buttons, Fluent glyphs, the close hover in `#C42B1C` |
+| the executable carries an icon | `[System.Drawing.Icon]::ExtractAssociatedIcon("C:\dtr\dtr.exe")` | the app icon, at 32×32 |
+| the taskbar draws it | screenshot with dtr running | the tile, under the running bar, on a light taskbar |
 
 **One thing did not reproduce: the snap-layout flyout.** The hit test answers
 `HTMAXBUTTON` when asked directly, which is the documented requirement
@@ -294,11 +308,14 @@ unverified on real hardware; the hit test and the button itself are not affected
 `WM_NCLBUTTONDOWN` handler exists because winit does not forward a non-client click to
 `DefWindowProc` (that bug made the button dead until it was added).
 
-Two smaller findings from the same session, neither caused by this change:
+Two smaller findings from the same session, one of them since fixed:
 
 - **A stray console window sits behind dtr on Windows.** The exe is console-subsystem, and
   a process started without a console gets one allocated. Launching from `cmd` or Windows
   Terminal reuses theirs and the extra window does not appear.
-- **The caption icon is dark artwork on a dark strip.** `dtr-mark-32.png` is nearly
-  invisible at 16 points against the strip's surface; a light/mono variant exists in
-  `assets/logo/` if that reads badly on a real screen.
+- **The caption icon was drawing egui's ⚠.** `include_image!` on a PNG needs egui_extras'
+  `image` feature and only `svg` was enabled, so the corner of the strip showed egui's
+  failed-image glyph — a small red outline — instead of the logo. (The "dark artwork on a
+  dark strip" note in the first version of this section was that glyph, read as artwork.)
+  `ui::every_embedded_image_decodes` asks every embedded source to load, so a dropped
+  decoder is a failed test rather than a picture that quietly becomes a warning sign.

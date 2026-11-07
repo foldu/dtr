@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img" aria-labelledby="icon-title icon-desc">
+  <title id="icon-title">dtr</title>
+  <desc id="icon-desc">The dtr app icon: the amber pixel-mask dollar mark on a rounded CRT-black tile.</desc>
+  <!-- The application icon, as opposed to the mark in `dtr-mark-bitmap.svg`.
+       A transparent amber glyph disappears in a light taskbar and a deep-amber one
+       disappears in a dark one, so the icon carries the brand surface with it: the
+       same CRT black the lockups are set on, rounded to the sibling-app square. -->
+  <rect id="tile" width="16" height="16" rx="3.2" fill="#0B0F0E"/>
+  <!-- The mark, unchanged from `dtr-mark-bitmap.svg` and drawn on its own 1 px grid. -->
+  <path id="glyph" fill="#FFB000" shape-rendering="crispEdges" d="M7 1h2v1h-2zM3 2h10v1h-10zM3 3h10v1h-10zM3 4h2v1h-2zM7 4h2v1h-2zM3 5h2v1h-2zM7 5h2v1h-2zM3 6h2v1h-2zM7 6h2v1h-2zM3 7h10v1h-10zM3 8h10v1h-10zM7 9h2v1h-2zM11 9h2v1h-2zM7 10h2v1h-2zM11 10h2v1h-2zM7 11h2v1h-2zM11 11h2v1h-2zM3 12h10v1h-10zM3 13h10v1h-10zM7 14h2v1h-2z"/>
+</svg>

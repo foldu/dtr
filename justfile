@@ -55,6 +55,10 @@ run *args:
 wine:
     ./scripts/wine-smoke.sh
 
+# Regenerate the app icon: the Windows resource and the window's bitmap.
+icons:
+    ./scripts/icon.sh
+
 # vtebench; `just bench -- --check` only validates the payloads.
 bench *args:
     ./scripts/bench.sh {{ args }}
