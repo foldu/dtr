@@ -44,6 +44,12 @@ usage: scripts/bench.sh [--check | --report FILE] [--profile] [--only NAMES]
   --check         check that the payloads in ./benchmarks produce bytes, then
                   exit. Needs no window, no GPU and no network: the CI form.
   --report FILE   print the table for an already-recorded .dat, then exit.
+  --meta DAT [LOG [REV]]
+                  (re)write DAT.meta from a run's -v log, then print it. The
+                  sidecar says which build, window, adapter and sample size a
+                  .dat came from; this is how one is rebuilt for an old run.
+                  A log does not carry the build, so REV (or "unknown") is
+                  written as given.
   --profile       build the `profiling` profile and pass --cpu-profile, so the
                   run also writes target/bench/profile.svg (Linux only).
   --only NAMES    run just those benchmarks, comma separated, from either set.
@@ -56,6 +62,9 @@ EOF
 }
 
 mode=run
+meta_dat=
+meta_log=
+meta_rev=
 profile=
 only=
 # vtebench records each sample as whole milliseconds, so the sample has to be
@@ -71,6 +80,23 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --check) mode=check; shift ;;
         --report) mode=report; report_file=${2:?--report needs a path}; shift 2 ;;
+        --meta)
+            mode=meta
+            meta_dat=${2:?--meta needs a .dat path}
+            shift 2
+            # Up to two operands after the DAT, and neither is a flag.
+            for _ in 1 2; do
+                case "${1:-}" in
+                    '' | -*) break ;;
+                    *)
+                        if [ -z "$meta_log" ]; then meta_log=$1
+                        elif [ -z "$meta_rev" ]; then meta_rev=$1
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+            ;;
         --report=*) mode=report; report_file=${1#--report=}; shift ;;
         --profile) profile=1; shift ;;
         --only) only=${2:-}; shift 2 ;;
@@ -129,6 +155,102 @@ sample_size() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# What a run was, next to the numbers it produced.
+#
+# A `.dat` is one column per benchmark and one row per sample — vtebench's
+# format, and it says nothing about the build, the window or the sample size.
+# That is how a comparison once mixed a tiled 1908x2084 window with a 900x620
+# one and read as a 40% regression, and how a run that was OOM-killed mid-table
+# looked like a fast one. So every run writes `<dat>.meta`, and the table header
+# prints the parts that decide whether two runs can be compared at all.
+# ---------------------------------------------------------------------------
+
+# git_stamp — the commit this binary was built from, `-dirty` included.
+#
+# Not the reason a number differs, but the first question anyone asks about a
+# screenshot of a benchmark table.
+git_stamp() {
+    local rev
+    rev=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        printf '%s-dirty' "$rev"
+    else
+        printf '%s' "$rev"
+    fi
+}
+
+# field LOG KEY DEFAULT — what dtr's `-v` log said about one thing.
+#
+# The log is where the window size, the DPI factor and the adapter actually
+# live; nothing else knows them. ANSI is stripped because tracing colours its
+# output even into a file.
+field() {
+    local log=$1 pattern=$2 default=${3:-unknown} value
+    value=$(sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null \
+        | grep -oE "$pattern" | tail -1)
+    printf '%s' "${value:-$default}"
+}
+
+# write_meta DAT LOG — the sidecar, and it has to work for a run that died.
+write_meta() {
+    local dat=$1 log=$2 rev=${3:-} backfilled=${4:-0} window scale adapter cols rows cells
+    window=$(field "$log" 'width=[0-9]+ height=[0-9]+' | sed 's/width=//; s/ height=/x/')
+    scale=$(field "$log" 'strip geometry scale=[0-9.]+' | sed 's/.*scale=//')
+    adapter=$(field "$log" 'adapter=[^ ]*( [^ ]+)* backend=' | sed 's/^adapter=//; s/ backend=$//')
+    cols=$(field "$log" 'cols=[0-9]+ rows=[0-9]+' | sed 's/ rows=.*//; s/cols=//')
+    rows=$(field "$log" 'cols=[0-9]+ rows=[0-9]+' | sed 's/.*rows=//')
+    if [ -n "$cols" ] && [ -n "$rows" ] && [ "$cols" != unknown ]; then
+        cells=$((cols * rows))
+    else
+        cells=unknown
+        cols=unknown
+        rows=unknown
+    fi
+    cat >"$dat.meta" <<EOF
+rev=${rev:-unknown}
+backfilled=$backfilled
+dirty=$( [ -n "$(git status --porcelain 2>/dev/null)" ] && echo 1 || echo 0 )
+version=$(grep -m1 '^version' Cargo.toml 2>/dev/null | sed 's/.*= *"//; s/".*//' || echo unknown)
+profile=$( [ -n "$profile" ] && echo profiling || echo release )
+vtebench_rev=$vtebench_rev
+host=$(uname -n)
+date=$(date -Is)
+bytes=${min_bytes}
+adapter=${adapter}
+window=${window}
+scale=$scale
+cols=$cols
+rows=$rows
+cells=$cells
+EOF
+}
+
+# meta_value META KEY — one field, or nothing if there is no sidecar.
+meta_value() {
+    [ -f "$1" ] || return 0
+    sed -n "s/^$2=//p" "$1" | head -1
+}
+
+# describe DAT — one line saying what produced the numbers.
+describe() {
+    local dat=$1 meta=$1.meta bytes
+    if [ ! -f "$meta" ]; then
+        printf 'unknown build, no .meta beside the .dat'
+        return
+    fi
+    bytes=$(sample_size "$dat" "$min_bytes")
+    printf '%s, %s (%s), window %s at %sx, pane %sx%s, %s MiB samples' \
+        "$(meta_value "$meta" rev)" \
+        "$(meta_value "$meta" adapter)" \
+        "$(meta_value "$meta" profile)" \
+        "$(meta_value "$meta" window)" \
+        "$(meta_value "$meta" scale)" \
+        "$(meta_value "$meta" cols)" \
+        "$(meta_value "$meta" rows)" \
+        "$(awk -v b="$bytes" 'BEGIN { printf "%.0f", b / 1048576 }')"
+}
+
 # report DAT [PREVIOUS]
 report() {
     local dat=$1 previous=${2:-} bytes prev_bytes mib prev_mib prev_rows unmeasured
@@ -140,6 +262,11 @@ report() {
     prev_rows=""
     if [ -n "$previous" ] && [ -s "$previous" ]; then
         prev_rows=$(medians "$previous")
+    fi
+
+    printf 'bench: %-9s %s\n' "this run" "$(describe "$dat")"
+    if [ -n "$previous" ] && [ -s "$previous" ]; then
+        printf 'bench: %-9s %s\n' "previous" "$(describe "$previous")"
     fi
 
     printf '%-30s %6s %11s %8s %7s\n' benchmark runs median MiB/s vs-prev
@@ -184,6 +311,13 @@ report() {
     if [ -n "$previous" ] && [ -s "$previous" ] && [ -z "$prev_bytes" ]; then
         echo "bench: the previous run did not record its sample size, so no deltas —" >&2
         echo "bench: they compare rates, and two sizes are not comparable" >&2
+    fi
+    local cells prev_cells
+    cells=$(meta_value "$dat.meta" cells)
+    prev_cells=$(meta_value "$previous.meta" cells)
+    if [ -n "$cells" ] && [ -n "$prev_cells" ] && [ "$cells" != "$prev_cells" ]; then
+        echo "bench: the previous run had a different pane ($prev_cells cells against" >&2
+        echo "bench: $cells), so the delta mixes a window change with a code change" >&2
     fi
 }
 
@@ -236,7 +370,23 @@ if [ "$mode" = report ]; then
         echo "bench: no results in $report_file" >&2
         exit 1
     fi
-    report "$report_file" "target/bench/previous.dat"
+    report "$report_file" "${DTR_BENCH_OUT:-target/bench}/previous.dat"
+    exit 0
+fi
+
+if [ "$mode" = meta ]; then
+    # Rebuilding a sidecar needs the log and nothing else: no flake, no build,
+    # no window, which is what makes it usable on a run from last week.
+    [ -f "$meta_log" ] || meta_log=${DTR_BENCH_OUT:-target/bench}/stderr.log
+    if [ ! -f "$meta_log" ]; then
+        echo "bench: no log at $meta_log; pass one, or keep the one the run wrote" >&2
+        exit 1
+    fi
+    # A log does not record the build it came from, so this is `unknown` unless
+    # the caller knows better: a sidecar that guesses is worse than one that
+    # admits it, because the guess is what somebody compares against.
+    write_meta "$meta_dat" "$meta_log" "$meta_rev" 1
+    cat "$meta_dat.meta"
     exit 0
 fi
 
@@ -350,22 +500,34 @@ fi
 echo "bench: $count benchmarks, at most ${guard_s}s" >&2
 echo "bench: $bin --shell \"$shell_cmd\"" >&2
 
-if ! "$bin" "${dtr_args[@]}" 2>"$out_dir/stderr.log"; then
+# dtr's exit status is checked last, not first: a run that produced samples is
+# evidence even when the process was killed afterwards — an OOM, a closed
+# terminal — and the old order threw that evidence away, which is how one
+# benchmark session produced three tables that were never written.
+status=0
+"$bin" "${dtr_args[@]}" 2>"$out_dir/stderr.log" || status=$?
+
+if [ ! -s "$dat" ]; then
     if grep -qi 'wayland\|x11\|display\|surface' "$out_dir/stderr.log"; then
         echo "bench: dtr could not open a window — run this in the graphical session" >&2
     fi
-    tail -20 "$out_dir/stderr.log" >&2
-    exit 1
-fi
-
-if [ ! -s "$dat" ]; then
     echo "bench: vtebench wrote no results; dtr's log:" >&2
     tail -20 "$out_dir/stderr.log" >&2
     exit 1
 fi
 
+# Both sidecars are written before anything can fail, because they describe a
+# run that has already happened: the sample size the rates assume, and what the
+# window, the adapter and the build were.
 printf '%s\n' "$min_bytes" > "$dat.size"
+write_meta "$dat" "$out_dir/stderr.log" "$(git_stamp)" 0
 report "$dat" "$previous" | tee "$out_dir/summary.txt"
+
+if [ "$status" -ne 0 ]; then
+    echo >&2
+    echo "bench: dtr exited $status after vtebench finished; the table above is its own" >&2
+    tail -3 "$out_dir/stderr.log" >&2
+fi
 
 echo >&2
 echo "bench: dat      $dat" >&2

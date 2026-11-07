@@ -897,30 +897,14 @@ shutdown without a window manager.
 someone stares at. `--gpu <substring>` (or `DTR_GPU`) picks by adapter name; `-v` logs the
 adapter and every adapter seen.
 
-`./scripts/bench.sh` runs vtebench — Alacritty's PTY-read benchmark — against dtr with the
-delta from the previous run. It writes the payload to its own stdout, so it must run
-*inside* the terminal being measured: the script starts dtr with vtebench as the shell and
-the numbers arrive in a `.dat` file. Reading the table:
-
-- Absolute numbers only mean anything on one machine against itself.
-- The previous run is the baseline, so bench one change at a time and rebuild first. The
-  delta is a *rate*, and the sample size sits next to each `.dat` because comparing two
-  runs that measured different amounts of work is how a 4× payload change looks like a 4×
-  regression.
-- vtebench records whole milliseconds, so a fast terminal quantises to 2 or 3 ms; the
-  default is 32 MiB per sample and a median of `<1 ms` is a failed measurement.
-- A sample is bounded by whichever is slower, reading or drawing, so a renderer that
-  cannot keep up shows up here too. `--profile` writes `target/bench/profile.svg`.
-
-Two payloads are ours: `wide_cells` (the double-width path) and `cwd_reports` (the OSC 7
-sniffer, which sits on every byte). `scripts/bench.sh --check` validates them without a
-window, a GPU or a network, and is what CI runs.
-
-**The reader can be measured without a window.** `--screenshot PATH --screenshot-delay MS`
-spawns the session and pumps it with nothing on screen, so a payload can be timed on a
-machine with no display — `--shell` points at it and it writes the `.dat`. Only the final
-image needs an adapter, and a software Vulkan ICD (`WGPU_BACKEND=vulkan`, lavapipe) is
-enough.
+`./scripts/bench.sh` runs vtebench against dtr and prints the delta from the previous
+run. **`docs/bench.md` is how to read it** — what a sample is bounded by, why a delta
+across a different window means nothing, what each `.dat`, `.dat.size` and `.dat.meta`
+holds, and the two payloads that are ours. Three things bite without it: the numbers
+only compare on one machine against itself with the same window; a run writes
+`<dat>.meta` (rev, adapter, window, pane cells, sample size) so a table can be
+identified afterwards, and `--meta DAT [LOG]` rebuilds one; and a column that stops
+partway is usually an OOM kill, not a slow terminal.
 
 ## Gotchas that are real
 
@@ -967,6 +951,8 @@ enough.
   Han/kana, fullwidth punctuation, Nerd Font icons, emoji. Read it before
   changing `prepare_pane`'s placement rules. **§9 is the list of what is left**,
   in the order a person would notice it.
+- `docs/bench.md` — what a vtebench number means, what a `.dat` is worth, and the
+  `.meta` sidecar that says which build and window produced it.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost, and the
