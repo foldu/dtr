@@ -85,6 +85,12 @@ tag mirroring on.
 - **`git add` before `nix build`**: a flake build sees only git-tracked files, so an
   untracked source file gives "file not found" or a phantom error about a *different*
   crate.
+- **Do not hand-roll a widget.** A control a screen needs belongs in `dtr-widgets`,
+  painted from the skin's palette and style, so two screens cannot disagree about a row
+  height, a focused border or what "selected" looks like. A colour, a radius or a stroke
+  width written inside a screen is a bug in `dtr-widgets` (§The UI, below). One-offs are
+  how this tree got a bespoke baud field, a separate name row and three spellings of
+  "segmented switch".
 - **Screenshots are in-app only**, never a compositor grab: `--screenshot` renders
   offscreen from injected state, while `--capture PATH --capture-after MS` copies the live
   window's surface and is the truth when a menu or font differs — the offscreen path
@@ -532,6 +538,19 @@ tag mirroring on.
 
 ## The UI, its widgets, and its tests
 
+- **The look is a skin, and a surface asks it rather than deciding.** `dtr-widgets` holds
+  `Palette` (semantic slots — `card`, `control`, `border`, `accent`, `dim` …), `Style`
+  (row height, gaps, radii, fonts, and the `Title`/`Section`/`Footer`/`Focus`
+  behaviours) and `Skin` (the pair), plus `Skin::egui_style`, which derives an
+  `egui::Style` so stock egui widgets inherit the same look. `Preset::{Dtr, Native}`
+  picks a skin; `native` is system colours and the default, though on Linux it is the dtr
+  skin until `Skin::system` reads the desktop's. **Painted controls belong in
+  `crates/dtr-widgets/src/widgets/`**: `Editable` — a text field with a dropdown arrow,
+  reporting `Edit::Typed` and `Edit::Picked` as different answers — is the first. The
+  serial sheet's `row`, `section`, `segmented`, `check`, `keycap` and `close_cross` are
+  still local to `crates/dtr/src/serial_dialog.rs` and are being moved across; a surface
+  that needs one of them waits for the move instead of growing a second copy, and a new
+  primitive arrives with a gallery snapshot in `crates/dtr-widgets/tests/`.
 - **The egui layer is tested with `egui_kittest`, not a window**: `cargo test` drives a
   `Harness` with real layout and AccessKit, so clicks, keys and rendering are assertable —
   query a widget by accessible label, `.click()`, `harness.run()`, assert what it
