@@ -110,7 +110,35 @@ GitHub: if the mirror does not copy tags, nothing publishes — push it by hand
   offscreen from injected state; `--capture PATH --capture-after MS` copies the live
   window's surface. When a menu or a font differs between them, `--capture` is the
   one that tells the truth — and the offscreen path renders at 1×, so it cannot show a
-  HiDPI bug at all (`docs/windows.md` §2).
+  HiDPI bug at all (`docs/windows.md` §2). The next bullet is how to get a live window
+  on a machine with no display, which is what makes a scale test possible here.
+- **The real window runs on Linux without a display, and at any scale.** `--capture`
+  needs a `Window` and a surface, which a headless shell does not have; Xvfb provides
+  both, and `WINIT_X11_SCALE_FACTOR` forces a factor the machine does not have — the
+  only way to see a DPI bug without a HiDPI screen, and it is how the grid-scaling fix
+  was verified at 2× (`docs/windows.md` §2.1). Nothing in dtr knows Xvfb exists; this
+  is the ordinary X11 path:
+
+  ```sh
+  nix build nixpkgs#xvfb --no-link --print-out-paths   # Xvfb is not on PATH
+  Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -ac &   # a managed background job
+  DISPLAY=:99 WINIT_X11_SCALE_FACTOR=2 nix develop .#default --command bash -c \
+    './target/debug/dtr --shell "bash --norc --noprofile" \
+       --send "bash /tmp/sample.sh\n" \
+       --capture /tmp/shot.png --capture-after 3000 --exit-after 5000'
+  ```
+
+  `--capture` writes the file and carries on drawing, so `--exit-after` is what ends
+  the process; without it the command hangs until something kills it. Read the
+  result three ways: the PNG's size is the window in *physical* pixels (900 × 620 at
+  1×, 1800 × 1240 at 2×), `magick identify` catches a window that did not scale at
+  all, and `stty size` written to a file from inside the shell is the pane's cell
+  count — that is the number that changes when the *cell* scales (100 × 34 at 1×,
+  105 × 35 at 2×, the five extra columns being the whole-pixel ceiling). Two traps:
+  the capture needs a frame at that moment, so the sample has to still be printing
+  (a `tick` line every 500 ms) or the deadline finds an idle window and writes
+  nothing; and there is no window manager, which does not matter — the window maps at
+  its requested size and nothing needs focus.
 - **Capture with a shell that does not read the user's bash rc.** dtr launches
   `$SHELL`, so a broken `~/.bashrc` ends up *in the grid*: readline's `\[` and `\]`
   prompt markers are printed literally, the prompt grows to half a screen, and it
