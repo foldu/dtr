@@ -19,7 +19,10 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{HTMAXBUTTON, WM_NCHITTEST};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_SYSCOMMAND,
+};
 
 /// Identifies dtr's subclass, in case anything else subclasses the window too.
 const SUBCLASS: usize = 0x6474_7200;
@@ -88,6 +91,23 @@ unsafe extern "system" fn procedure(
                 return HTMAXBUTTON as LRESULT;
             }
         }
+    }
+    if message == WM_NCLBUTTONDOWN && wparam as u32 == HTMAXBUTTON {
+        // Answering the hit test with `HTMAXBUTTON` moves the click into the
+        // non-client area, and winit's window procedure does not forward a
+        // non-client button down to `DefWindowProc` — so the button would be a
+        // dead rectangle. Send the command a native maximise button sends.
+        //
+        // Posted, not sent: this runs inside a hit-test/click sequence and the
+        // window must not be maximised under the mouse's own message.
+        let command: WPARAM = if unsafe { IsZoomed(hwnd) } != 0 {
+            SC_RESTORE as WPARAM
+        } else {
+            SC_MAXIMIZE as WPARAM
+        };
+        // SAFETY: `hwnd` is the window this procedure was called for.
+        unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command, 0) };
+        return 0;
     }
     // SAFETY: passing the message through to the previous procedure, which is
     // what makes this a subclass and not a replacement.
