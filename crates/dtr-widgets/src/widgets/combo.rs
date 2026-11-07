@@ -110,15 +110,25 @@ impl<'a> Editable<'a> {
         );
 
         let mut buffer = self.text.to_owned();
-        let response = ui.put(
-            text_rect.shrink2(Vec2::new(7.0, 2.0)),
-            egui::TextEdit::singleline(&mut buffer)
-                .id_salt((self.id, "text"))
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin::ZERO)
-                .font(egui::TextStyle::Body)
-                .desired_width((text_rect.width() - 14.0).max(20.0)),
-        );
+        // A child Ui, not `ui.put`: `put` ends by advancing the parent's cursor
+        // to the *child widget's* rect — the text, not the field — so the next
+        // control is placed over the arrow end of this one. The space was already
+        // reserved by `allocate_exact_size` above; nothing here may shrink it.
+        let response = {
+            let mut field = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(text_rect.shrink2(Vec2::new(7.0, 2.0)))
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            field.add(
+                egui::TextEdit::singleline(&mut buffer)
+                    .id_salt((self.id, "text"))
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .font(egui::TextStyle::Body)
+                    .desired_width((text_rect.width() - 14.0).max(20.0)),
+            )
+        };
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, self.label));
 
         // A focused native field shows an accent underline, not a ring; the dtr
@@ -267,6 +277,38 @@ mod tests {
         assert_eq!(
             seen.borrow().clone(),
             Some(Edit::Picked("115200".to_owned()))
+        );
+    }
+
+    /// The control reserves its whole width, arrow included. It used to be
+    /// drawn with `ui.put`, which ends by advancing the parent's cursor to the
+    /// *text field's* rect rather than the control's — so the control after it
+    /// was placed on top of the arrow end (a `save` button over the profile
+    /// field, and a baud list that started under its own chevron).
+    #[test]
+    fn the_control_reserves_its_whole_width() {
+        let skin = skin();
+        let edges: Rc<RefCell<(f32, f32)>> = Rc::new(RefCell::new((0.0, 0.0)));
+        let edges_in = Rc::clone(&edges);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(400.0, 60.0))
+            .build_ui(move |ui| {
+                skin.apply(ui.ctx());
+                ui.horizontal(|ui| {
+                    let start = ui.cursor().min.x;
+                    let _ = Editable::new("field", "gps module", "field value")
+                        .width(200.0)
+                        .show(ui, &skin, &["gps module"]);
+                    let after = ui.cursor().min.x;
+                    *edges_in.borrow_mut() = (start, after);
+                });
+            });
+        harness.run();
+        let (start, after) = *edges.borrow();
+        assert!(
+            after - start >= 200.0,
+            "the field reserved {} of its 200 points",
+            after - start
         );
     }
 
