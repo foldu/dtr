@@ -174,6 +174,14 @@ pub struct Frame {
     pub selection: Option<(usize, usize)>,
     /// Row-major, `cols * rows` entries.
     pub cells: Vec<Cell>,
+    /// What the program named this session with — OSC 0 or OSC 2, which is how
+    /// a shell, nvim, tmux or an ssh client says what it is. Empty when nothing
+    /// has set one, in which case the caller falls back to what it connected to.
+    ///
+    /// Here rather than in `Stats` because it arrives on the same path as the
+    /// cells and changes at the same rate, and because the pane is the only
+    /// thing holding the terminal that parsed it.
+    pub title: String,
 }
 
 /// Byte counters, shared with the UI. Totals only: the rate is the UI's
@@ -835,7 +843,7 @@ fn notice(
     out: &Mutex<Option<Frame>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
     selection: &mut Option<SelectionAnchors>,
-    shown: &mut Option<Cursor>,
+    shown: &mut Displayed,
 ) -> anyhow::Result<()> {
     let mut line = String::with_capacity(text.len() + 16);
     // CR LF, not LF: the session is raw, so nothing rewrites it for us.
@@ -933,7 +941,7 @@ async fn run(
     let mut selection: Option<SelectionAnchors> = None;
     // The cursor the last frame carried, so `publish` can notice when the program
     // changed it without changing any cell — see the dirty check there.
-    let mut shown: Option<Cursor> = None;
+    let mut shown = Displayed::default();
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
 
@@ -2018,6 +2026,7 @@ fn copy_text(
         cursor: None,
         selection: None,
         cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
+        title: String::new(),
     };
     fill_cells(&snapshot, rows, cells, &mut frame)?;
     Ok(frame_text(&frame))
@@ -2153,6 +2162,25 @@ async fn read_loop(
     }
 }
 
+/// What a program's title is allowed to become.
+///
+/// The bytes come from the program and are not guaranteed to be UTF-8, so they
+/// are decoded lossily; control characters are dropped because this string is
+/// drawn as a line of text, and a title carrying an `ESC` would paint the tab
+/// strip with escape sequences that were never interpreted. Capped as well: the
+/// strip elides what it cannot show, but a megabyte of title would still be
+/// copied into every frame.
+fn clean_title(bytes: &[u8]) -> String {
+    const MAX: usize = 512;
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 fn publish(
     term: &mut Terminal<'static, '_>,
     state: &mut RenderState<'static>,
@@ -2162,7 +2190,7 @@ fn publish(
     wake: &Arc<dyn Fn() + Send + Sync>,
     force: bool,
     selection: &mut Option<SelectionAnchors>,
-    shown: &mut Option<Cursor>,
+    shown: &mut Displayed,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let snapshot = state.update(term)?;
@@ -2198,9 +2226,14 @@ fn publish(
     // into the bar nvim wants in insert mode changes nothing in the grid, so the
     // render state stays clean — and a frame that is never published leaves the
     // old cursor on screen while the program's own idea of it has moved on.
-    let cursor_changed = cursor != *shown;
+    //
+    // A title is the same shape of fact: `nvim file` sets one without drawing
+    // anything, so a strip that only heard about it on the next keystroke would
+    // name the tab after the wrong program.
+    let title = clean_title(term.title()?);
+    let changed = cursor != shown.cursor || title != shown.title;
     // A clean frame means the UI already has the current contents.
-    if !force && !cursor_changed && matches!(snapshot.dirty()?, Dirty::Clean) {
+    if !force && !changed && matches!(snapshot.dirty()?, Dirty::Clean) {
         return Ok(());
     }
 
@@ -2213,6 +2246,9 @@ fn publish(
         cursor,
         selection: None,
         cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
+        // Cloned because `shown` keeps it too: one string per frame is not the
+        // cost this path is worried about.
+        title: title.clone(),
     };
 
     fill_cells(&snapshot, rows, cells, &mut frame)?;
@@ -2250,13 +2286,14 @@ fn publish(
         "frame published"
     );
 
+    // Before the frame moves into the slot — and still after the work above, so a
+    // failed publish is retried by the next one rather than remembered as drawn.
+    shown.cursor = cursor;
+    shown.title = title;
     match out.lock() {
         Ok(mut slot) => *slot = Some(frame),
         Err(err) => tracing::error!("frame slot poisoned: {err}"),
     }
-    // After the frame is in the slot, so a failed publish is retried by the next
-    // one rather than remembered as drawn.
-    *shown = cursor;
     wake();
     Ok(())
 }
@@ -2743,7 +2780,20 @@ const DEMO: &[u8] = b"\x1b[32mdtr\x1b[0m \xe2\x80\x94 a serial-first terminal\r\
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Frame, frame_text};
+    use super::{Cell, Frame, clean_title, frame_text};
+
+    /// A title is drawn text, so a title carrying an escape sequence must arrive
+    /// as the characters, and a title that is not UTF-8 must not lose the frame.
+    #[test]
+    fn a_title_is_text_and_not_markup() {
+        assert_eq!(clean_title(b"nvim src/lib.rs"), "nvim src/lib.rs");
+        assert_eq!(clean_title(b"a\x1b[31mb"), "a[31mb");
+        assert_eq!(clean_title(b"  spaced  "), "spaced");
+        assert_eq!(clean_title(b"bad \xff bytes"), "bad \u{fffd} bytes");
+        assert_eq!(clean_title(b""), "");
+        // A megabyte of programme output is not a tab name.
+        assert_eq!(clean_title(&vec![b'x'; 5000]).chars().count(), 512);
+    }
 
     /// Copy from `start` to `end`, inclusive, as text.
     ///
@@ -2807,6 +2857,7 @@ mod tests {
             default_bg: [0, 0, 0],
             cursor: None,
             selection: None,
+            title: String::new(),
             cells,
         }
     }
@@ -2940,6 +2991,7 @@ mod tests {
             default_bg: rgb(colors.background),
             cursor: None,
             selection: None,
+            title: String::new(),
             cells: Vec::new(),
         };
         fill_cells(&snapshot, &mut rows, &mut cells, &mut frame).unwrap();
@@ -3503,6 +3555,17 @@ mod ending_tests {
     }
 }
 
+/// What the last published frame showed that is not a cell.
+///
+/// Two things ride here — the cursor and the program's title — because a change
+/// to either belongs on screen and neither dirties the grid, so both are
+/// compared against what was actually published rather than against `Dirty`.
+#[derive(Default)]
+struct Displayed {
+    cursor: Option<Cursor>,
+    title: String,
+}
+
 /// A shell pane with a real pty behind it: the only way to see a reconnection,
 /// because the whole question is what the child's exit status means.
 ///
@@ -3553,6 +3616,34 @@ mod session_tests {
                 "`{needle}` never appeared; the screen said:\n{text}"
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A program names its own tab: OSC 0 and OSC 2 are how a shell, nvim, tmux
+    /// or an ssh client says what it is. The title arrives *after* the last cell
+    /// was drawn, so this only works if a title change publishes by itself —
+    /// waiting for the next keystroke would name the tab after the wrong program.
+    #[test]
+    fn a_program_can_rename_its_tab() {
+        for escape in ["\\033]2", "\\033]0"] {
+            let pane = pane(
+                format!("printf 'ready\\r\\n'; printf '{escape};nvim ~/src/lib.rs\\007'; sleep 5"),
+                None,
+                Vec::new(),
+            );
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(frame) = pane.take_frame() {
+                    if frame.title == "nvim ~/src/lib.rs" {
+                        break;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no title arrived for an `{escape}` sequence"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 

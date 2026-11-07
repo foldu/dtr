@@ -549,6 +549,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 port,
                 frame: None,
                 label,
+                program_title: String::new(),
                 serial,
                 remote,
                 alias: startup_alias,
@@ -878,6 +879,19 @@ fn explorer_key(key: &winit::keyboard::Key) -> Option<crate::explorer::Key> {
     }
 }
 
+/// What the strip calls a session: the title a program set, else who it is.
+///
+/// The program wins because it knows more — a shell reports its directory, nvim
+/// the file, tmux the window — and `1 shell` is only what is left when nobody
+/// said anything. An empty title is not a name, so it falls back.
+fn tab_name<'a>(program: &'a str, fallback: &'a str) -> &'a str {
+    if program.is_empty() {
+        fallback
+    } else {
+        program
+    }
+}
+
 /// One open session. Tabs are just these, in order; only the active one is
 /// drawn, but the others keep running and keep their own scrollback, selection
 /// and statistics.
@@ -891,6 +905,11 @@ struct Session {
     grid: (u16, u16),
     frame: Option<Frame>,
     label: String,
+    /// The title the program set with OSC 0 or OSC 2, empty until it does. Kept
+    /// apart from `label` rather than overwriting it: a program that sets a
+    /// title and later clears it should fall back to naming the session, not to
+    /// being called nothing.
+    program_title: String,
     /// Whether this session has modem lines, for the status strip.
     serial: bool,
     /// Whether the shell is an `ssh` client, so its reported directory belongs
@@ -2671,6 +2690,7 @@ impl App {
                     },
                     frame: None,
                     label: transport.describe(),
+                    program_title: String::new(),
                     serial: matches!(transport, Transport::Serial(_)),
                     // A remote shell reports the *remote* directory; it must not
                     // be adopted as a local path by a new tab.
@@ -2803,6 +2823,7 @@ impl App {
                 },
                 frame: None,
                 label: transport.describe(),
+                program_title: String::new(),
                 serial: matches!(transport, Transport::Serial(_)),
                 remote: alias.is_some(),
                 alias,
@@ -3679,6 +3700,14 @@ impl ApplicationHandler<UserEvent> for App {
             for pane in tab.leaves.values_mut() {
                 if let Pane::Terminal(session) = pane {
                     if let Some(frame) = session.pane.take_frame() {
+                        if frame.title != session.program_title {
+                            tracing::debug!(
+                                from = %session.program_title,
+                                to = %frame.title,
+                                "session renamed itself"
+                            );
+                            session.program_title = frame.title.clone();
+                        }
                         session.frame = Some(frame);
                     }
                 }
@@ -3992,7 +4021,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // the label they had, so a background session cannot rename
                     // itself under the eye.
                     if let Some(session) = self.tabs[self.active].focused_terminal() {
-                        let label = session.label.clone();
+                        let label = tab_name(&session.program_title, &session.label).to_owned();
                         self.tabs[self.active].title = label;
                     }
                     let tabs: Vec<String> = self
@@ -5072,7 +5101,19 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed, copy_to, cycled, mouse_goes_to_program, save_name};
+    use super::{closed, copy_to, cycled, mouse_goes_to_program, save_name, tab_name};
+
+    /// A program's title names the tab, and silence does not.
+    ///
+    /// A shell that reports its directory, nvim that reports the file and tmux
+    /// that reports the window all say something better than `3 shell`; a
+    /// program that sets no title (or clears it) must not leave the tab blank.
+    #[test]
+    fn a_program_title_names_the_tab() {
+        assert_eq!(tab_name("", "serial /dev/ttyUSB0"), "serial /dev/ttyUSB0");
+        assert_eq!(tab_name("", "1 shell"), "1 shell");
+        assert_eq!(tab_name("nvim src/lib.rs", "3 shell"), "nvim src/lib.rs");
+    }
 
     /// A path the save dialog hands back is where the copy goes, and the folder
     /// it names does not have to exist yet: a native dialog lets a name be typed

@@ -2355,6 +2355,7 @@ mod font_tests {
             default_bg: [0; 3],
             cursor: None,
             selection: None,
+            title: String::new(),
             cells: cells
                 .iter()
                 .map(|(text, wide)| Cell {

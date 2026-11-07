@@ -543,6 +543,13 @@ string would hide the text on screen and quietly lose it everywhere else.
 
 ## Sessions: shell, ssh, serial
 
+**A tab is named by the program, not by the transport.** OSC 0/2 set the terminal's
+title; `Frame::title` carries it to the strip and the window, and `1 shell` is only the
+fallback (`tab_name`). It is not a dirty cell and not trustworthy bytes: it is compared
+with the last published title in the same `Displayed` record as the cursor, so a program
+that renames itself and draws nothing still publishes; `clean_title` decodes it lossily,
+drops control characters and caps it at 512.
+
 **A shell that exits closes its tab.** The pane cannot — the UI owns the tab — so the
 pty reader sets `Pane::ended` on EOF and wakes; `App::reap_ended` closes those tabs
 highest index first, and the last one takes the window with it.
@@ -791,12 +798,10 @@ both made the winner depend on allocation order — the cross closed sometimes, 
 `+` lost its press to its own icon. Disjoint rects, and `Image::paint_at` for anything
 that must not sense anything.
 
-**A chip is as wide as its title, unless the title is longer than a strip.** A tab's
-name is whatever the session called itself — a working directory, an ssh alias with a
-command after it — so it is elided at `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, one
-row, broken anywhere. The full name stays in the tooltip and in the accessibility
-node; only the painted line is shortened. Unbounded, one deep directory pushes every
-other tab and the `+` off the strip.
+**A chip is as wide as its title, until the title is longer than a strip.** The label is
+elided at `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, one row, broken anywhere; the full
+name stays in the tooltip and the accessibility node. Unbounded, one deep directory
+pushes every tab and the `+` off the strip.
 
 **A chip has two hit targets**: the label switches tabs, a cross on the right closes
 that tab — whichever is active. Both declare accessibility names (`2 shell`, `close tab
