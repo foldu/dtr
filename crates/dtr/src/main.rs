@@ -557,6 +557,10 @@ fn main() -> anyhow::Result<()> {
         skin = crate::system::describe(&skin),
         requested = look.preset.as_str(),
         accent = crate::system::accent_hex(&skin),
+        // The hover the platform's own ladder chose, when there is one: it is the
+        // difference between "read the system accent" and "read the system's
+        // hover for it", and only one of those is visible without the log.
+        hover = crate::system::hex(skin.palette.accent_hover),
         "chrome"
     );
     look.fallback = config.font.fallback.clone();

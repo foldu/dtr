@@ -62,6 +62,31 @@ pub struct Palette {
     pub focus_inner: Color32,
 }
 
+/// The accent ladder Windows keeps beside the base colour.
+///
+/// Windows computes six variants of the accent for its own controls — the
+/// pale ones and the dark ones — and stores the lot in the registry, so a
+/// window that wants to look like Windows can hover into the *same* variants
+/// rather than approximating them with alpha. The field names are the WinUI
+/// resource names (`SystemAccentColorLight1`, `...Dark2`).
+///
+/// Entry order is not the order they are declared in: see
+/// `crate::system::ladder_from_registry`, which had to decode it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccentLadder {
+    pub light3: Color32,
+    pub light2: Color32,
+    pub light1: Color32,
+    pub base: Color32,
+    pub dark1: Color32,
+    pub dark2: Color32,
+    pub dark3: Color32,
+    /// The eighth entry, which Windows fills with the second ("Start")
+    /// accent rather than a shade. Kept so the decoding accounts for every
+    /// byte it was given.
+    pub secondary: Color32,
+}
+
 impl Palette {
     /// The terminal's own chrome, derived from a theme exactly as it always was.
     ///
@@ -107,6 +132,17 @@ impl Palette {
     /// pressed variants by drawing the same brush at 90 % and 80 %, which is what
     /// [`Palette::accent_hover`] and [`Palette::accent_active`] do here.
     pub fn windows(dark: bool, accent: Color32) -> Self {
+        Self::windows_with_accent(dark, accent, None)
+    }
+
+    /// The same palette, with the OS's own hover and pressed variants when the
+    /// caller could read them.
+    ///
+    /// WinUI hovers an accent button into `SystemAccentColorDark1` on a light
+    /// theme and `Light1` on a dark one, and presses into the next step out;
+    /// without the ladder this falls back to compositing the accent at 90 % and
+    /// 80 %, which is the closest a single colour can get.
+    pub fn windows_with_accent(dark: bool, accent: Color32, ladder: Option<AccentLadder>) -> Self {
         // WinUI's neutral ramp, per theme. The `#AARRGGBB` values are the XAML's
         // own and are composited over the base background below, because most of
         // them carry alpha and a slot here has to be a colour.
@@ -165,8 +201,18 @@ impl Palette {
             dim: over(base, dim),
             disabled: over(base, disabled),
             accent,
-            accent_hover: over(base, with_alpha(accent, 230)),
-            accent_active: over(base, with_alpha(accent, 204)),
+            // The ladder's steps are already composited colours from Windows, so
+            // they are used as they come; only the fallback blends.
+            accent_hover: match ladder {
+                Some(ladder) if dark => ladder.light1,
+                Some(ladder) => ladder.dark1,
+                None => over(base, with_alpha(accent, 230)),
+            },
+            accent_active: match ladder {
+                Some(ladder) if dark => ladder.light2,
+                Some(ladder) => ladder.dark2,
+                None => over(base, with_alpha(accent, 204)),
+            },
             on_accent,
             selection: accent,
             on_selection: on_accent,
@@ -248,6 +294,35 @@ fn argb(value: u32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hover the OS chose beats a hover computed from one colour.
+    #[test]
+    fn the_accent_ladder_wins_over_the_blend() {
+        let accent = rgb([0x00, 0x78, 0xD4]);
+        let ladder = AccentLadder {
+            light3: rgb([0x99, 0xEB, 0xFF]),
+            light2: rgb([0x4C, 0xC2, 0xFF]),
+            light1: rgb([0x00, 0x91, 0xF8]),
+            base: accent,
+            dark1: rgb([0x00, 0x67, 0xC0]),
+            dark2: rgb([0x00, 0x3E, 0x92]),
+            dark3: rgb([0x00, 0x1A, 0x68]),
+            secondary: rgb([0xF7, 0x63, 0x0C]),
+        };
+        // Light hovers *darker*, dark hovers *lighter*: WinUI's own rule, and the
+        // ladder is ordered so either step is one lookup.
+        let light = Palette::windows_with_accent(false, accent, Some(ladder));
+        assert_eq!(light.accent_hover, ladder.dark1);
+        assert_eq!(light.accent_active, ladder.dark2);
+        let dark = Palette::windows_with_accent(true, accent, Some(ladder));
+        assert_eq!(dark.accent_hover, ladder.light1);
+        assert_eq!(dark.accent_active, ladder.light2);
+        // Without a ladder the old blend is still there, so a machine that did not
+        // answer cannot break the skin.
+        let blended = Palette::windows(false, accent);
+        assert_ne!(blended.accent_hover, ladder.dark1);
+        assert_ne!(blended.accent_hover, ladder.light1);
+    }
 
     /// The compositing is the part that is easy to get wrong in the other
     /// direction: a slot with alpha still in it paints a translucent control,

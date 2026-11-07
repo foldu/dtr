@@ -33,7 +33,7 @@ mod skin;
 mod style;
 mod widgets;
 
-pub use palette::Palette;
+pub use palette::{AccentLadder, Palette};
 pub use skin::{Skin, WINDOWS_ACCENT_DARK, WINDOWS_ACCENT_LIGHT};
 pub use style::{Focus, Footer, Preset, Section, Style, Title};
 pub use widgets::{

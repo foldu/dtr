@@ -44,8 +44,18 @@ impl Skin {
 
     /// Windows 11's chrome over Windows 11's palette.
     pub fn windows(dark: bool, accent: Color32) -> Self {
+        Self::windows_with_accent(dark, accent, None)
+    }
+
+    /// The platform's skin, with the OS's own accent ladder for its hover and
+    /// pressed states. See [`Palette::windows_with_accent`].
+    pub fn windows_with_accent(
+        dark: bool,
+        accent: Color32,
+        ladder: Option<crate::palette::AccentLadder>,
+    ) -> Self {
         Self {
-            palette: Palette::windows(dark, accent),
+            palette: Palette::windows_with_accent(dark, accent, ladder),
             style: Style::native(),
         }
     }
