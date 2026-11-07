@@ -1,10 +1,13 @@
 //! The platform's own chrome, when this machine has one.
 //!
 //! `native` means "look like a window on this machine", and only Windows tells
-//! us how: light or dark from `AppsUseLightTheme`, and the user's accent from
-//! DWM, both under `HKCU\Software\Microsoft\Windows\CurrentVersion`. Linux has no
-//! portable system palette — the desktop's theme lives in a dozen formats behind
-//! a dozen libraries — so `native` is the dtr skin there, by decision.
+//! us how: light or dark from `AppsUseLightTheme` under
+//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, and the
+//! user's accent from DWM under `HKCU\Software\Microsoft\Windows\DWM` — note the
+//! *different* path; `AccentColor` is not under `CurrentVersion`, and a run that
+//! asks the wrong key silently gets WinUI's default blue. Linux has no portable
+//! system palette — the desktop's theme lives in a dozen formats behind a dozen
+//! libraries — so `native` is the dtr skin there, by decision.
 //!
 //! The reading is here rather than in `dtr-widgets` because it is platform code
 //! and this is where the platform code lives; the crate only knows how to build
@@ -76,11 +79,7 @@ fn registry_skin() -> Option<Skin> {
         "AppsUseLightTheme",
     )
     .map_or(true, |value| value != 0);
-    let accent = read_dword(
-        r"Software\Microsoft\Windows\CurrentVersion\DWM",
-        "AccentColor",
-    )
-    .map(accent_from_dwm);
+    let accent = read_dword(r"Software\Microsoft\Windows\DWM", "AccentColor").map(accent_from_dwm);
     Some(Skin::windows(
         !light,
         // WinUI's default accent, shown when the user never chose one
