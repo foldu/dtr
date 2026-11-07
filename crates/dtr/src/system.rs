@@ -47,6 +47,14 @@ pub fn describe(skin: &Skin) -> &'static str {
     }
 }
 
+/// The skin's accent as `#RRGGBB`, for the startup log: "native, light, and the
+/// user's accent" is the whole claim, and two of those three are invisible
+/// without saying what colour came out.
+pub fn accent_hex(skin: &Skin) -> String {
+    let accent = skin.palette.accent;
+    format!("#{:02X}{:02X}{:02X}", accent.r(), accent.g(), accent.b())
+}
+
 /// DWM stores an accent as `0xAABBGGRR` — the byte order of a `COLORREF`, which
 /// is little-endian RGB — while everything else here speaks `RRGGBB`.
 #[cfg_attr(not(windows), allow(dead_code))]

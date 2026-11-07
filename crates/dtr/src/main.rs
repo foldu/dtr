@@ -546,9 +546,11 @@ fn main() -> anyhow::Result<()> {
         theme.as_ref(),
         preset,
     );
+    let skin = look.skin();
     tracing::debug!(
-        skin = crate::system::describe(&look.skin()),
+        skin = crate::system::describe(&skin),
         requested = look.preset.as_str(),
+        accent = crate::system::accent_hex(&skin),
         "chrome"
     );
     look.fallback = config.font.fallback.clone();
