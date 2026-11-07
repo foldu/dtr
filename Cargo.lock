@@ -902,6 +902,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dtr-widgets"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_kittest",
+]
+
+[[package]]
 name = "ecolor"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

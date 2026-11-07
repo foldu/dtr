@@ -11,12 +11,14 @@
 # when it is not there, so these being untracked meant CI compared against
 # nothing. The failure artefacts stay ignored, below.
 !crates/dtr/tests/snapshots/*.png
+!crates/dtr-widgets/tests/snapshots/*.png
 *.jpg
 *.jpeg
 *.webp
 *.gif
 **/tests/snapshots/**/*.diff.png
 **/tests/snapshots/**/*.new.png
+**/tests/snapshots/**/*.old.png
 
 # Profiling output: `dtr --cpu-profile`, `scripts/flamegraph.sh` and `perf
 # record` all write next to the working directory, and none of it belongs in a

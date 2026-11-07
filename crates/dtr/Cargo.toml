@@ -51,7 +51,7 @@ winit.workspace = true
 [dev-dependencies]
 # Drives egui without a window: clicks, keys and snapshot rendering. The
 # window-based harness needs a real event loop; this one runs in `cargo test`.
-egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+egui_kittest.workspace = true
 tempfile.workspace = true
 
 # Modem control lines are ioctls on the tty descriptor; Windows needs a

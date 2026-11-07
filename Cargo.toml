@@ -53,6 +53,10 @@ egui-wgpu = "0.37"
 # failed to load — which is what the caption icon was showing.
 egui_extras = { version = "0.37", features = ["svg", "image"] }
 egui-winit = "0.37"
+# Drives egui without a window: clicks, keys and snapshot rendering. Shared by
+# the binary's surfaces and by `dtr-widgets`, whose gallery is a baseline too, so
+# both compare against the same rasteriser (`just fmt`'s gate runs the same suite).
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
 # The system clipboard, written directly: egui-winit's own clipboard path
 # silently falls back to an in-app buffer when it cannot reach a display, which
 # looks exactly like a copy that worked.
