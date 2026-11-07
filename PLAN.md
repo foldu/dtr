@@ -729,6 +729,30 @@ Click focuses the pane under the pointer, `Ctrl+Shift+\` splits side by side and
 stacked, `Ctrl+Shift+W` closes the focused pane and collapses its parent. Closing the last pane closes
 the tab. A split opens a *shell*, never a copy of the pane: a serial port cannot be opened twice.
 
+**A pane border is a thing you can grab.** The geometry moved into `layout.rs` as functions the
+pointer and the keyboard both call: `divider_at` finds the split under a point (two points of slop
+either side of a three-point gap, because a gap is not a target), `divider_toward` finds the split
+bordering a pane on one side, `set_ratio` clamps as it writes, `neighbour` answers "which pane is
+that way" by nearest distance with a *shared span* (a pane that only meets a corner is not a
+direction), and `visible` is the zoom. A press on a gap starts a drag and is not a click: it
+changes no focus, asks no pane about a cell, and never reaches the program, which is why a
+selection cannot start on a border; letting go copies nothing, and a second press puts the divider
+back at half. The pty's size and the painted rectangle come from the same `pane_area` and the same
+`halves`, because a drag that did its own arithmetic would put the divider where the picture is
+not — `stty size` in each pane is what says the two agree (80 × 24 before a split, 49 columns
+after, 33 after a drag to a third of the window).
+
+**Focus, resize and zoom are chords, because a mux you cannot drive from the keyboard is a mouse
+toy.** `ctrl-alt-←→↑↓` moves focus, the same chord with shift moves the divider one *cell* — the
+step is measured against the cell, not the window, so it means the same thing at every size and
+font — and `ctrl-alt-z` gives the focused pane the whole tab. Zoom is a *view* of the tree rather
+than an edit: `Tab::zoom` names a leaf and `Layout::visible` returns only that leaf's rectangle, so
+unzooming restores every divider exactly, and a split or a close unzooms first or the change would
+happen off screen. Only the visible pane is re-fitted while zoomed; the others keep the grid they
+had. The map grew a `panes` group for the nine new actions, and the card learned to measure its
+chord column per column instead of sharing one width, which is what stopped `ctrl-alt-shift-right`
+from running into its own label.
+
 **The file pane is the first non-terminal leaf.** A leaf now maps to
 `Pane::Terminal(Session) | Pane::Files(Explorer)`; a file pane owns its rectangle but no session, so
 keys, selection, copy/paste, the status strip, splits and closing all have to say what they do when

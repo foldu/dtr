@@ -21,6 +21,18 @@ pub enum Action {
     PreviousTab,
     SplitHorizontal,
     SplitVertical,
+    /// Move the keyboard to the pane on that side of the focused one.
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    /// Move the divider bordering the focused pane one cell in that direction.
+    ResizeLeft,
+    ResizeRight,
+    ResizeUp,
+    ResizeDown,
+    /// Give the focused pane the whole window, or put the layout back.
+    ZoomPane,
     Copy,
     Paste,
     ScrollPageUp,
@@ -53,6 +65,15 @@ impl Action {
             Self::PreviousTab => "previous-tab",
             Self::SplitHorizontal => "split-horizontal",
             Self::SplitVertical => "split-vertical",
+            Self::FocusLeft => "focus-left",
+            Self::FocusRight => "focus-right",
+            Self::FocusUp => "focus-up",
+            Self::FocusDown => "focus-down",
+            Self::ResizeLeft => "resize-left",
+            Self::ResizeRight => "resize-right",
+            Self::ResizeUp => "resize-up",
+            Self::ResizeDown => "resize-down",
+            Self::ZoomPane => "zoom-pane",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll-page-up",
@@ -86,6 +107,15 @@ impl Action {
             Self::PreviousTab => "previous tab",
             Self::SplitHorizontal => "split sideways",
             Self::SplitVertical => "split stacked",
+            Self::FocusLeft => "focus pane left",
+            Self::FocusRight => "focus pane right",
+            Self::FocusUp => "focus pane up",
+            Self::FocusDown => "focus pane down",
+            Self::ResizeLeft => "move divider left",
+            Self::ResizeRight => "move divider right",
+            Self::ResizeUp => "move divider up",
+            Self::ResizeDown => "move divider down",
+            Self::ZoomPane => "zoom this pane",
             Self::Copy => "copy selection",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll a page up",
@@ -107,12 +137,19 @@ impl Action {
     /// [`Group::ALL`], not the order here.
     pub fn group(self) -> Group {
         match self {
-            Self::NewTab
-            | Self::ClosePane
-            | Self::NextTab
-            | Self::PreviousTab
+            Self::NewTab | Self::NextTab | Self::PreviousTab => Group::Tabs,
+            Self::ClosePane
             | Self::SplitHorizontal
-            | Self::SplitVertical => Group::Tabs,
+            | Self::SplitVertical
+            | Self::FocusLeft
+            | Self::FocusRight
+            | Self::FocusUp
+            | Self::FocusDown
+            | Self::ResizeLeft
+            | Self::ResizeRight
+            | Self::ResizeUp
+            | Self::ResizeDown
+            | Self::ZoomPane => Group::Panes,
             Self::Palette | Self::Settings | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
@@ -131,6 +168,7 @@ impl Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
     Tabs,
+    Panes,
     Overlays,
     Clipboard,
     Scrollback,
@@ -139,19 +177,26 @@ pub enum Group {
 
 impl Group {
     /// The groups, in the order the map reads: what a window is made of, then
-    /// what opens over it, then what happens to text, then history, then the
-    /// cable.
-    pub const ALL: [Group; 5] = [
+    /// what a pane is made of, then what opens over it, then what happens to
+    /// text, then history, then the cable.
+    pub const ALL: [Group; 6] = [
         Group::Tabs,
+        Group::Panes,
         Group::Overlays,
         Group::Clipboard,
         Group::Scrollback,
         Group::Serial,
     ];
 
+    /// Where the map's two columns divide: after the panes, because tabs and
+    /// panes together are about as tall as everything else and the card is one
+    /// scroll area — an 18/13 split wastes half of the shorter column.
+    pub const COLUMNS: usize = 2;
+
     pub fn title(self) -> &'static str {
         match self {
-            Self::Tabs => "tabs and panes",
+            Self::Tabs => "tabs",
+            Self::Panes => "panes",
             Self::Overlays => "overlays",
             Self::Clipboard => "clipboard",
             Self::Scrollback => "scrollback",
@@ -161,7 +206,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 22] = [
+pub const ALL: [Action; 31] = [
     Action::Palette,
     Action::Settings,
     Action::NewTab,
@@ -170,6 +215,15 @@ pub const ALL: [Action; 22] = [
     Action::PreviousTab,
     Action::SplitHorizontal,
     Action::SplitVertical,
+    Action::FocusLeft,
+    Action::FocusRight,
+    Action::FocusUp,
+    Action::FocusDown,
+    Action::ResizeLeft,
+    Action::ResizeRight,
+    Action::ResizeUp,
+    Action::ResizeDown,
+    Action::ZoomPane,
     Action::Copy,
     Action::Paste,
     Action::ScrollPageUp,
@@ -201,6 +255,19 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // ctrl+shift+\\ reports `|`, and `ctrl-shift-\\` would never match.
     ("split-horizontal", "ctrl-|"),
     ("split-vertical", "ctrl-_"),
+    // The arrows are the shell's (and readline's, and vim's) with ctrl and alt
+    // held; ctrl+alt is the one pair left that neither a line editor nor a
+    // full-screen program claims, and the keymap card is where they are found.
+    ("focus-left", "ctrl-alt-left"),
+    ("focus-right", "ctrl-alt-right"),
+    ("focus-up", "ctrl-alt-up"),
+    ("focus-down", "ctrl-alt-down"),
+    // The same arrows with shift added move the divider instead of the focus.
+    ("resize-left", "ctrl-alt-shift-left"),
+    ("resize-right", "ctrl-alt-shift-right"),
+    ("resize-up", "ctrl-alt-shift-up"),
+    ("resize-down", "ctrl-alt-shift-down"),
+    ("zoom-pane", "ctrl-alt-z"),
     ("copy", "ctrl-shift-c"),
     ("paste", "ctrl-shift-v"),
     ("scroll-page-up", "shift-pageup"),
@@ -729,6 +796,24 @@ mod tests {
             seen.push(sequence);
         }
         assert_eq!(seen.len(), ALL.len(), "every action has a default");
+    }
+
+    /// The map is two columns in one scroll area, so the halves have to be about
+    /// as tall as each other. The counts move whenever a group grows; this is
+    /// the test that says where the divider belongs when they do.
+    #[test]
+    fn the_two_columns_of_the_map_are_balanced() {
+        let rows = |groups: &[Group]| {
+            ALL.iter()
+                .filter(|action| groups.contains(&action.group()))
+                .count()
+        };
+        let left = rows(&Group::ALL[..Group::COLUMNS]);
+        let right = rows(&Group::ALL[Group::COLUMNS..]);
+        assert!(
+            left.abs_diff(right) <= 3,
+            "the columns are {left} and {right} rows tall"
+        );
     }
 
     #[test]

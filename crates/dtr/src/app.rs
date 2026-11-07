@@ -116,6 +116,13 @@ struct LinkMenuTarget {
 /// file has no wait, because there is nothing to spend but a read.
 const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
 
+/// How far either side of a divider still counts as a press on it, in points.
+///
+/// The gap is three points wide because it is a gap, not a handle; the pointer
+/// has to be able to find it without pixel-hunting, and the cursor changing to
+/// a resize arrow is what says it did.
+const DIVIDER_SLOP: f32 = 2.0;
+
 /// A preview that is waiting for the pointer to settle.
 struct PendingThumb {
     due: std::time::Instant,
@@ -585,6 +592,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         store: startup.store,
         log: startup.log,
         dragging: false,
+        divider: None,
         drag_moved: false,
         drag_origin: None,
         drag_multi: false,
@@ -986,6 +994,10 @@ struct Tab {
     layout: crate::layout::Layout,
     leaves: std::collections::BTreeMap<crate::layout::LeafId, Pane>,
     focus: crate::layout::LeafId,
+    /// The pane taking the whole tab, if one is. The layout is untouched — this
+    /// is a view of it, not an edit — so unzooming puts every pane back exactly
+    /// where it was, dividers and all.
+    zoom: Option<crate::layout::LeafId>,
     /// What the tab strip calls this tab: the focused pane's session label,
     /// kept up to date when the tab is drawn for the *active* tab, and frozen
     /// otherwise so a background session cannot rename itself under the eye.
@@ -1001,6 +1013,7 @@ impl Tab {
             layout: crate::layout::Layout::leaf(id),
             leaves,
             focus: id,
+            zoom: None,
         }
     }
 
@@ -1091,6 +1104,10 @@ struct App {
     log: Option<(PathBuf, crate::serial::LogFormat)>,
     look: Look,
     dragging: bool,
+    /// The divider the pointer pressed and has not let go of. A drag is
+    /// addressed by the split's path rather than by a borrow of the tree, so the
+    /// layout can be rewritten between two frames without the drag losing it.
+    divider: Option<crate::layout::Divider>,
     /// Whether the pointer moved to another cell while down: a press that never
     /// moved is a click, and a click copies nothing — unless it was a
     /// double-click, which is a word on purpose.
@@ -2033,6 +2050,7 @@ impl App {
                 .insert(id, Pane::Files(explorer));
             return;
         }
+        self.unzoom();
         let id = self.next_leaf;
         self.next_leaf += 1;
         let tab = &mut self.tabs[self.active];
@@ -2187,8 +2205,6 @@ impl App {
         ))
     }
 
-    /// The pointer went down at `at`. A press focuses the pane under it and
-    /// starts a selection anchor; the drag turns the anchor into a range.
     /// Put text on the system clipboard, by hand.
     ///
     /// egui's own path goes through `egui-winit`, which falls back to an
@@ -2265,7 +2281,35 @@ impl App {
             .send(crate::pane::Command::Paste(text.into_bytes()));
     }
 
+    /// The pointer went down at `at`. A press focuses the pane under it and
+    /// starts a selection anchor; the drag turns the anchor into a range.
+    ///
+    /// A press on a divider is neither: it grabs the border, and the drag moves
+    /// it. The program never hears about it — the gap is the window's, not a
+    /// cell — which is also why it cannot be a click on the pane beside it.
     fn pointer_down(&mut self, at: (f64, f64)) {
+        // A press always ends whatever drag was running, even one whose release
+        // never arrived — the pointer left the window, or a compositor ate the
+        // event — because a divider that follows the pointer afterwards is a
+        // layout nobody can stop editing.
+        self.divider = None;
+        if let Some(divider) = self.divider_at_point(at) {
+            self.dragging = false;
+            self.drag_moved = false;
+            // The hand and the preview belong to a cell, and the gap is not one.
+            self.hover_cell = None;
+            self.hover_link = None;
+            self.thumb_pending = None;
+            // A second press in the same place puts the divider back in the
+            // middle: a layout that was dragged into a corner is otherwise only
+            // recoverable by pixel-hunting it back.
+            if self.count_clicks(at) > 1 {
+                self.tabs[self.active].layout.set_ratio(&divider.path, 0.5);
+            }
+            self.divider = Some(divider);
+            self.repaint("divider pressed");
+            return;
+        }
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
         }
@@ -2321,6 +2365,13 @@ impl App {
 
     /// The pointer moved while down: move the selection's head with it.
     fn pointer_move(&mut self, at: (f64, f64)) {
+        // A divider drag comes before everything: the press that started it was
+        // not in a pane, so no program is following it and no selection began.
+        if let Some(divider) = self.divider.take() {
+            self.drag_divider(&divider, at);
+            self.divider = Some(divider);
+            return;
+        }
         // The program first: `?1003h` wants motion with nothing held and
         // `?1002h` only while a button is, which the encoder decides from
         // whether one is down — and it drops motion inside the same cell, so a
@@ -2351,6 +2402,14 @@ impl App {
     /// the drag ends, the text is there. A single-cell selection is a click,
     /// not a selection, and copying one blank cell is the "0 chars" bug again.
     fn pointer_up(&mut self) {
+        // Letting go of a divider ends the drag and copies nothing: there is no
+        // selection, because the press never landed on a cell.
+        if self.divider.take().is_some() {
+            self.dragging = false;
+            self.drag_moved = false;
+            self.drag_multi = false;
+            return;
+        }
         // A release the program is waiting for ends nothing on this side: the
         // gesture was never a selection, so there is nothing to copy.
         let button = self.mouse_button;
@@ -2571,6 +2630,42 @@ impl App {
                     crate::layout::Axis::Vertical,
                     Transport::Shell(crate::pty::Config::default()),
                 );
+                true
+            }
+            Action::FocusLeft => {
+                self.focus_direction(crate::layout::Direction::Left);
+                true
+            }
+            Action::FocusRight => {
+                self.focus_direction(crate::layout::Direction::Right);
+                true
+            }
+            Action::FocusUp => {
+                self.focus_direction(crate::layout::Direction::Up);
+                true
+            }
+            Action::FocusDown => {
+                self.focus_direction(crate::layout::Direction::Down);
+                true
+            }
+            Action::ResizeLeft => {
+                self.resize_pane(crate::layout::Direction::Left);
+                true
+            }
+            Action::ResizeRight => {
+                self.resize_pane(crate::layout::Direction::Right);
+                true
+            }
+            Action::ResizeUp => {
+                self.resize_pane(crate::layout::Direction::Up);
+                true
+            }
+            Action::ResizeDown => {
+                self.resize_pane(crate::layout::Direction::Down);
+                true
+            }
+            Action::ZoomPane => {
+                self.toggle_zoom();
                 true
             }
             Action::Copy => {
@@ -2960,6 +3055,7 @@ impl App {
     /// Close the focused pane; when it is the last pane in its tab, close the
     /// tab; when it is the last tab, close the window.
     fn close_active(&mut self) {
+        self.unzoom();
         let tab = &mut self.tabs[self.active];
         if tab.leaves.len() > 1 && tab.layout.remove(tab.focus) {
             let gone = tab.focus;
@@ -3004,6 +3100,7 @@ impl App {
             }
         };
 
+        self.unzoom();
         let id = self.next_leaf;
         self.next_leaf += 1;
         let tab = &mut self.tabs[self.active];
@@ -3033,6 +3130,120 @@ impl App {
             }),
         );
         tab.focus = id;
+    }
+
+    /// Move the keyboard to the pane in that direction.
+    ///
+    /// A zoomed tab has one visible pane, so the arrows do nothing there: focus
+    /// on a pane nobody can see would take the keyboard out of the one that is
+    /// on screen, and the person typing would see nothing happen.
+    fn focus_direction(&mut self, direction: crate::layout::Direction) {
+        let (screen, scale) = match self.gpu.as_ref() {
+            Some(gpu) => (
+                (gpu.config.width as f32, gpu.config.height as f32),
+                gpu.scale(),
+            ),
+            None => return,
+        };
+        let area = self.pane_area(screen, scale);
+        let tab = &mut self.tabs[self.active];
+        if tab.zoom.is_some() {
+            return;
+        }
+        let Some(next) =
+            tab.layout
+                .neighbour(area, crate::ui::SPLIT_GAP * scale, tab.focus, direction)
+        else {
+            return;
+        };
+        if next == tab.focus {
+            return;
+        }
+        tab.focus = next;
+        tracing::debug!(pane = next, ?direction, "pane focus");
+        self.repaint("pane focus");
+    }
+
+    /// Move a divider by one cell, for a keyboard that has no pointer.
+    ///
+    /// The divider is the one bordering the focused pane on the side pressed —
+    /// or the far one when that edge is the window's, because a key that does
+    /// nothing is indistinguishable from a key that is broken. A cell rather
+    /// than a fraction: the step is the same size at every window size and font,
+    /// which is also what `resize-pane` in a mux means.
+    fn resize_pane(&mut self, direction: crate::layout::Direction) {
+        let (screen, scale, metrics) = match self.gpu.as_ref() {
+            Some(gpu) => (
+                (gpu.config.width as f32, gpu.config.height as f32),
+                gpu.scale(),
+                gpu.metrics(),
+            ),
+            None => return,
+        };
+        if self.tabs[self.active].zoom.is_some() {
+            return;
+        }
+        let area = self.pane_area(screen, scale);
+        let gap = crate::ui::SPLIT_GAP * scale;
+        let tab = &mut self.tabs[self.active];
+        let focus = tab.focus;
+        let Some(divider) = tab
+            .layout
+            .divider_toward(area, gap, focus, direction)
+            .or_else(|| {
+                tab.layout
+                    .divider_toward(area, gap, focus, direction.opposite())
+            })
+        else {
+            return;
+        };
+        let step = match divider.axis {
+            crate::layout::Axis::Horizontal => {
+                metrics.cell_width / (divider.area.width - gap).max(1.0)
+            }
+            crate::layout::Axis::Vertical => {
+                metrics.cell_height / (divider.area.height - gap).max(1.0)
+            }
+        };
+        let Some(current) = tab.layout.ratio(&divider.path) else {
+            return;
+        };
+        // A bigger ratio is a divider further right or down, wherever the pane
+        // sits: the ratio is the first child's share, not the pane's.
+        let delta = match direction {
+            crate::layout::Direction::Right | crate::layout::Direction::Down => step,
+            crate::layout::Direction::Left | crate::layout::Direction::Up => -step,
+        };
+        if tab.layout.set_ratio(&divider.path, current + delta) {
+            self.repaint("pane resized");
+        }
+    }
+
+    /// Give the focused pane the whole tab, or put the layout back.
+    ///
+    /// Nothing is rewritten: the tree keeps its dividers, so zooming out is
+    /// exact rather than a reconstruction. A tab with one pane has nothing to
+    /// zoom out of and is left alone.
+    fn toggle_zoom(&mut self) {
+        let tab = &mut self.tabs[self.active];
+        if tab.leaves.len() < 2 {
+            return;
+        }
+        tab.zoom = match tab.zoom {
+            Some(id) if id == tab.focus => None,
+            _ => Some(tab.focus),
+        };
+        tracing::debug!(pane = tab.focus, zoomed = tab.zoom.is_some(), "pane zoom");
+        self.repaint("pane zoom");
+    }
+
+    /// Put the layout back before adding or removing a pane.
+    ///
+    /// A zoom hides every pane but one, so a split or a close made while zoomed
+    /// would happen off screen — the new pane would be invisible and the closed
+    /// one would still be the only thing shown.
+    fn unzoom(&mut self) {
+        self.tabs[self.active].zoom = None;
     }
 
     /// Split the focused pane and put a file manager in the new half. Side by
@@ -3162,6 +3373,7 @@ impl App {
 
     /// Open a file pane over another machine, beside the terminal that is on it.
     fn split_files_remote(&mut self, alias: &str) {
+        self.unzoom();
         let id = self.next_leaf;
         self.next_leaf += 1;
         let tab = &mut self.tabs[self.active];
@@ -3177,6 +3389,7 @@ impl App {
     }
 
     fn split_files(&mut self, path: Option<PathBuf>) {
+        self.unzoom();
         let id = self.next_leaf;
         self.next_leaf += 1;
         let tab = &mut self.tabs[self.active];
@@ -3225,23 +3438,9 @@ impl App {
         screen: (f32, f32),
         scale: f32,
     ) -> Vec<(crate::layout::LeafId, crate::render::PaneView<'a>)> {
-        let status_height = if self.status_visible() {
-            (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale
-        } else {
-            0.0
-        };
-        // The tab strip takes the top, and only when there is more than one tab
-        // to show: a lone tab is a title nobody needs.
-        let tabs_height = self.top_inset(scale);
-        let area = crate::layout::Rect::new(
-            0.0,
-            tabs_height,
-            screen.0,
-            (screen.1 - status_height - tabs_height).max(0.0),
-        );
-
+        let area = self.pane_area(screen, scale);
         tab.layout
-            .rects(area, crate::ui::SPLIT_GAP * scale)
+            .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom)
             .into_iter()
             .map(|(id, rect)| {
                 let _ = metrics;
@@ -3314,21 +3513,30 @@ impl App {
         (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
     }
 
-    fn fit_panes(&mut self, metrics: crate::render::Metrics, screen: (f32, f32), scale: f32) {
-        if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
-            return;
-        }
+    /// The rectangle panes live in: below the strip, above the status bar.
+    ///
+    /// One function because three things draw or size against it — the grid
+    /// pass, the pty's resize and the divider the pointer grabs — and two of
+    /// them disagreeing is a pane whose text is not where its rectangle is.
+    fn pane_area(&self, screen: (f32, f32), scale: f32) -> crate::layout::Rect {
         let inset = self.top_inset(scale);
         let status = if self.status_visible() {
             (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * scale
         } else {
             0.0
         };
+        crate::layout::Rect::new(0.0, inset, screen.0, (screen.1 - status - inset).max(0.0))
+    }
+
+    fn fit_panes(&mut self, metrics: crate::render::Metrics, screen: (f32, f32), scale: f32) {
+        if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
+            return;
+        }
+        let area = self.pane_area(screen, scale);
         let tab = &mut self.tabs[self.active];
-        let rects = tab.layout.rects(
-            crate::layout::Rect::new(0.0, inset, screen.0, (screen.1 - status - inset).max(0.0)),
-            crate::ui::SPLIT_GAP * scale,
-        );
+        let rects = tab
+            .layout
+            .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom);
         for (id, rect) in rects {
             let Some(session) = tab.leaves.get_mut(&id).and_then(Pane::terminal_mut) else {
                 continue;
@@ -3357,6 +3565,57 @@ impl App {
             .into_iter()
             .find(|(_, pane)| pane.rect.contains(x as f32, y as f32))
             .map(|(id, _)| id)
+    }
+
+    /// The divider under a point, if the point is on one.
+    ///
+    /// A zoomed tab has no dividers to grab: the layout is still there, but the
+    /// only pane on screen owns the whole window, so a press in the middle of it
+    /// must reach the program rather than move a border nobody can see.
+    fn divider_at_point(&self, at: (f64, f64)) -> Option<crate::layout::Divider> {
+        let gpu = self.gpu.as_ref()?;
+        let tab = &self.tabs[self.active];
+        if tab.zoom.is_some() {
+            return None;
+        }
+        let scale = gpu.scale();
+        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        tab.layout.divider_at(
+            self.pane_area(screen, scale),
+            crate::ui::SPLIT_GAP * scale,
+            at.0 as f32,
+            at.1 as f32,
+            DIVIDER_SLOP * scale,
+        )
+    }
+
+    /// Put the divider where the pointer is.
+    ///
+    /// The position is turned into the split's ratio rather than into an offset,
+    /// so a drag that leaves the window, comes back, or runs past the edge keeps
+    /// meaning the same thing — the clamp is the tree's, and the pointer's
+    /// distance from the start does not accumulate error.
+    fn drag_divider(&mut self, divider: &crate::layout::Divider, at: (f64, f64)) {
+        let gap = crate::ui::SPLIT_GAP * self.scale();
+        let (along, start, span) = match divider.axis {
+            crate::layout::Axis::Horizontal => (
+                at.0 as f32,
+                divider.area.x,
+                (divider.area.width - gap).max(1.0),
+            ),
+            crate::layout::Axis::Vertical => (
+                at.1 as f32,
+                divider.area.y,
+                (divider.area.height - gap).max(1.0),
+            ),
+        };
+        let ratio = (along - start) / span;
+        if self.tabs[self.active]
+            .layout
+            .set_ratio(&divider.path, ratio)
+        {
+            self.repaint("divider dragged");
+        }
     }
 
     /// Which cell is under a physical pixel position, if any.
@@ -3740,27 +3999,33 @@ impl ApplicationHandler<UserEvent> for App {
         if self.scan_due <= std::time::Instant::now() {
             self.request_scan();
         }
-        // `--drag`: press, move, release — the three steps a person's hand
-        // makes, so the copy-on-selection path runs without a mouse.
-        if let Some((x1, y1, x2, y2)) = self.drag_script.take() {
-            self.pointer_down((x1, y1));
-            self.pointer_move((x2, y2));
-            self.pointer_up();
-            self.repaint("scripted drag");
-        }
-        // `--click`: hover first, then press and release on the next wake. A
-        // hand hovers before it clicks, and the link under the pointer only
-        // exists once the pane has answered, which is one frame later.
-        if let Some((at, hovered)) = self.click_script.take() {
-            self.cursor_position = Some(at);
-            if hovered {
-                self.pointer_down(at);
+        // Scripted pointer gestures run after the scripted keys, because a
+        // gesture is usually about what the keys just built: a drag on the
+        // divider of a split that has not happened yet grabs nothing, and a
+        // click lands on whatever was there before.
+        if self.script.is_empty() {
+            // `--drag`: press, move, release — the three steps a person's hand
+            // makes, so the copy-on-selection path runs without a mouse.
+            if let Some((x1, y1, x2, y2)) = self.drag_script.take() {
+                self.pointer_down((x1, y1));
+                self.pointer_move((x2, y2));
                 self.pointer_up();
-                self.repaint("scripted click");
-            } else {
-                self.hover(at);
-                self.click_script = Some((at, true));
-                self.repaint("scripted click: hover");
+                self.repaint("scripted drag");
+            }
+            // `--click`: hover first, then press and release on the next wake. A
+            // hand hovers before it clicks, and the link under the pointer only
+            // exists once the pane has answered, which is one frame later.
+            if let Some((at, hovered)) = self.click_script.take() {
+                self.cursor_position = Some(at);
+                if hovered {
+                    self.pointer_down(at);
+                    self.pointer_up();
+                    self.repaint("scripted click");
+                } else {
+                    self.hover(at);
+                    self.click_script = Some((at, true));
+                    self.repaint("scripted click: hover");
+                }
             }
         }
 
@@ -4011,7 +4276,12 @@ impl ApplicationHandler<UserEvent> for App {
                     && self.serial_dialog.is_none()
                 {
                     self.pointer_move((position.x, position.y));
-                    self.hover((position.x, position.y));
+                    // A divider drag is not a hover: the pointer is over a gap,
+                    // and asking the pane about a cell that is not under it
+                    // lights up a link nobody is pointing at.
+                    if self.divider.is_none() {
+                        self.hover((position.x, position.y));
+                    }
                 }
             }
             // Leaving the window is not a move to another cell, so without this the
@@ -4163,13 +4433,31 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                     }
-                    // A pointing hand is the whole affordance: a link cell has no
-                    // underline to draw, and the cursor says "this is clickable"
-                    // everywhere else on the desktop too.
-                    let wanted = if self.hover_link.is_some() {
-                        winit::window::CursorIcon::Pointer
+                    // A pointing hand is the whole affordance for a link, and a
+                    // resize arrow the whole affordance for a divider: neither
+                    // has an underline or a handle to draw. While a divider is
+                    // being dragged the arrow stays put, because the pointer
+                    // running ahead of the split does not mean the drag ended.
+                    let resizing = if self.pager.is_open()
+                        || self.link_menu.is_open()
+                        || self.serial_dialog.is_some()
+                    {
+                        None
                     } else {
-                        winit::window::CursorIcon::Default
+                        let held = self.divider.as_ref().map(|divider| divider.axis);
+                        held.or_else(|| {
+                            self.cursor_position
+                                .and_then(|at| self.divider_at_point(at))
+                                .map(|divider| divider.axis)
+                        })
+                    };
+                    let wanted = match resizing {
+                        Some(crate::layout::Axis::Horizontal) => {
+                            winit::window::CursorIcon::ColResize
+                        }
+                        Some(crate::layout::Axis::Vertical) => winit::window::CursorIcon::RowResize,
+                        None if self.hover_link.is_some() => winit::window::CursorIcon::Pointer,
+                        None => winit::window::CursorIcon::Default,
                     };
                     if self.cursor_icon != Some(wanted) {
                         self.cursor_icon = Some(wanted);
@@ -4272,21 +4560,10 @@ impl ApplicationHandler<UserEvent> for App {
                         .collect();
                     // File panes have no cells: they are painted with egui over
                     // the rectangle the grid pass reserved for them.
-                    let (width, height) = (gpu.config.width as f32, gpu.config.height as f32);
-                    let status_height = if self.status_visible() {
-                        (crate::ui::STATUS_HEIGHT + crate::ui::GRID_GAP) * gpu.scale()
-                    } else {
-                        0.0
-                    };
-                    let area = crate::layout::Rect::new(
-                        0.0,
-                        self.top_inset(gpu.scale()),
-                        width,
-                        (height - status_height - self.top_inset(gpu.scale())).max(0.0),
-                    );
+                    let area = self.pane_area(screen, gpu.scale());
                     let file_panes: Vec<FilePaneView<'_>> = tab
                         .layout
-                        .rects(area, crate::ui::SPLIT_GAP * gpu.scale())
+                        .visible(area, crate::ui::SPLIT_GAP * gpu.scale(), tab.zoom)
                         .into_iter()
                         .filter_map(|(id, rect)| match tab.leaves.get(&id) {
                             Some(Pane::Files(explorer)) => Some(FilePaneView {

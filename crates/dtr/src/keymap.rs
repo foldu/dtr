@@ -21,14 +21,12 @@ use crate::keys::{Action, Group, Keymap};
 use crate::ui::Look;
 use dtr_widgets::{Skin, section};
 
-/// How wide the chord column is. Wide enough for `ctrl-shift-pageup`, the
-/// longest default, with room to spare — a chord that wraps is a chord nobody
-/// can read.
-const CHORD_WIDTH: f32 = 118.0;
-const WIDTH: f32 = 780.0;
-/// The card's height in the dtr style: its twenty-two rows, five headings, title
-/// and footer, rounded up. The native style scrolls inside it.
-const HEIGHT: f32 = 480.0;
+const WIDTH: f32 = 900.0;
+/// The card's height: every row, six headings, title and footer, which is
+/// taller than a 620-point window allows by 32 points. A window with less room
+/// scrolls the body, which is honest; a window with more does not grow the card,
+/// because a cheat sheet is scanned in one place, not followed around.
+const HEIGHT: f32 = 588.0;
 const POPUP_WIDTH: f32 = 260.0;
 
 /// The card's state: whether it is up, and whether a key is being waited for.
@@ -72,7 +70,8 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
     // Two columns, so the whole map is on one screen: a cheat sheet you have to
     // scroll is one you cannot glance at. The split follows `Group::ALL`, which
     // is the order a reader expects, rather than restating it here.
-    let columns: [&[Group]; 2] = [&Group::ALL[..3], &Group::ALL[3..]];
+    let columns: [&[Group]; 2] = [&Group::ALL[..Group::COLUMNS], &Group::ALL[Group::COLUMNS..]];
+
     let id = egui::Id::new("dtr-keymap");
     crate::ui::prime_area(ui.ctx(), id, egui::Order::Foreground, rect, true);
 
@@ -130,8 +129,31 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
                                         ui.add_space(style.gap * 3.0);
                                     }
                                     ui.vertical(|ui| {
-                                        ui.set_width(inner / 2.0 - style.gap * 2.0);
-                                        for group in groups.iter() {
+                                        // Room for the scroll bar, because a
+                                        // floating one paints over the last
+                                        // characters of the key names in the
+                                        // right-hand column — which is exactly
+                                        // the column the `[keys]` spellings are
+                                        // in. When the map fits, the reserve is
+                                        // a few points of margin.
+                                        let bar = ui.spacing().scroll.bar_width;
+                                        ui.set_width((inner - bar) / 2.0 - style.gap * 2.0);
+                                        // The columns do not hold chords of the
+                                        // same length — `ctrl-alt-shift-right`
+                                        // against `shift-pageup` — so each asks
+                                        // its own widest instead of sharing one
+                                        // guess that is cramped in one column and
+                                        // wasteful in the other.
+                                        let chord_width =
+                                            chord_width(ui, &skin, keymap, groups);
+                                        for (position, group) in groups.iter().enumerate() {
+                                            // The gap goes before each group but
+                                            // the first, not after each: a
+                                            // trailing gap is what makes the
+                                            // body one line taller than the card.
+                                            if position > 0 {
+                                                ui.add_space(style.gap * 1.5);
+                                            }
                                             section(ui, &skin, group.title());
                                             ui.add_space(style.gap);
                                             for action in crate::keys::ALL
@@ -144,7 +166,12 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
                                                     .as_ref()
                                                     .is_some_and(|(editing, _)| *editing == action);
                                                 let row = row(
-                                                    ui, &skin, keymap, action, editing,
+                                                    ui,
+                                                    &skin,
+                                                    keymap,
+                                                    action,
+                                                    editing,
+                                                    chord_width,
                                                 );
                                                 if editing {
                                                     anchor = Some(row.rect);
@@ -153,7 +180,6 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
                                                     event = Some(Event::Edit(action));
                                                 }
                                             }
-                                            ui.add_space(style.gap * 1.5);
                                         }
                                     });
                                 }
@@ -186,12 +212,46 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
     event
 }
 
+/// How wide one column's chord column has to be: the widest chord in the groups
+/// it holds, measured in the font the card draws it with.
+///
+/// Measured rather than a constant because the answer belongs to the bindings —
+/// a rebinding to a longer chord, or the native style's larger value font, moves
+/// it — and because a chord that runs into its label is a chord nobody can read.
+fn chord_width(ui: &Ui, skin: &Skin, keymap: &Keymap, groups: &[Group]) -> f32 {
+    let font = skin.style.value_font.clone();
+    let mut widest: f32 = 0.0;
+    for action in crate::keys::ALL
+        .iter()
+        .copied()
+        .filter(|action| groups.contains(&action.group()))
+    {
+        for chord in keymap.bound(action) {
+            let width = ui
+                .painter()
+                .layout_no_wrap(chord, font.clone(), skin.palette.text)
+                .size()
+                .x;
+            widest = widest.max(width);
+        }
+    }
+    // A gap, not a padding: the label starts where the chord ends plus a space.
+    widest + 14.0
+}
+
 /// One binding row: the chord, what it does, the `[keys]` name, and a target.
 ///
 /// It is a button, not a line of text, because rebinding has to start somewhere
 /// a person can find. The painter draws and the response decides; the node says
 /// `press a key` was the whole point.
-fn row(ui: &mut Ui, skin: &Skin, keymap: &Keymap, action: Action, editing: bool) -> Row {
+fn row(
+    ui: &mut Ui,
+    skin: &Skin,
+    keymap: &Keymap,
+    action: Action,
+    editing: bool,
+    chord_width: f32,
+) -> Row {
     let palette = skin.palette;
     let style = &skin.style;
     let chords = keymap.bound(action);
@@ -224,7 +284,7 @@ fn row(ui: &mut Ui, skin: &Skin, keymap: &Keymap, action: Action, editing: bool)
         },
     );
     ui.painter().text(
-        egui::pos2(rect.left() + CHORD_WIDTH, rect.center().y),
+        egui::pos2(rect.left() + chord_width, rect.center().y),
         Align2::LEFT_CENTER,
         action.label(),
         egui::FontId::new(style.label_font.size, style.label_font.family.clone()),

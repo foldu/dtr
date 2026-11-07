@@ -203,6 +203,22 @@ tag mirroring on.
   buffer**: a per-pane draw would rewrite it and the last pane would win, so
   `render::prepare` takes every visible pane at once, and cells outside a pane's rectangle
   are not emitted rather than scissored.
+- **A pane border is geometry, so the drag lives in `layout.rs`**: `divider_at` (with two
+  points of slop either side, because a three-point gap is not a target), `divider_toward`
+  (the nearest split at that edge of the focused pane), `set_ratio` (clamped to
+  `MIN_RATIO` once, in the tree, so a stored ratio and a dragged one cannot disagree),
+  `neighbour` (nearest with a *shared span*, so a pane that only meets a corner is not in
+  that direction) and `visible` (zoom) are pure functions with tests; `App` only turns a
+  pointer position into a call. **One `pane_area` for three consumers** — the grid pass,
+  the pty fit and the divider hit test — because two of them disagreeing puts the divider
+  where the picture is not, and `halves` is shared by `rects` and the drag for the same
+  reason. **A press on a gap is not a click**: it starts a drag, changes no focus, asks no
+  pane about a cell and never reaches the program; letting go copies nothing, and a second
+  press in the same place puts the divider back at half. **`ctrl-alt-arrow` moves focus,
+  the same chord with shift moves the divider one cell, `ctrl-alt-z` zooms** — a zoom is a
+  *view* of the tree rather than an edit, so unzooming restores every divider exactly, and
+  a split or a close unzooms first or the change happens off screen. `fit_panes` asks the
+  same `visible`, so a hidden pane is not resized behind the one on screen.
 - **`O` and `0` look identical in egui's default monospace**, so `OK` looks like `0K` in a
   screenshot; before touching the render path run
   `nix develop .#default --command bash -c 'cargo test -p dtr --bin dtr the_vt_core'` — if
@@ -690,7 +706,13 @@ tag mirroring on.
   cannot be taken — no modifier, already another action's, or the start of a longer
   binding — and the popup says which, because a refused key and a dead card look alike.
   The columns, rows and fonts come from the skin, so the native style gets a taller card
-  whose body scrolls inside the same 480 points.
+  whose body scrolls inside the same 588 points. **The chord column is measured, not a
+  constant**: each column asks the widest chord it holds, because `ctrl-alt-shift-right`
+  and `shift-pageup` are in different columns and one width that fits the first wastes a
+  third of the second. The scroll bar's width is reserved for the same reason — a
+  floating bar paints over the last characters of the `[keys]` names, which are the point
+  of that column — and `Group::COLUMNS` is the index the two columns divide at, with a
+  test that keeps the halves about as tall as each other.
 - **Icons are Lucide SVGs, fetched by a skill in this repository**:
   `.dsh/skills/lucide-icons` and `scripts/fetch.sh` pull
   `https://lucide.dev/api/icons/<name>` into `crates/dtr/assets/icons/<name>.svg`,
