@@ -36,6 +36,9 @@ pub enum Action {
     ModemRts,
     ModemBreak,
     Echo,
+    /// Show the keyboard map: every binding, grouped, for the person who has
+    /// just installed this and does not know ctrl-shift-p exists yet.
+    Keymap,
 }
 
 impl Action {
@@ -63,16 +66,102 @@ impl Action {
             Self::ModemRts => "modem-rts",
             Self::ModemBreak => "modem-break",
             Self::Echo => "echo",
+            Self::Keymap => "keymap",
         }
     }
 
     fn from_name(name: &str) -> Option<Self> {
         ALL.iter().copied().find(|action| action.name() == name)
     }
+
+    /// What the action does, in words a person who has just installed this can
+    /// read. The `[keys]` name is a key in a file; this is a sentence fragment.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Palette => "command palette",
+            Self::Settings => "settings",
+            Self::NewTab => "new tab",
+            Self::ClosePane => "close pane",
+            Self::NextTab => "next tab",
+            Self::PreviousTab => "previous tab",
+            Self::SplitHorizontal => "split sideways",
+            Self::SplitVertical => "split stacked",
+            Self::Copy => "copy selection",
+            Self::Paste => "paste",
+            Self::ScrollPageUp => "scroll a page up",
+            Self::ScrollPageDown => "scroll a page down",
+            Self::ScrollTop => "scroll to top",
+            Self::ScrollBottom => "scroll to bottom",
+            Self::PreviousPrompt => "previous prompt",
+            Self::NextPrompt => "next prompt",
+            Self::CaptureBlock => "capture last block",
+            Self::ModemDtr => "toggle DTR",
+            Self::ModemRts => "toggle RTS",
+            Self::ModemBreak => "send a break",
+            Self::Echo => "echo to the log",
+            Self::Keymap => "this keyboard map",
+        }
+    }
+
+    /// Which block of the map it belongs in. The order of the groups is
+    /// [`Group::ALL`], not the order here.
+    pub fn group(self) -> Group {
+        match self {
+            Self::NewTab
+            | Self::ClosePane
+            | Self::NextTab
+            | Self::PreviousTab
+            | Self::SplitHorizontal
+            | Self::SplitVertical => Group::Tabs,
+            Self::Palette | Self::Settings | Self::Keymap => Group::Overlays,
+            Self::Copy | Self::Paste => Group::Clipboard,
+            Self::ScrollPageUp
+            | Self::ScrollPageDown
+            | Self::ScrollTop
+            | Self::ScrollBottom
+            | Self::PreviousPrompt
+            | Self::NextPrompt
+            | Self::CaptureBlock => Group::Scrollback,
+            Self::ModemDtr | Self::ModemRts | Self::ModemBreak | Self::Echo => Group::Serial,
+        }
+    }
+}
+
+/// A block of the keyboard map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Tabs,
+    Overlays,
+    Clipboard,
+    Scrollback,
+    Serial,
+}
+
+impl Group {
+    /// The groups, in the order the map reads: what a window is made of, then
+    /// what opens over it, then what happens to text, then history, then the
+    /// cable.
+    pub const ALL: [Group; 5] = [
+        Group::Tabs,
+        Group::Overlays,
+        Group::Clipboard,
+        Group::Scrollback,
+        Group::Serial,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Tabs => "tabs and panes",
+            Self::Overlays => "overlays",
+            Self::Clipboard => "clipboard",
+            Self::Scrollback => "scrollback",
+            Self::Serial => "serial",
+        }
+    }
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 21] = [
+pub const ALL: [Action; 22] = [
     Action::Palette,
     Action::Settings,
     Action::NewTab,
@@ -94,6 +183,7 @@ pub const ALL: [Action; 21] = [
     Action::ModemRts,
     Action::ModemBreak,
     Action::Echo,
+    Action::Keymap,
 ];
 
 /// What the terminal does out of the box, as `(action, chords)`.
@@ -126,6 +216,10 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("modem-rts", "ctrl-shift-r"),
     ("modem-break", "ctrl-shift-b"),
     ("echo", "ctrl-shift-e"),
+    // `ctrl-?` rather than F1: a terminal's F1 is `ESC O P` and belongs to the
+    // program (Midnight Commander's help menu is the usual one), while ctrl+?
+    // is what applications have used for "keyboard shortcuts" for decades.
+    ("keymap", "ctrl-?"),
 ];
 
 /// What a chord means right now.
@@ -436,6 +530,18 @@ impl Keymap {
         }
     }
 
+    /// The chords an action answers to, as text, in the order the map holds
+    /// them. Empty when the config turned the action off — which the keyboard
+    /// map says out loud, because "the binding does nothing" and "there is no
+    /// binding" are the same silence at the keyboard.
+    pub fn bound(&self, action: Action) -> Vec<String> {
+        self.bindings
+            .iter()
+            .filter(|(_, bound)| *bound == action)
+            .map(|(sequence, _)| sequence.to_string())
+            .collect()
+    }
+
     /// Chords that more than one action claims.
     pub fn conflicts(&self) -> &[(Sequence, Action, Action)] {
         &self.conflicts
@@ -515,6 +621,34 @@ impl Keymap {
 mod tests {
     use super::*;
     use dtr_config::keys::parse_sequence;
+
+    /// `ctrl-?` has to match a real keyboard: pressing ctrl+shift+/ reports the
+    /// character `?` with shift held, while the binding is written without it.
+    /// The resolver retries a non-alphabetic character without its shift, which
+    /// is the only reason this chord works at all.
+    #[test]
+    fn ctrl_question_opens_the_keyboard_map() {
+        use dtr_config::keys::{Chord, Mods};
+        let keymap = Keymap::new(&BTreeMap::new());
+        let chord = parse_sequence("ctrl-?").expect("chord").chords[0];
+        assert_eq!(
+            keymap.resolve(&[], chord),
+            Matched::Action(Action::Keymap),
+            "the written chord"
+        );
+        let shifted = Chord {
+            mods: Mods {
+                shift: true,
+                ..chord.mods
+            },
+            key: chord.key,
+        };
+        assert_eq!(
+            keymap.resolve(&[], shifted),
+            Matched::Action(Action::Keymap),
+            "the chord a keyboard actually sends"
+        );
+    }
 
     #[test]
     fn the_defaults_parse_and_are_unique() {

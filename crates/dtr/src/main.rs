@@ -6,6 +6,7 @@ mod explorer;
 mod fonts;
 mod ime;
 mod input;
+mod keymap;
 mod keys;
 mod layout;
 mod linkmenu;
@@ -81,6 +82,10 @@ struct Args {
     /// Open the settings menu on start (also how it gets into screenshots)
     #[arg(long)]
     settings: bool,
+
+    /// Open the keyboard map on start: every binding, on one card
+    #[arg(long)]
+    keymap: bool,
 
     /// List the installed families that can be a terminal grid, then exit
     #[arg(long)]
@@ -723,6 +728,7 @@ fn main() -> anyhow::Result<()> {
             click: args.click.clone(),
             gpu: gpu.clone(),
             settings: args.settings,
+            keymap: args.keymap,
             serial_dialog: args.serial_dialog.as_deref().map(|port| {
                 crate::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())
             }),
@@ -765,6 +771,7 @@ fn main() -> anyhow::Result<()> {
         click: args.click.clone(),
         gpu,
         settings: args.settings,
+        keymap: args.keymap,
         serial_dialog: args
             .serial_dialog
             .as_deref()

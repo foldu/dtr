@@ -78,6 +78,8 @@ pub fn capture(
     settings: Option<&crate::settings::Settings>,
     // The serial connection sheet, when the preview flag asked for one.
     serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
+    // The keyboard map, when `--keymap` asked for it.
+    keymap: Option<&crate::keys::Keymap>,
     // A composition to draw above the caret, so the IME box can be reviewed in
     // the same picture the window draws (`--preedit`). The window itself gets
     // this from the platform; a headless run cannot.
@@ -249,6 +251,9 @@ pub fn capture(
         }
         if let Some(serial_dialog) = serial_dialog {
             serial_dialog.ui(ui, look);
+        }
+        if let Some(keymap) = keymap {
+            crate::keymap::ui(ui, look, keymap);
         }
         if let Some(preedit) = preedit {
             if let Some(pane) = panes.iter().find(|pane| pane.cursor) {

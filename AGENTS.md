@@ -649,7 +649,17 @@ tag mirroring on.
   must ignore key releases** — the release of the keystroke that opened it arrives while
   it is open, which made the settings menu flash and vanish — so overlays check
   `ElementState::Pressed` first. **`Ctrl+Shift+T` opens a tab** (`Ctrl+Tab` only cycles
-  ones that exist), and the palette footer is the one place bindings are written down.
+  ones that exist).
+- **A binding nobody can find is a binding nobody has**: `ctrl-?` opens the keyboard map
+  ([keymap.rs](crates/dtr/src/keymap.rs)), and `keys` in the palette opens it too, because
+  the chord itself is the thing a new person does not know. The card is built from the
+  live `keys::Keymap`, so it shows the rebindings `[keys]` in the config has applied and
+  says `unbound` where a binding was switched off — "does nothing" and "is not bound" are
+  the same silence at the keyboard. Each row also names the action as `[keys]` spells it
+  (`new-tab`, `split-horizontal`), because the card is where a person finds out what to
+  *write*, not only what to press. It reads as a reference: nothing on it is clickable
+  except the close cross, and its two columns, rows and fonts come from the skin, so the
+  native style gets a taller card whose body scrolls inside the same 480 points.
 - **Icons are Lucide SVGs, fetched by a skill in this repository**:
   `.dsh/skills/lucide-icons` and `scripts/fetch.sh` pull
   `https://lucide.dev/api/icons/<name>` into `crates/dtr/assets/icons/<name>.svg`,

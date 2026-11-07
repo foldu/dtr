@@ -118,6 +118,11 @@ const COMMANDS: &[Command] = &[
         argument: Argument::None,
     },
     Command {
+        name: "keys",
+        summary: "show the keyboard map",
+        argument: Argument::None,
+    },
+    Command {
         name: "quit",
         summary: "close the window",
         argument: Argument::None,

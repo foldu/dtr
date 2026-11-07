@@ -22,6 +22,9 @@ pub enum Action {
     Files(Option<String>),
     Demo,
     Quit,
+    /// Show the keyboard map: the palette's own answer for somebody who does not
+    /// know the chord yet.
+    Keys,
 }
 
 pub struct Palette {
@@ -286,7 +289,7 @@ impl Palette {
                 RichText::new(
                     "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
                          ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
-                         ctrl+, settings",
+                         ctrl+, settings    ctrl+? keys",
                 )
                 .font(egui::FontId::new(
                     style.label_font.size - 1.5,
@@ -332,6 +335,7 @@ fn action_for(line: &str) -> Option<Action> {
         "files" => Some(Action::Files((!rest.is_empty()).then(|| rest.to_owned()))),
         "demo" => Some(Action::Demo),
         "quit" => Some(Action::Quit),
+        "keys" => Some(Action::Keys),
         _ => None,
     }
 }

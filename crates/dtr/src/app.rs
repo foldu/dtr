@@ -282,6 +282,8 @@ pub struct Startup {
     pub scroll: i64,
     /// Open the settings menu on start (also how it gets into screenshots).
     pub settings: bool,
+    /// Open the keyboard map on start, the same way.
+    pub keymap: bool,
     /// The serial connection sheet to show over the session, for reviewing the
     /// chrome before the connect path uses it (`--serial-dialog`).
     pub serial_dialog: Option<crate::serial_dialog::SerialDialog>,
@@ -391,6 +393,9 @@ pub fn capture_headless(
         settings
     });
     let serial_dialog = startup.serial_dialog;
+    let keymap = startup
+        .keymap
+        .then(|| crate::keys::Keymap::new(&startup.config.keys));
     // The composition `--preedit` asked for, in the shape the window gives the
     // box: the same type, so both paths cannot disagree about the layout.
     let mut preedit = crate::ime::Preedit::default();
@@ -414,6 +419,7 @@ pub fn capture_headless(
         None,
         settings.as_ref(),
         serial_dialog.as_ref(),
+        keymap.as_ref(),
         Some(&preedit),
     )
 }
@@ -597,6 +603,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             }
             settings
         },
+        keymap_open: startup.keymap,
         serial_dialog: startup.serial_dialog,
         fonts_dirty: false,
         keymap: crate::keys::Keymap::new(&startup.config.keys),
@@ -1142,6 +1149,9 @@ struct App {
     held: Option<winit::keyboard::Key>,
     /// The settings menu, and the config it edits.
     settings: crate::settings::Settings,
+    /// The keyboard map: a reference card, not a form. Read-only, so it is a
+    /// flag rather than a struct with state.
+    keymap_open: bool,
     /// The serial connection sheet. `Some` while it is open; the connect path
     /// will put it here, and `--serial-dialog` is how the chrome is previewed.
     serial_dialog: Option<crate::serial_dialog::SerialDialog>,
@@ -1249,6 +1259,7 @@ impl App {
     fn terminal_owns_keys(&self) -> bool {
         !self.palette.open
             && !self.settings.open
+            && !self.keymap_open
             && !self.pager.is_open()
             && self.serial_dialog.is_none()
     }
@@ -1360,6 +1371,37 @@ impl App {
                 }
             }
             self.held = Some(stroke.key.clone());
+            return;
+        }
+
+        // The keyboard map owns the keyboard, because every key it does not
+        // need is a key it must not pass on: it is the answer to "what does
+        // this key do", and answering by doing it would be a puzzle.
+        if self.keymap_open {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            if !stroke.repeat && self.held.as_ref() == Some(&stroke.key) {
+                tracing::debug!(key = ?stroke.key, "ignoring a duplicate press");
+                return;
+            }
+            self.held = Some(stroke.key.clone());
+            let escape = matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+            );
+            let toggles =
+                crate::keys::chord_from_event(&stroke.key, stroke.mods).is_some_and(|chord| {
+                    matches!(
+                        self.keymap.resolve(&[], chord),
+                        crate::keys::Matched::Action(crate::keys::Action::Keymap)
+                    )
+                });
+            if escape || toggles {
+                self.keymap_open = false;
+                self.repaint("keymap closed");
+            }
             return;
         }
 
@@ -2321,6 +2363,11 @@ impl App {
             Action::Palette => {
                 self.palette.toggle();
                 self.repaint("palette");
+                true
+            }
+            Action::Keymap => {
+                self.keymap_open = !self.keymap_open;
+                self.repaint("keymap");
                 true
             }
             Action::Settings => {
@@ -3306,6 +3353,7 @@ impl App {
                 // reopens it when it drops instead of closing the tab.
                 self.open(Transport::Shell(crate::pty::Config::ssh(&host)));
             }
+            Action::Keys => self.keymap_open = true,
             Action::Quit => self.quit = true,
         }
     }
@@ -4159,6 +4207,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut link_menu = std::mem::take(&mut self.link_menu);
                     let mut menu_choice = None;
                     let mut close_window = false;
+                    let mut keymap_close = false;
                     let rendered = gpu.render(
                         &panes,
                         self.frames_drawn,
@@ -4179,6 +4228,9 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_ref()
                             .map(|(text, alpha)| (text.as_str(), *alpha)),
                         settings,
+                        self.keymap_open,
+                        &self.keymap,
+                        &mut keymap_close,
                         serial_dialog.as_ref(),
                         &mut serial_event,
                         &tabs,
@@ -4192,6 +4244,13 @@ impl ApplicationHandler<UserEvent> for App {
                         ime,
                         &mut close_window,
                     );
+                    // The keyboard map's cross. Its Escape is handled where the
+                    // keys are; a click has to come back from the frame, because
+                    // only the frame knows the card was drawn.
+                    if keymap_close {
+                        self.keymap_open = false;
+                        self.repaint("keymap closed");
+                    }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
                     if close_window {
@@ -4712,6 +4771,9 @@ impl Gpu {
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
         settings: Option<&crate::settings::Settings>,
+        keymap: bool,
+        keymap_bindings: &crate::keys::Keymap,
+        keymap_close: &mut bool,
         serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
         serial_event: &mut Option<crate::serial_dialog::Event>,
         tabs: &[String],
@@ -4908,6 +4970,18 @@ impl Gpu {
                 if let Some(change) = settings.ui(ui, look) {
                     *settings_change = Some(change);
                 }
+            }
+            // The keyboard map sits above the palette and the pager: it is the
+            // thing a person opens precisely because they do not know what is
+            // open behind it.
+            if keymap {
+                crate::ui::overlay(ui, "dtr-keymap", |ui| {
+                    if crate::keymap::ui(ui, look, keymap_bindings)
+                        == Some(crate::keymap::Event::Close)
+                    {
+                        *keymap_close = true;
+                    }
+                });
             }
             if palette_open {
                 crate::ui::overlay(ui, "dtr-palette", |ui| {
