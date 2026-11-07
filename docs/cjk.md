@@ -637,12 +637,13 @@ Segoe UI Symbol's glyph. That is the fallback policy doing what it is told, not 
 Windows behaviour, and the Nerd Font path is measured on the host (§5 M3).
 
 The display was later raised to **125 %** to close §7.4's open question, and the
-answer is that M7 is unaffected by the scale: at 125 % the window grows to
-1125 × 775 and the cell stays 9 × 17, so 啊 is still 14 × 14 at (+1,+1) and every
-choice above holds. What the scale *does* expose is the grid-size DPI bug —
-`docs/windows.md` §2.1 now has the measured table (100 × 34 pane at 100 %,
-125 × 43 at 125 %) — and that is a window question, not a glyph one: nothing is
-misplaced, the whole grid is drawn at the wrong size for the display.
+answer is that M7 is unaffected by the scale: the window grows to 1125 × 775 and
+the cell grows with it, so 啊 is still 14 × 14 at (+1,+1) in *its own* frame and
+every choice above holds. That run is also what found the grid-size DPI bug — at
+the time the cell stayed 9 × 17 while the window grew, so the pane had 125 columns
+where it should have had 100 — and the fix for it is `docs/windows.md` §2.1: the
+factor is applied in `Fonts::load`, so a relative measurement like this one is
+unchanged by it.
 
 ---
 
@@ -857,17 +858,19 @@ Unknown / not decided:
 
 ## 9. What is left
 
-Everything below is known, reproducible and *not* done. The first row is the one
-a person would notice first, and it is the only one with a measured table behind
-it.
+Everything below is known, reproducible and *not* done.
+
+The grid ignoring the display scale used to head this list and is now fixed —
+`Fonts::load` takes the factor, the cell, atlas key and every fallback scale with
+it, and the guest measures 102 × 34 cells at 125 % where the broken build had
+125 × 43 (`docs/windows.md` §2.1). What is left:
 
 | what | how it reads | where it starts |
 |---|---|---|
-| **The grid ignores the display scale.** `[font] size` is documented in points and used as physical pixels, so at 125 % the cell is still 9 × 17 and the pane gains 25 columns while the tab strip grows (`docs/windows.md` §2.1, measured in the guest). | text visibly smaller than the UI around it on any HiDPI display; more columns than the window should hold; cell clicks still land right, because the hit test divides by the same cell | `docs/windows.md` §2.4: `size_px = look.size * scale` into `Fonts::load`, rebuild on `ScaleFactorChanged`, `STATUS_HEIGHT` without its `* scale`, the screenshot path pinned to 1.0, and a `metrics_at(2.0) == 2 × metrics_at(1.0)` unit test |
 | **No per-cell shaper** (gap 9). A cell draws its first `char`, so `❤️` is `❤`, `VS15`/`VS16` do nothing, and a combining mark stacks on the base instead of being shaped with it. | an emoji that will not take its colour form; a decomposed dakuten landing in the previous cell | shape the cell's cluster (swash `shape`) before `constraint_for`; the atlas key becomes `(face, cluster hash, size, constraint, cells)` |
 | **Legacy computing, arcs and diagonals** still come from a font: `╭╮╯╰`, `╱╲╳`, and Ghostty's 1 413 + 633 lines of legacy block drawing. | a seam or a one-pixel overlap in a TUI that uses them — rare outside the structural ranges M6 draws | port `sprite/draw/arc.zig` and the legacy ranges into `crates/dtr/src/sprite.rs` |
 | **Nerd Fonts are unverified on Windows.** The guest has none installed, so `U+F015` answers *no face has this character* and the powerline arrow falls to Segoe UI Symbol. | on a Windows machine without a patched family, an icon column that is empty or monochrome | install one family in the guest (or point `[font] path` at a `.ttf`) and re-run `--font-report` |
-| **150 % and 200 % are arithmetic, not observation.** The guest offers only 100 % and 125 % at 1280 × 800 on `virtio-vga`. | the §2.2 status-bar table, which says a row disappears at 150 % and two at 200 % | a bigger `virtio-vga` mode or a second head, then the same two runs |
+| **150 % and 200 % have never been observed.** The guest offers only 100 % and 125 % at 1280 × 800 on `virtio-vga`, so the scaling fix is verified at 1× and 1.25× only. | an integer factor is the case where `ceil` costs the least; 1.5× is where a half-pixel cell would show | a bigger `virtio-vga` mode or a second head, then the same two runs |
 | **A wide glyph in the last fitting column** can emit an instance past the pane edge: one draw call for every pane, no scissor. | a Han character drawn over the neighbour pane or the status bar in a narrow pane | clip in the shader, or a scissor rectangle per pane; deliberately not done — the single draw call is the point |
 | **`→` and a few symbols still arrive from a random family** on a machine with no Nerd Font: `is_symbol` gives them two cells, but the face is whatever the walk found. | an arrow that is the wrong weight beside its neighbours | covered by the Nerd Font row; a curated symbol family in `fonts::FALLBACK` is the alternative |
 

@@ -706,7 +706,17 @@ impl Atlas {
 }
 
 impl GridRenderer {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, look: &Look) -> Self {
+    /// `scale` is the window's DPI factor: the grid's size is a *point* size and
+    /// the rasteriser works in physical pixels, so this is where one becomes the
+    /// other. It is stored rather than looked up per glyph, because the cell, the
+    /// atlas key and every fallback face's adjustment all have to agree with it,
+    /// and the only way to guarantee that is to have exactly one number.
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        look: &Look,
+        scale: f32,
+    ) -> Self {
         let atlases = [
             Atlas::new(device, "dtr glyph atlas", wgpu::TextureFormat::R8Unorm),
             Atlas::new(
@@ -854,7 +864,7 @@ impl GridRenderer {
             sampler,
             atlases,
             glyphs: HashMap::new(),
-            fonts: Fonts::load(look),
+            fonts: Fonts::load(look, scale),
             instances: Vec::new(),
             instance_buffer: None,
             instance_capacity: 0,
@@ -952,7 +962,9 @@ impl GridRenderer {
                 .push(Instance::solid([x, y, cell_w, cell_h], cell.bg, 1.0));
         }
 
-        // Then the glyphs.
+        // Then the glyphs. One size for the whole frame: the physical size the
+        // grid was loaded at, which is the point size times the display's scale.
+        let size = self.fonts.size;
         for (index, cell) in frame.cells.iter().enumerate() {
             // A concealed cell keeps its characters and loses its ink: xterm
             // and Ghostty skip the glyph and still draw the background, which
@@ -974,7 +986,7 @@ impl GridRenderer {
             // `constraint_width` answers it from the neighbours.
             let cells = constraint_width(frame, index);
             for ch in cell.text.chars() {
-                let Some(glyph) = self.glyph(device, queue, ch, style, look.size, cells) else {
+                let Some(glyph) = self.glyph(device, queue, ch, style, size, cells) else {
                     continue;
                 };
                 self.instances.push(Instance {
@@ -1514,11 +1526,18 @@ struct Fonts {
 }
 
 impl Fonts {
-    fn load(look: &Look) -> Self {
+    /// `scale` is the window's DPI factor; `look.size` is a point size.
+    ///
+    /// Everything below is in physical pixels from here on, including
+    /// `Metrics`, `Loaded::adjust` and the atlas key. That is the whole fix for
+    /// "the grid ignores the display": the number was already the right number,
+    /// it was just a point being used as a pixel.
+    fn load(look: &Look, scale: f32) -> Self {
         let (faces, grid_name) = load_faces(look);
+        let size = look.size * scale;
 
         let mut context = swash::scale::ScaleContext::new();
-        let mut grid_ic = look.size;
+        let mut grid_ic = size;
         let metrics = {
             let font = swash::FontRef::from_index(
                 &faces[Face::Regular as usize].bytes,
@@ -1527,18 +1546,18 @@ impl Fonts {
             match font {
                 Some(font) => {
                     let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
-                    let scale = |value: f32| value * look.size / units;
-                    let ascent = scale(font.metrics(&[]).ascent);
-                    let advance = scale(
-                        font.glyph_metrics(&[])
-                            .advance_width(font.charmap().map('M')),
-                    );
+                    // Font units to pixels, at the size this face is drawn.
+                    let px = |value: f32| value * size / units;
+                    let ascent = px(font.metrics(&[]).ascent);
+                    let advance = px(font
+                        .glyph_metrics(&[])
+                        .advance_width(font.charmap().map('M')));
                     // swash reports descent as a positive distance *below* the
                     // baseline (unlike FreeType, which gives it negative), so
                     // negating it here shrinks the cell and the lines collapse
                     // into each other.
-                    let descent = scale(font.metrics(&[]).descent);
-                    let line_gap = scale(font.metrics(&[]).leading);
+                    let descent = px(font.metrics(&[]).descent);
+                    let line_gap = px(font.metrics(&[]).leading);
                     // Whole-pixel cells: a fractional advance puts every glyph
                     // on a half-pixel and the whole screen looks out of focus.
                     // Round *up*: rounding down makes the cell narrower than the
@@ -1558,7 +1577,7 @@ impl Fonts {
                     // that does not declare one gets the usual ratio of its
                     // ascent rather than an icon of zero height.
                     let cap_height = {
-                        let declared = scale(font.metrics(&[]).cap_height);
+                        let declared = px(font.metrics(&[]).cap_height);
                         if declared > 0.0 {
                             declared
                         } else {
@@ -1567,7 +1586,7 @@ impl Fonts {
                     };
                     // The size every fallback face is scaled against, and it
                     // has to be measured: see `ic_width`.
-                    grid_ic = ic_width(font, &mut context, look.size);
+                    grid_ic = ic_width(font, &mut context, size);
                     Metrics {
                         cell_width,
                         cell_height,
@@ -1581,11 +1600,11 @@ impl Fonts {
                         // underline thickness is `0.15 * ex_height` when the
                         // face does not declare one.
                         box_thickness: {
-                            let declared = scale(font.metrics(&[]).stroke_size);
+                            let declared = px(font.metrics(&[]).stroke_size);
                             if declared >= 1.0 {
                                 declared.round()
                             } else {
-                                let x = scale(font.metrics(&[]).x_height);
+                                let x = px(font.metrics(&[]).x_height);
                                 let x = if x > 0.0 { x } else { ascent * 0.52 };
                                 (0.15 * x).max(1.0).round()
                             }
@@ -1593,15 +1612,15 @@ impl Fonts {
                     }
                 }
                 None => Metrics {
-                    cell_width: look.size * 0.6,
-                    cell_height: look.size * 1.2,
-                    baseline: look.size,
-                    face_width: look.size * 0.6,
-                    face_height: look.size * 1.2,
+                    cell_width: size * 0.6,
+                    cell_height: size * 1.2,
+                    baseline: size,
+                    face_width: size * 0.6,
+                    face_height: size * 1.2,
                     face_top: 0.0,
-                    icon_height: look.size * 1.2,
-                    icon_height_single: look.size * 1.2,
-                    box_thickness: (look.size / 14.0).max(1.0),
+                    icon_height: size * 1.2,
+                    icon_height_single: size * 1.2,
+                    box_thickness: (size / 14.0).max(1.0),
                 },
             }
         };
@@ -1609,7 +1628,7 @@ impl Fonts {
         Self {
             faces: faces.into_iter().collect(),
             grid_name,
-            size: look.size,
+            size,
             context,
             metrics,
             resolved: HashMap::new(),
@@ -1971,10 +1990,13 @@ fn constraint_name(constraint: Constraint) -> &'static str {
 /// a second opinion: it is the frame the window would draw. `-v` says which
 /// family answered; this says what the answer came out as.
 pub fn font_report(look: &Look) {
-    let mut fonts = Fonts::load(look);
+    // 1.0: the report describes the glyph pipeline, which starts from points.
+    // The window multiplies by its scale before any of this runs, so a report
+    // taken at 1.0 is the same layout a 2x display would draw, twice the size.
+    let mut fonts = Fonts::load(look, 1.0);
     let metrics = fonts.metrics;
     println!(
-        "grid      {} at {}",
+        "grid      {} at {} pt",
         if fonts.grid_name.is_empty() {
             "(none)"
         } else {
@@ -2023,18 +2045,19 @@ pub fn font_report(look: &Look) {
         // not the report's.
         let wide = unicode_width::UnicodeWidthChar::width(ch) == Some(2);
         let offered = if wide || is_symbol(ch) { 2 } else { 1 };
-        let Some(laid) = lay_out(&mut fonts, face, glyph_id, ch, look.size, offered) else {
+        let size = fonts.size;
+        let Some(laid) = lay_out(&mut fonts, face, glyph_id, ch, size, offered) else {
             continue;
         };
         // The face's own ascent, to show why a fallback used to float: the
         // baseline below is the grid's, not this number.
         let ascent = fonts.font(face).map_or(0.0, |font| {
             let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
-            font.metrics(&[]).ascent * look.size / units
+            font.metrics(&[]).ascent * fonts.size / units
         });
         let advance = fonts.font(face).map_or(0.0, |font| {
             let units = f32::from(font.metrics(&[]).units_per_em).max(1.0);
-            font.glyph_metrics(&[]).advance_width(glyph_id) * look.size / units
+            font.glyph_metrics(&[]).advance_width(glyph_id) * fonts.size / units
         });
         let adjust = fonts.faces.get(face).map_or(1.0, |loaded| loaded.adjust);
         println!(
@@ -2281,12 +2304,13 @@ mod font_tests {
     /// here is describing the frame the window draws.
     fn placed(ch: char) -> Option<Placed> {
         let look = Look::default();
-        let mut fonts = Fonts::load(&look);
+        let mut fonts = Fonts::load(&look, 1.0);
         let face = fonts.face_for(Face::Regular, ch)?;
         let glyph_id = fonts.glyph_id(face, ch)?;
         // Through the renderer's own path — rasterised, constrained, placed —
         // so a passing test describes the frame the window draws.
-        let laid = lay_out(&mut fonts, face, glyph_id, ch, look.size, 1)?;
+        let size = fonts.size;
+        let laid = lay_out(&mut fonts, face, glyph_id, ch, size, 1)?;
         let rect = (laid.ink.x, laid.ink.y, laid.ink.width, laid.ink.height);
         Some(Placed {
             face,
@@ -2300,13 +2324,14 @@ mod font_tests {
     /// when this machine has no font for it.
     fn drawn(ch: char, cells: u8) -> Option<(Metrics, Ink, u8)> {
         let look = Look::default();
-        let mut fonts = Fonts::load(&look);
+        let mut fonts = Fonts::load(&look, 1.0);
         if let Some(laid) = laid_sprite(ch, &fonts.metrics) {
             return Some((fonts.metrics, laid.ink, laid.cells));
         }
         let face = fonts.face_for(Face::Regular, ch)?;
         let glyph_id = fonts.glyph_id(face, ch)?;
-        let laid = lay_out(&mut fonts, face, glyph_id, ch, look.size, cells)?;
+        let size = fonts.size;
+        let laid = lay_out(&mut fonts, face, glyph_id, ch, size, cells)?;
         Some((fonts.metrics, laid.ink, laid.cells))
     }
 
@@ -2314,10 +2339,11 @@ mod font_tests {
     /// has it.
     fn colour_of(ch: char) -> Option<bool> {
         let look = Look::default();
-        let mut fonts = Fonts::load(&look);
+        let mut fonts = Fonts::load(&look, 1.0);
         let face = fonts.face_for(Face::Regular, ch)?;
         let glyph_id = fonts.glyph_id(face, ch)?;
-        Some(lay_out(&mut fonts, face, glyph_id, ch, look.size, 2)?.colour)
+        let size = fonts.size;
+        Some(lay_out(&mut fonts, face, glyph_id, ch, size, 2)?.colour)
     }
 
     /// A one-row frame, one string per cell.
@@ -2404,7 +2430,7 @@ mod font_tests {
     fn a_graphics_element_is_drawn_by_the_sprite_face() {
         for ch in ['─', '│', '┌', '┼', '█', '▀', '░', '⠿'] {
             let m = Look::default();
-            let laid = laid_sprite(ch, &Fonts::load(&m).metrics)
+            let laid = laid_sprite(ch, &Fonts::load(&m, 1.0).metrics)
                 .unwrap_or_else(|| panic!("{ch} is not drawn as geometry"));
             assert_eq!(laid.cells, 1);
             assert_eq!(laid.constraint, Constraint::NONE);
@@ -2516,7 +2542,7 @@ mod font_tests {
     /// remembered rather than repeated for every cell.
     #[test]
     fn a_han_character_falls_back_to_a_face_that_has_it() {
-        let mut fonts = Fonts::load(&Look::default());
+        let mut fonts = Fonts::load(&Look::default(), 1.0);
         let Some(first) = fonts.face_for(Face::Regular, '啊') else {
             // No CJK font installed here; nothing to prove.
             return;
@@ -2531,7 +2557,7 @@ mod font_tests {
     /// fontconfig happens to report.
     #[test]
     fn a_preferred_fallback_family_is_chosen_over_an_arbitrary_one() {
-        let mut fonts = Fonts::load(&Look::default());
+        let mut fonts = Fonts::load(&Look::default(), 1.0);
         let Some(index) = fonts.face_for(Face::Regular, '啊') else {
             return; // no CJK font installed here
         };
@@ -2641,7 +2667,7 @@ mod font_tests {
     fn a_configured_fallback_family_wins_over_the_built_in_list() {
         let mut look = Look::default();
         look.fallback = vec!["Noto Sans CJK SC".to_owned()];
-        let mut fonts = Fonts::load(&look);
+        let mut fonts = Fonts::load(&look, 1.0);
         let Some(index) = fonts.face_for(Face::Regular, '啊') else {
             return; // no CJK installed here
         };
@@ -2661,7 +2687,7 @@ mod font_tests {
     #[test]
     fn a_cjk_fallback_is_drawn_at_its_own_size() {
         let look = Look::default();
-        let mut fonts = Fonts::load(&look);
+        let mut fonts = Fonts::load(&look, 1.0);
         let Some(index) = fonts.face_for(Face::Regular, '啊') else {
             return; // no CJK installed here
         };
@@ -2673,15 +2699,15 @@ mod font_tests {
         );
         let glyph_id = fonts.glyph_id(index, '啊').expect("the face has the glyph");
         let image = fonts
-            .rasterise(index, glyph_id, look.size)
+            .rasterise(index, glyph_id, fonts.size)
             .expect("a raster");
         // One em of ink, within a pixel: the face's own em is what a Han
         // character fills, and the grid's point size is that em.
         let height = image.placement.height as f32;
         assert!(
-            (height - look.size).abs() <= look.size * 0.1,
-            "the Han glyph is {height} px tall at {} pt",
-            look.size
+            (height - fonts.size).abs() <= fonts.size * 0.1,
+            "the Han glyph is {height} px tall at {} px",
+            fonts.size
         );
     }
 
@@ -2692,7 +2718,7 @@ mod font_tests {
     fn the_fallback_answer_is_the_same_twice() {
         let mut answers = Vec::new();
         for _ in 0..2 {
-            let mut fonts = Fonts::load(&Look::default());
+            let mut fonts = Fonts::load(&Look::default(), 1.0);
             answers.push((
                 fonts
                     .face_for(Face::Regular, '啊')
@@ -2748,8 +2774,50 @@ mod font_tests {
 
     #[test]
     fn latin_text_never_leaves_the_grid_face() {
-        let mut fonts = Fonts::load(&Look::default());
+        let mut fonts = Fonts::load(&Look::default(), 1.0);
         assert_eq!(fonts.face_for(Face::Regular, 'M'), Some(0));
         assert_eq!(fonts.faces.len(), 4, "no fallback for plain text");
+    }
+
+    /// A point is not a pixel, and the only place the two are allowed to meet is
+    /// `Fonts::load`. Doubling the factor must double the cell — to within the
+    /// rounding that makes cells whole pixels — or every HiDPI display draws the
+    /// grid at the same physical size as a 1x one while the chrome around it
+    /// grows (`docs/windows.md` §2.1).
+    ///
+    /// This is the assertion that would have failed every day since the grid got
+    /// a font size: the old code never passed a factor at all, so the two loads
+    /// were byte-identical.
+    #[test]
+    fn a_cell_scales_with_the_display() {
+        let look = Look::default();
+        let one = Fonts::load(&look, 1.0);
+        let two = Fonts::load(&look, 2.0);
+        assert_eq!(
+            two.size,
+            2.0 * one.size,
+            "the rasterised size did not scale"
+        );
+        // `ceil` to whole pixels: `ceil(2a)` is within one of `2 * ceil(a)`, and
+        // the baseline rounds twice, so the tolerance is a pixel either way.
+        for (name, a, b) in [
+            ("cell_width", one.metrics.cell_width, two.metrics.cell_width),
+            (
+                "cell_height",
+                one.metrics.cell_height,
+                two.metrics.cell_height,
+            ),
+            ("baseline", one.metrics.baseline, two.metrics.baseline),
+            (
+                "box_thickness",
+                one.metrics.box_thickness,
+                two.metrics.box_thickness,
+            ),
+        ] {
+            assert!(
+                (b - 2.0 * a).abs() <= 2.0,
+                "{name} is {a} px at 1x and {b} px at 2x"
+            );
+        }
     }
 }

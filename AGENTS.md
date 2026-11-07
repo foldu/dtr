@@ -226,11 +226,19 @@ over a 30 **point** strip), which is why it reproduced on the laptop and not in 
 captures here. `scale()` is `window.scale_factor()` now, and `-v` logs `strip
 geometry` once per scale. The units rule: egui works in points and applies the DPI
 factor itself; `top_inset` and grid rects are physical pixels. Layout constants are
-points, grid sizes are physical, and the scale is applied exactly once — with one
-known, unfixed exception: the **grid font size** is documented in points and used as
-physical pixels, so the cells never scale with the display while the chrome does
-(`docs/windows.md` §2). The status panel also still multiplies `STATUS_HEIGHT` by the
-scale in *points*, which is how it ends up taller than the space reserved for it.
+points, grid sizes are physical, and the scale is applied exactly once.
+
+**The grid's font size is a point size and the rasteriser wants pixels, so the
+multiply happens in `Fonts::load`.** That was the last exception to the rule above,
+and it was a visible one: at 125 % the cell stayed 9 × 17 while the tab strip grew,
+so the text was smaller than the UI and the pane gained 25 columns
+(`docs/windows.md` §2.1). `GridRenderer::new` and `Fonts::load` take the factor,
+`Metrics` and the atlas key are physical from there on, and everything downstream —
+the cell, the fallback `adjust`, the sprite canvas — inherits it for free. A scale
+change sets `fonts_dirty`, which rebuilds the grid and lets `fit_panes` re-fit the
+pty; nothing else may multiply by the scale. `STATUS_HEIGHT` is drawn in *points*
+(egui multiplies) over a reservation in pixels — multiplying it by the scale in
+points is how the bar grew as `scale²` and covered the bottom row.
 
 **A shell has no status bar; the strip is reserved even for one tab.** The bar exists
 for a serial port's counters and modem lines and is not drawn (nor reserved) when the

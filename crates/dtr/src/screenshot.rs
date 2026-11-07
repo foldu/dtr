@@ -30,10 +30,13 @@ pub fn cell_metrics(width: u32, height: u32) -> anyhow::Result<crate::render::Me
         trace: wgpu::Trace::Off,
     }))?;
     let _ = (width, height);
+    // Scale 1.0: the offscreen path renders at 1x on purpose, so a committed
+    // snapshot compares against the same raster on every machine.
     let grid = crate::render::GridRenderer::new(
         &device,
         wgpu::TextureFormat::Bgra8Unorm,
         &crate::ui::Look::default(),
+        1.0,
     );
     Ok(grid.metrics())
 }
@@ -152,7 +155,8 @@ pub fn capture(
 
     // The layout is decided before the egui pass because the file pane's
     // rectangle comes from the same split tree the grid uses.
-    let mut grid = crate::render::GridRenderer::new(&device, format, look);
+    // 1x: `--screenshot` is a renderer test, not a display one.
+    let mut grid = crate::render::GridRenderer::new(&device, format, look, 1.0);
     let status_height = crate::ui::STATUS_HEIGHT;
     let area = crate::layout::Rect::new(
         0.0,
