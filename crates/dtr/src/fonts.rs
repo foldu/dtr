@@ -152,6 +152,14 @@ pub const FALLBACK: &[&str] = &[
     "CaskaydiaCove Nerd Font Mono",
     "VictorMono Nerd Font Mono",
     "NerdFontsSymbolsOnly",
+    // Then the colour emoji. They have bitmaps and no outlines at all, which is
+    // why they were left out until the colour atlas existed: before it, the walk
+    // rejected them for drawing nothing, and correctly — an outline renderer
+    // asked Noto Color Emoji for `😀` and got an empty image.
+    "Noto Color Emoji",
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Twemoji Mozilla",
 ];
 
 /// Does this family's name say it carries the Nerd Font patches?

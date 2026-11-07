@@ -238,10 +238,10 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 | 3 | symbols are unconstrained and 1 cell | powerline/block/Braille overlap their neighbours and the row above | **done**, M3: `fit_cover1` + centring for icons, `stretch` for powerline and braille, the 2-cell rule |
 | 4 | fallback face is "first in fontconfig order" | icons from Courier New, emoji from Unifont | **done**, M4: configured list, then dtr's, then the platform's, then the walk — monospaced first |
 | 5 | no fallback size adjustment | CJK optically larger/smaller than Latin even when placed correctly | **done**, M4: scale by ideographic width at load (x-height was 8 % too small) |
-| 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | M5: second atlas, swash colour sources |
+| 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | **done**, M5: a second RGBA atlas and swash's colour sources |
 | 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | M6: a sprite face — **not** a stretch, which turns a 3 px line into a block |
 | 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
-| 9 | no per-cell shaper | combining marks stack on the base | M5-ish: shape a cell's cluster before placing |
+| 9 | no per-cell shaper | combining marks stack on the base; VS15/VS16 do nothing | not scheduled: shape a cell's cluster before placing |
 | 10 | cursor is one cell | a block cursor covers half a Han character | **done**, M2: `wide_tail`, 2-cell block |
 
 ---
@@ -460,7 +460,7 @@ Not done: emoji families are *not* in the built-in list. Putting Noto Color Emoj
 there before M5 would only make `😀` blank on purpose, so the list lands in M5
 where the glyphs do.
 
-### M5 — colour emoji
+### M5 — colour emoji — done
 
 * A second atlas in BGRA (or RGBA) beside the grayscale one, plus an instance
   flag and a shader branch (the shader already branches for solid quads).
@@ -477,6 +477,33 @@ Acceptance: `😀` is 2 cells wide, in colour, centred and inside its cell;
 `❤︎` with VS15 stays in the text face.
 Risk: a second texture binds into the one pipeline; `Gpu`'s drop order must
 keep carrying it (see AGENTS.md).
+
+*Landed:* a second atlas in `Rgba8Unorm` beside the `R8Unorm` mask, packed by the
+same shelf code, and an `f32` flag on the instance that picks which texture the
+fragment shader samples. A flag rather than a second pipeline or a second draw:
+one draw call for the screen is the point of this renderer, and a branch that is
+uniform across a glyph is free.
+
+`swash`'s source list is `[ColorOutline(0), ColorBitmap(BestFit), Outline]` —
+its own example — and `Image::content` says which one answered. Two consequences
+worth knowing:
+
+* **`has_ink` uses the same list**, which is what un-hides `😀`: Noto Color Emoji
+  maps every emoji and has no outlines, so under the outline-only renderer the
+  walk correctly saw a face that draws nothing. Now the bitmap is the ink.
+* A colour glyph's pixels are its own, so `prepare_pane` still passes the cell's
+  foreground but the shader ignores it. A letter drawn from the colour atlas
+  would stop being tinted, which is why `text_is_not_drawn_from_the_colour_atlas`
+  exists.
+
+Emoji families are now in `fonts::FALLBACK` (Noto Color Emoji first), because
+that is the M4 item that could not land until the glyphs did.
+
+Not done: presentation selectors. `❤️` is drawn as `❤` — the cell's text is two
+codepoints and the renderer draws each on its own, so VS16 and VS15 have no
+effect; `❤` is monochrome from the text face rather than colour from the emoji
+face. Fixing it needs a per-cell shaper (`docs/cjk.md` §4, gap 9), which is a
+different piece of work from a second atlas.
 
 ### M6 — graphics elements tile
 
@@ -575,6 +602,10 @@ the rasteriser-disagreement problem the UI snapshots already have). Landed:
   corner.
 * `a_configured_fallback_family_wins_over_the_built_in_list` — `[font] fallback`
   beats dtr's own list, even when its answer is proportional.
+* `an_emoji_is_drawn_in_colour_inside_its_cells` — `😀` comes back as RGBA, two
+  cells wide, inside them.
+* `text_is_not_drawn_from_the_colour_atlas` — and a letter does not, or it would
+  stop being tinted with the cell's foreground.
 * `a_cjk_fallback_is_drawn_at_its_own_size` — the adjustment is within 10 % of
   1.0 and the Han glyph is one em tall, which is what says the metric is
   measuring the right thing.

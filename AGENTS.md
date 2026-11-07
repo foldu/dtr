@@ -438,6 +438,17 @@ that cell is blank, the glyph to its left was not also a symbol, and it is not t
 last column of its row. It changes the *glyph's* room, never the grid — and without
 it every other icon in a row drifts right.
 
+**A colour glyph keeps its own pixels, and a mask is tinted.** There are two atlases —
+`R8Unorm` for masks and `Rgba8Unorm` for colour bitmaps — and an `f32` flag on the
+instance picks which the fragment shader samples. One draw call is the point of this
+renderer, so it is a flag and not a second pipeline. `swash`'s source list is
+`[ColorOutline(0), ColorBitmap(BestFit), Outline]` and `Image::content` says which one
+answered; `has_ink` uses the same list, which is why an outline-only renderer saw Noto
+Color Emoji as "draws nothing" and an emoji came out blank. A colour glyph must not be
+tinted with the cell's foreground, and a letter must never reach the colour atlas or it
+stops being tinted. Presentation selectors (VS15/VS16) do not work: each codepoint of a
+cell is drawn on its own, so `❤️` is `❤` (`docs/cjk.md` §4, gap 9).
+
 **egui's default fonts have no arrows.** `↑↓` and `←→` panicked the harness and had
 been drawing empty boxes in the window; hints are words now (`up/down`).
 

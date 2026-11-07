@@ -20,6 +20,9 @@ use crate::ui::Look;
 #[derive(Clone, Copy, Debug)]
 struct Glyph {
     uv: [f32; 4],
+    /// The glyph came from the colour atlas, so its pixels are its own and the
+    /// cell's foreground colour must not tint them.
+    colour: bool,
     /// Offset from the cell's left/top, in pixels.
     left: f32,
     top: f32,
@@ -35,6 +38,13 @@ struct Instance {
     rect: [f32; 4],
     uv: [f32; 4],
     colour: [f32; 4],
+    /// 1.0 samples the colour atlas and keeps its pixels; 0.0 samples the
+    /// grayscale mask and tints it with `colour`.
+    ///
+    /// A flag in the instance rather than a second pipeline or a second draw:
+    /// the whole point of this renderer is one draw call for the screen, and a
+    /// branch that is uniform across a whole glyph is free.
+    flags: f32,
 }
 
 /// A negative uv is the shader's "no texture, use the colour" flag. Sampling a
@@ -51,6 +61,7 @@ impl Instance {
             rect,
             uv: SOLID,
             colour,
+            flags: 0.0,
         }
     }
 }
@@ -402,11 +413,7 @@ fn has_ink(
     }
     let mut scaler = context.builder(font).size(size).hint(true).build();
     let mut image = swash::scale::image::Image::new();
-    swash::scale::Render::new(&[swash::scale::Source::Outline]).render_into(
-        &mut scaler,
-        id,
-        &mut image,
-    );
+    swash::scale::Render::new(&SOURCES).render_into(&mut scaler, id, &mut image);
     image.placement.width > 0 && image.placement.height > 0
 }
 
@@ -605,12 +612,10 @@ pub struct GridRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     #[allow(dead_code)]
     sampler: wgpu::Sampler,
-    atlas: wgpu::Texture,
-    atlas_size: u32,
-    /// Next free row in the atlas packing (simple shelf packing).
-    shelf_y: u32,
-    shelf_height: u32,
-    shelf_x: u32,
+    /// Grayscale masks and colour bitmaps, packed separately: a colour glyph is
+    /// four bytes a pixel and most glyphs are not, so mixing them would waste
+    /// three quarters of the atlas.
+    atlases: [Atlas; 2],
     /// Keyed by (face, glyph id, size×4, constraint, cells): the same character
     /// is a different bitmap in the bold face, a different size is a different
     /// raster, and the same icon is a different bitmap one cell wide than two.
@@ -635,10 +640,32 @@ pub struct PaneView<'a> {
 const ATLAS_SIZE: u32 = 1024;
 const WHITE_PX: u32 = 1;
 
-impl GridRenderer {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, look: &Look) -> Self {
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("dtr glyph atlas"),
+/// The sources a glyph is rasterised from, in order.
+///
+/// A layered colour outline (COLR), then a colour bitmap (`CBDT`/`sbix`), then
+/// the ordinary outline — swash's own example, and what makes an emoji arrive as
+/// RGBA instead of as the empty box an outline-only renderer produces for a
+/// bitmap-only font.
+const SOURCES: [swash::scale::Source; 3] = [
+    swash::scale::Source::ColorOutline(0),
+    swash::scale::Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
+    swash::scale::Source::Outline,
+];
+
+/// One shelf-packed texture.
+struct Atlas {
+    texture: wgpu::Texture,
+    size: u32,
+    /// Next free row (simple shelf packing).
+    shelf_y: u32,
+    shelf_height: u32,
+    shelf_x: u32,
+}
+
+impl Atlas {
+    fn new(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
             size: wgpu::Extent3d {
                 width: ATLAS_SIZE,
                 height: ATLAS_SIZE,
@@ -647,11 +674,36 @@ impl GridRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            texture,
+            size: ATLAS_SIZE,
+            shelf_y: 0,
+            shelf_height: 0,
+            shelf_x: WHITE_PX,
+        }
+    }
+}
+
+impl GridRenderer {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, look: &Look) -> Self {
+        let atlases = [
+            Atlas::new(device, "dtr glyph atlas", wgpu::TextureFormat::R8Unorm),
+            Atlas::new(
+                device,
+                "dtr colour glyph atlas",
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
+        ];
+        let view = atlases[0]
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let colour_view = atlases[1]
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("dtr glyph sampler"),
             // 1:1 texel-to-pixel sampling: linear filtering would smear every
@@ -696,6 +748,16 @@ impl GridRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -714,6 +776,10 @@ impl GridRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&colour_view),
                 },
             ],
         });
@@ -743,6 +809,7 @@ impl GridRenderer {
                         0 => Float32x4, // rect
                         1 => Float32x4, // uv
                         2 => Float32x4, // colour
+                        3 => Float32,   // flags: colour atlas?
                     ],
                 })],
             },
@@ -768,11 +835,7 @@ impl GridRenderer {
             bind_group,
             bind_group_layout,
             sampler,
-            atlas,
-            atlas_size: ATLAS_SIZE,
-            shelf_y: 0,
-            shelf_height: 0,
-            shelf_x: WHITE_PX,
+            atlases,
             glyphs: HashMap::new(),
             fonts: Fonts::load(look),
             instances: Vec::new(),
@@ -906,6 +969,7 @@ impl GridRenderer {
                     ],
                     uv: glyph.uv,
                     colour: rgb(cell.fg),
+                    flags: if glyph.colour { 1.0 } else { 0.0 },
                 });
             }
         }
@@ -1018,11 +1082,13 @@ impl GridRenderer {
         }
 
         let laid = lay_out(&mut self.fonts, face, glyph_id, ch, size, cells)?;
+        let colour = laid.colour;
         let image = &laid.image;
         let (width, height) = (image.placement.width, image.placement.height);
         if width == 0 || height == 0 {
             let glyph = Glyph {
                 uv: SOLID,
+                colour,
                 left: 0.0,
                 top: 0.0,
                 width: 0.0,
@@ -1032,26 +1098,27 @@ impl GridRenderer {
             return Some(glyph);
         }
 
+        let atlas = &mut self.atlases[usize::from(colour)];
         // Shelf packing: fill the current row, then start a new one.
-        if self.shelf_x + width > self.atlas_size {
-            self.shelf_y += self.shelf_height + 1;
-            self.shelf_x = 0;
-            self.shelf_height = 0;
+        if atlas.shelf_x + width > atlas.size {
+            atlas.shelf_y += atlas.shelf_height + 1;
+            atlas.shelf_x = 0;
+            atlas.shelf_height = 0;
         }
-        if self.shelf_y + height > self.atlas_size {
+        if atlas.shelf_y + height > atlas.size {
             // A full atlas would need a rebuild; at 1024² and one size this is
             // thousands of glyphs, so report and skip instead of panicking.
             tracing::warn!("glyph atlas is full");
             return None;
         }
-        let x = self.shelf_x;
-        let y = self.shelf_y;
-        self.shelf_x += width + 1;
-        self.shelf_height = self.shelf_height.max(height);
+        let x = atlas.shelf_x;
+        let y = atlas.shelf_y;
+        atlas.shelf_x += width + 1;
+        atlas.shelf_height = atlas.shelf_height.max(height);
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.atlas,
+                texture: &atlas.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -1059,7 +1126,8 @@ impl GridRenderer {
             &image.data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width),
+                // A colour bitmap is four bytes a pixel; the mask is one.
+                bytes_per_row: Some(width * if colour { 4 } else { 1 }),
                 rows_per_image: Some(height),
             },
             wgpu::Extent3d {
@@ -1070,7 +1138,7 @@ impl GridRenderer {
         );
         let _ = device;
 
-        let size_px = self.atlas_size as f32;
+        let size_px = atlas.size as f32;
         let glyph = Glyph {
             uv: [
                 x as f32 / size_px,
@@ -1078,6 +1146,7 @@ impl GridRenderer {
                 (x + width) as f32 / size_px,
                 (y + height) as f32 / size_px,
             ],
+            colour,
             left: laid.ink.x,
             top: laid.ink.y,
             width: laid.ink.width,
@@ -1097,6 +1166,8 @@ impl GridRenderer {
 /// the picture.
 struct Laid {
     image: swash::scale::image::Image,
+    /// The bitmap is RGBA and belongs in the colour atlas.
+    colour: bool,
     /// Where the bitmap is drawn, relative to the cell's top-left corner.
     ink: Ink,
     constraint: Constraint,
@@ -1148,6 +1219,7 @@ fn lay_out(
     };
     (ink.x, ink.y) = constraint.place(&metrics, ink, cells);
     Some(Laid {
+        colour: image.content == swash::scale::image::Content::Color,
         image,
         ink,
         constraint,
@@ -1244,17 +1316,22 @@ struct Screen {
 @group(0) @binding(0) var<uniform> screen: Screen;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
+// The colour glyphs: their pixels are their own, so the cell's foreground must
+// not tint them.
+@group(0) @binding(3) var colour_atlas: texture_2d<f32>;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) colour: vec4<f32>,
+    @location(2) flags: f32,
 };
 
 struct Instance {
     @location(0) rect: vec4<f32>,
     @location(1) uv: vec4<f32>,
     @location(2) colour: vec4<f32>,
+    @location(3) flags: f32,
 };
 
 @vertex
@@ -1275,11 +1352,19 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> VertexOut {
     out.position = vec4(clip, 0.0, 1.0);
     out.uv = mix(instance.uv.xy, instance.uv.zw, corner);
     out.colour = instance.colour;
+    out.flags = instance.flags;
     return out;
 }
 
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+    // A colour glyph carries its own pixels: an emoji is not a mask and must
+    // not be tinted with the cell's foreground, which is `colour` here and is
+    // the default text colour for every cell.
+    if (in.flags > 0.5) {
+        let sample = textureSample(colour_atlas, atlas_sampler, in.uv);
+        return vec4(sample.rgb, sample.a * in.colour.a);
+    }
     // Negative uv means a solid rectangle: backgrounds, the cursor, a
     // selection. Nothing to sample, so alpha comes from the instance.
     var alpha = 1.0;
@@ -1768,11 +1853,7 @@ impl Fonts {
         let context = &mut self.context;
         let mut scaler = context.builder(font).size(size).hint(true).build();
         let mut image = swash::scale::image::Image::new();
-        swash::scale::Render::new(&[swash::scale::Source::Outline]).render_into(
-            &mut scaler,
-            glyph_id,
-            &mut image,
-        );
+        swash::scale::Render::new(&SOURCES).render_into(&mut scaler, glyph_id, &mut image);
         Some(image)
     }
 }
@@ -1857,13 +1938,14 @@ pub fn font_report(look: &Look) {
         });
         let adjust = fonts.faces.get(face).map_or(1.0, |loaded| loaded.adjust);
         println!(
-            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  adj {:.2}  ink {:>3}x{:<3}  at ({:+.0},{:+.0}) {:.0}x{:.0}  {} cw{}",
+            "U+{:04X} {ch}  face {face}  {name:<26} asc {:>6.2}  adv {:>6.2}  adj {:.2}  ink {:>3}x{:<3}{}  at ({:+.0},{:+.0}) {:.0}x{:.0}  {} cw{}",
             ch as u32,
             ascent,
             advance,
             adjust,
             laid.image.placement.width,
             laid.image.placement.height,
+            if laid.colour { " c" } else { "  " },
             laid.ink.x,
             laid.ink.y,
             laid.ink.width,
@@ -2080,6 +2162,16 @@ mod font_tests {
         let glyph_id = fonts.glyph_id(face, ch)?;
         let laid = lay_out(&mut fonts, face, glyph_id, ch, look.size, cells)?;
         Some((fonts.metrics, laid.ink, laid.cells))
+    }
+
+    /// Whether a character is rasterised as colour, or `None` when no face here
+    /// has it.
+    fn colour_of(ch: char) -> Option<bool> {
+        let look = Look::default();
+        let mut fonts = Fonts::load(&look);
+        let face = fonts.face_for(Face::Regular, ch)?;
+        let glyph_id = fonts.glyph_id(face, ch)?;
+        Some(lay_out(&mut fonts, face, glyph_id, ch, look.size, 2)?.colour)
     }
 
     /// A one-row frame, one string per cell.
@@ -2445,6 +2537,47 @@ mod font_tests {
             ));
         }
         assert_eq!(answers[0], answers[1], "two loads disagreed");
+    }
+
+    /// An emoji arrives as RGBA from the colour atlas, two cells wide, inside
+    /// them. Before M5 it was an *empty* image: Noto Color Emoji has bitmaps and
+    /// no outlines, so the outline source found nothing to draw at all.
+    #[test]
+    fn an_emoji_is_drawn_in_colour_inside_its_cells() {
+        let Some(colour) = colour_of('\u{1f600}') else {
+            return; // no emoji font installed here
+        };
+        if !colour {
+            // A machine whose only emoji face is monochrome draws a monochrome
+            // emoji, which is correct and says nothing about the colour atlas.
+            eprintln!("no colour emoji font installed; nothing to check");
+            return;
+        }
+        let Some((m, ink, cells)) = drawn('\u{1f600}', 2) else {
+            return;
+        };
+        assert_eq!(cells, 2, "an emoji borrows the cell beside it");
+        assert!(ink.width > 2.0 && ink.height > 2.0, "the emoji has ink");
+        assert!(
+            ink.x >= -0.5 && ink.x + ink.width <= m.cell_width * 2.0 + 0.5,
+            "the emoji is {} px wide at x {:+.1}",
+            ink.width,
+            ink.x
+        );
+        assert!(
+            ink.y >= -0.5 && ink.y + ink.height <= m.cell_height + 0.5,
+            "the emoji is {} px tall at y {:+.1}",
+            ink.height,
+            ink.y
+        );
+    }
+
+    /// Text stays a mask. A letter drawn from the colour atlas would keep its
+    /// own pixels and stop being tinted with the cell's foreground, which is
+    /// the whole of what a font colour means in a terminal.
+    #[test]
+    fn text_is_not_drawn_from_the_colour_atlas() {
+        assert_eq!(colour_of('M'), Some(false), "a letter came back as colour");
     }
 
     #[test]
