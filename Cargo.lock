@@ -881,6 +881,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "redb",
+ "serialport",
  "tempfile",
 ]
 

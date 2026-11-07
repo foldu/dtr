@@ -620,13 +620,13 @@ impl Settings {
     /// The port record to store, when a serial port is focused and its settings
     /// were edited.
     pub fn serial_write(&self) -> Option<(String, dtr_store::SerialSettings)> {
-        Some((self.port.clone()?, self.serial?))
+        Some((self.port.clone()?, self.serial.clone()?))
     }
 
     /// The settings the menu would apply to a live port.
     #[cfg(test)]
     fn serial(&self) -> Option<dtr_store::SerialSettings> {
-        self.serial
+        self.serial.clone()
     }
 }
 
@@ -666,6 +666,7 @@ mod tests {
             Some(dtr_store::SerialSettings {
                 baud: 115_200,
                 cr_to_crlf: true,
+                ..dtr_store::SerialSettings::default()
             }),
         );
         settings.row = settings
@@ -704,6 +705,7 @@ mod tests {
         settings.serial = Some(dtr_store::SerialSettings {
             baud: 230_400,
             cr_to_crlf: false,
+            ..dtr_store::SerialSettings::default()
         });
         settings.draft.serial.auto_reconnect = false;
 

@@ -73,6 +73,8 @@ pub fn capture(
     files: Option<&crate::explorer::Explorer>,
     toast: Option<(&str, f32)>,
     settings: Option<&crate::settings::Settings>,
+    // The serial connection sheet, when the preview flag asked for one.
+    serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
     // A composition to draw above the caret, so the IME box can be reviewed in
     // the same picture the window draws (`--preedit`). The window itself gets
     // this from the platform; a headless run cannot.
@@ -240,6 +242,9 @@ pub fn capture(
         }
         if let Some(settings) = settings {
             settings.ui(ui, look);
+        }
+        if let Some(serial_dialog) = serial_dialog {
+            serial_dialog.ui(ui, look);
         }
         if let Some(preedit) = preedit {
             if let Some(pane) = panes.iter().find(|pane| pane.cursor) {

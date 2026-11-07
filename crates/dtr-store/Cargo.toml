@@ -10,6 +10,9 @@ publish.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 redb.workspace = true
+# The framing enums are `serialport`'s, not a copy of them: the store, the form
+# and the open call all speak one vocabulary.
+serialport.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -19,6 +19,7 @@ mod pty;
 mod render;
 mod screenshot;
 mod serial;
+mod serial_dialog;
 mod settings;
 mod sources;
 mod theme;
@@ -171,6 +172,12 @@ struct Args {
     #[arg(long)]
     palette: bool,
 
+    /// Open the serial connection sheet for PORT on start. The port is not
+    /// opened until the sheet is answered; this is also how it gets into
+    /// `--screenshot`.
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "/dev/ttyUSB0")]
+    serial_dialog: Option<String>,
+
     /// Open a file-browser pane next to the initial session, at PATH if given
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
     files: Option<String>,
@@ -262,18 +269,17 @@ fn resolve_serial(
     cli_imap: Option<&str>,
     remembered: Option<&dtr_store::SerialSettings>,
 ) -> anyhow::Result<dtr_store::SerialSettings> {
-    let default = dtr_store::SerialSettings::default();
-    Ok(dtr_store::SerialSettings {
-        baud: cli_baud
-            .or(remembered.map(|settings| settings.baud))
-            .unwrap_or(default.baud),
-        cr_to_crlf: match cli_imap {
-            Some(spec) => parse_imap(spec)?,
-            None => remembered
-                .map(|settings| settings.cr_to_crlf)
-                .unwrap_or(default.cr_to_crlf),
-        },
-    })
+    // Start from the whole remembered record: framing, signals and the profile
+    // name are facts about this device just as the rate is. The command line
+    // can override the two it has flags for; everything else survives.
+    let mut settings = remembered.cloned().unwrap_or_default();
+    if let Some(baud) = cli_baud {
+        settings.baud = baud;
+    }
+    if let Some(spec) = cli_imap {
+        settings.cr_to_crlf = parse_imap(spec)?;
+    }
+    Ok(settings)
 }
 
 #[cfg(test)]
@@ -284,10 +290,15 @@ mod serial_precedence {
     fn a_remembered_port_is_reopened_the_way_it_was_left() {
         let remembered = dtr_store::SerialSettings {
             baud: 9600,
+            parity: dtr_store::Parity::Even,
+            profile: Some("gps".to_owned()),
             cr_to_crlf: false,
+            ..dtr_store::SerialSettings::default()
         };
         let picked = resolve_serial(None, None, Some(&remembered)).unwrap();
         assert_eq!(picked.baud, 9600);
+        assert_eq!(picked.parity, dtr_store::Parity::Even);
+        assert_eq!(picked.profile.as_deref(), Some("gps"));
         assert!(!picked.cr_to_crlf);
     }
 
@@ -302,10 +313,17 @@ mod serial_precedence {
     fn the_command_line_beats_memory() {
         let remembered = dtr_store::SerialSettings {
             baud: 9600,
+            parity: dtr_store::Parity::Even,
             cr_to_crlf: false,
+            ..dtr_store::SerialSettings::default()
         };
         let picked = resolve_serial(Some(57_600), Some("none"), Some(&remembered)).unwrap();
         assert_eq!(picked.baud, 57_600);
+        assert_eq!(
+            picked.parity,
+            dtr_store::Parity::Even,
+            "the command line only overrides what it names"
+        );
         assert!(
             !picked.cr_to_crlf,
             "the command line asked for no translation"
@@ -545,7 +563,13 @@ fn main() -> anyhow::Result<()> {
         // the remembered rate is a fact about this device. The old order had the
         // config first, which made the remembered value unreachable: `baud` was
         // not optional, so it was always present and always won.
-        let settings = resolve_serial(args.baud, args.imap.as_deref(), remembered.as_ref())?;
+        let mut settings = resolve_serial(args.baud, args.imap.as_deref(), remembered.as_ref())?;
+        // The config file's `auto_reconnect` is the default for a port that
+        // has never been opened; a remembered port keeps the policy it was last
+        // connected with, the same way it keeps its framing.
+        if remembered.is_none() {
+            settings.auto_reconnect = config.serial.auto_reconnect;
+        }
 
         if let Some(store) = store.as_ref() {
             if let Err(err) = store.remember_serial(&port, &settings) {
@@ -554,12 +578,7 @@ fn main() -> anyhow::Result<()> {
             let _ = store.set_last_port(&port);
         }
 
-        Transport::Serial(serial::Config {
-            port,
-            baud: settings.baud,
-            cr_to_crlf: settings.cr_to_crlf,
-            auto_reconnect: config.serial.auto_reconnect,
-        })
+        Transport::Serial(serial::Config::from_settings(port, &settings))
     } else {
         Transport::Shell(pty::Config {
             program: args.shell.clone(),
@@ -663,6 +682,9 @@ fn main() -> anyhow::Result<()> {
             click: args.click.clone(),
             gpu: gpu.clone(),
             settings: args.settings,
+            serial_dialog: args.serial_dialog.as_deref().map(|port| {
+                crate::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())
+            }),
             config: config.clone(),
             config_path: config_path.clone(),
             preedit: args.preedit.clone(),
@@ -701,6 +723,10 @@ fn main() -> anyhow::Result<()> {
         click: args.click.clone(),
         gpu,
         settings: args.settings,
+        serial_dialog: args
+            .serial_dialog
+            .as_deref()
+            .map(|port| crate::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())),
         config,
         config_path,
         preedit: args.preedit.clone(),

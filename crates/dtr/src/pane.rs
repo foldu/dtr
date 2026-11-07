@@ -340,6 +340,12 @@ pub enum Command {
     /// keeps its scrollback and its place.
     SetSerial {
         baud: u32,
+        data_bits: dtr_store::DataBits,
+        parity: dtr_store::Parity,
+        stop_bits: dtr_store::StopBits,
+        flow_control: dtr_store::FlowControl,
+        dtr: bool,
+        rts: bool,
         cr_to_crlf: bool,
         auto_reconnect: bool,
     },
@@ -362,9 +368,10 @@ impl Transport {
     pub fn describe(&self) -> String {
         match self {
             Transport::Serial(config) => format!(
-                "{} {} 8N1{}",
+                "{} {} {}{}",
                 config.port,
                 config.baud,
+                config.line_code(),
                 if config.cr_to_crlf { " cr=crlf" } else { "" }
             ),
             Transport::Shell(config) => match (&config.remote, &config.program) {
@@ -1004,8 +1011,10 @@ async fn run(
             // it is still one object.
             modem = crate::modem::Modem::new(&stream);
             if modem.is_some() {
-                stats.set_dtr(true);
-                stats.set_rts(true);
+                // `open_at` applied the requested levels; the status strip
+                // should show what was asked for, not the open-time default.
+                stats.set_dtr(cfg.dtr);
+                stats.set_rts(cfg.rts);
             }
             let (read_half, write_half) = tokio::io::split(stream);
             sink = Some(Sink::Serial(write_half));
@@ -1625,17 +1634,61 @@ async fn run(
                     Command::Echo(on) => echo = on,
                     Command::SetSerial {
                         baud,
+                        data_bits,
+                        parity,
+                        stop_bits,
+                        flow_control,
+                        dtr,
+                        rts,
                         cr_to_crlf,
                         auto_reconnect,
                     } => {
                         if let Some((cfg, _)) = reconnect.as_mut() {
-                            let reconnect_needed =
-                                cfg.baud != baud || cfg.cr_to_crlf != cr_to_crlf;
+                            // A framing change is a different UART setup, so
+                            // the port has to be reopened; the line levels can
+                            // be moved on the open descriptor.
+                            let reconnect_needed = cfg.baud != baud
+                                || cfg.data_bits != data_bits
+                                || cfg.parity != parity
+                                || cfg.stop_bits != stop_bits
+                                || cfg.flow_control != flow_control
+                                || cfg.cr_to_crlf != cr_to_crlf;
+                            let levels_changed = cfg.dtr != dtr || cfg.rts != rts;
                             cfg.baud = baud;
+                            cfg.data_bits = data_bits;
+                            cfg.parity = parity;
+                            cfg.stop_bits = stop_bits;
+                            cfg.flow_control = flow_control;
+                            cfg.dtr = dtr;
+                            cfg.rts = rts;
                             cfg.cr_to_crlf = cr_to_crlf;
                             cfg.auto_reconnect = auto_reconnect;
+                            if levels_changed {
+                                if let Some(modem) = modem.as_mut() {
+                                    match modem.set_dtr(dtr) {
+                                        Ok(()) => stats.set_dtr(dtr),
+                                        Err(err) => {
+                                            tracing::warn!(%err, "could not set DTR live")
+                                        }
+                                    }
+                                    match modem.set_rts(rts) {
+                                        Ok(()) => stats.set_rts(rts),
+                                        Err(err) => {
+                                            tracing::warn!(%err, "could not set RTS live")
+                                        }
+                                    }
+                                }
+                            }
                             if reconnect_needed && source_alive {
-                                tracing::info!(baud, cr_to_crlf, "serial settings changed; reconnecting");
+                                tracing::info!(
+                                    baud,
+                                    data_bits = ?data_bits,
+                                    parity = ?parity,
+                                    stop_bits = ?stop_bits,
+                                    flow = ?flow_control,
+                                    cr_to_crlf,
+                                    "serial settings changed; reconnecting"
+                                );
                                 serial_stop.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }

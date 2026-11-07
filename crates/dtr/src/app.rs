@@ -279,6 +279,9 @@ pub struct Startup {
     pub scroll: i64,
     /// Open the settings menu on start (also how it gets into screenshots).
     pub settings: bool,
+    /// The serial connection sheet to show over the session, for reviewing the
+    /// chrome before the connect path uses it (`--serial-dialog`).
+    pub serial_dialog: Option<crate::serial_dialog::SerialDialog>,
     /// The config the menu edits, and where it came from.
     pub config: dtr_config::Config,
     pub config_path: PathBuf,
@@ -383,6 +386,7 @@ pub fn capture_headless(
         settings.show(&startup.config);
         settings
     });
+    let serial_dialog = startup.serial_dialog;
     // The composition `--preedit` asked for, in the shape the window gives the
     // box: the same type, so both paths cannot disagree about the layout.
     let mut preedit = crate::ime::Preedit::default();
@@ -405,6 +409,7 @@ pub fn capture_headless(
         files.as_ref(),
         None,
         settings.as_ref(),
+        serial_dialog.as_ref(),
         Some(&preedit),
     )
 }
@@ -586,6 +591,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             }
             settings
         },
+        serial_dialog: startup.serial_dialog,
         fonts_dirty: false,
         keymap: crate::keys::Keymap::new(&startup.config.keys),
         pending: Vec::new(),
@@ -1112,6 +1118,9 @@ struct App {
     held: Option<winit::keyboard::Key>,
     /// The settings menu, and the config it edits.
     settings: crate::settings::Settings,
+    /// The serial connection sheet. `Some` while it is open; the connect path
+    /// will put it here, and `--serial-dialog` is how the chrome is previewed.
+    serial_dialog: Option<crate::serial_dialog::SerialDialog>,
     config: dtr_config::Config,
     config_path: PathBuf,
     /// A copy note and when it was made. Shown briefly, because "did that
@@ -1214,7 +1223,10 @@ impl App {
     /// committed into the shell behind an open palette would type somewhere the
     /// person is not looking. A new modal belongs in both places.
     fn terminal_owns_keys(&self) -> bool {
-        !self.palette.open && !self.settings.open && !self.pager.is_open()
+        !self.palette.open
+            && !self.settings.open
+            && !self.pager.is_open()
+            && self.serial_dialog.is_none()
     }
 
     /// Handle one event from the platform's input method.
@@ -1288,6 +1300,44 @@ impl App {
         // can rewrite. `pending` holds the chords of a binding that is
         // not finished yet (`ctrl-k ctrl-s`).
         let pressed = stroke.state == winit::event::ElementState::Pressed;
+
+        // The sheet owns the keyboard while it is open. It is a form, so
+        // egui has already seen the text a field wants; what must not leak to
+        // the shell is everything else. Enter is its answer, Escape its no.
+        if self.serial_dialog.is_some() {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            let enter = matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter)
+            );
+            let escape = matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+            );
+            if escape {
+                self.serial_dialog = None;
+                self.repaint("serial dialog cancelled");
+            } else if enter {
+                if let Some(dialog) = self.serial_dialog.take() {
+                    // Enter is the primary action, but an unparseable rate is
+                    // not a rate: the sheet stays open rather than connecting
+                    // with the last one that happened to parse.
+                    match dialog.baud() {
+                        Some(baud) => {
+                            let mut settings = dialog.settings.clone();
+                            settings.baud = baud;
+                            self.connect_serial_sheet(dialog, settings);
+                        }
+                        None => self.serial_dialog = Some(dialog),
+                    }
+                }
+            }
+            self.held = Some(stroke.key.clone());
+            return;
+        }
 
         // The menu owns the keyboard while it is open. Releases only
         // clear the held key; duplicates are compositor noise.
@@ -2476,7 +2526,13 @@ impl App {
         // go to the store and straight to the open session; `auto_reconnect` is
         // the one serial setting that is a policy of the terminal, so it goes to
         // every session.
-        if let Some((port, record)) = self.settings.serial_write() {
+        if let Some((port, mut record)) = self.settings.serial_write() {
+            // The menu's auto_reconnect row is the global policy; if it moved,
+            // this port's record takes the new value too. A menu that only
+            // changed the rate leaves the port's own policy alone.
+            if serial_changed {
+                record.auto_reconnect = self.config.serial.auto_reconnect;
+            }
             if let Some(store) = self.store.as_ref() {
                 if let Err(err) = store.remember_serial(&port, &record) {
                     tracing::warn!(%port, %err, "could not remember the port settings");
@@ -2488,8 +2544,14 @@ impl App {
                         if session.port.as_deref() == Some(port.as_str()) {
                             session.pane.send(crate::pane::Command::SetSerial {
                                 baud: record.baud,
+                                data_bits: record.data_bits,
+                                parity: record.parity,
+                                stop_bits: record.stop_bits,
+                                flow_control: record.flow_control,
+                                dtr: record.dtr,
+                                rts: record.rts,
                                 cr_to_crlf: record.cr_to_crlf,
-                                auto_reconnect: self.config.serial.auto_reconnect,
+                                auto_reconnect: record.auto_reconnect,
                             });
                         }
                     }
@@ -2500,15 +2562,30 @@ impl App {
                 for pane in tab.leaves.values_mut() {
                     if let Pane::Terminal(session) = pane {
                         if let Some(port) = session.port.clone() {
-                            let record = self
+                            let mut record = self
                                 .store
                                 .as_ref()
                                 .and_then(|store| store.serial(&port).ok().flatten())
                                 .unwrap_or_default();
+                            // The config file's reconnect policy is the
+                            // terminal's, so a change there reaches every port
+                            // and is remembered as the new per-port default.
+                            record.auto_reconnect = self.config.serial.auto_reconnect;
+                            if let Some(store) = self.store.as_ref() {
+                                if let Err(err) = store.remember_serial(&port, &record) {
+                                    tracing::warn!(%port, %err, "could not remember the reconnect policy");
+                                }
+                            }
                             session.pane.send(crate::pane::Command::SetSerial {
                                 baud: record.baud,
+                                data_bits: record.data_bits,
+                                parity: record.parity,
+                                stop_bits: record.stop_bits,
+                                flow_control: record.flow_control,
+                                dtr: record.dtr,
+                                rts: record.rts,
                                 cr_to_crlf: record.cr_to_crlf,
-                                auto_reconnect: self.config.serial.auto_reconnect,
+                                auto_reconnect: record.auto_reconnect,
                             });
                         }
                     }
@@ -3091,21 +3168,55 @@ impl App {
         Some((row * cols + col) as usize)
     }
 
+    /// Open the connection sheet for `port`, prefilled from the store.
+    ///
+    /// A serial connection is the one action that asks first: the settings are
+    /// per-device and the port is not opened until the sheet is answered. The
+    /// remembered record supplies the form; the remembered profile supplies the
+    /// dropdown's selection.
+    fn open_serial_sheet(&mut self, port: String) {
+        // The detail line comes from the destination scan the new-tab menu
+        // already did; a port the menu does not list (a typed path) gets none.
+        let detail = self
+            .destinations
+            .iter()
+            .find_map(|destination| match destination {
+                crate::sources::Destination::Serial { path, detail } if path == &port => {
+                    Some(detail.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.serial_dialog = Some(crate::serial_dialog::SerialDialog::from_store(
+            port,
+            detail,
+            self.store.as_deref(),
+        ));
+        self.repaint("serial connection sheet");
+    }
+
+    /// The sheet was answered: remember the form against the port and open it.
+    fn connect_serial_sheet(
+        &mut self,
+        dialog: crate::serial_dialog::SerialDialog,
+        settings: dtr_store::SerialSettings,
+    ) {
+        let port = dialog.port().to_owned();
+        if let Some(store) = self.store.as_ref() {
+            if let Err(err) = store.remember_serial(&port, &settings) {
+                tracing::warn!(%port, %err, "could not remember the port settings");
+            }
+            let _ = store.set_last_port(&port);
+        }
+        self.open(Transport::Serial(crate::serial::Config::from_settings(
+            port, &settings,
+        )));
+        self.repaint("serial sheet connected");
+    }
+
     fn apply(&mut self, action: Action) {
         match action {
-            Action::Connect(port) => {
-                let remembered = self
-                    .store
-                    .as_ref()
-                    .and_then(|store| store.serial(&port).ok().flatten())
-                    .unwrap_or_default();
-                self.open(Transport::Serial(crate::serial::Config {
-                    port,
-                    baud: remembered.baud,
-                    cr_to_crlf: remembered.cr_to_crlf,
-                    auto_reconnect: true,
-                }));
-            }
+            Action::Connect(port) => self.open_serial_sheet(port),
             Action::Theme(name) => match crate::theme::load(&name) {
                 Ok(theme) => {
                     // The chrome and the terminals have to move together, or
@@ -3642,7 +3753,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // the grid underneath would light up a link the pager covers, and
                 // a drag would select text nobody can see. A menu is the same: it
                 // is about one file, not about the cell under the pointer.
-                if !self.pager.is_open() && !self.link_menu.is_open() {
+                if !self.pager.is_open()
+                    && !self.link_menu.is_open()
+                    && self.serial_dialog.is_none()
+                {
                     self.pointer_move((position.x, position.y));
                     self.hover((position.x, position.y));
                 }
@@ -3660,6 +3774,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.pager.is_open() {
                     // The pager owns the pointer while it is open; the wheel and
                     // the drag belong to it.
+                } else if self.serial_dialog.is_some() {
+                    // The sheet is a form: egui has already seen the click, and
+                    // it must not also start a selection in the terminal behind.
                 } else if let Some(at) = self.cursor_position {
                     match (button, state) {
                         (WinitButton::Left, ElementState::Pressed) => self.left_press(at),
@@ -3697,7 +3814,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // The pager scrolls itself: egui reads the wheel from the event
                 // stream, and sending the same wheel to the shell's scrollback
                 // would move a view the pager is covering.
-                if lines != 0.0 && !self.pager.is_open() {
+                if lines != 0.0 && !self.pager.is_open() && self.serial_dialog.is_none() {
                     // A program that tracks the mouse gets the wheel as buttons 4
                     // and 5, which is how vim and every pager over ssh scroll.
                     // Shift is the selection key again, so it still scrolls the
@@ -3846,6 +3963,11 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         None
                     };
+                    // Taken out for the frame for the same reason the pager is:
+                    // the sheet borrows itself while it draws, and the answer is
+                    // applied after the egui pass.
+                    let serial_dialog = self.serial_dialog.take();
+                    let mut serial_event = None;
                     // A window capture is due once, then never again.
                     // The active tab follows its focused session; the others keep
                     // the label they had, so a background session cannot rename
@@ -4007,6 +4129,8 @@ impl ApplicationHandler<UserEvent> for App {
                             .as_ref()
                             .map(|(text, alpha)| (text.as_str(), *alpha)),
                         settings,
+                        serial_dialog.as_ref(),
+                        &mut serial_event,
                         &tabs,
                         self.active,
                         &self.destinations,
@@ -4029,6 +4153,39 @@ impl ApplicationHandler<UserEvent> for App {
                     // the only place that knows how tall the text turned out.
                     self.pager = pager;
                     self.link_menu = link_menu;
+                    self.serial_dialog = serial_dialog;
+                    if let Some(asked) = serial_event {
+                        match asked {
+                            crate::serial_dialog::Event::Connect(settings) => {
+                                if let Some(dialog) = self.serial_dialog.take() {
+                                    self.connect_serial_sheet(dialog, settings);
+                                }
+                            }
+                            crate::serial_dialog::Event::Cancel => {
+                                self.serial_dialog = None;
+                                tracing::info!("serial connection sheet cancelled");
+                            }
+                            crate::serial_dialog::Event::Save => {
+                                // The sheet owns the list; the store owns the
+                                // file. Only a named save is written.
+                                if let Some(dialog) = self.serial_dialog.as_mut() {
+                                    if let Some((name, settings)) = dialog.save() {
+                                        if let Some(store) = self.store.as_ref() {
+                                            if let Err(err) = store.save_profile(&name, &settings) {
+                                                tracing::warn!(%name, %err, "could not save the profile");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            other => {
+                                if let Some(dialog) = self.serial_dialog.as_mut() {
+                                    dialog.apply(other);
+                                }
+                            }
+                        }
+                        self.repaint("serial dialog");
+                    }
                     // The answers come back after the frame, like a clicked tab: the
                     // drawing code knows what was clicked, the app knows what to do
                     // about it.
@@ -4494,6 +4651,8 @@ impl Gpu {
         copied: &mut Option<String>,
         toast: Option<(&str, f32)>,
         settings: Option<&crate::settings::Settings>,
+        serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
+        serial_event: &mut Option<crate::serial_dialog::Event>,
         tabs: &[String],
         active_tab: usize,
         destinations: &[crate::sources::Destination],
@@ -4707,6 +4866,13 @@ impl Gpu {
             if link_menu.is_open() {
                 *menu_choice = link_menu.ui(ui, look);
             }
+            // The serial sheet is the topmost surface while it is up: it is a
+            // question about the session, not a decoration on it.
+            if let Some(serial_dialog) = serial_dialog {
+                if let Some(asked) = serial_dialog.ui(ui, look) {
+                    *serial_event = Some(asked);
+                }
+            }
             // Clipboard in and out. egui hands paste over as an event; the
             // pane hands copied text back through a slot it fills itself.
             let pasted: Vec<String> = ui.ctx().input(|input| {
@@ -4720,7 +4886,7 @@ impl Gpu {
                     .collect()
             });
             for text in pasted {
-                if !palette_open {
+                if !palette_open && serial_dialog.is_none() {
                     if let Some(pane) = pane {
                         pane.send(crate::pane::Command::Paste(text.into_bytes()));
                     }
