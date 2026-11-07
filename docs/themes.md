@@ -4,7 +4,7 @@ Status: research, 2026-10-27 · Scope: *which* format dtr reads, *what shape* a 
 *how the colours reach the VT core*. Not the renderer work.
 
 Written against the code as it stands today (`crates/dtr/src/ui.rs`, `pane.rs`,
-`crates/dtr-config`), and against the pinned VT crate (`libghostty-rs` rev `9ede35b8`), whose
+`crates/dtr-config`), and against the pinned VT crate (`libghostty-rs` rev `84373f8d`), whose
 source I read directly rather than from docs.
 
 Question: dtr draws a `Frame` of cells whose colours the VT core has already resolved to RGB. A
