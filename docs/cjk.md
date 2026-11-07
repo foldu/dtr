@@ -791,6 +791,11 @@ and a `┌` is two arms — a 3× nearest-neighbour zoom of the *whole row* of b
 characters looks like scattered marks with gaps. Crop one character, or dump the
 mask as text, before concluding anything; the mask is what the renderer draws.
 
+One more, for anyone scripting the guest: `--send` expands `\n \r \t \e \\`, so a
+Windows path is *two lines* — `C:\build\run.cmd` contains `\b` (kept, unknown
+escape) and then `\r` (a carriage return), and the shell sees `C:\build` + Enter +
+`un.cmd`. Write `C:\\build\\run.cmd`, or forwards slashes.
+
 ---
 
 ## 8. Provenance and unknowns
