@@ -814,6 +814,9 @@ enough.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost, and the
   instrument each open item still needs.
+- `docs/chrome.md` — how the tabs get into the title bar: client chrome on Windows and
+  Linux, the winit/egui mechanics that make it mostly one implementation, and the
+  per-platform metrics and glyphs that keep the buttons looking native.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
 - `crates/dtr/src/app.rs` — the event loop, keys, and the palette glue.
 - `crates/dtr/src/layout.rs` — the split tree. It knows nothing about terminals;

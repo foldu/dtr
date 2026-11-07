@@ -18,7 +18,7 @@ until there is an on-screen counter.
 | 1 | Status bar (rx/tx) hides text | **Bug**, cause located | `app.rs:4429` vs `app.rs:3016` | every DPI ≠ 100% | XS |
 | 2 | Baud input "needs to exist somewhere" | **UX gap** — the control exists but is buried | `settings.rs:566` | all | S |
 | 3 | Autobaud | **Missing**, and needs a safety decision first | — | all | M–L |
-| 4 | Tabs should be in the header | **Design change**, not a bug | `app.rs:4396` | Windows most | M–L |
+| 4 | Tabs should be in the header | **Design change**, decided in [chrome.md](chrome.md) | `app.rs:4396` | all | M |
 | 5 | Needs HiDPI support | **Bug**, and the config already promised it | `render.rs:677`, `lib.rs:42` | every DPI ≠ 100% | S–M |
 | 6 | Latency feels bad on Windows | **Unverified**; two known floors, one invisible today | `pane.rs:1155`, `app.rs:4639` | Windows worst | measure |
 | 7 | Debug UI for fps / frame timing | **Missing**, cheap, unblocks 6 and 10 | `app.rs:3235`, `app.rs:4069` | all | S |
@@ -278,6 +278,11 @@ expectation is a modest improvement, not a transformation.
 
 ## 6. Tabs in the header (note 4)
 
+**Decided**: client-side chrome on both platforms, tabs in dtr's style, window buttons in
+the platform's — the design, the per-platform levers and the build order are in
+[chrome.md](chrome.md). The rest of this section is the reasoning that led there, kept
+because it still explains what the merge costs.
+
 Today there are two rows above the grid: the OS title bar (default decorations,
 `crates/dtr/src/app.rs:3255`) and a 30-point tab strip inside the client area
 (`crates/dtr/src/app.rs:4396`, `crates/dtr/src/ui.rs:208`). "Tabs in the header" means
@@ -290,8 +295,11 @@ merging them, which means client-side decorations:
 - the tab strip's hit targets still have to work inside the drag region.
 
 Options, cheapest first: (a) leave it, spend the row on something else; (b) merge only on
-Windows, keeping decorations elsewhere; (c) custom decorations everywhere. This is the only
-item on the list that is pure design and blocks nothing, which is why it is last in §7.
+Windows, keeping decorations elsewhere; (c) custom decorations everywhere. (c) won: winit
+keeps the Windows frame styles that Aero Snap needs and hides the frame in `WM_NCCALCSIZE`,
+and egui already forwards drag, resize, maximise and title, so the only real platform work
+is the Windows 11 snap flyout and the Linux edge zones. It is still the one item on the
+list that blocks nothing, which is why it is last in §7.
 
 ---
 
@@ -306,7 +314,8 @@ item on the list that is pure design and blocks nothing, which is why it is last
 4. **Baud in the connect flow (§3.1).**
 5. **Autobaud (§3.2)** — after the safety decision in §9.
 6. **Resize (§5.3)** — after the counter says where the milliseconds are.
-7. **Tabs in the header (§6)** — last, needs a design decision, blocks nothing.
+7. **Tabs in the header (§6)** — design settled in [chrome.md](chrome.md), four steps
+   there. Last, blocks nothing.
 
 Note 9 is not in the list because it is not actionable until §8's capture exists; if it turns
 out to be DPI, step 2 closes it.
@@ -334,8 +343,9 @@ status-bar bug's class, but not the status-bar bug itself (that needs a non-1.0 
 
 ## 9. Open questions for the person who ran it
 
-1. "Tabs in the header" — the OS title bar, or just "the strip should be at the top" (it is)?
-   If the title bar: is losing native decorations and snap layouts acceptable?
+1. "Tabs in the header" — answered: [chrome.md](chrome.md) §4, client chrome everywhere.
+   Still open: is the Windows 11 snap-layout flyout worth a Win32 module by then, or is it
+   polish?
 2. Autobaud — may it transmit a probe, or must it be listen-only? On what hardware will it be
    used?
 3. Icons — is the Nerd Font configured as the grid family, or is dtr falling back to whatever
