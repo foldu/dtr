@@ -370,16 +370,25 @@ grid stops lining up. `-v` logs `fallback face` naming the winner, which is how 
 tell whether the list does anything on a given machine.
 
 Two consequences: the glyph atlas key includes the *face index* (glyph ids collide
-between fonts), and a glyph is placed by the ascent of the face that produced it.
+between fonts), and — the current bug — a glyph is placed by the ascent of the face
+that produced it, so every fallback sits off the grid's baseline. Ghostty places
+every face on one `cell_baseline` (`docs/cjk.md` §3.1).
 
-**A wide character is two cells, not one.** The render iterator does not report cell
-width, so width comes from `unicode-width` and a two-cell character is drawn across
-both, scaled to fit. Without it the grid shows a one-cell glyph and a one-cell hole.
+**A wide character is two cells, not one.** The render iterator used to hide cell
+width, so width came from `unicode-width`; the core does report it (`Cell::wide()`,
+`Narrow`/`Wide`/`SpacerTail`/`SpacerHead`) and the plan is to take it from there.
+Today a two-cell character is drawn across both cells, *scaled to fit* — which is
+one of the four bugs `docs/cjk.md` §1 measures, together with the per-face
+baseline, the unconstrained symbols and the "first family fontconfig lists"
+fallback.
 
 **A placed offset is not a length.** `glyph.top` is the distance from the cell's top
 edge to the glyph, not a size — scaling it with the bitmap moved wide glyphs by the
-wrong amount and piled CJK on its neighbours. Wide glyphs are fitted from the bitmap:
-scaled uniformly into the two-cell box, centred, resting on the cell's bottom.
+wrong amount and piled CJK on its neighbours. Today wide glyphs are fitted from the
+bitmap: scaled uniformly into the two-cell box, centred, resting on the cell's
+bottom. Ghostty's model — one cell canvas, one baseline, nothing scaled unless a
+constraint says so — is in `docs/cjk.md` §3; do not add a second copy of the fitting
+rule here.
 
 **egui's default fonts have no arrows.** `↑↓` and `←→` panicked the harness and had
 been drawing empty boxes in the window; hints are words now (`up/down`).
@@ -821,6 +830,9 @@ enough.
   worth doing it in. `crates/dtr-ttl/tests/field/` is where real macros go: the
   corpus is upstream's bug reports, and nobody's job depends on them.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
+- `docs/cjk.md` — measured memo and plan for everything outside the grid face:
+  Han/kana, fullwidth punctuation, Nerd Font icons, emoji. Read it before
+  changing `prepare_pane`'s placement rules.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost, and the
