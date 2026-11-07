@@ -98,7 +98,12 @@ impl Look {
     /// Fonts are installed once, when the context is created: egui rebuilds its
     /// glyph atlas when the set changes, so doing this per frame would be a
     /// stutter on every repaint.
-    pub fn install(&self, ctx: &egui::Context) {
+    ///
+    /// Returns whether the platform's caption-glyph font was installed: the
+    /// window buttons draw with it when it is there, and paint their shapes when
+    /// it is not. Asking here, once, is what keeps a missing glyph from being a
+    /// panic at draw time.
+    pub fn install(&self, ctx: &egui::Context) -> bool {
         let mut definitions = egui::FontDefinitions::default();
         if let Some(path) = self.path.as_ref() {
             match std::fs::read(path) {
@@ -141,7 +146,26 @@ impl Look {
             }
             None => tracing::debug!("no UI fallback face; CJK in the UI will panic"),
         }
+        // The caption's own glyphs, when the platform ships them: on Windows the
+        // window buttons are the OS's symbols, not a drawing of them.
+        let mut caption_icons = false;
+        match crate::fonts::caption_icons() {
+            Some((name, bytes)) => {
+                definitions.font_data.insert(
+                    name.clone(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                definitions.families.insert(
+                    egui::FontFamily::Name(name.clone().into()),
+                    vec![name.clone()],
+                );
+                caption_icons = true;
+                tracing::debug!(family = %name, "caption glyphs");
+            }
+            None => tracing::debug!("no caption-glyph font; the window buttons are painted"),
+        }
         ctx.set_fonts(definitions);
+        caption_icons
     }
 }
 

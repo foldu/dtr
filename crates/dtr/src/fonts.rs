@@ -186,6 +186,57 @@ pub fn ui_fallback() -> Option<(String, Vec<u8>)> {
     None
 }
 
+/// The egui font family name the caption glyphs are installed under.
+pub const ICON_FAMILY: &str = "caption-icons";
+
+/// Bytes of the platform's own window-caption glyphs, if it has a font for them.
+///
+/// Windows draws its caption buttons with a private-use icon font — Segoe Fluent
+/// Icons on 11 (`SegoeIcons.ttf`), Segoe MDL2 Assets on 10 (`segmdl2.ttf`) — and
+/// that font is the difference between "buttons that look like Windows" and
+/// "buttons in the right place". Nothing is redistributed: it is a font already
+/// installed on the machine, and the codepoints are stable and public
+/// (`E921` minimise, `E922` maximise, `E923` restore, `E8BB` close).
+///
+/// The family is checked for the close glyph, not just for the name: a
+/// look-alike family without the private-use range would draw tofu in the
+/// caption, which is worse than the painted fallback.
+///
+/// Read once, at startup: `set_fonts` rebuilds egui's atlas.
+pub fn caption_icons() -> Option<(String, Vec<u8>)> {
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
+    let mut cache = fontique::SourceCache::default();
+    for name in ["Segoe Fluent Icons", "Segoe MDL2 Assets"] {
+        let Some(id) = collection.family_id(name) else {
+            continue;
+        };
+        let Some(family) = collection.family(id) else {
+            continue;
+        };
+        let Some(font) = family.match_font(
+            fontique::FontWidth::NORMAL,
+            fontique::FontStyle::Normal,
+            fontique::FontWeight::NORMAL,
+            false,
+        ) else {
+            continue;
+        };
+        let Some(blob) = font.load(Some(&mut cache)) else {
+            continue;
+        };
+        let index = font.index() as usize;
+        let covers = swash::FontRef::from_index(blob.data(), index)
+            .is_some_and(|face| face.charmap().map('\u{E8BB}') != 0);
+        if !covers {
+            continue;
+        }
+        // Reload to own the bytes: `load(Some(&mut cache))` borrows from it.
+        let owned = font.load(None)?;
+        return Some((ICON_FAMILY.to_owned(), owned.data().to_vec()));
+    }
+    None
+}
+
 /// The family to use when nothing is configured: the first preferred one that
 /// is installed, else the first usable family at all.
 ///

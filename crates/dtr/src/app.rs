@@ -3246,6 +3246,24 @@ fn report_loop(app: &App) {
     app.refresh_frame_budget();
 }
 
+/// The window's icon, decoded from the artwork the desktop entry names.
+///
+/// `include_bytes!` and not a path: the one-file Windows build has no `share/`,
+/// which is the same reason the theme is compiled in.
+fn window_icon() -> Option<winit::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../../../assets/logo/dtr-mark-32.png"))
+        .ok()?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    match winit::window::Icon::from_rgba(image.into_raw(), width, height) {
+        Ok(icon) => Some(icon),
+        Err(err) => {
+            tracing::warn!(%err, "window icon refused");
+            None
+        }
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gpu.is_some() {
@@ -3260,6 +3278,10 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("dtr")
             .with_decorations(!client_frame)
+            // The same artwork the desktop entry names. Without it Windows draws
+            // a generic blank next to the title, and a window list has nothing
+            // to show but the name.
+            .with_window_icon(window_icon())
             .with_inner_size(LogicalSize::new(900.0, 620.0));
         // A frameless window with no shadow reads as a rectangle pasted onto the
         // desktop; winit draws one only when asked, and only for a window whose
@@ -4137,6 +4159,9 @@ struct Gpu {
     /// at creation: it decides whether the strip is a drag region and whether
     /// the buttons are drawn.
     client_frame: bool,
+    /// Where the caption buttons get their symbols: the platform's icon font
+    /// when it resolved at startup, drawn shapes when it did not.
+    caption_glyphs: crate::chrome::Glyphs,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     /// When the current frame started, and how much of it was CPU work rather
@@ -4306,7 +4331,10 @@ impl Gpu {
         let egui_ctx = egui::Context::default();
         // Before any image is drawn: the SVG loader is what decodes the icons.
         crate::ui::install_image_loaders(&egui_ctx);
-        look.install(&egui_ctx);
+        // Whether the platform's caption-glyph font is there: the buttons draw
+        // with it when it is, and paint their shapes when it is not. Asked here
+        // because a missing glyph is a panic, not a fallback.
+        let caption_font = look.install(&egui_ctx);
         egui_ctx.set_visuals(egui::Visuals::dark());
 
         let egui_state = egui_winit::State::new(
@@ -4341,6 +4369,11 @@ impl Gpu {
             queue,
             config,
             client_frame,
+            caption_glyphs: if caption_font {
+                crate::chrome::Glyphs::Font
+            } else {
+                crate::chrome::Glyphs::Painted
+            },
             egui_ctx,
             egui_state,
             frame_began: std::time::Instant::now(),
@@ -4350,8 +4383,7 @@ impl Gpu {
         })
     }
 
-    /// Keep the OS title in step with the active tab.
-    ///
+    /// Keep the OS title in step with the active tab.    ///
     /// With a client-side frame the strip is the only place the session's name
     /// is written, so this is what the taskbar and Alt-Tab show. A window called
     /// `dtr` is anonymous when three sessions are open, and `set_title` is a
@@ -4363,6 +4395,27 @@ impl Gpu {
         }
         self.window.set_title(&title);
         self.title = title;
+    }
+
+    /// Ask Windows for the window's system menu, at a point in egui points.
+    ///
+    /// The menu is the one a native caption shows on a right-click or on its
+    /// title-bar icon, and winit exposes exactly that as `show_window_menu`.
+    /// Windows only, so everything else compiles to nothing.
+    fn show_system_menu(&self, at: egui::Pos2) {
+        #[cfg(target_os = "windows")]
+        {
+            let scale = self.scale();
+            if let Ok(inner) = self.window.inner_position() {
+                self.window
+                    .show_window_menu(winit::dpi::PhysicalPosition::new(
+                        inner.x + (at.x * scale) as i32,
+                        inner.y + (at.y * scale) as i32,
+                    ));
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = at;
     }
 
     /// Cell size in physical pixels, for hit-testing.
@@ -4456,7 +4509,9 @@ impl Gpu {
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            if !tabs.is_empty() {
+            // A client-side frame must exist even with no tabs, or the window
+            // has no way to be moved or closed while the last tab is going away.
+            if !tabs.is_empty() || self.client_frame {
                 // The panel is the strip's full height and the chips are
                 // shorter than it, so nothing egui rounds or grows can paint
                 // over the first terminal row. Same lesson as the status bar.
@@ -4473,10 +4528,16 @@ impl Gpu {
                     .frame(egui::Frame::new().fill(crate::ui::Look::colour(look.surface)))
                     .show(ui, |ui| {
                         let strip = ui.max_rect();
-                        // The chips keep the inset the panel used to give them:
-                        // 6 points at the sides, centred vertically.
+                        // The chips keep the inset the panel used to give them,
+                        // except on Windows, where the caption icon's square
+                        // comes first.
+                        let left = if self.client_frame {
+                            crate::chrome::chips_left()
+                        } else {
+                            6.0
+                        };
                         let inset = egui::vec2(
-                            6.0,
+                            left,
                             ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0).floor(),
                         );
                         let mut chips = ui.new_child(
@@ -4495,6 +4556,11 @@ impl Gpu {
                         // one place.
                         if self.client_frame {
                             let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                            // The app icon, where Windows puts it, and doing what
+                            // Windows does with it: a click is the system menu.
+                            if let Some(at) = crate::chrome::caption_icon(ui, strip, &look) {
+                                self.show_system_menu(at);
+                            }
                             // The drag region stops where the buttons begin: a
                             // press that starts a drag must never be a press on
                             // the close button's neighbour.
@@ -4514,7 +4580,13 @@ impl Gpu {
                                 }
                                 None => {}
                             }
-                            match crate::chrome::buttons(ui, strip, maximized, &look) {
+                            match crate::chrome::buttons(
+                                ui,
+                                strip,
+                                maximized,
+                                &look,
+                                self.caption_glyphs,
+                            ) {
                                 Some(crate::chrome::Hit::Minimize) => {
                                     ui.ctx()
                                         .send_viewport_cmd(egui::ViewportCommand::Minimized(true));

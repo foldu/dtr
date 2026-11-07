@@ -146,18 +146,25 @@ pub fn buttons_rect(strip: Rect, kind: Kind) -> Rect {
 }
 
 /// Draw the window buttons, right-aligned in `strip`, and report a press.
-pub fn buttons(ui: &mut Ui, strip: Rect, maximized: bool, look: &Look) -> Option<Hit> {
-    buttons_for(ui, strip, maximized, look, kind())
+pub fn buttons(
+    ui: &mut Ui,
+    strip: Rect,
+    maximized: bool,
+    look: &Look,
+    glyphs: Glyphs,
+) -> Option<Hit> {
+    buttons_for(ui, strip, maximized, look, kind(), glyphs)
 }
 
-/// The same, for an explicitly chosen platform — what the tests and a future
-/// "draw the other platform's caption" option need.
+/// The same, for an explicitly chosen platform and glyph source — what the tests
+/// need to render both captions on one machine.
 pub fn buttons_for(
     ui: &mut Ui,
     strip: Rect,
     maximized: bool,
     look: &Look,
     kind: Kind,
+    glyphs: Glyphs,
 ) -> Option<Hit> {
     let t = tokens(kind, strip.height());
     let fg = Look::colour(look.foreground);
@@ -199,20 +206,9 @@ pub fn buttons_for(
                 ui.painter().rect_filled(rect, 0.0, fill);
             }
         }
-        let glyph = if hovered && close { Color32::WHITE } else { fg };
-        let source = match action {
-            Hit::Minimize => egui::include_image!("../assets/icons/minus.svg"),
-            Hit::Maximize if maximized => egui::include_image!("../assets/icons/copy.svg"),
-            Hit::Maximize => egui::include_image!("../assets/icons/square.svg"),
-            Hit::Close => egui::include_image!("../assets/icons/x.svg"),
-        };
-        let box_ = Rect::from_center_size(rect.center(), Vec2::splat(t.glyph));
-        // Painted, not added as a widget: an image on top of the button is a
-        // second click target and wins the press half the time.
-        egui::Image::new(source)
-            .fit_to_exact_size(box_.size())
-            .tint(glyph)
-            .paint_at(ui, box_);
+        let glyph_colour = if hovered && close { Color32::WHITE } else { fg };
+        let glyph_box = Rect::from_center_size(rect.center(), Vec2::splat(t.glyph));
+        paint_glyph(ui, glyph_box, action, maximized, kind, glyphs, glyph_colour);
 
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
         if response.clicked() && ui.input(|i| i.pointer.any_click()) {
@@ -220,6 +216,164 @@ pub fn buttons_for(
         }
     }
     hit
+}
+
+/// Where the caption's glyphs come from.
+///
+/// Decided once, at startup, by whether the platform's icon font resolved — not
+/// per frame, and never by hoping a family exists: egui panics on a missing
+/// glyph, which in a caption means the window dies while closing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyphs {
+    /// The platform's own icon font (Windows' Segoe Fluent Icons).
+    Font,
+    /// Drawn in this file: Adwaita's shapes, or Lucide as the last resort.
+    Painted,
+}
+
+/// Draw one button's symbol inside `box_`.
+fn paint_glyph(
+    ui: &Ui,
+    box_: Rect,
+    action: Hit,
+    maximized: bool,
+    kind: Kind,
+    glyphs: Glyphs,
+    colour: Color32,
+) {
+    match (kind, glyphs) {
+        (Kind::Windows, Glyphs::Font) => {
+            let glyph = match action {
+                Hit::Minimize => "\u{E921}",
+                Hit::Maximize if maximized => "\u{E923}",
+                Hit::Maximize => "\u{E922}",
+                Hit::Close => "\u{E8BB}",
+            };
+            ui.painter().text(
+                box_.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::new(
+                    box_.height(),
+                    egui::FontFamily::Name(crate::fonts::ICON_FAMILY.into()),
+                ),
+                colour,
+            );
+        }
+        // Lucide when the platform's font is not there: the same three shapes,
+        // drawn from the SVG corpus the rest of the UI uses.
+        (Kind::Windows, Glyphs::Painted) => {
+            let source = match action {
+                Hit::Minimize => egui::include_image!("../assets/icons/minus.svg"),
+                Hit::Maximize if maximized => egui::include_image!("../assets/icons/copy.svg"),
+                Hit::Maximize => egui::include_image!("../assets/icons/square.svg"),
+                Hit::Close => egui::include_image!("../assets/icons/x.svg"),
+            };
+            // Painted, not added as a widget: an image on top of the button is a
+            // second click target and wins the press half the time.
+            egui::Image::new(source)
+                .fit_to_exact_size(box_.size())
+                .tint(colour)
+                .paint_at(ui, box_);
+        }
+        (Kind::Adwaita, _) => paint_adwaita(ui, box_, action, maximized, colour),
+    }
+}
+
+/// Adwaita's four symbols, on its own 16-unit grid with a 1.5-point stroke.
+///
+/// Drawn rather than embedded: Adwaita's symbolic icons are CC-BY-SA/LGPL and
+/// dtr is `MIT OR Unlicense`, and the shapes are a line, two squares and a
+/// cross — the licence would cost more than the four paths.
+fn paint_adwaita(ui: &Ui, box_: Rect, action: Hit, maximized: bool, colour: Color32) {
+    let stroke = egui::Stroke::new(1.5, colour);
+    let at = |x: f32, y: f32| {
+        egui::pos2(
+            box_.left() + x / 16.0 * box_.width(),
+            box_.top() + y / 16.0 * box_.height(),
+        )
+    };
+    let line = |a: egui::Pos2, b: egui::Pos2| {
+        ui.painter().line_segment([a, b], stroke);
+        // egui strokes have square caps; at 1.5 points the notch shows, so a dot
+        // at each end is Adwaita's round cap.
+        for end in [a, b] {
+            ui.painter().circle_filled(end, 0.75, colour);
+        }
+    };
+    let square = |from: (f32, f32), to: (f32, f32)| {
+        ui.painter().rect_stroke(
+            Rect::from_min_max(at(from.0, from.1), at(to.0, to.1)),
+            0.0,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+    };
+    match action {
+        Hit::Minimize => line(at(3.5, 8.0), at(12.5, 8.0)),
+        Hit::Maximize if maximized => {
+            square((3.5, 6.5), (10.5, 13.0));
+            // The window behind it: a corner, not a second full square, which is
+            // how Adwaita draws restore.
+            line(at(6.0, 3.5), at(12.5, 3.5));
+            line(at(12.5, 3.5), at(12.5, 10.0));
+        }
+        Hit::Maximize => square((3.5, 3.5), (12.5, 12.5)),
+        Hit::Close => {
+            line(at(4.0, 4.0), at(12.0, 12.0));
+            line(at(12.0, 4.0), at(4.0, 12.0));
+        }
+    }
+}
+
+/// The app icon at the far left of a Windows caption.
+///
+/// It sits where the OS puts it, and it does what the OS does with it: a click
+/// opens the window's system menu. GNOME header bars have no app icon, so on
+/// anything but Windows this draws nothing and takes no space.
+pub fn caption_icon_rect(strip: Rect) -> Option<Rect> {
+    (kind() == Kind::Windows).then(|| {
+        Rect::from_center_size(
+            egui::pos2(strip.left() + 8.0 + 8.0, strip.center().y),
+            Vec2::splat(16.0),
+        )
+    })
+}
+
+/// How far the chips start from the left edge.
+///
+/// Windows reserves the icon's square first; everyone else gives the chips the
+/// same 6 points the strip always had.
+pub fn chips_left() -> f32 {
+    if kind() == Kind::Windows {
+        // 8 points in, the 16-point icon, 8 points out.
+        32.0
+    } else {
+        6.0
+    }
+}
+
+/// Draw the caption icon and report where it was clicked, in points.
+pub fn caption_icon(ui: &mut Ui, strip: Rect, look: &Look) -> Option<egui::Pos2> {
+    let rect = caption_icon_rect(strip)?;
+    let response = ui.interact(rect, Id::unique("dtr-caption-icon"), Sense::click());
+    if response.has_focus() {
+        response.surrender_focus();
+    }
+    if response.hovered() {
+        let fg = Look::colour(look.foreground);
+        ui.painter().rect_filled(
+            rect.expand(2.0),
+            0.0,
+            Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 26),
+        );
+    }
+    // The logo is the window's own, painted untinted: it is artwork, not a mask.
+    egui::Image::new(egui::include_image!("../../../assets/logo/dtr-mark-32.png"))
+        .fit_to_exact_size(rect.size())
+        .paint_at(ui, rect);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "window menu"));
+    (response.clicked() && ui.input(|i| i.pointer.any_click())).then_some(rect.center())
 }
 
 /// The part of the strip a press can drag: everything the tab bar and the
@@ -343,7 +497,8 @@ mod tests {
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             let strip = ui.max_rect();
             crate::ui::tab_bar(ui, &labels, 0, &[], &look);
-            if let Some(hit) = buttons_for(ui, strip, false, &look, Kind::Windows) {
+            if let Some(hit) = buttons_for(ui, strip, false, &look, Kind::Windows, Glyphs::Painted)
+            {
                 sink.borrow_mut().push(hit);
             }
         });
