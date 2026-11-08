@@ -262,9 +262,12 @@
           # Flat on purpose: a list inside nativeBuildInputs is a deprecation
           # warning in nixpkgs 26.05, and `nix flake check` prints it.
           # coreutils is for the pty tests, which run `true`; a build's PATH
-          # does not otherwise promise it.
+          # does not otherwise promise it. ncurses is for the terminfo test,
+          # which compiles the embedded `xterm-ghostty` entry with `tic` and
+          # reads it back with `infocmp` — the same pair the ssh copy runs at
+          # the far end.
           nativeBuildInputs =
-            cargoCommon.nativeBuildInputs ++ [pkgs.mesa pkgs.coreutils] ++ fontPackages;
+            cargoCommon.nativeBuildInputs ++ [pkgs.mesa pkgs.coreutils pkgs.ncurses] ++ fontPackages;
           FONTCONFIG_FILE = fontsConf;
           VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
           WGPU_BACKEND = "vulkan";

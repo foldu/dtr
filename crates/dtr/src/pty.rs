@@ -12,11 +12,31 @@ pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
 /// Ten seconds to reach the host, instead of the kernel's two minutes.
-const CONNECT_TIMEOUT: &str = "ConnectTimeout=10";
+///
+/// Shared with `crate::terminfo`, which connects to the same host for a very
+/// different reason and must not be the one place with its own idea of "too
+/// long to wait".
+pub(crate) const CONNECT_TIMEOUT: &str = "ConnectTimeout=10";
 /// Ask the far end for a sign of life this often, and give up after this many
 /// unanswered — a minute of silence in total.
 const KEEPALIVE: &str = "ServerAliveInterval=20";
 const KEEPALIVE_COUNT: &str = "ServerAliveCountMax=3";
+
+/// Run a POSIX script whatever the account's login shell is.
+///
+/// `sshd` hands a command to the *user's* shell, and that shell may be fish,
+/// csh, ion or elvish: `"${SHELL:-/bin/sh}"` is a parse error in several of
+/// them, so a reconnect command written as plain shell breaks on an account
+/// whose shell is not POSIX. `sh -c '…'` is understood by every one of them —
+/// single quotes are literal everywhere, and the script inside is parsed by
+/// `sh`, which is the shell that can actually read it.
+///
+/// An embedded single quote is the one thing that has to be spelled out, with
+/// the standard `'\''` dance, because a directory in a reconnect command comes
+/// from the far end's own output and may contain anything but `/` and NUL.
+pub(crate) fn sh_command(script: &str) -> String {
+    format!("sh -c '{}'", script.replace('\'', r"'\''"))
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -72,11 +92,21 @@ impl Config {
     /// slow enough not to kill a session on a congested link and fast enough
     /// that nobody has to wonder whether the pane is stuck.
     pub fn ssh(alias: &str) -> Self {
-        Self {
-            program: Some("ssh".to_owned()),
+        let mut args: Vec<String> = Vec::new();
+        // The same escape hatch `dtr-sftp` has, for the same failure: one
+        // root-owned drop-in in `/etc/ssh/ssh_config` makes every connection die
+        // with "Bad owner or permissions". `-F` replaces the *system* file as
+        // well as the user one, which is what gets past it — and it is also why
+        // the terminfo copy derives its arguments from here: both have to reach
+        // the host the same way.
+        if let Ok(config) = std::env::var("DTR_SSH_CONFIG") {
+            args.push("-F".to_owned());
+            args.push(config);
+        }
+        args.extend(
             // Before the destination: after it, ssh treats everything as a
             // command for the remote side.
-            args: [
+            [
                 "-t",
                 "-o",
                 CONNECT_TIMEOUT,
@@ -88,6 +118,10 @@ impl Config {
             ]
             .map(str::to_owned)
             .to_vec(),
+        );
+        Self {
+            program: Some("ssh".to_owned()),
+            args,
             remote: Some(alias.to_owned()),
             ..Self::default()
         }
@@ -123,8 +157,9 @@ impl Config {
             tracing::warn!("the directory cannot be a shell argument; reopening at home");
             return next;
         };
-        next.args
-            .push(format!("cd {dir} ; exec \"${{SHELL:-/bin/sh}}\" -l"));
+        next.args.push(sh_command(&format!(
+            "cd {dir} ; exec \"${{SHELL:-/bin/sh}}\" -l"
+        )));
         next
     }
 
@@ -452,13 +487,23 @@ mod tests {
         assert_eq!(reopened.args[..alias + 1], config.args[..]);
     }
 
-    /// The words the remote shell would see in the command. Parsed with the same
-    /// crate that quoted it, which is the only assertion that says what matters:
-    /// the directory arrives as *one* word, and the rest of the command is
-    /// intact.
+    /// The script the far end's `sh` is given. The command is `sh -c '…'`, so
+    /// the assertion that matters is on the *inner* text: the login shell only
+    /// has to pass it through, and the `sh` on the other side parses it.
+    fn script(config: &Config) -> String {
+        let command = shlex::split(config.args.last().expect("a reopen adds a command"))
+            .expect("the command parses");
+        assert_eq!(
+            command[..2],
+            ["sh", "-c"],
+            "the command is not run through sh: {command:?}"
+        );
+        command[2].clone()
+    }
+
+    /// The words the remote `sh` would see in the command.
     fn words(config: &Config) -> Vec<String> {
-        shlex::split(config.args.last().expect("a reopen adds a command"))
-            .expect("the command parses")
+        shlex::split(&script(config)).expect("the script parses")
     }
 
     #[test]
@@ -497,6 +542,23 @@ mod tests {
                 "while quoting {dir:?}"
             );
         }
+    }
+
+    /// An outer layer of quoting is only worth having if it is exact, and the
+    /// case that breaks naive single quoting is a quote in the directory, so
+    /// that one is executed for real: the login shell (whatever it is) hands
+    /// `sh` the text, and what `sh` receives has to be the script.
+    #[test]
+    fn a_quote_in_the_directory_survives_the_outer_shell() {
+        let hostile = "/tmp/it's here";
+        let script = format!("printf %s {}", shlex::try_quote(hostile).expect("quotable"));
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(sh_command(&script))
+            .output()
+            .expect("sh");
+        assert!(out.status.success(), "sh said no: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), hostile);
     }
 
     /// NUL is the one byte a shell argument cannot carry at all, so a report

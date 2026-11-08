@@ -26,6 +26,7 @@ mod settings;
 mod sources;
 mod sprite;
 mod system;
+mod terminfo;
 mod theme;
 mod thumb;
 mod ui;

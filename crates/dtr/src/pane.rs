@@ -1107,6 +1107,15 @@ async fn run(
 
     // The alias, when this pane is a connection rather than a shell of its own.
     let alias = shell.as_ref().and_then(|config| config.remote.clone());
+    if let Some(alias) = alias.as_deref() {
+        // The far end may not know `xterm-ghostty`, which turns every `tput`,
+        // `clear` and `reset` there into "unknown terminal type". The copy is a
+        // connection of its own, so it starts *before* the session's — two
+        // handshakes running together are what makes the entry land before the
+        // first prompt rather than after the first command. Best effort: it
+        // logs, and it never holds this pane up.
+        crate::terminfo::copy(alias);
+    }
 
     // Always publish once, even if the terminal is still clean: a pane that
     // has produced no output yet still has an (empty) grid to show.
@@ -3716,9 +3725,13 @@ mod session_tests {
         let pane = pane(script, Some("test-host"), vec!["dtr".to_owned()]);
         wait_for(&pane, "second", Duration::from_secs(20));
         let args = std::fs::read_to_string(&seen).expect("the second connection recorded its argv");
-        // What the *remote shell* would parse, not the spelling: the directory
-        // has to arrive as one word, after a `cd`.
-        let words = shlex::split(args.trim()).expect("the reopen command parses");
+        // What the far end runs is `sh -c '…'` — the login shell only passes it
+        // through — so the command is unwrapped before it is read. What the
+        // *sh* would parse is the assertion: the directory has to arrive as one
+        // word, after a `cd`.
+        let outer = shlex::split(args.trim()).expect("the reopen command parses");
+        assert_eq!(outer[..2], ["sh", "-c"], "not run through sh: {args}");
+        let words = shlex::split(&outer[2]).expect("the script parses");
         assert_eq!(
             words.first().map(String::as_str),
             Some("cd"),

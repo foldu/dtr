@@ -420,15 +420,23 @@ tag mirroring on.
   quoted with the exit status. `examples/probe.rs` runs the same path from a shell;
   `DTR_SSH_CONFIG=/dev/null` gets past a broken config and `DTR_SSH_BATCH=0` lets a prompt
   be seen.
-- **`TERM` is `xterm-ghostty`, and a host without that terminfo says so**: dtr sets it in
-  the pty because the VT core is Ghostty's, and the entry ships with nixpkgs and the
-  ghostty installer — but a vanilla Ubuntu container has no `ncurses-term` entry for it,
-  so *on the far side* `clear`, `tput` and `reset` answer `unknown terminal type`. Install
-  the entry there, or force another name with `SetEnv TERM=xterm-256color` in
-  `~/.ssh/config` **and** `AcceptEnv TERM` in that host's `sshd_config` — the client's
-  `SetEnv` is silently dropped without it (Ubuntu's default accepts only `LANG LC_*`),
-  which is a long afternoon if you do not know. This is not what makes a fresh ssh
-  session look broken; that was the raw pty (see the bullet above).
+- **dtr carries `xterm-ghostty` to the far end, because a host without it cannot
+  `clear`**: a vanilla Ubuntu has no `ncurses-term` entry for Ghostty's name, so `tput`,
+  `clear` and `reset` answer `unknown terminal type` in a session that otherwise looks
+  fine. The entry is `crates/dtr/assets/terminfo/xterm-ghostty` (`tic` source, dumped with
+  `infocmp -x` from ghostty's own; `the_entry_compiles_back_into_ghostty` compiles it and
+  reads it back), and when an ssh session opens, `crate::terminfo` starts a second
+  connection beside it — `ssh -T`, `BatchMode=yes`, the source on stdin — whose command is
+  `sh -c '… tic -x -o "${TERMINFO:-$HOME/.terminfo}" -'`. **The `sh -c` is load bearing**:
+  `sshd` hands a command to the *account's* login shell, and that shell may be fish,
+  elvish or ion, where `${TERMINFO:-…}` is a parse error — `pty::sh_command` is the one
+  wrapper both this and the reconnect command go through. Best effort by design: its own
+  thread (the pane must not wait, and closing the tab must not wait either), 15 s
+  deadline, one log line (`terminfo entry copied` / `could not copy …`), once per host per
+  run, `DTR_TERMINFO=0` to switch it off. Two honest gaps: a host that wants a password
+  for the extra connection keeps failing `tput`, and a command typed in the ~200 ms while
+  both handshakes run can still see one `unknown terminal type` — a person cannot type
+  that fast, a `--send` script can.
 - **Retries are bounded in rate, not in number**: waits go 1, 2, 4, 8, 16, 30, 30, …
   seconds, forever, because closing the tab is how a person gives up and a cap would turn
   a laptop shut for a day into "closed while you were not looking". The reset needs ten
@@ -438,12 +446,14 @@ tag mirroring on.
   startup should be a pane that waits, which is why `--send` is held in `typed_early`
   until the first pty exists.
 - **A reconnected session is put back where it was by the remote command**: `ssh -t host`
-  starts in `$HOME`, so the reopen is
-  `ssh -t host 'cd <dir> ; exec "${SHELL:-/bin/sh}" -l'` — the directory quoted by `shlex`
+  starts in `$HOME`, so the reopen adds one — `cd <dir> ; exec "${SHELL:-/bin/sh}" -l`,
+  wrapped in `sh -c` by `pty::sh_command` because `sshd` gives a command to the *account's*
+  login shell and fish or elvish cannot parse that line. The directory is quoted by `shlex`
   for the shell at the other end (any path may hold anything but `/` and NUL, and NUL is
   refused), `;` rather than `&&` so a deleted directory still leaves a usable shell, and
   `exec`ed so the login shell *is* the session. `a_hostile_directory_is_still_one_word`
-  round-trips a dozen hostile paths through `shlex::split`.
+  round-trips a dozen hostile paths through `shlex::split`, and
+  `a_quote_in_the_directory_survives_the_outer_shell` runs one through `sh -c` for real.
 - **The modes outlive the program that set them**: a drop can happen while vim holds the
   alternate screen with mouse modes on, so `reset_modes` clears them through the core
   before the reopen — including the kitty stack (`CSI < 999 u`) and DECSCUSR's shape and
