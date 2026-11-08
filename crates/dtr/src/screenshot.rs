@@ -131,7 +131,10 @@ pub fn capture(
 
     let ctx = egui::Context::default();
     look.install(&ctx);
-    ctx.set_visuals(egui::Visuals::dark());
+    // The same install the window does every frame: without it this path draws
+    // stock egui widgets in egui's own style while the window draws them in the
+    // skin's, and a capture is supposed to be the window.
+    look.skin().apply(&ctx);
     let mut renderer =
         egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 

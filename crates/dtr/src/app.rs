@@ -4499,6 +4499,12 @@ impl ApplicationHandler<UserEvent> for App {
                     // (the cache turns pixels into a texture once) and `settings` is
                     // about to lend `self` out for the whole frame.
                     let thumbnail = self.hover_thumbnail(scale, &gpu.egui_ctx);
+                    // A menu opened before the startup font probe finished picks
+                    // the list up here, on the first frame it exists. Before the
+                    // borrows, because filling it in needs `&mut self`.
+                    if self.settings.open {
+                        self.settings.refresh_families();
+                    }
                     let settings = if self.settings.open {
                         Some(&self.settings)
                     } else {
@@ -4914,6 +4920,9 @@ struct Gpu {
     /// The title the window was last told, so a frame that changes nothing does
     /// not talk to the window manager — which on Wayland is a round trip.
     title: String,
+    /// The skin whose `egui::Style` is installed on the context. Kept so a
+    /// frame that resolves the same skin again does not rebuild the style.
+    installed_skin: Option<dtr_widgets::Skin>,
     window: Arc<Window>,
 }
 
@@ -5084,7 +5093,11 @@ impl Gpu {
         // with it when it is, and paint their shapes when it is not. Asked here
         // because a missing glyph is a panic, not a fallback.
         let caption_font = look.install(&egui_ctx);
-        egui_ctx.set_visuals(egui::Visuals::dark());
+        // The window's style is the skin from the first frame — installed here so
+        // nothing reads egui's own defaults, and again in `render` whenever the
+        // resolved skin changes (the platform palette is live).
+        let skin = look.skin();
+        skin.apply(&egui_ctx);
 
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -5133,6 +5146,7 @@ impl Gpu {
             frame_began: std::time::Instant::now(),
             cpu_ms: 0.0,
             title: String::new(),
+            installed_skin: Some(skin),
             window,
         })
     }
@@ -5268,6 +5282,20 @@ impl Gpu {
             | wgpu::CurrentSurfaceTexture::Validation => return Ok(()),
         };
 
+        // The window's style is the skin, and this is where it is installed —
+        // not in a dialog. A dialog has to put its skin on the *context*,
+        // because the stock widgets egui draws inside a popup read the context
+        // style rather than the one the dialog was given, and that install
+        // outlives the frame that made it: closing the settings menu used to
+        // leave the window with the menu's row height, and the tab strip's
+        // chips under it were centred in a 34-point row and clipped by the
+        // panel. Installing the resolved skin first makes the window the
+        // authority and every dialog a guest.
+        let skin = look.skin();
+        if self.installed_skin.as_ref() != Some(&skin) {
+            skin.apply(&self.egui_ctx);
+            self.installed_skin = Some(skin);
+        }
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             // A client-side frame must exist even with no tabs, or the window

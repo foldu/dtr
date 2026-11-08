@@ -224,6 +224,20 @@ or a press on the menu starts a window drag.
 compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot disagree with the binary,
 and it is opened by the menu and by `about` in the palette.
 
+**A row's height is the row's, not the context style's.** `ui.horizontal` sizes its child
+from `interact_size.y`, and that number is part of the *skin*: `Skin::apply` puts it on the
+context (34 points for Adwaita, 23 for dtr's own) because the stock widgets egui draws
+inside a dialog's popups read the context style rather than the dialog's. A dialog therefore
+leaves its row height behind, and the strip inherited it: after one visit to the settings
+menu the chips were centred in a 34-point row inside a 30-point panel, seven points lower
+than the `TAB_CHIP_HEIGHT` box they had been given, and the strip's clip rect cut their
+bottoms off. That is the whole of "the tab strip has things cut off", arithmetic included —
+`(34 − 20) / 2` is the seven. Two changes, because either alone leaves a hole: `tab_bar` and
+`status_bar` set `interact_size.y` themselves (the strip's row is a chip, the bar's row is
+the bar), and `Gpu::render` installs the window's resolved skin on the context whenever it
+changes, so the window is the authority and every dialog a guest.
+`ui::kittest_tests::a_skins_row_does_not_move_the_chips` fails if either half is undone.
+
 Two bugs are worth keeping in mind whenever a chip changes. **A widget painted by hand has
 no accessibility node** unless `Response::widget_info` declares one, and the chips were
 invisible to the harness *and* to a screen reader. And `Sense::click()` is **not
@@ -248,10 +262,18 @@ addressed from a test. Port rows exist only when a port is focused: baud and CR 
 belong to one device.
 
 **A menu that opens slowly the first time is doing its work in the frame**:
-`usable_families` builds a fontconfig collection and probes every family (the same
-`FcFontSort` cost that showed up in a profile at 16%), and it is cached in a `OnceLock` so
-the second open is instant. The app warms both lists on a `dtr-warm` thread at startup, and
-`-v` logs `warmed the settings lists` and `settings populated`.
+`usable_families` builds a fontconfig collection and probes every family by loading a face
+and asking for `M`, `i`, `W` and a width ratio (the same `FcFontSort` cost that showed up in
+a profile at 16%). Measured on this desktop, where 47 families pass: 290 ms in a release
+build — inside the click that opens the menu, which is a third of a second of frozen window,
+and the whole of "settings take a while to open". The list is a `OnceLock` filled by the
+`dtr-warm` thread `main` starts before the window exists, read by the menu through
+`ready_families`, which never blocks: a menu opened before the probe lands shows `default`
+alone and `Settings::refresh_families` fills it in on a later frame. The theme list is
+scanned once in `show` and kept — the controls used to call `theme::names()` (six
+`read_dir`s) and `usable_families` again on *every frame the menu was open*. `-v` logs
+`probed system fonts elapsed_ms=…` and `settings populated elapsed_us=…`; the second is the
+click, and it reads single-digit microseconds once the warm has finished.
 
 ## The palette
 

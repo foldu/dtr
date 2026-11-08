@@ -15,9 +15,41 @@ use std::sync::OnceLock;
 /// machine's fonts do not change while the terminal runs in any way worth
 /// noticing.
 pub fn usable_families() -> Vec<String> {
-    static CACHE: OnceLock<Vec<String>> = OnceLock::new();
-    CACHE.get_or_init(probe_all).clone()
+    FAMILIES.get_or_init(probe_all).clone()
 }
+
+/// The probed list if the work has already been done, without waiting for it.
+///
+/// `usable_families` blocks on a fontconfig walk that costs about 300 ms, which
+/// is a third of a second of a frozen window if it happens inside the click
+/// that opens the settings menu. So the menu takes this instead: empty until the
+/// probe lands, filled on the next frame after it does.
+pub fn ready_families() -> Option<Vec<String>> {
+    FAMILIES.get().cloned()
+}
+
+/// Start the probe on a thread of its own, once per process.
+///
+/// `main` calls this before the window exists, so the click that opens the
+/// settings menu is normally a cache hit. Idempotent, and cheap when the list is
+/// already there — the menu calls it too, because a run that opened the menu
+/// before the startup thread finished would otherwise never fill the list in.
+pub fn warm() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("dtr-warm".to_owned())
+            .spawn(|| {
+                let _ = usable_families();
+            });
+        if let Err(err) = spawned {
+            tracing::warn!(%err, "could not start the font probe");
+        }
+    });
+}
+
+/// The one probe, whoever asks for it first.
+static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
 
 fn probe_all() -> Vec<String> {
     let started = std::time::Instant::now();
@@ -322,6 +354,27 @@ mod tests {
     }
 
     use super::*;
+
+    /// The settings menu reads the list without waiting for it, so the warm
+    /// thread is what makes the list appear at all: `ready_families` answers
+    /// `None` until the probe lands, and the same list once it has.
+    ///
+    /// `settings::Settings::show` calls `warm` too, so a run that opened the menu
+    /// before `main` got this far still fills the combo in.
+    #[test]
+    fn warming_the_families_makes_them_ready() {
+        super::warm();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while super::ready_families().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ready = super::ready_families().expect("the probe thread never finished");
+        assert_eq!(ready, usable_families(), "one probe, two readers");
+        // Idempotent: a second warm starts no second thread, so it cannot block.
+        let again = std::time::Instant::now();
+        super::warm();
+        assert!(again.elapsed() < std::time::Duration::from_millis(50));
+    }
 
     #[test]
     fn the_probe_rejects_a_proportional_face() {

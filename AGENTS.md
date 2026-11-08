@@ -614,6 +614,14 @@ account behind each of these.
   strokes in the chip's own reserved rect, not `×`, because egui's font has no
   multiplication sign. The active tab's title follows its focused session, and every switch
   goes through `App::set_active`, which logs `active tab from=… to=… why=…`.
+- **A row's height is the row's, not the context style's**: `ui.horizontal` gives its child
+  `interact_size.y`, and a dialog installs its *skin's* row on the context (`Skin::apply`)
+  because the stock widgets in its popups read the context style — so one visit to the
+  settings menu left the strip's chips centred in a 34-point Adwaita row inside a 30-point
+  panel, seven points lower than the box they were given, with their bottoms cut off.
+  `tab_bar` and `status_bar` set `interact_size.y` themselves (a chip is
+  `TAB_CHIP_HEIGHT`, the bar is the bar), and `Gpu::render` installs the resolved skin
+  whenever it changes, so the window is the authority and every dialog a guest.
 - **The strip's own menu is a burger at the right-hand end, next to the caption buttons**,
   on both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
   `menu_row`s — settings, keyboard map, about. The right end because the left is where tabs
@@ -634,8 +642,12 @@ account behind each of these.
   name, because the row's label already carries the bare name and two nodes with one name
   cannot be addressed from a test. Port rows exist only when a port is focused: baud and CR
   translation belong to one device. **A menu that opens slowly the first time is doing its
-  work in the frame**: `usable_families` is cached in a `OnceLock` and warmed on a
-  `dtr-warm` thread at startup.
+  work in the frame**: `usable_families` is a fontconfig walk that parses a face per family
+  — 300 ms on a desktop with 47 families — so it is cached in a `OnceLock`, warmed by the
+  `dtr-warm` thread `main` starts before the window, and read by the menu through
+  `ready_families`; a menu opened before the probe lands fills its list in on a later frame
+  (`refresh_families`) instead of freezing the click. The theme list is taken once in
+  `show` for the same reason: a control that rescans per frame is a scan per frame.
 - **One theme is compiled in, and a file of the same name beats it**: `theme::load` asks the
   search paths first (exact name, then ignoring case) and falls back to the `include_str!`-ed
   `Kanagawa Wave`, because Ghostty's themes on NixOS are a store path and the one-file

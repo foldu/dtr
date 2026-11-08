@@ -476,6 +476,12 @@ fn main() -> anyhow::Result<()> {
             dtr_config::Config::default()
         }
     };
+    // The settings menu offers the fonts that can be a terminal grid, and
+    // finding them is a fontconfig walk that parses a face per family — a third
+    // of a second, which is a frozen window if it happens inside the click that
+    // opens the menu. Start it here, on its own thread, so the click is normally
+    // a cache hit.
+    crate::fonts::warm();
     // A key table with a typo in it is silent otherwise: the binding simply
     // never fires. Say which names were not understood and which chords are
     // claimed twice, once, at startup.

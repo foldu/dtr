@@ -142,11 +142,15 @@ impl Settings {
         self.row = 0;
         self.draft = config.clone();
         self.original = config.clone();
-        // The font list costs a fontconfig walk the first time; the app warms
-        // it off the drawing thread so opening this menu does not.
+        // Neither list is worth a stall on the click that opened this menu. The
+        // family probe is a fontconfig walk (warmed at startup, and started here
+        // for a run that got here first) and the theme list a scan of six
+        // directories, which is cheap but not free. `refresh_families` fills the
+        // families in on the next frame if the probe has not landed yet.
         let started = std::time::Instant::now();
+        crate::fonts::warm();
         if self.families.is_empty() {
-            self.families = crate::fonts::usable_families();
+            self.families = crate::fonts::ready_families().unwrap_or_default();
         }
         if self.themes.is_empty() {
             self.themes = crate::theme::names();
@@ -157,6 +161,19 @@ impl Settings {
             themes = self.themes.len(),
             "settings populated"
         );
+    }
+
+    /// Take the family list once the startup probe has finished.
+    ///
+    /// `show` does not wait for the probe — the menu appears in a frame, and the
+    /// one thing a click must not do is freeze — so a menu opened in the first
+    /// moments of a run shows `default` alone until this fills the list in.
+    pub fn refresh_families(&mut self) {
+        if self.families.is_empty()
+            && let Some(families) = crate::fonts::ready_families()
+        {
+            self.families = families;
+        }
     }
 
     pub fn draft(&self) -> &Config {
@@ -500,7 +517,9 @@ impl Settings {
                 response.changed().then_some(Change::FontSize(size))
             }
             Row::FontFamily => {
-                let families = crate::fonts::usable_families();
+                // The list `show` found, not a fresh probe: a fontconfig walk in
+                // the drawing code is a walk per frame.
+                let families = &self.families;
                 let current = self
                     .draft
                     .font
@@ -521,9 +540,9 @@ impl Settings {
                             change = Some(Change::Family(None));
                         }
                         for family in families {
-                            let picked = self.draft.font.family.as_deref() == Some(&family);
-                            if dtr_widgets::menu_row(ui, skin, &family, picked) {
-                                change = Some(Change::Family(Some(family)));
+                            let picked = self.draft.font.family.as_deref() == Some(family.as_str());
+                            if dtr_widgets::menu_row(ui, skin, family.as_str(), picked) {
+                                change = Some(Change::Family(Some(family.clone())));
                             }
                         }
                     });
@@ -533,9 +552,8 @@ impl Settings {
                 change
             }
             Row::Theme => {
-                let mut names = crate::theme::names();
-                names.sort();
-                names.dedup();
+                // Same rule: the scan belongs to `show`, not to a frame.
+                let names = &self.themes;
                 let current = self
                     .draft
                     .theme
@@ -551,8 +569,8 @@ impl Settings {
                         }
                         for name in names {
                             let picked = self.draft.theme.as_deref() == Some(name.as_str());
-                            if dtr_widgets::menu_row(ui, skin, &name, picked) {
-                                change = Some(Change::Theme(Some(name)));
+                            if dtr_widgets::menu_row(ui, skin, name.as_str(), picked) {
+                                change = Some(Change::Theme(Some(name.clone())));
                             }
                         }
                     });
@@ -684,6 +702,26 @@ mod tests {
         settings.nudge(1);
         assert!(settings.serial_write().is_none());
         assert_eq!(settings.value(Row::Baud), "no port");
+    }
+
+    /// Opening the menu takes the list the probe found; it does not walk the
+    /// machine's fonts itself.
+    ///
+    /// `show` runs in the click that opens the menu, and the probe is a
+    /// fontconfig walk that parses a face per family — 300 ms of frozen window,
+    /// which is what "the settings take a while to open" was. `main` warms it and
+    /// `refresh_families` fills the list in when a run got here first.
+    #[test]
+    fn the_menu_takes_the_family_list_the_probe_found() {
+        // Deterministic: make the probe's answer exist before the menu asks.
+        let families = crate::fonts::usable_families();
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(settings.families, families);
+        assert!(
+            !settings.themes.is_empty(),
+            "the compiled-in theme is always in the list"
+        );
     }
 
     #[test]

@@ -282,7 +282,7 @@ mod tests {
             "the command is not a single-quoted sh -c: {command:?}"
         );
         for script in [command, SCRIPT.to_owned()] {
-            let mut child = Command::new("sh")
+            let child = Command::new("sh")
                 .arg("-n")
                 .arg("-c")
                 .arg(&script)

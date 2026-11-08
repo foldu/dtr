@@ -454,6 +454,15 @@ pub fn tab_bar(
     let skin = look.skin();
     let palette = skin.palette;
     let mut clicked = None;
+    // The strip's own row, because `ui.horizontal` gives its child
+    // `interact_size.y` — and that is the *skin's* row, which a dialog installs
+    // on the context for the stock widgets egui draws inside its popups. A
+    // skin's row is 34 points for Adwaita and 23 for dtr's own, so the row
+    // became taller than the chip box it sits in and `Align::Center` pushed
+    // the chips down past the strip's clip rect: their bottoms were cut off
+    // after the settings menu had been opened once. A chip is
+    // `TAB_CHIP_HEIGHT` tall whoever asks, and the strip measures its own row.
+    ui.spacing_mut().interact_size.y = TAB_CHIP_HEIGHT;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (index, label) in labels.iter().enumerate() {
@@ -632,6 +641,11 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
     let s = &skin.style;
     let small = egui::FontId::new(s.label_font.size - 0.5, s.label_font.family.clone());
     let body_font = s.value_font.clone();
+    // The same trap as the tab strip's: a row taller than the space the bar was
+    // given is a row whose text is centred below the panel's bottom edge. The
+    // bar's row is the bar's height, not the skin's row, and never more than the
+    // bar's own design height.
+    ui.spacing_mut().interact_size.y = ui.available_height().min(STATUS_HEIGHT);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         if status.tabs.1 > 1 {
@@ -1016,6 +1030,36 @@ mod kittest_tests {
         });
         harness.run();
         harness.snapshot("tab_bar");
+    }
+
+    /// The strip's row is the chip's height, whatever row the context's style
+    /// asks for.
+    ///
+    /// `ui.horizontal` gives its child `interact_size.y`, and a skin's row is
+    /// 34 points for Adwaita and 23 for dtr's own — numbers that belong to a
+    /// dialog's controls, not to a chip. This is the reported bug: open the
+    /// settings menu once (which installs the skin on the context, for the stock
+    /// widgets in its popups) and every later frame drew the chips centred in a
+    /// 34-point row, 7 points lower than the 20-point box they were given, with
+    /// their bottoms cut off by the strip.
+    #[test]
+    fn a_skins_row_does_not_move_the_chips() {
+        let labels = vec!["demo".to_owned()];
+        let look = Look::default();
+        let used = std::rc::Rc::new(std::cell::Cell::new(egui::Rect::NOTHING));
+        let sink = used.clone();
+        let mut harness = Harness::new_ui(move |ui| {
+            ui.ctx()
+                .global_style_mut(|style| style.spacing.interact_size.y = 34.0);
+            let strip = tab_bar(ui, &labels, 0, &[], &look);
+            sink.set(strip.used);
+        });
+        harness.run();
+        let height = used.get().height();
+        assert!(
+            (height - TAB_CHIP_HEIGHT).abs() < 0.5,
+            "the chip row came out {height} points tall instead of {TAB_CHIP_HEIGHT}"
+        );
     }
 
     /// The strip's menu: a burger, and a popup that holds the window's three
