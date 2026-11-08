@@ -753,6 +753,11 @@ had. The map grew a `panes` group for the nine new actions, and the card learned
 chord column per column instead of sharing one width, which is what stopped `ctrl-alt-shift-right`
 from running into its own label.
 
+**What is left is written down**, because "splits work" is not "the pane layer is finished":
+`docs/panes.md` lists the nine gaps in the order worth closing them, starting with a bug this
+change made visible — a pane that exits takes its whole tab with it, measured at 1.1 s — and ending
+with the boundary against the session multiplexer.
+
 **The file pane is the first non-terminal leaf.** A leaf now maps to
 `Pane::Terminal(Session) | Pane::Files(Explorer)`; a file pane owns its rectangle but no session, so
 keys, selection, copy/paste, the status strip, splits and closing all have to say what they do when

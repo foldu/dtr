@@ -806,6 +806,10 @@ not a slow terminal.
   carries the measurement at 125 %.
 - `docs/chrome.md` — how the tabs get into the title bar: client chrome on Windows and
   Linux, and the per-platform metrics and glyphs that keep the buttons looking native.
+- `docs/panes.md` — what the pane layer still does not do, in the order it is worth
+  doing: the exit bug that closes a tab, move/swap, split-before, a drawn divider, and
+  the boundary against the session multiplexer. Read it before adding a pane verb, so
+  the geometry keeps living in `layout.rs` instead of growing a second copy.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
 - `crates/dtr/src/app.rs` — the event loop, keys, and the palette glue.
 - `crates/dtr/src/layout.rs` — the split tree. It knows nothing about terminals; a leaf is
