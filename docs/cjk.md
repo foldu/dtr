@@ -779,10 +779,12 @@ read like renderer bugs:
 * Capture with a shell that does not read the user's bash rc
   (`--shell "bash --norc --noprofile"`): a bad `PS1` prints readline's `\[`
   markers into the grid.
-* A script that prints `\n` renders a staircase. The pty is raw (that is the
-  whole `pty::set_raw` story in AGENTS.md), so nothing turns LF into CRLF for
-  the child: every line starts where the previous one ended. Print `\r\n` from
-  the sample, or the picture is unreadable and the glyphs look misplaced.
+* A script that prints `\n` used to render a staircase, because the pty was
+  raw (`pty::set_raw`) and nothing turned LF into CRLF for the child. Since
+  `pty::set_sane` the kernel's line discipline does that, so bare `\n` from
+  `printf`, `ls` or a script renders aligned. A staircase now means the *tty
+  mode* is wrong (something set the pty raw), not that the renderer misplaced a
+  glyph — check `stty -a` inside the session before looking at placement.
 
 A third, which cost an hour in the guest: **a settled window has no frame to
 capture**, so `--capture` fires and writes nothing (the deadline passes with the

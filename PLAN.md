@@ -53,6 +53,7 @@ renderer is deliberately a throwaway layer behind a trait.
 | D16 | **tokio everywhere for I/O; emulation stays on a LocalSet** | Serial via `tokio-serial`; the `!Send` `Terminal` forces one current-thread runtime per pane (see §2.4) |
 | D17 | **Pin the Rust wrapper to git `9ede35b`, not crates.io 0.2.2** | 0.2.2's pregenerated bindings call three C functions that do not exist at its own pinned ghostty commit (§12) |
 | D18 | **Name: `dtr`** | Data **T**erminal **R**eady — the RS-232 line a terminal asserts to announce itself. Three characters, technically exact, and the joke only lands for the audience |
+| D19 | **The child's tty keeps the kernel's line discipline** (`pty::set_sane`), and a program that wants raw sets it itself | A raw pty loses the LF → CR LF conversion, so `ls`, `cat`, a script or Ubuntu's motd staircase. Worse, `ssh` sends the local tty's modes in its `pty-req`, so a raw local pty is a raw *remote* shell: no echo and no `ONLCR`, which reads as a broken terminal until `reset` runs `tcsetattr(sane)` over there. Reversed 2026-11-08 from "the VT core *is* the line discipline"; the cost (the kernel rewrites each newline) is what every other terminal pays |
 
 Pinned upstream: ghostty commit **`0b8b9984ee560456194262d190aa850224edb1f4`** (2026-10-28) — the
 commit `libghostty-vt-sys`' bindings are generated against at the `libghostty-rs` rev `Cargo.toml`

@@ -238,19 +238,25 @@ Two things worth knowing before chasing this:
 
 ### 4.2 The trap: LF-only output on a raw pty staircases
 
+**Corrected 2026-11-08**: the raw pty was the bug, not the harness. dtr now calls
+`pty::set_sane` and leaves the kernel's line discipline in place, so a bare `\n` renders
+as a new line and this section describes what *used* to happen. It is kept because the
+diagnosis below is how the mode was found, and because the same picture still means "check
+the tty mode" rather than "check the glyphs".
+
 While reproducing the Nerd Font case I wrote a `--shell` script that printed with `\n` only.
 The result looked like a catastrophic renderer bug: each row began where the previous line
 ended, so the screen staircased by the length of every line.
 
-It is not a renderer bug. dtr sets the pty raw before spawning
-(`pty::set_raw`, documented in `AGENTS.md`), so `OPOST`/`ONLCR` is off and a bare line feed
-moves the cursor down **without returning the carriage** — correct VT behaviour. The same
-script with `\r\n` renders perfectly aligned.
+It is not a renderer bug. dtr set the pty raw before spawning
+(`pty::set_raw`, once documented in `AGENTS.md`), so `OPOST`/`ONLCR` was off and a bare
+line feed moved the cursor down **without returning the carriage** — correct VT behaviour.
+The same script with `\r\n` rendered perfectly aligned.
 
-Checked the other direction too: an interactive `bash -i` under dtr prints `ls` output
-column-aligned, so a real shell has the line discipline in its normal mode and this does not
-bite ordinary use. It bites non-interactive programs and test scripts — which is exactly
-where a screenshot of "artifacts" comes from.
+That mode also left `ECHO` and `ICANON` off, and `ssh` copies the local tty's modes to the
+far end in its `pty-req` — so an ssh session in dtr came up with a raw *remote* tty: no
+echo (typing invisible) and the same staircase on Ubuntu's motd, fixed only by `reset`,
+which is `tcsetattr(sane)` at the other end. That is what settled it; the raw mode is gone.
 
 Consequence for the "pi has artifacts" report: if the π came from a script, a `printf`, or
 any program that writes bare `\n`, the artifact may be a staircase and not a glyph at all.

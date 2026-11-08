@@ -3794,7 +3794,7 @@ mod session_tests {
             let out = dir.path().join("pasted");
             // `cat` writes whatever reaches it, byte for byte, which is the only
             // assertion that says what the program was actually handed.
-            let script = format!("{prologue}exec cat > {}", out.display());
+            let script = reader(prologue, &out);
             let pane = pane(script, None, Vec::new());
             // The program has started when it has said something (the mode
             // report) and its redirection exists.
@@ -3833,7 +3833,7 @@ mod session_tests {
         for (prologue, expected) in [("", "\x1b[A"), (r"printf '\033[?1h'; ", "\x1bOA")] {
             let dir = tempfile::tempdir().expect("tempdir");
             let out = dir.path().join("keys");
-            let script = format!("{prologue}exec cat > {}", out.display());
+            let script = reader(prologue, &out);
             let pane = pane(script, None, Vec::new());
             let deadline = Instant::now() + Duration::from_secs(10);
             // The program has started when it has said something (its mode
@@ -3866,7 +3866,7 @@ mod session_tests {
     fn a_kitty_application_gets_kitty_encodings() {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!(r"printf '\033[>1u'; exec cat > {}", out.display());
+        let script = reader(r"printf '\033[>1u'; ", &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() || pane.stats().rx() == 0 {
@@ -3907,7 +3907,7 @@ mod session_tests {
     fn a_kitty_application_gets_shifted_punctuation_as_a_character() {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!(r"printf '\033[>1u'; exec cat > {}", out.display());
+        let script = reader(r"printf '\033[>1u'; ", &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() || pane.stats().rx() == 0 {
@@ -3973,7 +3973,7 @@ mod session_tests {
     fn remapped_escape_at_a_program(prologue: &str) -> Vec<u8> {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!("{prologue}exec cat > {}", out.display());
+        let script = reader(prologue, &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() {
@@ -4010,7 +4010,7 @@ mod session_tests {
     fn a_kitty_application_that_asks_for_events_gets_them() {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!(r"printf '\033[>3u'; exec cat > {}", out.display());
+        let script = reader(r"printf '\033[>3u'; ", &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() || pane.stats().rx() == 0 {
@@ -4037,7 +4037,7 @@ mod session_tests {
     fn legacy_ctrl_and_alt_still_send_what_they_always_did() {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!("exec cat > {}", out.display());
+        let script = reader("", &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() {
@@ -4072,7 +4072,7 @@ mod session_tests {
     fn a_release_sends_nothing_unless_it_was_asked_for() {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!("exec cat > {}", out.display());
+        let script = reader("", &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() {
@@ -4111,7 +4111,7 @@ mod session_tests {
         for (prologue, expected) in [("", "\x1b[?0u"), (r"printf '\033[>1u'; ", "\x1b[?1u")] {
             let dir = tempfile::tempdir().expect("tempdir");
             let out = dir.path().join("reply");
-            let script = format!("{prologue}printf '\\033[?u'; exec cat > {}", out.display());
+            let script = reader(&format!("{prologue}printf '\\033[?u'; "), &out);
             let pane = pane(script, None, Vec::new());
             wait_for_bytes(&pane, &out, expected, &format!("query with {prologue:?}"));
         }
@@ -4137,7 +4137,7 @@ mod session_tests {
     fn a_composing_key_sends_nothing_and_the_commit_does() {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("keys");
-        let script = format!("exec cat > {}", out.display());
+        let script = reader("", &out);
         let pane = pane(script, None, Vec::new());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() {
@@ -4181,14 +4181,25 @@ mod session_tests {
         let _ = pane;
     }
 
-    /// A pane-sized grid and the program's `cat`, with or without the modes it
-    /// asks for first.
+    /// A pane-sized grid and the program's `cat`.
+    ///
+    /// The program reads *bytes* rather than lines, and therefore takes the tty
+    /// over first (`stty raw -echo`): readline, `vim`, `fzf` and every program
+    /// that answers the terminal all do. Without it the kernel's line discipline
+    /// holds a keystroke until a newline — right for a shell, wrong for these —
+    /// and the program never sees the bytes the test asserts on.
+    fn reader(prologue: &str, out: &std::path::Path) -> String {
+        format!("stty raw -echo; {prologue}exec cat > {}", out.display())
+    }
+
+    /// A program that reads clicks, and the modes it asks for first. Same tty
+    /// rule as [`reader`].
     ///
     /// `cat` is the assertion that matters: whatever reaches it is what the pane
     /// sent, byte for byte, and a program that read a click can be asked what it
     /// looked like.
     fn mouse_pane(prologue: &str, out: &std::path::Path) -> Pane {
-        let script = format!("{prologue}exec cat > {}", out.display());
+        let script = reader(prologue, out);
         let pane = pane(script, None, Vec::new());
         // A grid of 80x24 in 800x480 pixels: a ten-pixel cell, so the pointer
         // positions below are whole cells and the arithmetic is checkable by eye.

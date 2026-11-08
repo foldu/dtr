@@ -122,9 +122,12 @@ tag mirroring on.
   so a broken `~/.bashrc` lands *in the grid* — readline's `\[` and `\]` print literally
   and the prompt grows to half a screen. Use `--shell "bash --norc --noprofile"` for any
   capture, screenshot or font comparison.
-- **A captured sample must print `\r\n`, not `\n`**: the pty is raw, so nothing turns a
-  line feed into a carriage return for the child, and lines ending in `\n` draw a
-  *staircase*. It is the harness, not the renderer.
+- **`--send` expands escapes, so a sample's own `\n` is not the one you wrote**:
+  `input::unescape` turns `\n`, `\r`, `\t`, `\e` and `\\` into bytes, so
+  `--send "printf \"one\\ntwo\\n\""` types a *newline* inside the quoted string and
+  leaves the shell in a continuation prompt. Escape the backslash again, or put the
+  sample in a file and type its path. (A sample that prints bare `\n` is fine now —
+  the kernel's line discipline turns it into CR LF; see the pty bullet below.)
 - Commits end with the co-author trailer.
 
 ## The event loop, redraws, and doing work off the UI thread
@@ -162,11 +165,21 @@ tag mirroring on.
   `config.terminal.scrollback_limit`; there is no unlimited spelling,
   `dtr_config::SCROLLBACK_LIMIT` (100 MB) is default and ceiling, and the parser refuses
   more.
-- **A pty is cooked until somebody says otherwise**: `openpty` returns the kernel's
-  default mode, so a second line discipline sat before the VT core (`\n` → `\r\n` per
-  character, line-buffered echo, ^S stopping the flow). `pty::set_raw` runs *before* the
-  child spawns, `the_session_starts_raw` reads termios back, and `ISIG` is the one flag
-  kept so ^C reaches the foreground process.
+- **The tty is the kernel's, and `ssh` copies it to the far end**: `pty::set_sane` gives
+  the child the mode a terminal gives it — `stty sane`, so `OPOST`/`ONLCR`, `ECHO`,
+  `ICANON`, `ICRNL`, `ISIG` — and runs *before* the child spawns; a program that wants
+  raw sets it itself, which is what `readline`, `vim`, `less` and `ssh` all do. Two
+  readers of that mode make it non-negotiable. The kernel's line discipline is where a
+  line feed becomes a carriage return: turn it off and `ls`, `cat`, a script and Ubuntu's
+  motd all draw a staircase, and the VT core cannot recover what the kernel did not do.
+  And `ssh` sends *this* tty's modes in its `pty-req`, so a raw local pty is a raw
+  **remote** one — no `ONLCR` and no `ECHO`, so a fresh ssh session shows a garbled screen
+  and does not echo the typing, until `reset` runs `tcsetattr(sane)` at the other end
+  (which is why the fix looks like it did nothing). This was the other way round until
+  2026-11-08, on the argument that the VT core *is* the line discipline; it is not, and
+  `docs/windows.md` §4.2 records the staircase that argument produced. The cost is real
+  and paid on purpose: `n_tty` rewrites each newline, 3.9 s against 37 ms on a 32 MiB
+  flood of two-byte lines.
 - **`publish` gates on change, not on arrival**: it skips `Dirty::Clean`, so the first
   publish after a session starts is forced. **A cursor is not a dirty cell** — hiding or
   restyling it changes no cell, so `publish` compares the `Cursor` (position plus DECSCUSR
@@ -407,6 +420,15 @@ tag mirroring on.
   quoted with the exit status. `examples/probe.rs` runs the same path from a shell;
   `DTR_SSH_CONFIG=/dev/null` gets past a broken config and `DTR_SSH_BATCH=0` lets a prompt
   be seen.
+- **`TERM` is `xterm-ghostty`, and a host without that terminfo says so**: dtr sets it in
+  the pty because the VT core is Ghostty's, and the entry ships with nixpkgs and the
+  ghostty installer — but a vanilla Ubuntu container has no `ncurses-term` entry for it,
+  so *on the far side* `clear`, `tput` and `reset` answer `unknown terminal type`. Install
+  the entry there, or force another name with `SetEnv TERM=xterm-256color` in
+  `~/.ssh/config` **and** `AcceptEnv TERM` in that host's `sshd_config` — the client's
+  `SetEnv` is silently dropped without it (Ubuntu's default accepts only `LANG LC_*`),
+  which is a long afternoon if you do not know. This is not what makes a fresh ssh
+  session look broken; that was the raw pty (see the bullet above).
 - **Retries are bounded in rate, not in number**: waits go 1, 2, 4, 8, 16, 30, 30, …
   seconds, forever, because closing the tab is how a person gives up and a cap would turn
   a laptop shut for a day into "closed while you were not looking". The reset needs ten

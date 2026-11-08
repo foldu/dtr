@@ -176,25 +176,30 @@ fn spawn(config: &Config, program: &str) -> anyhow::Result<Shell> {
         pixel_height: 0,
     }))?;
 
-    // A pty is born in the kernel's cooked mode, and that mode is a second
-    // line discipline sitting in front of ours: every byte the session writes
-    // is scanned for post-processing (each `\n` becomes `\r\n`), input is line
-    // buffered and echoed by the kernel rather than by the program, and flow
-    // control eats ^S. A terminal does all of that itself — the VT core *is*
-    // the line discipline — so the session is put in raw mode before the child
-    // starts, the way every other terminal starts one.
+    // The tty the child gets is *not* raw, and both readers of this mode are
+    // why.
     //
-    // Measured on a 32 MiB flood of two-byte lines: 37 ms raw, 3.9 s cooked.
-    // The 3.9 s is `n_tty` rewriting each newline one character at a time, and
-    // it is paid by the *session*, not by dtr — which is why a dumb pass-through
-    // like `script` is just as slow on the same payload.
+    // The kernel's line discipline is not a second terminal we could do
+    // without: it is where a line feed becomes a carriage return. Turn that off
+    // and every program that writes `\n` — `ls`, `cat`, a shell script, Ubuntu's
+    // motd — draws a staircase, and "one\ntwo\n" comes out as `one` with `two`
+    // starting where `one` ended. The VT core cannot recover what the kernel
+    // did not do, and the core doing it instead would be the wrong layer: a
+    // program that wants bare newlines asks the tty for them itself.
     //
-    // `ISIG` is the one flag kept: ^C should still interrupt the foreground
-    // process, and a program that wants the byte itself (readline) turns it off
-    // for the duration, as it always has.
+    // The other reader is `ssh`. It sends *this* tty's modes to the far end in
+    // its `pty-req`, so a raw local pty is a raw remote one: no `ONLCR` and, the
+    // part people notice first, no `ECHO` — nothing typed at the remote shell
+    // appears, and the fix is `reset`, which is `tcsetattr(sane)` at the other
+    // end and therefore looks like it does nothing at all.
+    //
+    // This costs what it costs: `n_tty` rewrites each newline, measured at 3.9 s
+    // for a 32 MiB flood of two-byte lines against 37 ms raw. Every other
+    // terminal pays it on the same payload, and one that does not is not a
+    // terminal.
     #[cfg(unix)]
     if let Some(fd) = pair.master.as_raw_fd() {
-        set_raw(fd)?;
+        set_sane(fd)?;
     }
 
     // A shell may be given with arguments (`bash -l`); no quoting, M0.
@@ -235,11 +240,16 @@ fn spawn(config: &Config, program: &str) -> anyhow::Result<Shell> {
     })
 }
 
-/// Put the pty into raw mode: no output post-processing, no kernel echo, no
-/// line buffering, no flow control. `ISIG` is kept, so ^C still signals the
-/// foreground process group; a program that wants the byte turns it off itself.
+/// Give the child the tty a terminal gives it: canonical input, echo, signals,
+/// 8-bit data, and output post-processing so that a newline is also a carriage
+/// return.
+///
+/// These are the kernel's defaults — and `stty sane`'s — set explicitly so that
+/// the mode does not depend on what a pty inherits. A program that needs
+/// something else sets it itself; that is what `readline`, `vim`, `less` and
+/// `ssh` all do.
 #[cfg(unix)]
-fn set_raw(fd: std::os::unix::io::RawFd) -> anyhow::Result<()> {
+fn set_sane(fd: std::os::unix::io::RawFd) -> anyhow::Result<()> {
     // SAFETY: `fd` is an open pty master owned by this call's caller, and
     // `termios` is plain old data the kernel fills in.
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
@@ -248,16 +258,17 @@ fn set_raw(fd: std::os::unix::io::RawFd) -> anyhow::Result<()> {
     }
     let mut termios = unsafe { termios.assume_init() };
 
-    termios.c_iflag &= !(libc::IGNBRK
-        | libc::BRKINT
-        | libc::PARMRK
-        | libc::ISTRIP
-        | libc::INLCR
-        | libc::IGNCR
-        | libc::ICRNL
-        | libc::IXON);
-    termios.c_oflag &= !libc::OPOST;
-    termios.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::IEXTEN);
+    // Input: CR from the keyboard reads as NL, ^S/^Q flow control works, and
+    // nothing is stripped to seven bits.
+    termios.c_iflag |= libc::ICRNL | libc::IXON;
+    termios.c_iflag &= !(libc::PARMRK | libc::ISTRIP | libc::INLCR | libc::IGNCR | libc::IXOFF);
+    // Output: the one conversion a terminal cannot do for the kernel. See the
+    // comment at the call site — `ssh` forwards these flags as well.
+    termios.c_oflag |= libc::OPOST | libc::ONLCR;
+    // Line discipline: lines, echo (so a session that has not taken the tty
+    // over still shows what was typed), ^C to the foreground process group.
+    termios.c_lflag |=
+        libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ISIG | libc::IEXTEN;
     termios.c_cflag &= !(libc::CSIZE | libc::PARENB);
     termios.c_cflag |= libc::CS8;
 
@@ -299,7 +310,7 @@ fn candidates() -> Vec<String> {
 }
 
 #[cfg(all(test, unix))]
-mod raw_tests {
+mod tty_tests {
     use super::*;
 
     /// A directory that is asked for and exists is the one used, so "open a tab
@@ -319,13 +330,15 @@ mod raw_tests {
         assert!(dir.is_dir(), "{dir:?} is not a directory");
     }
 
-    /// The trap this guards: a pty is cooked until somebody says otherwise, and
-    /// cooked means the kernel runs a line discipline in front of ours. The
-    /// expensive half is output post-processing — every newline of the session's
-    /// output is rewritten to CR LF one character at a time, which measured
-    /// 3.9 s against 37 ms for the same 32 MiB flood.
+    /// The trap this guards: a pty whose modes were made raw is a pty that
+    /// cannot render a plain newline, and `ssh` copies these flags to the far
+    /// end, where the same raw mode shows up as a session with no echo.
+    ///
+    /// A program that wants raw sets it itself, so the flags asserted here are
+    /// the *starting* ones, and the cost (the kernel rewriting each newline) is
+    /// paid on purpose.
     #[test]
-    fn the_session_starts_raw() {
+    fn the_session_starts_sane() {
         let shell = Config {
             program: Some("true".to_owned()),
             ..Default::default()
@@ -339,21 +352,30 @@ mod raw_tests {
         assert_eq!(unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) }, 0);
         let termios = unsafe { termios.assume_init() };
 
-        assert_eq!(
+        assert_ne!(
             termios.c_oflag & libc::OPOST,
             0,
-            "the kernel post-processes output"
+            "a newline has to stay a newline and a carriage return"
         );
-        assert_eq!(
+        assert_ne!(
+            termios.c_oflag & libc::ONLCR,
+            0,
+            "`\\n` alone would draw a staircase, and ssh would copy that to the far end"
+        );
+        assert_ne!(
             termios.c_lflag & libc::ICANON,
             0,
-            "the kernel line buffers input"
+            "a session that has not taken the tty over reads lines"
         );
-        assert_eq!(termios.c_lflag & libc::ECHO, 0, "the kernel echoes input");
-        assert_eq!(
+        assert_ne!(
+            termios.c_lflag & libc::ECHO,
+            0,
+            "without echo, a remote shell shows nothing until `reset`"
+        );
+        assert_ne!(
             termios.c_iflag & libc::ICRNL,
             0,
-            "the kernel rewrites input newlines"
+            "the Enter key arrives as CR and has to read as NL"
         );
         assert_ne!(
             termios.c_lflag & libc::ISIG,
