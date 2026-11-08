@@ -26,6 +26,12 @@ until there is an on-screen counter.
 | 9 | "pi has artifacts" | **Unverified**; one trap ruled out, see §4.2 | — | ? | needs capture |
 | 10 | Windows resize is sluggish | **Real, partly inherent**; one avoidable cost found | `app.rs:4329` | Windows | S–M |
 
+**1 and 5 are fixed**, and they were the same bug — the grid sized in points and drawn in
+pixels, with the status bar the place it was left unfixed; §2.4 is what the fix touched, and
+§2.1's two rows of measurements are the before and the after. The table keeps the verdicts of
+the run that found it, because "we thought this was three problems" is the part worth
+keeping. Note 9 (§4.2) was fixed too, and was not a rendering bug at all.
+
 ---
 
 ## 2. The DPI cluster (1 and 5)
@@ -345,10 +351,9 @@ where the taskbar and Explorer had been drawing the generic blank. The rest of t
 section is the reasoning that led there, kept because it still explains what the merge
 costs.
 
-Today there are two rows above the grid: the OS title bar (default decorations,
-`crates/dtr/src/app.rs:3255`) and a 30-point tab strip inside the client area
-(`crates/dtr/src/app.rs:4396`, `crates/dtr/src/ui.rs:208`). "Tabs in the header" means
-merging them, which means client-side decorations:
+Before that work there were two rows above the grid: the OS title bar (default
+decorations) and a 30-point tab strip inside the client area (`ui::TAB_HEIGHT`). "Tabs in
+the header" meant merging them, which meant client-side decorations:
 
 - a drag region (`window.drag_window()` on press, double-click to maximise);
 - window buttons drawn by us, and on Windows 11 the snap-layout hover on the maximise button,
@@ -359,9 +364,10 @@ merging them, which means client-side decorations:
 Options, cheapest first: (a) leave it, spend the row on something else; (b) merge only on
 Windows, keeping decorations elsewhere; (c) custom decorations everywhere. (c) won: winit
 keeps the Windows frame styles that Aero Snap needs and hides the frame in `WM_NCCALCSIZE`,
-and egui already forwards drag, resize, maximise and title, so the only real platform work
-is the Windows 11 snap flyout and the Linux edge zones. It is still the one item on the
-list that blocks nothing, which is why it is last in §7.
+and egui already forwards drag, resize, maximise and title, so the platform work was the
+snap-layout flyout and the Linux edge zones — both built (`chrome.md` §2), with the flyout
+still not appearing. It was the one item on the list that blocked nothing, which is why it
+was last in §7.
 
 ---
 

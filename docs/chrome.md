@@ -71,17 +71,21 @@ deliberately *not* `WS_POPUP`:
 - `ViewportInfo.maximized` is refreshed from `window.is_maximized()` every frame
   (`egui-winit/src/lib.rs:1506`), so a restore icon needs no bookkeeping of its own.
 
-What is missing — the actual platform work:
+**Both of these were built** — §11 is the verification. They are kept here because they are
+why the design is what it is, not because they are outstanding.
 
 1. **Windows 11's snap-layout flyout.** It appears when `WM_NCHITTEST` answers
    `HTMAXBUTTON` over the maximise button. winit never sends that, and
    `EventLoopBuilderExtWindows::with_msg_hook` cannot help: the hook sees *posted*
-   messages, and hit tests are sent. This needs `SetWindowSubclass` and therefore a
-   direct `windows-sys` dependency.
+   messages, and hit tests are sent. So `crates/dtr/src/chrome/windows.rs` subclasses the
+   window with `SetWindowSubclass` — a direct `windows-sys` dependency — and answers the
+   hit test itself. What is still open is not the hit test but the flyout: the guest
+   answers `HTMAXBUTTON` when asked directly and still shows no flyout, while Edge in the
+   same guest does. §11 is what that rules out and what is left.
 2. **Linux edge zones.** With no WM frame nothing resizes the window, so eight border
-   zones are ours to hit-test and answer with `BeginResize`. On Windows this code is inert
-   — the retained OS frame takes the press before egui sees it — which is worth confirming
-   on the VM rather than assuming.
+   zones are ours to hit-test and answer with `BeginResize`: `chrome::resize_edges`. On
+   Windows this code is inert — the retained OS frame takes the press before egui sees it
+   — which is worth confirming on the VM rather than assuming.
 
 ---
 
@@ -172,11 +176,14 @@ a pixel off, and that is the point at which to query instead of multiply.
   *kind* of shape, but their 2-in-24 geometry and square caps are a different drawing, and
   at 16 pt that difference is the whole glyph.
 
-**The window icon** is a separate thing and does not exist today: nothing calls
-`with_window_icon` or `with_taskbar_icon`, so the Windows exe shows the generic blank in
-the taskbar. The artwork is already in the tree (`assets/logo/dtr-mark-32.png`,
-`-512.png`) and needs `Icon::from_rgba` at creation. On Linux the desktop entry supplies
-`Icon=dtr`, so this is mostly a Windows fix.
+**The window icon** is three separate things, and only one of them is about a window. The
+running window's icon is set at creation — `with_window_icon(window_icon())` in
+`crates/dtr/src/app.rs`, an `Icon::from_rgba` over the 32-pixel render of
+`assets/logo/dtr-icon.svg` — so the taskbar shows the mark while the app runs. Explorer, the
+taskbar's *pin* menu, the Start menu and Alt-Tab read a resource out of the **file** instead,
+which is why `crates/dtr/build.rs` compiles `assets/logo/dtr.ico` with `zig rc`; `WM_SETICON`
+cannot fix those. On Linux the desktop entry supplies `Icon=dtr`. §11 is how the three were
+made to agree.
 
 ---
 
@@ -185,19 +192,22 @@ the taskbar. The artwork is already in the tree (`assets/logo/dtr-mark-32.png`,
 | piece | where |
 |---|---|
 | policy read from config | `dtr-config`, `[window] chrome = …` |
-| decorations, shadow, icon at creation | `app.rs:3255` (`with_decorations`, `with_undecorated_shadow`, `with_window_icon`) |
-| tokens, hit test, paint, glyph source | `crates/dtr/src/chrome/{mod,windows,adwaita}.rs` |
-| caption row: chips left, buttons right, drag between | the `Panel::top` in `app.rs:4396` |
+| decorations, shadow, icon at creation | `App::resumed` (`with_decorations`, `with_undecorated_shadow`, `with_window_icon`) |
+| tokens, hit test, paint, glyph source | `crates/dtr/src/chrome.rs`, and `chrome/windows.rs` behind `#[cfg(target_os = "windows")]` |
+| caption row: chips left, buttons right, drag between | the `Panel::top` in `App::render` |
 | OS title follows the active tab | `App::set_active` |
 | tests | kittest for the rects, `--capture` for the look, winvm for Windows |
 
-`chrome/mod.rs` holds the geometry and the hit test and knows nothing about windows; the
-two submodules are a token table plus a glyph source (`Font` on Windows, `Painted` on
-Linux), so the shared code never branches on platform except to pick one.
+`chrome.rs` holds the geometry, the hit test, the painted glyphs and the strip's menu, and
+knows nothing about windows; `chrome/windows.rs` is the Windows token table plus the `Font`
+glyph source. `Glyphs::{Font, Painted}` is the one place the shared code asks which, so it
+never branches on the platform anywhere else.
 
 ---
 
 ## 7. Build order
+
+All four steps landed; §11 is the verification and the one thing that did not reproduce.
 
 1. **Policy and a frame you can move** (S). `chrome = client`, decorations off, drag in the
    free rectangle, double-click maximise, title follows the tab — no buttons yet.
@@ -238,17 +248,21 @@ Afterwards, when it bites: tab overflow (the 138 points make it arrive sooner), 
 - **The offscreen path has no window.** `--screenshot` has no maximise state to read, so it
   keeps drawing tabs without buttons. The caption is drawn by `app.rs`, not by
   `ui::tab_bar`, which is why the kittest baselines do not move.
-- **The status bar's `STATUS_HEIGHT * scale()` is still wrong** (`app.rs:4429`) and gets no
-  better here; a merged caption changes nothing about it (`windows.md` §2.2).
+- **The status bar was this mistake in one place, and it is fixed.** The panel is
+  `.exact_size(STATUS_HEIGHT)` in *points* while the reservation `fit_panes` takes is in
+  *pixels*, which is `windows.md` §2.2's bug; the caption row inherits the same lesson,
+  because the strip is reserved in pixels and laid out in points.
 
 ---
 
 ## 9. What will still not match
 
 High-contrast mode (native buttons re-theme; ours would need `SystemParametersInfo`), the
-Win11 flyout until step 4, Windows' hover tooltip (there is none), GNOME's per-theme accent
-and non-Adwaita themes (Breeze gets Adwaita geometry with our colours), and any WM feature
-driven by the WM's own title bar (there no longer is one).
+Win11 flyout — the subclass answers the hit test and Windows still does not show it (§11) —
+Windows' hover tooltip (there is none), a GTK theme that is not Adwaita (which is *refused*:
+that machine gets the `dtr` chrome rather than Adwaita's geometry in our colours,
+`gtk-palette.md` §6), and any WM feature driven by the WM's own title bar (there no longer
+is one).
 
 ---
 

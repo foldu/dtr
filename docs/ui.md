@@ -32,12 +32,15 @@ So the crate holds one vocabulary, and a surface asks it for a *skin*.
   two `on_*` foregrounds, `selection`, `scrim`, `danger`, and the two-tone
   focus ring. A widget names a role and never a grey.
 - **`Style` is shape**: the row height, the gaps, the label column, padding,
-  three radii, the hairline width, the fonts, and the few *behavioural* choices
-  a dialog makes — `Title::{Eyebrow,Bar}`, `Section::{Rule,Bold}`,
-  `Footer::{PrimaryLast,PrimaryFirst}`, `Focus::{None,Ring}`, plus an optional
-  card shadow. Each of those is a token rather than a `cfg!` so that both looks
-  render on one machine, which is the only way the Windows look stays honest
-  without a VM.
+  four radii — `control`, `card`, `chip` and `check`, the last two separate
+  because Adwaita rounds a 20-point box by 6 while a tab is a pill, and one
+  radius for both draws either a circle that is not a checkbox or a chip that
+  does not look like one — the hairline width, the fonts, and the few
+  *behavioural* choices a dialog makes — `Title::{Eyebrow,Bar}`,
+  `Section::{Rule,Bold}`, `Footer::{PrimaryLast,PrimaryFirst}`,
+  `Focus::{None,Ring}`, plus an optional card shadow. Each of those is a token
+  rather than a `cfg!` so that both looks render on one machine, which is the
+  only way the Windows look stays honest without a VM.
 - **`Skin` is the pair**, and `Skin::egui_style` derives an `egui::Style` from
   it, so the widgets that are still egui's own (`TextEdit`, `ScrollArea`, popup
   frames) share the surface with the painted ones. Without that derivation the
@@ -45,9 +48,10 @@ So the crate holds one vocabulary, and a surface asks it for a *skin*.
 
 ## Two presets, and what `native` means
 
-`Preset::{Dtr,Native}`; `Skin::resolve(preset, dtr_palette)` builds one.
-`native` is the default — a terminal that has to look like a system window
-should do so unless asked otherwise.
+`Preset::{Dtr,Native}`; `Skin::resolve(preset, dtr_palette, native)` builds one,
+where the third argument is the platform's answer or `None`. `native` is the
+default — a terminal that has to look like a system window should do so unless
+asked otherwise.
 
 - **`dtr`** is the terminal's own chrome: monospace, an 11.5-point label, a
   23-point row, a 5-point gap, an 82-point label column, radius 4 for a control
@@ -61,13 +65,23 @@ should do so unless asked otherwise.
   microsoft/microsoft-ui-xaml and composited over the base colour, because XAML
   carries its alpha in `#AARRGGBB` and a naive read of `#0FFFFFFF` as "grey"
   gets a translucent control.
-- **`native` on Linux** resolves to the `dtr` skin, by decision: there is no
-  portable system palette, and "read the GTK theme and the portal" is a project
-  of its own. `Skin::resolve` takes the platform's skin as an argument, so a
-  caller with no answer passes `None` and gets dtr.
-- **`native` on macOS** has no palette either, so it is the dtr skin for now.
-  A `windows()`-shaped constructor exists for Windows only, which is the honest
-  state rather than a guess at the macOS look.
+- **`native` on Linux is Adwaita**, read from the running desktop: the scheme
+  and the accent come from the XDG settings portal
+  (`org.freedesktop.appearance`, the same service libadwaita asks), and the gate
+  is the theme *name* (`GTK_THEME`, then `settings.ini`) — a theme that is not
+  Adwaita is refused, because painting Adwaita's `#36363a` surfaces on Breeze is
+  a confident lie. The surfaces themselves are libadwaita 1.9.3's own constants,
+  measured out of its gresource, so the only values a session can change are
+  those two; nothing parses CSS. This is `crates/dtr/src/system/linux.rs`, and
+  `docs/gtk-palette.md` is the whole story — §6 for the refusal, §8 for what a
+  second version would have to read. The portal half sits behind the `portal`
+  feature, so a build that will not take zbus's tree falls back to the theme's
+  name and never watches.
+- **`native` on macOS** has no reader, so it is the dtr skin for now:
+  `Skin::resolve` takes the platform's skin as an argument and a caller with no
+  answer passes `None`. The constructors are `dtr`, `adwaita`, `windows`,
+  `windows_light` and `windows_dark`; a guess at the macOS look would be worse
+  than saying there is none.
 
 The Windows palettes are rendered and snapshot-tested **on Linux** on purpose.
 A look that can only be seen on Windows is a look that is only checked when
@@ -78,16 +92,25 @@ somebody remembers to boot the VM.
 `[ui] widgets` in the config file, or `--widgets dtr|native` on the command line,
 which wins over the file. The default is `native`.
 
-The Windows read is in `crates/dtr/src/system.rs`: `AppsUseLightTheme` under
+The Windows read is `crates/dtr/src/system/windows.rs`: `AppsUseLightTheme` under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` for light
 or dark, and `AccentColor` under `...\DWM` for the user's accent — stored there
 as `0xAABBGGRR`, which is the byte order of a `COLORREF`, so reading it as
-`AARRGGBB` swaps red and blue and turns a blue accent amber. Absent means the
-user never chose, and the answer is WinUI's own default. It is read once and
-cached: `Look::skin()` is asked by every surface on every frame.
+`AARRGGBB` swaps red and blue and turns a blue accent amber — plus the accent
+ladder, so a hover lands on the shade Windows' own controls use. Absent means the
+user never chose, and the answer is WinUI's own default. That file is one of a
+pair: `system.rs` is the `Platform` trait both readers are written to
+(`source`, `read`, `skin`, over one `Reading { dark, accent, ladder }`), and the
+cell that holds whichever one answered. It is read once and kept current;
+`Look::skin()` builds the skin from the terminal theme's colours plus that
+answer, on every frame, because a palette is a few dozen mixes.
 
-`-v` logs `chrome skin=… requested=… accent=…` at startup. On Linux that line
-reads `requested="native" skin="dtr"`, which is the design, not a failure.
+`-v` logs a `chrome` event with `skin`, `requested`, `accent`, `hover` and
+`source` — `windows-registry`, `portal`, or `none` — and `reason` when there is
+no skin. That pair is the difference between a preference and an outcome: on a
+GNOME desktop the line now reads `source="portal" skin="adwaita-light"` (or
+`-dark`), while a machine with no portal, or a theme that is not Adwaita, gets
+`skin="dtr"` *with* the reason it is.
 
 **Verified in the `winvm` guest, 2026-11-07** (a light-theme Windows 11 with
 `AccentColor = 0xFFD47800`):
@@ -135,20 +158,28 @@ what makes them testable and what lets a caller `--send` into them.
   `on_accent` on it, which is what makes "selected" mean one thing everywhere.
 - `menu_row` — a full-width list entry, with the tick marking the value already
   in the field.
-- `cross` — a close button drawn from two strokes, sized by its target rather
-  than its glyph.
+- `cross`, `cross_at`, `plus` — the icon buttons, drawn from two strokes and
+  sized by their target rather than their glyph; `cross_at` takes a rect the tab
+  strip has already reserved, which is how a chip gets a close target that does
+  not overlap its label.
 
 The serial sheet is drawn entirely with these: `serial_dialog.rs` contains no
 colour, radius or stroke width, and its row heights and gaps come from
 `Look::skin()`. `menu_row` and `cross` exist because the sheet was the second
 place to need them.
 
-**Still to move**: the tab strip paints its own chip (the elided label and the
-two hit targets are the strip's own rules, but its colours and radii are the
-skin's now), and the settings menu, the palette overlay, the file explorer, the
-link menu and the pager still mix their own colours from `Look`'s three RGB
-triples. Those are the sites where a `native` skin would be ignored, so they are
-the next thing to convert rather than a style done.
+**That conversion is finished.** The tab strip, the settings menu, the palette
+overlay, the file explorer, the link menu, the pager, the keymap card and the
+about card each take `look.skin()` and paint from `skin.palette`, so a `native`
+skin reaches all of them. (It was not, for a while: this paragraph used to list
+five of them as still mixing their own colours from `Look`'s three RGB triples.)
+
+What still reads `Look`'s raw triples is the **terminal itself** — `render.rs`'s
+cells, the IME preedit, and the window's clear colour. That is correct rather
+than a leftover: a grid cell's colour belongs to the terminal theme, not to the
+chrome, and a chromed grid would be a terminal that ignored its own theme. The
+seam is `Look`'s theme colours out, `Skin`'s roles in, and a surface that is a
+terminal is on the theme side of it.
 
 Every painted widget declares an accessibility node for its response, refuses
 the Enter that egui turns into a click, and keeps its hit targets disjoint.
@@ -157,11 +188,14 @@ Those are not style decisions; they were each a bug once.
 ## How the widgets are checked
 
 `crates/dtr-widgets/tests/widgets.rs` renders the whole serial sheet — every row,
-in the real order — in each preset, and snapshots it. Behaviour has its own
-tests: a click by accessible name, and an assertion on what the widget reported.
-`crates/dtr-widgets/tests/snapshots.rs` fails when a `snapshot(…)` has no
-baseline or a baseline has no test, and the baselines are committed through LFS
-and must be regenerated inside the devShell, through lavapipe.
+in the real order — once per skin the crate can build (dtr, Windows dark and light,
+Adwaita dark and light), and snapshots it: a widget painted from a token is exactly the
+thing that cannot be reviewed by eye on the platform it is for.
+
+Behaviour has its own tests: a click by accessible name, and an assertion on what the
+widget reported. `crates/dtr-widgets/tests/snapshots.rs` fails when a `snapshot(…)` has no
+baseline or a baseline has no test, and the baselines are committed through LFS and must be
+regenerated inside the devShell, through lavapipe.
 
 ## The tab strip
 
@@ -280,8 +314,8 @@ other.
 
 ## Icons
 
-Icons are Lucide SVGs, fetched by a skill in this repository: `.dsh/skills/lucide-icons` and
-`scripts/fetch.sh` pull `https://lucide.dev/api/icons/<name>` into
+Icons are Lucide SVGs, fetched by a skill in this repository:
+`.dsh/skills/lucide-icons/scripts/fetch.sh` pulls `https://lucide.dev/api/icons/<name>` into
 `crates/dtr/assets/icons/<name>.svg`, refusing to overwrite one already committed. They are
 embedded with `egui::include_image!` and rasterised by `egui_extras`, so the one-file build
 carries them.
@@ -325,11 +359,19 @@ disagreeing.
 
 ## Not decided
 
-- The macOS palette, and whether `native` should read the desktop's accent on
-  Linux through the XDG portal.
-- Whether the settings menu's ComboBoxes should become a `Combo` primitive: they
-  are the last stock egui controls with a popup list, and their rows are painted
-  by `menu_row` but the closed control is still egui's.
-- Whether a chip and a checkbox should share `chip_radius` (they do today).
+- The macOS palette. Linux's is no longer a question — `native` there is
+  Adwaita read through the portal — so what is left is the platform nobody has
+  measured, and a constructor that guesses would be the one thing worse than
+  having none.
+- Whether the settings menu's four `egui::ComboBox`es should become a painted
+  `Combo`: their open rows are `menu_row` already, but the closed control is
+  still egui's, so it is the last place a `native` skin stops. `Editable` is
+  *not* the answer — it is a field that can be typed into, and it reports
+  `Edit::Typed` as well as `Edit::Picked`.
 - Where a key hint is drawn: the serial sheet's footer writes `enter connect`
   as text, and nothing paints a keycap yet.
+
+*(A chip and a checkbox sharing one radius was on this list; the answer was no.
+`Style::check_radius` is separate from `chip_radius` because Adwaita rounds a
+20-point box by 6 while a tab is a pill, and they differ in the native preset —
+9 against 6 — for exactly that reason.)*

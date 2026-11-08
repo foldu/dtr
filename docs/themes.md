@@ -20,8 +20,19 @@ Everything below is written to fit that; §7 and §8 are the parts that make it 
 ## 1. Recommendation
 
 **dtr's theme format is the Ghostty theme file. One file per theme, in
-`~/.config/dtr/themes/<name>`, selected by `theme = "<name>"` in `config.toml`. Three search
-directories, exact-filename lookup, no second dialect.**
+`~/.config/dtr/themes/<name>`, selected by `theme = "<name>"` in `config.toml`. No second
+dialect.**
+
+**As shipped on 2026-11-08, three details of that sentence are out of date.** The search is
+not three directories but six — `~/.config/dtr/themes`, `~/.config/ghostty/themes`,
+`~/.local/share/dtr/themes`, `~/.local/share/ghostty/themes`,
+`/usr/local/share/ghostty/themes` and `/usr/share/ghostty/themes`, in that order — because
+reading the themes the user already has is the point. The lookup is exact **and then**
+case-insensitive, because Ghostty capitalises its file names and people do not. And one
+entry is compiled into the binary, `Kanagawa Wave`, used when nothing on disk matches,
+because the places dtr runs have nothing to read: a Nix store path, or the one-file Windows
+exe with no `share/`. A file of that name beats the compiled-in copy, which is how it is
+intended to be changed.
 
 ```toml
 # ~/.config/dtr/config.toml

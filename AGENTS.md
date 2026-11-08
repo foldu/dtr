@@ -671,7 +671,7 @@ account behind each of these.
   constant**, and the scroll bar's width is reserved, or a floating bar paints over the last
   characters of the `[keys]` names.
 - **Icons are Lucide SVGs, fetched by a skill in this repository**:
-  `.dsh/skills/lucide-icons`, `scripts/fetch.sh`, `egui::include_image!`, rasterised by
+  `.dsh/skills/lucide-icons/scripts/fetch.sh`, `egui::include_image!`, rasterised by
   `egui_extras` so the one-file build carries them. `fetch.sh` rewrites `currentColor` to
   `#ffffff`, because it rasterises to black and `Image::tint` only multiplies.
   `install_image_loaders` is idempotent and `tab_bar` calls it rather than trusting

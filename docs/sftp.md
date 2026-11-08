@@ -2,6 +2,10 @@
 
 Status: research, 2026-10-27 · Scope: *how* SFTP gets into `dtr`, not the implementation.
 
+**Implemented as recommended.** `crates/dtr-sftp` spawns `ssh -s <alias>` and drives
+`russh-sftp` over the child's stdio — §1's choice, and neither runner-up. This memo stays
+the place to read for *why*, because the measurements in §3 are what decided it.
+
 Question: dtr needs file transfer over SSH, sharing authentication with the SSH terminal
 session where possible, without breaking the Windows single-`.exe` rule (PLAN §7) or the
 cross-build (§5.3). This memo picks an approach and records what was actually measured.
