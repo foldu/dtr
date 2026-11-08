@@ -1,8 +1,10 @@
-# The look of the chrome
+# The chrome: the skin, its widgets, and how they are tested
 
-A decision memo for `dtr-widgets`: why the chrome has a style at all, what a
-token is, and what "native" means on each platform. Read it before adding a
-colour to a screen; the short version is in `AGENTS.md` §The UI.
+A decision memo for `dtr-widgets` and for every surface that draws with it: why the
+chrome has a style at all, what a token is, what "native" means on each platform, and the
+rules the moving parts in a tiled window obey — the tab strip, the settings menu, the
+palette, the keyboard map. Read it before adding a colour to a screen; the short version is
+in `AGENTS.md` §The UI, and that file carries the rules an edit must not break.
 
 ## What was wrong
 
@@ -152,7 +154,7 @@ Every painted widget declares an accessibility node for its response, refuses
 the Enter that egui turns into a click, and keeps its hit targets disjoint.
 Those are not style decisions; they were each a bug once.
 
-## How it is checked
+## How the widgets are checked
 
 `crates/dtr-widgets/tests/widgets.rs` renders the whole serial sheet — every row,
 in the real order — in each preset, and snapshots it. Behaviour has its own
@@ -160,6 +162,166 @@ tests: a click by accessible name, and an assertion on what the widget reported.
 `crates/dtr-widgets/tests/snapshots.rs` fails when a `snapshot(…)` has no
 baseline or a baseline has no test, and the baselines are committed through LFS
 and must be regenerated inside the devShell, through lavapipe.
+
+## The tab strip
+
+**A chip is as wide as its title, until the title is longer than the strip.** The label is
+elided at `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, on one row, broken anywhere; the
+full name stays in the tooltip and in the accessibility node. Unbounded, one deep directory
+pushes every tab and the `+` off the strip.
+
+**A chip has two hit targets**: the label switches tabs, a cross on the right closes that
+tab, whichever is active, and both declare accessibility names (`2 shell`, `close tab 2`).
+The cross is `dtr_widgets::cross_at` — two strokes in the chip's own reserved rect, not
+`×`, because egui's font has no multiplication sign. The active tab's title follows its
+focused session, and every switch goes through `App::set_active`, which logs
+`active tab from=… to=… why=…`. The chip's colours and radii are the skin's; its elision and
+its two rects are the strip's, and `New tab`'s menu is `menu_row` rows.
+
+**The strip's own menu is a burger at the right-hand end, next to the caption buttons**, on
+both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
+`menu_row`s — settings, keyboard map, about. The right end because the left is where tabs
+start and a button there would move every tab; the *same* place on Linux, where a client
+frame draws the same caption buttons. Its rect is part of the caption's obstacle list, not
+just painted over it: the drag region stops at the menu's left edge (`chrome::drag_area`),
+or a press on the menu starts a window drag.
+
+**About is a card, not a dialog** (`crates/dtr/src/about.rs`): every fact on it is a
+compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot disagree with the binary,
+and it is opened by the menu and by `about` in the palette.
+
+Two bugs are worth keeping in mind whenever a chip changes. **A widget painted by hand has
+no accessibility node** unless `Response::widget_info` declares one, and the chips were
+invisible to the harness *and* to a screen reader. And `Sense::click()` is **not
+pointer-only**: egui turns Enter into a click for any focused widget that senses clicks, so
+a clicked chip stayed focused and every Enter typed into the shell switched tabs. The fix is
+to accept a hit only when `pointer.any_click()` says the pointer clicked, and to have the
+chip surrender focus after being drawn. **Overlapping click targets read as "sometimes
+unresponsive"**, too: egui gives the press to the topmost widget that senses clicks, so a
+chip, its close cross and the icon on top made the winner depend on allocation order —
+disjoint rects, and `Image::paint_at` for anything that must not sense anything.
+
+## The settings menu
+
+The settings menu is mouse-first: rows are click targets, font size is a drag value, family
+and theme are combo boxes, toggles are checkboxes. `Settings::ui` takes `&self` — the
+renderer holds a borrow — so a control *reports* its edit as a `Change` and `Settings::apply`
+writes the draft.
+
+Every control declares an accessible name of the form `<row> value`, not the row name,
+because the row's label already carries the bare name and two nodes with one name cannot be
+addressed from a test. Port rows exist only when a port is focused: baud and CR translation
+belong to one device.
+
+**A menu that opens slowly the first time is doing its work in the frame**:
+`usable_families` builds a fontconfig collection and probes every family (the same
+`FcFontSort` cost that showed up in a profile at 16%), and it is cached in a `OnceLock` so
+the second open is instant. The app warms both lists on a `dtr-warm` thread at startup, and
+`-v` logs `warmed the settings lists` and `settings populated`.
+
+## The palette
+
+**`egui::Window` renders nothing inside `Context::run_ui`**, which is why the palette is an
+overlay drawn into the same `Ui`. Two drawing traps come with it: **a widget's background
+painted after its text hides the text** — the palette's selected row was invisible until the
+highlight was drawn first — and **a solid quad that samples the atlas can vanish silently**,
+because solids carry a negative uv, take their colour from the instance, and the shader
+branches.
+
+**A trailing space is a word break, not whitespace to trim**: the palette used to trim it
+before deciding which word was being completed, so `ssh ` looked like the command `ssh` and
+offered commands where hosts belong. `Parsed::of` keeps it, and after a space there is
+nothing to complete for a command with no arguments.
+
+**A command's first letter is its accelerator, so it is unique**: `s` is `ssh` and nothing
+else may start with `s`, so rename the new command rather than share the letter (`shell`
+became `exec`). `crates/dtr-complete` fails the build when two commands collide and holds the
+ranking to it — one letter must *complete* to its command, not just rank it first. A command
+with no `palette::action_for` arm does not belong in the list: `log` and `logbook` were
+offered and inert, and are gone.
+
+**`C-n` and `C-p` are consumed like the arrows**, taken from `input_mut` before the text
+field sees them so navigating cannot land an `n` in the query. **Reopening the palette starts
+a fresh sentence**: `toggle` clears query, selection and completions. **A modal must ignore
+key releases** — the release of the keystroke that opened it arrives while it is open, which
+made the settings menu flash and vanish — so overlays check `ElementState::Pressed` first.
+**`Ctrl+Shift+T` opens a tab**; `Ctrl+Tab` only cycles ones that exist.
+
+## The keyboard map
+
+**A binding nobody can find is a binding nobody has**: `ctrl-?` opens the keyboard map
+(`crates/dtr/src/keymap.rs`), and `keys` in the palette opens it too, because the chord
+itself is the thing a new person does not know.
+
+The card is built from the live `keys::Keymap`, so it shows the rebindings `[keys]` in the
+config has applied and says `unbound` where a binding was switched off — "does nothing" and
+"is not bound" are the same silence at the keyboard. Each row also names the action as
+`[keys]` spells it (`new-tab`, `split-horizontal`), because the card is where a person finds
+out what to *write*, not only what to press.
+
+**A row is a button**, because rebinding has to start somewhere a person can find: pressing
+one opens a popup that waits for a key, with a `reset`. The key is captured by `App::on_key`
+rather than by the card — the card draws and reports, and dispatch is the only thing that
+knows what a keystroke means — and a replacement is `dtr_config::set_value("keys.<name>", …)`
+followed by rebuilding the map from `config.keys`, so the card cannot show a chord a restart
+would not have. Reset is `dtr_config::remove_value`, not "write the default back": deleting
+the override is what makes a future default apply. `keys::refuse_reason` is the one policy
+for a chord that cannot be taken — no modifier, already another action's, or the start of a
+longer binding — and the popup says which, because a refused key and a dead card look alike.
+
+The columns, rows and fonts come from the skin, so the native style gets a taller card whose
+body scrolls inside the same 588 points. **The chord column is measured, not a constant**:
+each column asks the widest chord it holds, because `ctrl-alt-shift-right` and `shift-pageup`
+are in different columns and one width that fits the first wastes a third of the second. The
+scroll bar's width is reserved for the same reason — a floating bar paints over the last
+characters of the `[keys]` names, which are the point of that column — and `Group::COLUMNS` is
+the index the two columns divide at, with a test that keeps the halves about as tall as each
+other.
+
+## Icons
+
+Icons are Lucide SVGs, fetched by a skill in this repository: `.dsh/skills/lucide-icons` and
+`scripts/fetch.sh` pull `https://lucide.dev/api/icons/<name>` into
+`crates/dtr/assets/icons/<name>.svg`, refusing to overwrite one already committed. They are
+embedded with `egui::include_image!` and rasterised by `egui_extras`, so the one-file build
+carries them.
+
+Lucide's `currentColor` rasterises to *black* and `Image::tint` only multiplies, so `fetch.sh`
+rewrites it to `#ffffff` and each file becomes a white mask the tint colours.
+`install_image_loaders` is idempotent and `tab_bar` calls it rather than trusting startup,
+because a kittest harness makes its own `Context` and would otherwise draw egui's
+missing-image glyph, a `⚠` egui's own fonts cannot render.
+
+## Driving the UI from a script
+
+**Keys can be typed at the window from a script**: `--keys "ctrl-shift-p;down;down"` applies
+one stroke per frame through `App::on_key`, `;` separates tokens because a chord may be a
+comma, `+` joins the chords of one binding, and `text:` types characters.
+
+`--click x,y` moves, waits a frame, then presses — what a hand does, which is what makes it
+exercise the real hover-then-press path — and `--drag x1,y1,x2,y2` calls the same
+`pointer_down/move/up`.
+
+## How the chrome is tested
+
+**The egui layer is tested with `egui_kittest`, not a window**: `cargo test` drives a
+`Harness` with real layout and AccessKit, so clicks, keys and rendering are assertable —
+query a widget by accessible label, `.click()`, `harness.run()`, assert what it reported.
+`UPDATE_SNAPSHOTS=1 cargo test` writes a baseline PNG under `crates/dtr/tests/snapshots/` and
+the plain run compares, with one snapshot per state worth seeing — `tab_bar` and
+`tab_bar_hover` — because a hand-painted hover fill is invisible to every test where the
+pointer is elsewhere.
+
+These baselines follow the same LFS rule as the widget gallery — `.gitignore` ignores `*.png`
+with an exception for this directory, and `.gitattributes` sends it through LFS — so a
+checkout whose `git-lfs` did not smudge them holds 130-byte pointers, which `egui_kittest`
+reports as a decode error that reads like a rendering bug, so `tests/snapshots.rs` checks
+signature and size first and fails when a `snapshot("…")` has no baseline or a baseline has
+no test. **The rasteriser that writes a baseline must be the one that reads it**: the
+devShell selects lavapipe — Vulkan in software — when the machine has no `/dev/dri`, and CI
+has no DRM node, so regenerate with `UPDATE_SNAPSHOTS=1 cargo test` *inside the devShell*,
+never with the variable unset on a GPU machine, or the next pipeline fails on two rasterisers
+disagreeing.
 
 ## Not decided
 

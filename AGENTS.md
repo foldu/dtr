@@ -128,6 +128,11 @@ tag mirroring on.
   leaves the shell in a continuation prompt. Escape the backslash again, or put the
   sample in a file and type its path. (A sample that prints bare `\n` is fine now —
   the kernel's line discipline turns it into CR LF; see the pty bullet below.)
+- **This file has a budget, and it is silent when it is exceeded**: a session loads at most
+  64 KB of `AGENTS.md` and drops the rest, so a file that grows past it loses its *tail* —
+  which is the index. Keep it to rules: the rule, and the clause that makes it stick. The
+  account behind a rule — measurements, what was tried, why the obvious fix is wrong —
+  belongs in the `docs/` memo named beside it, which costs nothing until someone reads it.
 - Commits end with the co-author trailer.
 
 ## The event loop, redraws, and doing work off the UI thread
@@ -239,29 +244,30 @@ tag mirroring on.
 
 ## Keys, mouse, IME, selection
 
+`docs/input.md` has the account behind each of these: what it looked like when it was
+wrong, and the measurement that settled it.
+
 - **The program decides what a key means, and only the pane knows**: `Command::Key`
   carries a *stroke* and the pane's `key::Encoder` picks bytes after
   `set_options_from_terminal`, because the sequence is terminal state — `DECCKM`
   (`ESC O A`), `DECKPAM`, mode 1036, `modifyOtherKeys`, the kitty protocol
-  (`CSI > flags u`, a *stack*; ctrl+a is `CSI 97;5u`, releases included) — so a table in
-  the UI cannot be right.
-- **A release repeats its press's `logical_key`**, so encoding both sends every keystroke
-  twice ("typing `ls` shows `lsls`"); a release encodes to nothing unless the kitty
-  protocol asked for releases. It is the encoder's rule, not a UI guard.
+  (`CSI > flags u`, a *stack*; ctrl+a is `CSI 97;5u`) — so a table in the UI cannot be
+  right.
+- **A release must encode to nothing unless the kitty protocol asked for releases**: a
+  release repeats its press's `logical_key`, so encoding both sends every keystroke twice
+  ("typing `ls` shows `lsls`"). The gate belongs in the encoder, not the UI: the exception
+  is terminal state.
 - **A shifted character is that character, not the key plus a shift bit**: `input::fill`
   passes `consumed_mods`, or shift+`;` goes out as `CSI 59;2u` and the program applies the
   shift — Neovim uppercases letters only, so `:` and `#` never arrived. winit has no
-  `getConsumedModifiers`, so it is derived: shift went into a one-character text differing
-  from the key's unshifted one, and a key with no unshifted character keeps its shift
-  (`<S-CR>`). The *position* decides, not the character (`physical_key`; `--keys` assumes
-  US), and ctrl or super must not pass `text` through while a plain character must, or
-  accents and CJK vanish.
-- **…except where the position is a legend**: `caps:escape` reports position `CapsLock`
-  with logical key `Escape`, and the encoder has no `CapsLock` bytes, so the keystroke
-  vanished while menus — which read the logical key — still closed on it. `input::key_of`
-  takes the layout's answer for `CapsLock`, `NumLock`, `ScrollLock`, `Fn` and `FnLock`,
-  keeping the position elsewhere (`DECKPAM`'s `Numpad8`), and tests drive a pty in both
-  encodings (`ESC`, `CSI 27 u`).
+  `getConsumedModifiers`, so it is derived from the one-character text (a key with no
+  unshifted character keeps its shift, `<S-CR>`); the *position* decides (`physical_key`;
+  `--keys` assumes US); ctrl or super must not pass `text` through while a plain character
+  must, or accents and CJK vanish. **…except where the position is a legend**:
+  `input::key_of` takes the layout's answer for `CapsLock`, `NumLock`, `ScrollLock`, `Fn`
+  and `FnLock` — the encoder has no `CapsLock` bytes, so a remapped Escape vanished while
+  menus, which read the logical key, still closed on it — and keeps the position elsewhere
+  (`DECKPAM`'s `Numpad8`, tested in both encodings).
 - **A click is encoded where the modes are**: `Command::Mouse` carries pane-relative
   position, button, modifiers and held state, and `mouse::Encoder` reads tracking mode per
   event — `?9h` presses, `?1000h` presses and releases, `?1002h`/`?1003h` motion, `?1006h`
@@ -276,27 +282,25 @@ tag mirroring on.
   composition cancelable — `KeyStroke::composing` keeps the romaji out,
   `set_ime_allowed(true)` keeps pinyin latin out, and `set_ime_cursor_area` (per caret
   cell, deduplicated) puts the candidates by the text. egui's faces are latin-only and
-  panic on a missing glyph (`No glyph for "に" in Monospace`), so `Look::install` appends
-  `fonts::ui_fallback()` to both families, checked for kana *and* Han.
+  panic on a missing glyph, so `Look::install` appends `fonts::ui_fallback()` to both
+  families, checked for kana *and* Han.
 - **A selection is anchored to characters, not to the grid**: the pane's two
   `TrackedGridRef`s follow the page list through scrolling, pruning and reflow and resolve
   on *every* publish, so the frame carries the range. `PointSpace::Viewport` resolves but
-  does not bound (`y = 13` below a five-row viewport), so the check is ours, and once
-  either end leaves the frame the selection is **dropped, not clamped** — a stretched
-  highlight claims cells it does not cover and a copy hands back a fragment. A press that
-  has not moved is an anchor, so one click deselects; a word, line or drag is
-  `deliberate`.
+  does not bound, so the check is ours, and once either end leaves the frame the selection
+  is **dropped, not clamped** — a stretched highlight claims cells it covers no longer and
+  a copy hands back a fragment. A press that has not moved is an anchor, so one click
+  deselects; a word, line or drag is `deliberate`.
 - **Double- and triple-click are counted, not reported**: `App::count_clicks` is 400 ms
   and four pixels, two takes the word and three the line via `select_word`/`select_line`,
   and a drag inside the press's cell changes nothing — jitter must not turn a word into
   one character. A double-click copies on release.
 - **A copy cannot use the published frame, because drawing it is what removes it**: the
-  slot is `None` by then (shipped as "copied 0 chars" with a selection on screen), so
-  `Command::Copy`/`CopySelection` rebuild from the terminal, the only holder of the cells.
-  **A toast that says "copied" is not a clipboard**: `ui.ctx().copy_text` goes through
-  `egui-winit`, whose clipboard falls back to an in-app buffer, so dtr also writes it with
-  `arboard` and holds the handle on `App` for the process's life (on X11 the owner must
-  live or the text goes).
+  slot is `None` by then, so `Command::Copy`/`CopySelection` rebuild from the terminal,
+  the only holder of the cells. **A toast that says "copied" is not a clipboard**:
+  `ui.ctx().copy_text` goes through `egui-winit`, whose clipboard falls back to an in-app
+  buffer, so dtr also writes it with `arboard` and holds the handle on `App` for the
+  process's life (on X11 the owner must live or the text goes).
 - **OSC 52 writes arrive on the pane thread**: `on_clipboard_write` parks the text in a
   slot and the UI does the work, and `Err` for a non-text MIME tells the program the write
   was refused.
@@ -396,6 +400,9 @@ tag mirroring on.
 
 ## Sessions: shell, ssh, serial
 
+`docs/sessions.md` has the account: the reconnect command, why the terminfo copy is a
+second connection, and what each of these failures looked like.
+
 - **A tab is named by the program, not by the transport**: OSC 0/2 set the title,
   `Frame::title` carries it to the strip and the window, and `1 shell` is only the
   fallback (`tab_name`). It is not a dirty cell and not trustworthy bytes: it is compared
@@ -408,35 +415,32 @@ tag mirroring on.
   that tells them apart**: `ssh` exits 255 when ssh itself failed, and anything else is
   the remote command's status, meaning somebody typed `exit`. `pane::ending` is that rule:
   a drop keeps the tab, says so and reconnects, an `exit` closes it.
-- **A client that never speaks is worse than one that fails**: a refused connect fails in
-  milliseconds, a blackhole sits in `connect` for two minutes, and a connection that goes
-  away without a reset leaves an `ssh` that looks alive, so reconnect never fires.
-  `pty::Config::ssh` passes three options, all **before the destination**:
-  `ConnectTimeout=10`, `ServerAliveInterval=20`, `ServerAliveCountMax=3` (ssh's own
-  default is no keepalive). They override `~/.ssh/config`; `ssh_args` builds the list and
-  a test asserts every flag precedes the alias, because an option after the destination
-  becomes a command for the far end. **An ssh failure's cause is its stderr**: with
-  `Stdio::null()` a dead `ssh` reached the UI as `sender dropped`, so stderr is piped and
-  quoted with the exit status. `examples/probe.rs` runs the same path from a shell;
-  `DTR_SSH_CONFIG=/dev/null` gets past a broken config and `DTR_SSH_BATCH=0` lets a prompt
-  be seen.
+- **A client that never speaks is worse than one that fails**: `pty::Config::ssh` passes
+  three options, all **before the destination** — `ConnectTimeout=10`,
+  `ServerAliveInterval=20`, `ServerAliveCountMax=3` (ssh's own default is no keepalive) —
+  and they override `~/.ssh/config`. A test asserts every flag precedes the alias, because
+  an option after the destination becomes a command for the far end. **An ssh failure's
+  cause is its stderr**: piped and quoted with the exit status, because with
+  `Stdio::null()` every dead `ssh` reached the UI as `sender dropped`.
+  `examples/probe.rs` runs the same path from a shell; `DTR_SSH_CONFIG=/dev/null` gets past
+  a broken config and `DTR_SSH_BATCH=0` lets a prompt be seen.
 - **dtr carries `xterm-ghostty` to the far end, because a host without it cannot
   `clear`**: a vanilla Ubuntu has no `ncurses-term` entry for Ghostty's name, so `tput`,
-  `clear` and `reset` answer `unknown terminal type` in a session that otherwise looks
-  fine. The entry is `crates/dtr/assets/terminfo/xterm-ghostty` (`tic` source, dumped with
-  `infocmp -x` from ghostty's own; `the_entry_compiles_back_into_ghostty` compiles it and
-  reads it back), and when an ssh session opens, `crate::terminfo` starts a second
-  connection beside it — `ssh -T`, `BatchMode=yes`, the source on stdin — whose command is
+  `clear` and `reset` answer `unknown terminal type`. The entry is
+  `crates/dtr/assets/terminfo/xterm-ghostty`, `tic` source dumped with `infocmp -x` from
+  ghostty's own (`the_entry_compiles_back_into_ghostty` compiles it and reads it back), and
+  when an ssh session opens `crate::terminfo` starts a second connection beside it —
+  `ssh -T`, `BatchMode=yes`, the source on stdin — whose command is
   `sh -c '… tic -x -o "${TERMINFO:-$HOME/.terminfo}" -'`. **The `sh -c` is load bearing**:
   `sshd` hands a command to the *account's* login shell, and that shell may be fish,
   elvish or ion, where `${TERMINFO:-…}` is a parse error — `pty::sh_command` is the one
-  wrapper both this and the reconnect command go through. Best effort by design: its own
-  thread (the pane must not wait, and closing the tab must not wait either), 15 s
-  deadline, one log line (`terminfo entry copied` / `could not copy …`), once per host per
-  run, `DTR_TERMINFO=0` to switch it off. Two honest gaps: a host that wants a password
-  for the extra connection keeps failing `tput`, and a command typed in the ~200 ms while
-  both handshakes run can still see one `unknown terminal type` — a person cannot type
-  that fast, a `--send` script can.
+  wrapper this and the reconnect command share. Best effort by design: its own thread (the
+  pane must not wait, and closing the tab must not wait either), 15 s deadline, one log
+  line (`terminfo entry copied` / `could not copy …`), once per host per run,
+  `DTR_TERMINFO=0` to switch it off. Two honest gaps: a host that wants a password for the
+  extra connection keeps failing `tput`, and a command typed in the ~200 ms while both
+  handshakes run can still see one `unknown terminal type` — a person cannot type that
+  fast, a `--send` script can.
 - **Retries are bounded in rate, not in number**: waits go 1, 2, 4, 8, 16, 30, 30, …
   seconds, forever, because closing the tab is how a person gives up and a cap would turn
   a laptop shut for a day into "closed while you were not looking". The reset needs ten
@@ -445,15 +449,14 @@ tag mirroring on.
   connection opens inside the event loop by the same code as every reopen — a host down at
   startup should be a pane that waits, which is why `--send` is held in `typed_early`
   until the first pty exists.
-- **A reconnected session is put back where it was by the remote command**: `ssh -t host`
-  starts in `$HOME`, so the reopen adds one — `cd <dir> ; exec "${SHELL:-/bin/sh}" -l`,
-  wrapped in `sh -c` by `pty::sh_command` because `sshd` gives a command to the *account's*
-  login shell and fish or elvish cannot parse that line. The directory is quoted by `shlex`
-  for the shell at the other end (any path may hold anything but `/` and NUL, and NUL is
-  refused), `;` rather than `&&` so a deleted directory still leaves a usable shell, and
-  `exec`ed so the login shell *is* the session. `a_hostile_directory_is_still_one_word`
-  round-trips a dozen hostile paths through `shlex::split`, and
-  `a_quote_in_the_directory_survives_the_outer_shell` runs one through `sh -c` for real.
+- **A reconnected session is put back where it was by the remote command**: the reopen is
+  `cd <dir> ; exec "${SHELL:-/bin/sh}" -l` inside `pty::sh_command`, because `sshd` gives a
+  command to the *account's* login shell and fish or elvish cannot parse that line. The
+  directory is quoted by `shlex` for the shell at the other end (any path may hold anything
+  but `/` and NUL, and NUL is refused), `;` rather than `&&` so a deleted directory still
+  leaves a usable shell, and `exec`ed so the login shell *is* the session. Two tests cover
+  it: `a_hostile_directory_is_still_one_word` and
+  `a_quote_in_the_directory_survives_the_outer_shell`.
 - **The modes outlive the program that set them**: a drop can happen while vim holds the
   alternate screen with mouse modes on, so `reset_modes` clears them through the core
   before the reopen — including the kitty stack (`CSI < 999 u`) and DECSCUSR's shape and
@@ -464,297 +467,224 @@ tag mirroring on.
   ssh session has no local process, so `CwdSniffer` watches for OSC 7
   (`ESC ] 7 ; file://host/path`) before the VT core, keeping the tail across chunks —
   holding the introducer back (prefix included, or flushed past `CARRY_MAX` so a bogus
-  introducer cannot stall the session) keeps a split sequence parseable. The **host**
-  decides the machine: empty, `localhost` or this machine's name is local, and anything
-  else is another machine whose path must never be used as a local path, or "new tab here"
-  tries to `cd` into a directory on the wrong machine. `Session::remote` records the ssh
-  case too, and `+` → local shell starts in the focused tab's directory when that tab is
-  local.
+  introducer cannot stall the session). The **host** decides the machine: empty,
+  `localhost` or this machine's name is local, and anything else is another machine whose
+  path must never be used as a local path, or "new tab here" tries to `cd` into a directory
+  on the wrong machine. `Session::remote` records the ssh case too, and `+` → local shell
+  starts in the focused tab's directory when that tab is local.
 - **A prompt mark is a reference, not a row**: OSC 133 is parsed by the core, so
   `previous-prompt` (`ctrl-shift-up`) walks `ScrollViewport::DeltaPrompt`, and what dtr
   keeps is for *capture* — `PromptMarks` records each `A` as a `TrackedGridRef`, because a
-  row number goes stale when the block scrolls. `select_output` is the tempting API and is
-  not what a pager wants: it returns `None` unless the reference is *inside* the output.
-  `capture-block` (`ctrl-shift-o`) parks the text for `crate::pager`; without shell
-  integration there are no marks and the toast says so. **fish already speaks OSC 133** —
-  nothing to install: it sends `ESC ] 133 ; A ; click_events=1 ESC \`, with options after
-  a `;` and ST rather than BEL, while bash and zsh need the snippet from the
-  shell-integration proposal sourced from their prompt.
-- **The pager is a `Label` in a `ScrollArea`, and that is the whole design**: the text is
-  in memory, so wrapping, scrolling and mouse selection are egui's job. Two costs: the
-  page height a key scrolls by is only known from the *last* frame (remembered, not
-  measured), and "go to the end" is `f32::MAX` with the scroll area clamping. It is
-  **modal** because the keyboard is — `j`, `k`, `b` and space are a shell's keys — so
-  `App::on_key` hands every key to the pager first and returns, including ones it does not
-  understand, while chords are not pager keys and `ctrl+…` falls through to nothing. The
-  pointer is modal too, and it draws in the foreground `overlay` layer because a file pane
-  is an `Area`; closing drops the text.
+  row number goes stale when the block scrolls. `select_output` returns `None` unless the
+  reference is *inside* the output, so it is not what a pager wants; `capture-block`
+  (`ctrl-shift-o`) parks the text for `crate::pager`. **fish already speaks OSC 133** —
+  nothing to install: options after a `;` and ST rather than BEL — while bash and zsh need
+  the snippet from the shell-integration proposal. **The pager is modal** because the
+  keyboard is (`j`, `k`, `b` and space are a shell's keys), it draws in the foreground
+  `overlay` layer because a file pane is an `Area`, and it takes the page height from the
+  *last* frame because a `ScrollArea` is measured, not asked.
 - **Devices are polled, not watched**: `serialport::available_ports` every couple of
-  seconds, because udev is Linux-only and Windows enumerates COM ports by another route,
-  and one mechanism that works on both beats a fast one that only exists here; files
-  differ, since `~/.ssh/config` is watched with `notify` because that mechanism *is*
-  portable. **"No bytes" is not "the reader ended"**: the pane keeps the byte sender alive
-  for reconnects, so `bytes_rx.recv()` never returns `None` and a disconnect arrives on
-  `closed_rx`. **`reconnecting…` on a transport that cannot disconnect** means
-  `Stats::connected` was left at its `Default` — only the serial reader turns it false.
+  seconds, because udev is Linux-only and Windows enumerates COM ports by another route;
+  `~/.ssh/config` is watched with `notify` because that mechanism *is* portable. **"No
+  bytes" is not "the reader ended"**: the pane keeps the byte sender alive for reconnects,
+  so a disconnect arrives on `closed_rx`. **`reconnecting…` on a transport that cannot
+  disconnect** means `Stats::connected` was left at its `Default` — only the serial reader
+  turns it false.
 
 ## Files, links, and panes
+
+`docs/files.md` has the account: the preview caps, the dialog, and what each of these looked
+like when it was wrong.
 
 - **Clicking a file is a VFS question, and the pane owns the answer**: `dtr-vfs` has
   `Location { backend, path }`, a `Backend` trait (`stat`, `open`, `list`) and local,
   in-memory and ssh implementations. **A `Location` comes from the pane, not from a URI**:
   `file:///etc/hosts` printed on `jupyter` means jupyter's file, and `BackendId::Ssh` is
   only built from a session that *is* remote, with `Vfs::backend` refusing it rather than
-  falling back to local. **Listings are batches** because `readdir` answers in chunks, and
-  dropping the receiver cancels the walk; **capabilities are declared** — no remote watch,
-  no directory size — and the UI hides what is not there.
-- **A hyperlink is asked about, not carried in the frame**: OSC 8 lives in the terminal,
-  which never leaves the pane thread, so `Command::HyperlinkAt { x, y }` answers into a
-  slot, where resolving per cell during publish would be ~8 ns of FFI per cell for a link
-  nobody points at; the reply carries the cell asked about, so a frame-late answer is
-  dropped instead of opening the wrong link. Only `file:` is understood, percent-decoded,
-  `stat`ed through the VFS and handed to `xdg-open`/`open`/`explorer` — never a shell,
-  because the path comes from a program's output — and another scheme is said out loud in
-  a toast. A press on a link opens it and starts no drag.
+  falling back to local. **Listings are batches**, and dropping the receiver cancels the
+  walk; **capabilities are declared** — no remote watch, no directory size — and the UI
+  hides what is not there.
 - **The host part decides which machine, and `file://blah` usually has one**:
-  `ls --hyperlink=always` prints `file://<hostname>/path`, not `localhost`, so a rule
-  accepting only empty and `localhost` refused every link `ls` ever printed. The rule
-  lives in `crate::uri`, shared with the OSC 7 sniffer: a local session resolves only for
+  `ls --hyperlink=always` prints `file://<hostname>/path`, not `localhost`. The rule lives in
+  `crate::uri`, shared with the OSC 7 sniffer: a local session resolves only
   empty/`localhost`/this machine and names the other host in the toast, while a remote
   session resolves every `file:` path on its own host.
-- **A directory link opens a file pane, not a toast**: the worker sends
-  `UserEvent::Reveal` and the UI decides where a pane may go — layout is not a worker's
-  business — and focus stays on the terminal. A pane browsing the *same machine* is
-  retargeted; another machine is another pane, because a pane reading this disk cannot
-  become one reading somebody else's.
+- **A hyperlink is asked about, not carried in the frame**: OSC 8 lives in the terminal,
+  which never leaves the pane thread, so `Command::HyperlinkAt { x, y }` answers into a slot
+  instead of resolving every cell during publish; the reply carries the cell asked about, so
+  a frame-late answer is dropped rather than opening the wrong link. Only `file:` is
+  understood, percent-decoded, `stat`ed through the VFS and handed to
+  `xdg-open`/`open`/`explorer` — never a shell, because the path comes from a program's
+  output — and another scheme is said out loud in a toast. A press on a link opens it and
+  starts no drag.
+- **A directory link opens a file pane, not a toast**: the worker sends `UserEvent::Reveal`
+  and the UI decides where a pane may go — layout is not a worker's business — and focus
+  stays on the terminal. A pane browsing the *same machine* is retargeted; another machine is
+  another pane.
 - **A hovered picture is decoded off the drawing thread and capped before it is read**: 16
-  MiB of source, 8192 pixels a side, 256 MiB of decode, and the extension only decides
-  whether to *try*, so a JPEG named `.png` still works. Three traps:
-  `DynamicImage::thumbnail` *enlarges* (a 1x1 icon came back 360x360), the texture is made
-  at draw time because `load_texture` needs an egui context, and a refusal is cached or a
-  row of names re-reads a 2 GB file five times.
-- **A remote preview waits, then fetches, and the cap comes before the bytes**: the
-  pointer must rest for `PREVIEW_DELAY` (350 ms), or a sweep across a row is one `ssh`
-  fetch per cell, and the wait has its own deadline in `about_to_wait` because a stopped
-  pointer produces no events. Then `stat` before `materialise` — a remote 400 MB scan must
-  never be downloaded to find out it is too big — then the decoder on the files runtime.
-  The cache key is **`{ machine, path }`**, not a path; the preview is a tooltip-layer
-  `Area`, `interactable(false)`, placed below-right and flipped at the edges with a clamp
-  last, and `CursorLeft` clears the hover.
-- **Right-clicking a link is a menu** with `Open`, `Save as...`, `Copy path`, and only a
-  link *under the pointer* gets one. A left press outside closes it *and goes nowhere
-  else*, or dismissing a menu also starts a selection, which needs the menu's rect from
-  the last frame (`LinkMenu::contains`). Escape is the menu's own key; any other key
-  closes it and then does what it was going to do. The image preview is suppressed while
-  the menu is open, because the menu opens *at* the pointer and the preview draws 14
-  points from it in a layer above.
-- **The file dialog is the platform's and it blocks**: `rfd` gives the XDG portal (zenity
-  without one) and the Common Item Dialog on Windows, and it runs on the files runtime and
-  answers with `UserEvent::SavePath` because on the drawing thread it would freeze the
-  window. A dialog that never appears returns the same `None` as a cancel, which is why
-  `LogTracer` is installed — rfd's own `log` line is what `-v` shows — and `set_parent`
-  keeps it in front on Windows. It starts at `~/Downloads/<name>`, shared with the
-  explorer's download; saving is the same `materialise` a click uses and then a copy, so
-  "Save as" and "Open" cannot disagree about the bytes, and the toast is raised *before*
-  the transfer because a slow link is otherwise a silence that reads as a dead button.
-- **Materialising is where transparency ends, and it says so**: a local file is its own
-  path — `materialise` must never copy, or clicking a file forks the one you are working
-  on — while a remote one is fetched under `<cache>/dtr/remote/<alias>/<path>`, with the
-  tree mirrored so a title bar says where it came from, `..` *dropped* rather than
-  resolved, the alias sanitised because it comes from `~/.ssh/config`, and directories
-  `0700` with files `0600`. The toast says "opened a copy of …" for a remote file and
-  nothing for a local one.
-- **One `ssh` child per alias, and a dead one is killed**: the session is shared behind an
-  `Arc` because a listing runs in its own task and still needs *this* connection, and a
-  fresh one per `read_dir` would spawn an `ssh` per directory. Every operation has a 30 s
-  deadline and one reconnect, and a failure or timeout **takes the child with it** — a
-  dead session left in place makes every later call fail the same way, which reads as
-  "this host is down" long after it came back.
-- **A reply has to outlive its request, and a pane nobody is in still has to list**: the
-  SFTP pump asked only the focused pane and delivered only to it, so the pane a link opens
-  sat on `loading…` forever and a split pane never listed. Both loops walk every leaf now,
-  and the reply is routed by host *and* by the directory asked for; `take_request`
-  consumes `pending`, so matching a reply against it matched nothing, and `awaiting`
-  survives the send.
+  MiB of source, 8192 pixels a side, 256 MiB of decode; the extension only decides whether to
+  *try*, so a JPEG named `.png` still works. Three traps: `DynamicImage::thumbnail`
+  *enlarges*, the texture is made at draw time because `load_texture` needs an egui context,
+  and a refusal is cached or a row of names re-reads a 2 GB file five times.
+- **A remote preview waits, then fetches, and the cap comes before the bytes**: the pointer
+  rests for `PREVIEW_DELAY` (350 ms), with its own deadline in `about_to_wait` because a
+  stopped pointer produces no events; then `stat` before `materialise`, because a remote
+  400 MB scan must never be downloaded to find out it is too big. The cache key is
+  **`{ machine, path }`**, not a path; the preview is a tooltip-layer `Area`,
+  `interactable(false)`, flipped at the edges with the clamp last, and `CursorLeft` clears it.
+- **Right-clicking a link is a menu** with `Open`, `Save as...`, `Copy path`, and only a link
+  *under the pointer* gets one. A left press outside closes it *and goes nowhere else*, or
+  dismissing a menu also starts a selection, which needs the menu's rect from the last frame
+  (`LinkMenu::contains`). Escape is the menu's own key; any other key closes it and then does
+  what it was going to do. The image preview is suppressed while the menu is open, because
+  the menu opens *at* the pointer and the preview draws 14 points from it in a layer above.
+- **The file dialog is the platform's and it blocks**: `rfd`, on the files runtime, answering
+  `UserEvent::SavePath`. A dialog that never appears returns the same `None` as a cancel,
+  which is why `LogTracer` is installed, and `set_parent` keeps it in front on Windows.
+  Saving is the same `materialise` a click uses and then a copy, so "Save as" and "Open"
+  cannot disagree about the bytes; the toast is raised *before* the transfer because a slow
+  link is otherwise a silence that reads as a dead button.
+- **Materialising is where transparency ends, and it says so**: a local file is its own path
+  — `materialise` must never copy, or clicking a file forks the one you are working on —
+  while a remote one is fetched under `<cache>/dtr/remote/<alias>/<path>`, with the tree
+  mirrored so a title bar says where it came from, `..` *dropped* rather than resolved, the
+  alias sanitised because it comes from `~/.ssh/config`, and directories `0700` with files
+  `0600`. The toast says "opened a copy of …" for a remote file and nothing for a local one.
+- **One `ssh` child per alias, and a dead one is killed**: shared behind an `Arc` because a
+  listing runs in its own task and still needs *this* connection. Every operation has a 30 s
+  deadline and one reconnect, and a failure or timeout **takes the child with it** — a dead
+  session left in place makes every later call fail the same way, which reads as "this host
+  is down" long after it came back.
+- **A reply has to outlive its request, and a pane nobody is in still has to list**: both
+  loops walk every leaf — the pump used to ask only the focused pane, so the pane a link
+  opened sat on `loading…` forever — and the reply is routed by host *and* by the directory
+  asked for. `take_request` consumes `pending`, so matching a reply against it matched
+  nothing, and `awaiting` survives the send.
 - **The new-tab button is a menu, not a chord**: the `+` opens `egui::Popup::menu` — local
-  shell, then serial ports, then `~/.ssh/config` hosts, each group behind a separator and
-  each row saying which it is. The answer is `TabHit::New(Option<Destination>)`, typed
-  because the menu used to guess "serial" from a leading `/` while the app opened *every*
-  entry as `ssh`, so picking a port ran `ssh /dev/ttyUSB0`. A port goes through
-  `Action::Connect`, which remembers its baud rate and CR translation; a host is
-  `ssh -t <alias>`.
+  shell, then serial ports, then `~/.ssh/config` hosts — and the answer is
+  `TabHit::New(Option<Destination>)`, typed because the menu used to guess "serial" from a
+  leading `/` while the app opened *every* entry as `ssh`, so picking a port ran
+  `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers its baud rate and
+  CR translation; a host is `ssh -t <alias>`.
 
 ## The UI, its widgets, and its tests
 
+`docs/ui.md` is the memo: what a token is, what `native` means on each platform, and the
+account behind each of these.
+
 - **The look is a skin, and a surface asks it rather than deciding.** `dtr-widgets` holds
   `Palette` (semantic slots — `card`, `control`, `border`, `accent`, `dim` …), `Style`
-  (row height, gaps, radii, fonts, and the `Title`/`Section`/`Footer`/`Focus`
-  behaviours) and `Skin` (the pair), plus `Skin::egui_style`, which derives an
-  `egui::Style` so stock egui widgets inherit the same look. `Preset::{Dtr, Native}`
-  picks a skin; `[ui] widgets` (or `--widgets`) says which, and `native` is the default.
-  **A preset is a request**: `Skin::resolve` takes the platform's skin as an argument and
-  falls back to dtr, because reading the system palette is platform code and lives in
-  `crates/dtr/src/system.rs`, where both platforms are written to one trait: a reader
-  answers "dark or light, which accent, which ladder" and the crate turns that into a
-  skin. Windows reads `AppsUseLightTheme`, DWM's `AccentColor` and the **accent ladder**
-  (`AccentPalette` under `...\Explorer\Accent`) so a hover lands on the variant
-  Windows' own controls use; Linux asks the XDG portal for the scheme and the accent and
-  refuses a theme that is not Adwaita rather than painting Adwaita's surfaces on Breeze
-  (`docs/gtk-palette.md` §6). **It is live**: the answer sits in a cell a frame reads, and
-  a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE`,
+  (row height, gaps, radii, fonts, and the `Title`/`Section`/`Footer`/`Focus` behaviours)
+  and `Skin` (the pair), plus `Skin::egui_style`, which derives an `egui::Style` so stock
+  egui widgets inherit the same look. `Preset::{Dtr, Native}`; `[ui] widgets` (or
+  `--widgets`) says which, and `native` is the default. **A preset is a request**:
+  `Skin::resolve` takes the platform's skin as an argument and falls back to dtr, because
+  reading the system palette is platform code in `crates/dtr/src/system.rs`, where both
+  platforms are written to one trait. **It is live**: the answer sits in a cell a frame
+  reads, and a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE`,
   `WM_DWMCOLORIZATIONCOLORCHANGED` or `WM_THEMECHANGED` through the window procedure that
   already subclasses the window (winit forwards only the first, and only when light/dark
-  differs), `SettingChanged` from the portal — then asks for a repaint. The Windows half is
-  verified on the guest and takes two messages per change, which is why it re-reads both
-  registry values rather than deciding which message meant what. `-v` logs
+  differs), `SettingChanged` from the portal — then asks for a repaint. `-v` logs
   `chrome skin=… requested=… accent=… source=…`, which is the difference between a
-  preference and an outcome, and `source=` names the reader that answered. **Painted controls belong in
-  `crates/dtr-widgets/src/widgets/`**: `Editable` (a text field with a dropdown arrow,
-  reporting `Edit::Typed` and `Edit::Picked` as different answers), the layout primitives
-  `label_cell`/`row`/`section`, and `check`, `Button`, `segmented`, `menu_row` and `cross`.
-  The serial sheet is drawn entirely with them — `Look::skin()` derives the skin from the
-  theme's colours, so `serial_dialog.rs` contains no colour, radius or stroke width — and a
-  surface that needs a control the crate does not have waits for it there instead of
-  growing a second copy. **A new primitive arrives with a gallery snapshot** in
-  `crates/dtr-widgets/tests/`. **A tick is drawn, not lent**: `check` and `menu_row` are
-  strokes, because egui's faces have no check mark and an icon would make every harness
-  install an image loader first.
-- **The egui layer is tested with `egui_kittest`, not a window**: `cargo test` drives a
-  `Harness` with real layout and AccessKit, so clicks, keys and rendering are assertable —
-  query a widget by accessible label, `.click()`, `harness.run()`, assert what it
-  reported. `UPDATE_SNAPSHOTS=1 cargo test` writes a baseline PNG under
-  `crates/dtr/tests/snapshots/` and the plain run compares, with one snapshot per state
-  worth seeing — `tab_bar` and `tab_bar_hover` — because a hand-painted hover fill is
-  invisible to every test where the pointer is elsewhere.
-- **A baseline is an input, so it is committed — through LFS**: `.gitignore` ignores
-  `*.png` (a `--screenshot` must never be committed) with an exception for this directory,
-  and `.gitattributes` sends it through LFS. A checkout whose `git-lfs` did not smudge
-  them holds 130-byte pointers, which `egui_kittest` reports as a decode error that reads
-  like a rendering bug, so `tests/snapshots.rs` checks signature and size first and fails
-  when a `snapshot("…")` has no baseline or a baseline has no test. **The rasteriser that
-  writes a baseline must be the one that reads it**: the devShell selects lavapipe —
-  Vulkan in software — when the machine has no `/dev/dri`, and CI has no DRM node, so
-  regenerate with `UPDATE_SNAPSHOTS=1 cargo test` *inside the devShell*, never with the
-  variable unset on a GPU machine, or the next pipeline fails on two rasterisers
-  disagreeing.
+  preference and an outcome, and `source=` names the reader that answered.
+- **Painted controls belong in `crates/dtr-widgets/src/widgets/`**: `Editable` (a text
+  field with a dropdown arrow, reporting `Edit::Typed` and `Edit::Picked` as different
+  answers), the layout primitives `label_cell`/`row`/`section`, and `check`, `Button`,
+  `segmented`, `menu_row`, `cross`. A surface that needs a control the crate does not have
+  waits for it there instead of growing a second copy — the serial sheet is drawn entirely
+  with them, so `serial_dialog.rs` contains no colour, radius or stroke width. **A new
+  primitive arrives with a gallery snapshot**, and **a tick is drawn, not lent**: `check`
+  and `menu_row` are strokes, because egui's faces have no check mark and an icon would
+  make every harness install an image loader first.
 - **A widget painted by hand has no accessibility node** unless `Response::widget_info`
   declares one, and the tab chips were invisible to the harness *and* to a screen reader.
   `Sense::click()` is **not pointer-only**: egui turns Enter into a click for any focused
   widget that senses clicks, so a clicked chip stayed focused and every Enter typed into
   the shell switched tabs — accept a hit only when `pointer.any_click()` says the pointer
   clicked, and have the chip surrender focus after being drawn. **Overlapping click
-  targets read as "sometimes unresponsive"**: egui gives the press to the topmost widget
-  that senses clicks, so a chip, its close cross and the icon on top made the winner
-  depend on allocation order — disjoint rects, and `Image::paint_at` for anything that
-  must not sense anything.
-- **A chip is as wide as its title, until the title is longer than a strip**: the label is
-  elided at `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, one row, broken anywhere, and the
-  full name stays in the tooltip and the accessibility node — unbounded, one deep
-  directory pushes every tab and the `+` off the strip. **A chip has two hit targets**:
-  the label switches tabs, a cross on the right closes that tab, whichever is active, and
-  both declare accessibility names (`2 shell`, `close tab 2`); the cross is
-  `dtr_widgets::cross_at`, two strokes in the chip's own reserved rect, not `×`, because
-  egui's font has no multiplication sign. The active tab's title follows its focused
-  session, and every switch goes through `App::set_active`, which logs
-  `active tab from=… to=… why=…`. The chip's colours and radii are the skin's; its
-  elision and its two rects are the strip's, and `New tab`'s menu is `menu_row` rows.
-  **The strip's own menu is a burger at the right-hand end, next to the caption
-  buttons**, on both platforms — `crate::ui::app_menu`, a Lucide `menu.svg` icon, a
-  `Popup::menu` of `menu_row`s: settings, keyboard map, about. The right end because
-  the left is where tabs start and a button there would move every tab; the *same*
-  place on Linux, where a client frame draws the same caption buttons. Its rect is
-  part of the caption's obstacle list, not just painted over it: the drag region stops
-  at the menu's left edge (`chrome::drag_area`), or a press on the menu starts a
-  window drag. **About is a card, not a dialog** (`crates/dtr/src/about.rs`): every
-  fact on it is a compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot
-  disagree with the binary, and it is opened by the menu and by `about` in the
-  palette.
+  targets read as "sometimes unresponsive"**: the press goes to the topmost widget that
+  senses clicks, so disjoint rects, and `Image::paint_at` for anything that must not sense
+  anything.
+- **A chip is as wide as its title, until the title is longer than a strip**: elided at
+  `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, one row, broken anywhere, and the full name
+  stays in the tooltip and the accessibility node — unbounded, one deep directory pushes
+  every tab and the `+` off the strip. **A chip has two hit targets**: the label switches
+  tabs, a cross on the right closes that tab, whichever is active, and both declare
+  accessibility names (`2 shell`, `close tab 2`); the cross is `dtr_widgets::cross_at`, two
+  strokes in the chip's own reserved rect, not `×`, because egui's font has no
+  multiplication sign. The active tab's title follows its focused session, and every switch
+  goes through `App::set_active`, which logs `active tab from=… to=… why=…`.
+- **The strip's own menu is a burger at the right-hand end, next to the caption buttons**,
+  on both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
+  `menu_row`s — settings, keyboard map, about. The right end because the left is where tabs
+  start and a button there would move every tab; the *same* place on Linux, where a client
+  frame draws the same caption buttons. Its rect is part of the caption's obstacle list,
+  not just painted over it: the drag region stops at the menu's left edge
+  (`chrome::drag_area`), or a press on the menu starts a window drag. **About is a card,
+  not a dialog** (`crates/dtr/src/about.rs`): every fact on it is a compile-time constant,
+  so it cannot disagree with the binary.
 - **`egui::Window` renders nothing inside `Context::run_ui`**, which is why the palette is
-  an overlay drawn into the same `Ui`. **A widget's background painted after its text
-  hides the text** — the palette's selected row was invisible until the highlight was
-  drawn first — and **a solid quad that samples the atlas can vanish silently**: solids
-  carry a negative uv, take their colour from the instance, and the shader branches.
-- **The settings menu is mouse-first**: rows are click targets, font size is a drag value,
-  family and theme are combo boxes, toggles are checkboxes. `Settings::ui` takes `&self`
-  (the renderer holds a borrow), so a control *reports* its edit as a `Change` and
-  `Settings::apply` writes the draft. Every control declares an accessible name of the
-  form `<row> value`, not the row name, because the row's label already carries the bare
-  name and two nodes with one name cannot be addressed from a test. Port rows exist only
-  when a port is focused: baud and CR translation belong to one device.
-- **One theme is compiled in, and a file of the same name beats it**: `Kanagawa Wave` is
-  Ghostty's own file under a three-line provenance header, `include_str!`-ed from
-  `crates/dtr/assets/themes/` — not because a theme corpus belongs in a terminal (the
-  licence finding in `docs/themes.md` §9.1 is why there is exactly one) but because the
-  places dtr runs have nothing to read: Ghostty's themes on NixOS are a store path, and
-  the one-file Windows exe has no `share/`. `theme::load` asks the search paths first
-  (exact name, then ignoring case, because Ghostty capitalises its file names and people
-  do not) and falls back to the compiled-in copy, so `~/.config/dtr/themes/Kanagawa Wave`
-  is how you change it and `theme = "kanagawa wave"` is how you select it; `names()`
-  merges both lists.
-- **A menu that opens slowly the first time is doing its work in the frame**:
-  `usable_families` builds a fontconfig collection and probes every family (the same
-  `FcFontSort` cost that showed up in a profile at 16%), and it is cached in a `OnceLock`
-  so the second open is instant. The app warms both lists on a `dtr-warm` thread at
-  startup and `-v` logs `warmed the settings lists` and `settings populated`.
+  an overlay drawn into the same `Ui`. **A widget's background painted after its text hides
+  the text** — the palette's selected row was invisible until the highlight was drawn first
+  — and **a solid quad that samples the atlas can vanish silently**: solids carry a negative
+  uv, take their colour from the instance, and the shader branches.
+- **The settings menu is mouse-first**, and `Settings::ui` takes `&self` (the renderer holds
+  a borrow), so a control *reports* its edit as a `Change` and `Settings::apply` writes the
+  draft. Every control declares an accessible name of the form `<row> value`, not the row
+  name, because the row's label already carries the bare name and two nodes with one name
+  cannot be addressed from a test. Port rows exist only when a port is focused: baud and CR
+  translation belong to one device. **A menu that opens slowly the first time is doing its
+  work in the frame**: `usable_families` is cached in a `OnceLock` and warmed on a
+  `dtr-warm` thread at startup.
+- **One theme is compiled in, and a file of the same name beats it**: `theme::load` asks the
+  search paths first (exact name, then ignoring case) and falls back to the `include_str!`-ed
+  `Kanagawa Wave`, because Ghostty's themes on NixOS are a store path and the one-file
+  Windows exe has no `share/`, so `~/.config/dtr/themes/Kanagawa Wave` is how you change it
+  and `theme = "kanagawa wave"` is how you select it.
 - **Key bindings are config, and the format is Zed's**: `[keys]` maps an action name to a
-  chord (`ctrl-shift-t`), a named key (`tab`), or several chords in a row
-  (`ctrl-k ctrl-s`), and `false` hands a chord back to the shell; the vocabulary is in
-  `crates/dtr/src/keys.rs`. Two rules bite: **shifted punctuation is written as the
-  character it produces** — ctrl+shift+backslash reports `|`, so the binding is `ctrl-|`
-  and the lookup retries without shift so both spellings work — and **a chord that starts
-  a longer binding waits**, which is why a pending sequence flushes after a second.
-- **A trailing space is a word break, not whitespace to trim**: the palette trimmed it
-  before deciding which word was being completed, so `ssh ` looked like the command `ssh`
-  and offered commands where hosts belong; `Parsed::of` keeps it, and after a space there
-  is nothing to complete for a command with no arguments.
-- **A command's first letter is its accelerator, so it is unique**: `s` is `ssh` and
-  nothing else may start with `s`, so rename the new command rather than share the letter
-  (`shell` became `exec`). `crates/dtr-complete` fails the build when two commands collide
-  and holds the ranking to it — one letter must *complete* to its command, not just rank
-  it first. A command with no `palette::action_for` arm does not belong in the list: `log`
-  and `logbook` were offered and inert, and are gone.
-- **`C-n` and `C-p` are consumed like the arrows**, taken from `input_mut` before the text
-  field sees them so navigating cannot land an `n` in the query. **Reopening the palette
-  starts a fresh sentence**: `toggle` clears query, selection and completions. **A modal
-  must ignore key releases** — the release of the keystroke that opened it arrives while
-  it is open, which made the settings menu flash and vanish — so overlays check
-  `ElementState::Pressed` first. **`Ctrl+Shift+T` opens a tab** (`Ctrl+Tab` only cycles
-  ones that exist).
+  chord, a named key, or several chords in a row, and `false` hands a chord back to the
+  shell. Two rules bite: **shifted punctuation is written as the character it produces**
+  (ctrl+shift+backslash is `ctrl-|`, and the lookup retries without shift so both spellings
+  work), and **a chord that starts a longer binding waits**, which is why a pending sequence
+  flushes after a second.
+- **A trailing space is a word break, not whitespace to trim**: `Parsed::of` keeps it, or
+  `ssh ` looks like the command `ssh` and offers commands where hosts belong. **A command's
+  first letter is its accelerator, so it is unique**: rename the command rather than share
+  the letter (`shell` became `exec`), `crates/dtr-complete` fails the build on a collision,
+  and a command with no `palette::action_for` arm does not belong in the list. **`C-n` and
+  `C-p` are consumed like the arrows**, taken from `input_mut` before the text field sees
+  them; **reopening the palette starts a fresh sentence**; and **a modal must ignore key
+  releases** — the release of the keystroke that opened it arrives while it is open, which
+  made the settings menu flash and vanish — so overlays check `ElementState::Pressed` first.
+  **`Ctrl+Shift+T` opens a tab**; `Ctrl+Tab` only cycles ones that exist.
 - **A binding nobody can find is a binding nobody has**: `ctrl-?` opens the keyboard map
-  ([keymap.rs](crates/dtr/src/keymap.rs)), and `keys` in the palette opens it too, because
-  the chord itself is the thing a new person does not know. The card is built from the
-  live `keys::Keymap`, so it shows the rebindings `[keys]` in the config has applied and
+  ([keymap.rs](crates/dtr/src/keymap.rs)), and `keys` in the palette opens it too. It is
+  built from the live `keys::Keymap`, so it shows the rebindings `[keys]` has applied and
   says `unbound` where a binding was switched off — "does nothing" and "is not bound" are
-  the same silence at the keyboard. Each row also names the action as `[keys]` spells it
-  (`new-tab`, `split-horizontal`), because the card is where a person finds out what to
-  *write*, not only what to press. **A row is a button**, because rebinding has to start
-  somewhere a person can find: pressing one opens a popup that waits for a key, with a
-  `reset`. The key is captured by `App::on_key` rather than by the card — the card draws
-  and reports, and dispatch is the only thing that knows what a keystroke means — and a
-  replacement is `dtr_config::set_value("keys.<name>", …)` followed by rebuilding the map
-  from `config.keys`, so the card cannot show a chord a restart would not have. Reset is
-  `dtr_config::remove_value`, not "write the default back": deleting the override is what
-  makes a future default apply. `keys::refuse_reason` is the one policy for a chord that
-  cannot be taken — no modifier, already another action's, or the start of a longer
-  binding — and the popup says which, because a refused key and a dead card look alike.
-  The columns, rows and fonts come from the skin, so the native style gets a taller card
-  whose body scrolls inside the same 588 points. **The chord column is measured, not a
-  constant**: each column asks the widest chord it holds, because `ctrl-alt-shift-right`
-  and `shift-pageup` are in different columns and one width that fits the first wastes a
-  third of the second. The scroll bar's width is reserved for the same reason — a
-  floating bar paints over the last characters of the `[keys]` names, which are the point
-  of that column — and `Group::COLUMNS` is the index the two columns divide at, with a
-  test that keeps the halves about as tall as each other.
+  the same silence at the keyboard — and each row names the action as `[keys]` spells it,
+  because the card is where a person finds out what to *write*. **A row is a button**: the
+  key is captured by `App::on_key` rather than by the card, a replacement is
+  `dtr_config::set_value("keys.<name>", …)` plus a rebuild from `config.keys`, and reset is
+  `dtr_config::remove_value` — not "write the default back", because deleting the override
+  is what lets a future default apply. `keys::refuse_reason` is the one policy for a chord
+  that cannot be taken, and the popup says which. **The chord column is measured, not a
+  constant**, and the scroll bar's width is reserved, or a floating bar paints over the last
+  characters of the `[keys]` names.
 - **Icons are Lucide SVGs, fetched by a skill in this repository**:
-  `.dsh/skills/lucide-icons` and `scripts/fetch.sh` pull
-  `https://lucide.dev/api/icons/<name>` into `crates/dtr/assets/icons/<name>.svg`,
-  refusing to overwrite one already committed; they are embedded with
-  `egui::include_image!` and rasterised by `egui_extras`, so the one-file build carries
-  them. Lucide's `currentColor` rasterises to *black* and `Image::tint` only multiplies,
-  so `fetch.sh` rewrites it to `#ffffff` and each file becomes a white mask the tint
-  colours. `install_image_loaders` is idempotent and `tab_bar` calls it rather than
-  trusting startup, because a kittest harness makes its own `Context` and would otherwise
-  draw egui's missing-image glyph, a `⚠` egui's own fonts cannot render.
+  `.dsh/skills/lucide-icons`, `scripts/fetch.sh`, `egui::include_image!`, rasterised by
+  `egui_extras` so the one-file build carries them. `fetch.sh` rewrites `currentColor` to
+  `#ffffff`, because it rasterises to black and `Image::tint` only multiplies.
+  `install_image_loaders` is idempotent and `tab_bar` calls it rather than trusting
+  startup, because a kittest harness makes its own `Context`.
+- **The egui layer is tested with `egui_kittest`, not a window**: a `Harness` with real
+  layout and AccessKit, so a widget is queried by accessible label, clicked, and asked what
+  it reported. `UPDATE_SNAPSHOTS=1 cargo test` writes baselines under
+  `crates/dtr/tests/snapshots/`, one per state worth seeing (`tab_bar`, `tab_bar_hover`),
+  and **a baseline is an input, so it is committed through LFS**: a checkout whose
+  `git-lfs` did not smudge them holds 130-byte pointers, which reads like a rendering bug,
+  so `tests/snapshots.rs` checks the signature first and fails on a snapshot with no test or
+  a test with no snapshot. **The rasteriser that writes a baseline must be the one that
+  reads it**: regenerate inside the devShell, through lavapipe, never on a GPU machine.
 - **Keys can be typed at the window from a script**: `--keys "ctrl-shift-p;down;down"`
   applies one stroke per frame through `App::on_key`, `;` separates tokens because a chord
   may be a comma, `+` joins the chords of one binding, and `text:` types characters.
@@ -831,8 +761,14 @@ not a slow terminal.
   without linking GLib: the XDG portal for scheme and accent, constants measured
   out of libadwaita's gresource, the metrics that come with them, the live signal,
   and why v1 does not parse user CSS.
-- `docs/ui.md` — why the chrome has a skin at all, what a token is, and what
-  `native` means on each platform.
+- `docs/ui.md` — the chrome: why it has a skin at all, what a token is, what `native` means
+  on each platform, and the rules the tab strip, the settings menu, the palette and the
+  keyboard map obey.
+- `docs/sessions.md` — a shell, an ssh host, a serial port: how a session ends, what a drop
+  looks like, the reconnect command, and the terminfo copy.
+- `docs/input.md` — what the program is told: keys, mouse, IME, selection, and the clipboard.
+- `docs/files.md` — clicking a path a program printed: the VFS, hyperlinks, previews, the
+  save dialog, and what materialising a remote file does to its permissions.
 - `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
   status bar), serial baud and autobaud, glyph and icon rendering, resize cost; §2.1
   carries the measurement at 125 %.
