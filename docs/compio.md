@@ -1,7 +1,8 @@
 # compio instead of tokio — decision memo
 
 Status: measured, 2026-11-12 · Scope: whether the pane's runtime should be a completion-based
-one, and what that would do to the serial transport.
+one, what that would do to the serial transport, and — because that is what the question turns
+into — the process's thread count and the one dependency that looks replaceable.
 
 **Not implemented, and not because it is impossible.** compio builds for both of dtr's targets
 and a COM port is expressible in about thirty lines of its public API (§3.1, §3.2). It was
@@ -12,7 +13,9 @@ and a thread ([`docs/sessions.md` §11](sessions.md)), one commit before this me
 Question: dtr drives one OS thread per pane with a current-thread tokio runtime, a `LocalSet`
 and a single `select!`. A completion-based runtime matches "one thread per pane" more closely
 than a poll-based one, and its Windows story is IOCP rather than tokio-serial's named-pipe
-shim. Is it worth replacing tokio, and would it have fixed the serial flood?
+shim. Is it worth replacing tokio, and would it have fixed the serial flood? Two follow-ups are
+answered here as well: what the thread count actually is (§4), and whether a compio watcher
+could replace `notify` (§5).
 
 ---
 
@@ -33,6 +36,12 @@ shim. Is it worth replacing tokio, and would it have fixed the serial flood?
 seam: one type, one `Read`/`Write` impl, one thread behind it. A compio backend for that seam
 is §3.2's listing, and it would prove the runtime on the one transport where completion-based
 I/O is a natural fit — without touching the pane loop, the VFS, or the UI.
+
+**Measured against the thread count, the case is narrower than it feels** (§4): dtr's own is
+eight threads for one shell pane, and two per pane after that, of which a completion runtime
+removes exactly one — the parked read. It shortens no read (§3.3), and the pty's thread only
+goes if the pty becomes ours (§3.5). What remains is cancellation and a smaller per-pane count
+on Windows: real, and both smaller than "no more threads".
 
 **Switch when** any of these becomes true: (a) the pane loop needs cheap cancellation of many
 concurrent ops (compio's `Submit` cancels on drop; tokio needs the op re-armed); (b) dtr grows
@@ -81,7 +90,7 @@ of dtr, which also links libghostty and mimalloc on that target.
 public escape hatch for any `OpCode`. So the transport is our own `CreateFileW` (with
 `FILE_FLAG_OVERLAPPED`) plus the port's `COMMTIMEOUTS`, wrapped in
 `SharedFd<OwnedFd>`, attached to the runtime and read through `op::Read`. The listing is in
-§7.1; it is the ~30 lines that ran in the guest.
+§9.1; it is the ~30 lines that ran in the guest.
 
 Two API details worth writing down, both found the hard way:
 
@@ -136,18 +145,132 @@ pre-1.0 and its modules version independently.
 Untested here, and it is the reason §1 says "take the serial transport first" rather than "port
 the panes": on Linux a serial port or a pty is a tty, and an io_uring read on a tty commonly
 retires into an io-wq worker — a blocking thread — so the completion-based path buys less than
-it does on Windows, where the handle is a real completion object. The pty transport would keep
-its OS thread either way (`portable-pty` hands out a blocking reader).
+it does on Windows, where the handle is a real completion object. Keeping `portable-pty` would
+keep the pty reader thread whatever the runtime does; dropping the *thread* means owning the
+pty — `openpty`/`fork`/`TIOCSCTTY` on Unix, `CreatePseudoConsole` and its pipes on Windows —
+which is the cost of the one thread §4 counts.
 
 ---
 
-## 4. What this memo does not cover
+## 4. The thread census, and what a completion runtime would remove
+
+Measured 2026-11-12, one shell pane with the window idle: thread names and kernel wait sites
+from `/proc/<pid>/task/*/{comm,wchan}`.
+
+| thread | waiting in | what it is |
+|---|---|---|
+| `dtr` | `do_epoll_wait` | winit's X11 loop |
+| `dtr-pane` | `do_epoll_wait` | the pane's tokio `LocalSet`, idle |
+| `dtr-pty` | `wait_woken` | a blocking `read` on the pty master |
+| `dtr-scan` ×2 | `epoll` + `futex` | 1 worker, 1 blocking thread (`available_ports`) |
+| `dtr-files` ×2 | `epoll` + `futex` | 2 workers, created at boot, unused by a terminal |
+| `notify-rs inoti` | `do_epoll_wait` | notify's own `mio::Poll` (§5) |
+
+77 threads exist in that process and **8 are dtr's**; the other 69 belong to the software
+rasteriser — 32 `llvmpipe-N`, a larger anonymous pool named after the process, and its WSI
+threads — which a machine with a GPU does not create. So the number is a census, not a scandal:
+8 with one shell pane, 9 once a config directory exists (a second notify watcher, which this
+machine lacks), and one more pair per pane — 14 with four serial panes. The pair is the design
+(`Terminal` is `!Send`, one OS thread, no locks), and one of the two is the parked read.
+
+**`spawn` accepts `!Send` futures**, which is what makes the pane expressible at all:
+
+```rust
+// compio-runtime-0.12.6/src/lib.rs:221, compio-executor-0.1.4/src/lib.rs:179
+pub fn spawn<F: Future + 'static>(&self, future: F) -> JoinHandle<F::Output>
+```
+
+No `Send` bound, and the executor's own comment says why ("Executor cannot be sent to ther
+thread"). The `LocalSet` is therefore not a thing to port: the pane becomes a `Runtime` and its
+tasks, and a `Submit<Read>` on the pty or serial handle replaces the reader thread. §3.2 proved
+the read half of that in the guest; the `!Send` half is this signature.
+
+So **a completion runtime removes one thread per pane** — the parked read — and nothing else
+that is dtr's: 8 → 7 with one shell pane, 14 → 10 with four serial panes. It does not remove
+the main thread, one thread per pane, one to drive the completion port, notify's loop (§5), the
+blocking `available_ports` call, or anything the driver started.
+
+Two consequences worth writing down before anyone counts threads again.
+
+- **`IDLE_FLUSH` survives the port.** §3.3 is that measurement: a completion port shortens no
+  read, it only stops a thread from waiting on one. What the thread buys in exchange is
+  *cancellation* — dropping the `Submit` cancels the overlapped `ReadFile`, so a closing tab
+  stops paying the 25 ms — microseconds of a tab close, not a fix for a bug.
+- **The cheapest three threads are not compio's.** `dtr-scan` and `dtr-files` are two tokio
+  runtimes built at boot (3–4 threads) to hold one blocking enumeration and a file pane most
+  terminals never open. One lazy, shared background runtime is a smaller change than a runtime
+  swap and takes 4 → 1; with it the numbers above become **8 → 4** and **14 → 7**.
+
+---
+
+## 5. A watcher is not something compio can hand you — and dtr does not need one
+
+The question that follows ("then what replaces `notify`?") has a factual answer, and then a
+design one.
+
+**There is no compio file watcher.** `cargo search compio` lists 219 crates and none of them
+watch files: the compio org ships fs, net, process, signal, timer, dispatch, quic, tls, log,
+buf, macros, and `compio-term` — which sounds like it and is a crossterm-shaped *event reader
+for the terminal you are running in* (stdin events, raw mode, a command queue), not a directory
+watcher, and not a pty spawner either. The async watchers that do exist are `tokio-inotify` and
+`async-inotify`, both Linux-only, and everything portable — `wtr-watcher`, the
+`notify-debouncer-*` family, `cargo-watch` — is `notify` underneath.
+
+**Writing one is supported, and short on Windows.** `compio_driver`'s `OpCode` is a public
+`unsafe trait` whose Windows shape is an `OVERLAPPED` and a completion routine:
+
+```rust
+// compio-driver-0.12.5/src/sys/driver/iocp/op.rs
+unsafe trait OpCode {
+    type Control: Default;
+    fn op_type(&self, control: &Self::Control) -> OpType { OpType::Overlapped }
+    unsafe fn operate(&mut self, control: &mut Self::Control,
+                      optr: *mut OVERLAPPED) -> Poll<io::Result<usize>>;
+    fn cancel(&mut self, control: &mut Self::Control, optr: *mut OVERLAPPED) -> io::Result<()> { … }
+}
+// compio-runtime-0.12.6/src/lib.rs:291 — "You only need this when authoring your own OpCode."
+pub fn submit<T: OpCode + 'static>(&self, op: T) -> Submit<T>
+```
+
+notify's Windows backend is those calls plus two things compio deletes: it stashes its own
+`Box<OVERLAPPED>` in `hEvent`, passes `Some(handle_event)` as the completion routine, then parks
+a thread on `WaitForSingleObjectEx` over a `CreateSemaphoreW`. As an `OpCode` the first two stay
+and the last two go — about 80 lines. Linux is the fiddly half: inotify is a readable fd, and
+under the polling backend a custom op's `pre_submit`/`operate` is a readiness-then-syscall
+`Decision`, which fits; under io_uring you would want a `POLL_ADD`-shaped op rather than
+guessing what `op::Read` does with a pollable, non-regular fd (§6).
+
+**But dtr should stop watching instead.** Two `NonRecursive` watches, one access-event filter
+and a 150 ms settler is the whole of notify's work here:
+
+- **`/dev` is redundant on every platform.** `available_ports` is already polled every two
+  seconds (`App::request_scan`), and that poll is the only thing that finds a device on
+  Windows. The watch only makes *Linux* discovery up to two seconds faster.
+- **`~/.ssh/config` is one `stat`.** The same shape as `scan_due`: a deadline in
+  `about_to_wait`, ~250 ms, on mtime and size, feeding the existing `Settle`. The
+  directory-mtime trick already in `watch::paths` covers a file that does not exist yet and an
+  editor's rename-over.
+
+That deletes `notify`, and with it `inotify`, `inotify-sys`, `notify-types` and `kqueue` — all
+four have notify as their only dependent in `Cargo.lock`; `walkdir` stays, `jni` wants it — and
+two threads, for no new crate. The price is bounded lag: ≤250 ms before a saved config is
+re-read, ≤2 s before a hotplugged port appears, and the second of those is already the Windows
+behaviour.
+
+---
+
+## 6. What this memo does not cover
 
 - **A compio build of dtr itself.** The probe links no libghostty, no wgpu, no mimalloc. Those
   are the ones with the awkward mingw link steps (`docs` and `flake.nix`: the
   `libsynchronization.a` stub, `CFLAGS_x86_64_pc_windows_gnu`, `PKG_CONFIG_PATH=""`), and they
   are the next thing that would break.
 - **`compio::process` for sftp, and `compio::fs` for the VFS.** Both exist; neither was tried.
+- **A pty under compio.** `compio-term` is not one (§5): it reads the terminal dtr is *in*.
+  The pane's own pty would still be `portable-pty` and its thread (§3.5), or hand-rolled
+  `openpty`/`ConPTY`.
+- **An inotify fd under io_uring.** §5 needs to know whether a `POLL_ADD`-shaped op is
+  required; that is a probe, not a paragraph.
 - **The pty on Linux through io_uring.** §3.5 is a prediction from how ttys behave, not a
   measurement.
 - **Latency, not just granularity.** The probe prints "blocked N ms" per read; it does not
@@ -156,7 +279,7 @@ its OS thread either way (`portable-pty` hands out a blocking reader).
 
 ---
 
-## 5. Design sketch, if it were taken further
+## 7. Design sketch, if it were taken further
 
 1. **A compio backend for `serial::Port`.** Same type, same `Read`/`Write` impls, a
    `#[cfg]`-selected body: the thread for `tokio` builds, a `SharedFd` + `op::Read` for a
@@ -168,11 +291,13 @@ its OS thread either way (`portable-pty` hands out a blocking reader).
    would judge a runtime swap.
 3. **Only then** the pane loop. The `select!` becomes compio's, the timers move, and
    `tokio::sync::mpsc` becomes whatever the runtime offers — the one place where the change is
-   structural rather than mechanical.
+   structural rather than mechanical. The reader threads go with it, which needs two decisions
+   taken first, while the runtime is still tokio because they are cheaper to make there: the
+   pty becomes ours (§3.5), and the watcher is already gone (§5).
 
 ---
 
-## 6. Risks that outlive the measurement
+## 8. Risks that outlive the measurement
 
 - **Pre-1.0, single maintainer, independently versioned modules.** dtr's pane loop would
   depend on `compio-runtime 0.12`'s behaviour for its event loop; a semver-minor change there
@@ -181,14 +306,17 @@ its OS thread either way (`portable-pty` hands out a blocking reader).
   `windows-sys` bump could compile on msvc and not on gnu, and we would find out at release
   time.
 - **Two runtimes during any transition.** zbus borrows a tokio runtime today (a measured
-  choice: 77 lock entries against 86, `docs/gtk-palette.md` §6). A parallel compio runtime in
-  the same process is exactly the second reactor that argument avoided.
+  choice: 77 lock entries against 86, `docs/gtk-palette.md` §6). The census (§4) weakens the
+  "second reactor" objection: the process already runs a tokio runtime per pane, two app
+  workers and notify's `mio` loop, so the cost of a transition is the migration surface, not
+  plurality. The line that must hold is one *transport* per seam — a `#[cfg]`-selected serial
+  backend (§7), not a bridge between both runtimes.
 
 ---
 
-## 7. Appendix — what produced §3
+## 9. Appendix — what produced §3
 
-### 7.1 The probe
+### 9.1 The probe
 
 `Cargo.toml`:
 
@@ -273,7 +401,7 @@ fn main() {
 }
 ```
 
-### 7.2 Build, feed, run
+### 9.2 Build, feed, run
 
 ```sh
 # toolchain: rustup stable with the GNU Windows target, inside the devShell for zig

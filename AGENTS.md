@@ -806,8 +806,8 @@ the two payloads that are ours.
 - `docs/ttl-gaps.md` — what the TTL interpreter still does not do, and the order worth
   doing it in.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
-- `docs/compio.md` — a completion-based runtime, measured: it would not have fixed the serial
-  lumping, which is the driver's.
+- `docs/compio.md` — a completion-based runtime, measured: one thread a pane; the serial
+  lumping was the driver's.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face: Han/kana,
   fullwidth punctuation, Nerd Font icons, emoji. Read it before changing `prepare_pane`'s
   placement rules.
