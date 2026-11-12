@@ -2648,10 +2648,23 @@ impl App {
         }
         self.scanning = true;
         let proxy = self.proxy.clone();
+        // The store is read on the worker, not here: a redb read is quick but it
+        // is still I/O, and the UI thread only ever asks for the list.
+        let store = self.store.clone();
         self.bg_blocking(move || {
+            let uses = store
+                .as_deref()
+                .and_then(|store| match store.ssh_uses() {
+                    Ok(uses) => Some(uses),
+                    Err(err) => {
+                        tracing::warn!(%err, "could not read the ssh hosts that were used");
+                        None
+                    }
+                })
+                .unwrap_or_default();
             let mut destinations = crate::sources::shell_destinations();
             destinations.extend(crate::sources::serial_destinations());
-            destinations.extend(crate::sources::ssh_destinations());
+            destinations.extend(crate::sources::ssh_destinations(&uses));
             let _ = proxy.send_event(UserEvent::Destinations(destinations));
         });
     }
@@ -3285,6 +3298,14 @@ impl App {
     /// work on a machine nobody has set up, and silence about the difference
     /// would read as the feature having worked.
     fn open_ssh(&mut self, alias: String) {
+        // Counted here rather than where the connection succeeds: the menu is a
+        // list of what a person reaches for, and a host that is down this minute
+        // is still the one they picked.
+        if let Some(store) = &self.store {
+            if let Err(err) = store.note_ssh_use(&alias) {
+                tracing::warn!(%err, %alias, "could not remember the ssh host");
+            }
+        }
         if !self.config.tmux.enabled {
             self.open(Transport::Shell(crate::pty::Config::ssh(&alias)));
             return;

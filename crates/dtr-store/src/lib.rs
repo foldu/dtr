@@ -2,12 +2,14 @@
 //!
 //! Two kinds of state live here, and they are different in nature. `settings`
 //! remembers what a port needs, so a device does not have to be re-specified on
-//! every run; `logbook` (M1) will record what happened. Both go in one redb
-//! file because a session is a row plus the settings that produced it.
+//! every run — and which ssh hosts a person opens, so the menu can list those
+//! first; `logbook` records what happened. Both go in one redb file because a
+//! session is a row plus the settings that produced it.
 //!
 //! The settings table is a plain key/value map with namespaced keys, so adding
 //! a field never needs a migration — the absence of a key is the default.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -339,6 +341,80 @@ impl Store {
         write.commit()?;
         Ok(())
     }
+
+    /// Note that a tab was opened to `alias`.
+    ///
+    /// Counted where the host is *chosen* rather than where a connection
+    /// succeeds, because the menu is a list of what a person reaches for: a host
+    /// that was down this minute is still the one they picked, and a count that
+    /// only moved on success would forget a laptop's home server every time it
+    /// was away from home. One write, because the two keys are one fact — a host
+    /// used a hundred times and a host used yesterday are sorted apart by both.
+    pub fn note_ssh_use(&self, alias: &str) -> Result<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(SETTINGS)?;
+            let uses_key = ssh_key(alias, "uses");
+            let uses = table
+                .get(uses_key.as_str())?
+                .map(|value| value.value().to_owned())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            table.insert(uses_key.as_str(), (uses + 1).to_string().as_str())?;
+            let last_key = ssh_key(alias, "last");
+            table.insert(last_key.as_str(), now_ms().to_string().as_str())?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Every host that has been opened, by alias.
+    ///
+    /// Read once per destination scan, which is what the menu's order comes
+    /// from. A host with no row here has never been opened, and the absence is
+    /// the default that makes a new key need no migration.
+    pub fn ssh_uses(&self) -> Result<HashMap<String, SshUse>> {
+        let read = self.db.begin_read()?;
+        let table = read.open_table(SETTINGS)?;
+        let prefix = format!("ssh{SEP}");
+        let mut uses: HashMap<String, SshUse> = HashMap::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let Some(rest) = key.value().strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some((alias, field)) = rest.rsplit_once(SEP) else {
+                continue;
+            };
+            let used = uses.entry(alias.to_owned()).or_default();
+            let parse = || value.value().parse::<u64>().unwrap_or(0);
+            match field {
+                "uses" => used.uses = parse(),
+                "last" => used.last = parse(),
+                _ => {}
+            }
+        }
+        Ok(uses)
+    }
+}
+
+/// One ssh host, as the destination list sorts by it.
+///
+/// Not derived from the logbook: that records a *run*, and a tab opened from the
+/// `+` menu never reaches it, so "which host do I reach for" has to be kept
+/// where the host is chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SshUse {
+    /// How many tabs have been opened to it.
+    pub uses: u64,
+    /// When the last one was, in milliseconds since the Unix epoch.
+    pub last: u64,
+}
+
+/// An alias is a hostname or a `Host` pattern, so it can hold `/` or `:` but not
+/// the unit separator the key is built from.
+fn ssh_key(alias: &str, field: &str) -> String {
+    format!("ssh{SEP}{alias}{SEP}{field}")
 }
 
 /// One session, as the logbook remembers it.
@@ -552,5 +628,49 @@ mod tests {
         };
         assert_eq!(settings.line_code(), "7E2");
         assert_eq!(settings.summary(), "115200 7E2");
+    }
+
+    /// A host the menu has never opened has no row, and the rows that are there
+    /// carry both halves of the sort: how often, and how recently.
+    #[test]
+    fn a_host_is_counted_and_timed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let store = Store::open(&dir.path().join("dtr.redb")).expect("open");
+
+        assert!(
+            store.ssh_uses().expect("read").is_empty(),
+            "a fresh database has remembered no host"
+        );
+
+        store.note_ssh_use("web").expect("count web");
+        store.note_ssh_use("db").expect("count db");
+        store.note_ssh_use("web").expect("count web again");
+
+        let uses = store.ssh_uses().expect("read");
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses["web"].uses, 2);
+        assert_eq!(uses["db"].uses, 1);
+        assert!(uses["web"].last >= uses["db"].last, "web was used last");
+
+        // A key that is not a use is not a host: the settings table also holds
+        // the serial fields, and one of them must not read as an alias.
+        store
+            .remember_serial("COM7", &SerialSettings::default())
+            .expect("remember a port");
+        assert_eq!(store.ssh_uses().expect("read").len(), 2);
+    }
+
+    /// Reopened, not re-noted: the count is the file's, not the process's.
+    #[test]
+    fn a_count_survives_a_reopen() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("dtr.redb");
+        {
+            let store = Store::open(&path).expect("open");
+            store.note_ssh_use("jupyter").expect("count");
+        }
+        let store = Store::open(&path).expect("reopen");
+        let uses = store.ssh_uses().expect("read");
+        assert_eq!(uses["jupyter"].uses, 1);
     }
 }

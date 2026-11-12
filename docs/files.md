@@ -197,6 +197,16 @@ a cable and a host with a rack — Lucide glyphs in the skin's text colour, beca
 picture: no icon theme knows `/dev/ttyUSB0`, and an alias is a name in a config file. `menu_width`
 is told which rows reserve the column, so it never widens a menu that has no marks in it.
 
+**The hosts come in the order they are used.** A row that opens an ssh tab writes two keys into
+the store's `settings` namespace — `ssh␟<alias>␟uses` and `␟last` — and the menu sorts by the
+count, then by when the host was last used, then by the order `~/.ssh/config` was written, which
+a stable sort leaves untouched on a machine that has never opened one. The count is taken where
+the *row is chosen*, not where a connection succeeds: a host that is down this minute is still
+the one somebody reached for, and an ssh server on a laptop is away half the time. The logbook
+cannot answer this — it records a run, and a tab opened from this menu never reaches it — so the
+count lives where the choice does. `--no-remember`, or a store that will not open, is the config
+file's order again.
+
 The answer is `TabHit::New(Option<Destination>)`, and it is a *typed* destination because the
 menu used to infer "serial" from a leading `/` while the app opened every entry as `ssh` — so
 picking a port ran `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers

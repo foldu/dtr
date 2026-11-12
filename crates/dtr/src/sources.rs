@@ -8,6 +8,7 @@
 //! The shells are *discovered*, not listed: there is no portable registry of
 //! them, so each platform is asked the way it keeps the answer.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dtr_complete::{Engine, PortInfo};
@@ -171,12 +172,33 @@ pub fn shell_destinations() -> Vec<Destination> {
 }
 
 /// The ssh hosts the new-tab menu offers: `~/.ssh/config`'s aliases, with the
-/// detail line each one shows.
-pub fn ssh_destinations() -> Vec<Destination> {
-    ssh_hosts(&ssh_config_path())
+/// detail line each one shows, in the order the menu should show them.
+pub fn ssh_destinations(uses: &HashMap<String, dtr_store::SshUse>) -> Vec<Destination> {
+    by_use(ssh_hosts(&ssh_config_path()), uses)
         .into_iter()
         .map(|(alias, detail)| Destination::Ssh { alias, detail })
         .collect()
+}
+
+/// Hosts by how much they are used: most opened first, the most recent breaking
+/// a tie, and the config file's own order breaking the rest.
+///
+/// The sort is stable, so a machine that has never opened a host from the menu
+/// looks exactly as it did before there was a counter: the order somebody wrote
+/// `ssh_config` in is one they chose, and it is only recorded use that outranks
+/// it.
+fn by_use(
+    mut hosts: Vec<(String, String)>,
+    uses: &HashMap<String, dtr_store::SshUse>,
+) -> Vec<(String, String)> {
+    hosts.sort_by(|a, b| {
+        let of = |alias: &str| {
+            let used = uses.get(alias).copied().unwrap_or_default();
+            (used.uses, used.last)
+        };
+        of(&b.0).cmp(&of(&a.0))
+    });
+    hosts
 }
 
 /// Serial ports the new-tab menu offers.
@@ -502,8 +524,8 @@ fn shell_name(program: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalShell, com_port_name, local_shells, one_per_name, ordered, resolved, shell_name,
-        shells_in, uart_absent, unique,
+        LocalShell, by_use, com_port_name, local_shells, one_per_name, ordered, resolved,
+        shell_name, shells_in, uart_absent, unique,
     };
 
     /// `/etc/shells` is programs, one per line, with `#` comments and blank
@@ -675,5 +697,48 @@ mod tests {
         assert!(!uart_absent("4"), "a 16550A is a port worth offering");
         assert!(!uart_absent(""));
         assert!(!uart_absent("unknown"));
+    }
+    /// The menu is a list of what a person reaches for, so the hosts they open
+    /// come first; a machine that has opened none keeps the order the config file
+    /// was written in, which is an order somebody chose.
+    #[test]
+    fn the_hosts_a_person_uses_come_first() {
+        use dtr_store::SshUse;
+        use std::collections::HashMap;
+
+        let hosts = || {
+            vec![
+                ("alpha".to_owned(), String::new()),
+                ("beta".to_owned(), String::new()),
+                ("gamma".to_owned(), String::new()),
+            ]
+        };
+        let names = |hosts: Vec<(String, String)>| -> Vec<String> {
+            hosts.into_iter().map(|(alias, _)| alias).collect()
+        };
+
+        assert_eq!(
+            names(by_use(hosts(), &HashMap::new())),
+            vec!["alpha", "beta", "gamma"],
+            "nothing remembered leaves the file's order alone"
+        );
+
+        let mut uses = HashMap::new();
+        uses.insert("gamma".to_owned(), SshUse { uses: 3, last: 10 });
+        uses.insert("beta".to_owned(), SshUse { uses: 1, last: 20 });
+        assert_eq!(
+            names(by_use(hosts(), &uses)),
+            vec!["gamma", "beta", "alpha"],
+            "the most used first, then the one used once"
+        );
+
+        let mut uses = HashMap::new();
+        uses.insert("alpha".to_owned(), SshUse { uses: 1, last: 30 });
+        uses.insert("gamma".to_owned(), SshUse { uses: 1, last: 10 });
+        assert_eq!(
+            names(by_use(hosts(), &uses)),
+            vec!["alpha", "gamma", "beta"],
+            "the same count, the more recent first"
+        );
     }
 }
