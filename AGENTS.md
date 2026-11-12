@@ -804,18 +804,19 @@ the two payloads that are ours.
   them against a recording host, and `tests/corpus/corpus-dialogs.txt` is what they said —
   regenerate with `UPDATE_CORPUS_DIALOGS=1`.
 - `docs/ttl-gaps.md` — what the TTL interpreter still does not do, and the order worth
-  doing it in; `crates/dtr-ttl/tests/field/` is where real macros go.
+  doing it in.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
+- `docs/compio.md` — a completion-based runtime, measured: it would not have fixed the serial
+  lumping, which is the driver's.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face: Han/kana,
   fullwidth punctuation, Nerd Font icons, emoji. Read it before changing `prepare_pane`'s
-  placement rules; **§9 is the list of what is left**.
-- `docs/bench.md` — what a vtebench number means, what a `.dat` is worth, and the `.meta`
-  sidecar.
+  placement rules.
+- `docs/bench.md` — what a vtebench number means and what a `.dat` is worth.
 - `docs/themes.md` — which terminal theme formats dtr could read.
 - `docs/gtk-palette.md` — how `native` reads the GTK4/libadwaita palette on Linux
-  without linking GLib: the XDG portal for scheme and accent, constants measured
-  out of libadwaita's gresource, the metrics that come with them, the live signal,
-  and why v1 does not parse user CSS.
+  without linking GLib: the portal for scheme and accent, the constants and metrics
+  measured out of libadwaita's gresource, the live signal, and why v1 does not parse
+  user CSS.
 - `docs/ui.md` — the chrome: why it has a skin at all, what a token is, what `native` means
   on each platform, and the rules the tab strip, the settings menu, the palette and the
   keyboard map obey.
