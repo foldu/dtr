@@ -55,6 +55,12 @@ pub struct Terminal {
     /// is a difference the program can see. (Ghostty's `clipboard-read` defaults
     /// to asking; dtr has no prompt yet, so the honest default is "no".)
     pub clipboard_read: bool,
+    /// Whether a program may resize the window with `CSI 8 ; rows ; cols t`.
+    ///
+    /// Off by default, and deliberately so: a program that can resize the window
+    /// is a program that can resize the window *while somebody is typing*, and
+    /// Ghostty's own escape hatch is opt-in for the same reason.
+    pub window_resize: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -259,6 +265,7 @@ impl Default for Terminal {
         Self {
             scrollback_limit: SCROLLBACK_LIMIT,
             clipboard_read: false,
+            window_resize: false,
         }
     }
 }
@@ -426,6 +433,11 @@ impl Config {
             if let Some(read) = terminal.get("clipboard_read") {
                 config.terminal.clipboard_read = read.as_bool().ok_or_else(|| {
                     Error::Value("terminal.clipboard_read must be true or false".into())
+                })?;
+            }
+            if let Some(resize) = terminal.get("window_resize") {
+                config.terminal.window_resize = resize.as_bool().ok_or_else(|| {
+                    Error::Value("terminal.window_resize must be true or false".into())
                 })?;
             }
         }
@@ -741,6 +753,14 @@ mod tests {
         let error = Config::parse("[terminal]\nclipboard_read = \"always\"\n")
             .expect_err("a string is not a bool");
         assert!(format!("{error}").contains("clipboard_read"), "{error}");
+        // A program resizing the window is off for the same kind of reason.
+        assert!(!Config::parse("").unwrap().terminal.window_resize);
+        assert!(
+            Config::parse("[terminal]\nwindow_resize = true\n")
+                .unwrap()
+                .terminal
+                .window_resize
+        );
     }
 
     #[test]

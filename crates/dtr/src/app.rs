@@ -121,6 +121,13 @@ const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(350)
 /// a resize arrow is what says it did.
 const DIVIDER_SLOP: f32 = 2.0;
 
+/// The smallest window a program may talk dtr down to, in physical pixels.
+///
+/// `CSI 8 ; 1 ; 1 t` is legal, and a window that obeys it literally is a window
+/// with no room for its own caption — so the request is honoured down to here
+/// and no further.
+const MIN_WINDOW: (f32, f32) = (240.0, 160.0);
+
 /// A preview that is waiting for the pointer to settle.
 struct PendingThumb {
     due: std::time::Instant,
@@ -674,6 +681,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         config_path: startup.config_path.clone(),
         toast: None,
         clipboard_cache,
+        pending_resize: None,
     };
     // `--files` for screenshots and for starting next to a listing; the pane
     // gets focus, so the arrow keys work immediately.
@@ -1268,6 +1276,9 @@ struct App {
     /// clipboard — so the UI keeps this warm on the two occasions the clipboard
     /// can have changed under us: a copy of ours, and a paste of theirs.
     clipboard_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// A `CSI 8 t` request the window has not been able to honour yet, because
+    /// the first frame had not measured a cell when it arrived.
+    pending_resize: Option<(Option<u16>, Option<u16>)>,
     /// `--select START:END`, still waiting for a frame to say how wide the grid
     /// is: the pane wants viewport cells, the flag names linear ones.
     scripted_selection: Option<(usize, usize)>,
@@ -3816,6 +3827,50 @@ impl App {
         crate::layout::Rect::new(0.0, inset, screen.0, (screen.1 - status - inset).max(0.0))
     }
 
+    /// Resize the window so the grid holds `rows` × `cols` cells.
+    ///
+    /// A *delta* against the size that is there rather than a computed absolute:
+    /// the chrome above and below the grid is not something a program asked
+    /// about, and the only thing it asked for is more or fewer cells. `None` on a
+    /// side means it wanted that side left alone. The clamp is there because a
+    /// program asking for one cell must not shrink the window to nothing.
+    ///
+    /// Returns whether it applied. It cannot before the first frame has measured
+    /// a cell, and the caller keeps the request rather than losing it.
+    fn resize_window_to(&mut self, rows: Option<u16>, cols: Option<u16>) -> bool {
+        let (Some(gpu), Some(session)) = (&self.gpu, self.session()) else {
+            return false;
+        };
+        let (current_cols, current_rows) = session.grid;
+        // Before the first fit there is no grid to be a delta from.
+        if current_cols == 0 || current_rows == 0 {
+            return false;
+        }
+        let cell = gpu.metrics();
+        let mut size = gpu.window.inner_size();
+        if let Some(cols) = cols {
+            let delta = (f32::from(cols) - f32::from(current_cols)) * cell.cell_width;
+            size.width = (size.width as f32 + delta).max(MIN_WINDOW.0) as u32;
+        }
+        if let Some(rows) = rows {
+            let delta = (f32::from(rows) - f32::from(current_rows)) * cell.cell_height;
+            size.height = (size.height as f32 + delta).max(MIN_WINDOW.1) as u32;
+        }
+        tracing::info!(
+            ?cols,
+            ?rows,
+            width = size.width,
+            height = size.height,
+            "a program resized the window"
+        );
+        // `request_` because a compositor may refuse a size, and a terminal that
+        // insisted would be fighting the window manager.
+        let _ = gpu
+            .window
+            .request_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
+        true
+    }
+
     fn fit_panes(&mut self, metrics: crate::render::Metrics, screen: (f32, f32), scale: f32) {
         if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
             return;
@@ -4486,9 +4541,21 @@ impl ApplicationHandler<UserEvent> for App {
         // file pane can have focus while the terminal beside it is still live.
         let mut bell_rang = false;
         let mut bell_behind = false;
+        let mut resize_to = None;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             for pane in tab.leaves.values_mut() {
                 if let Pane::Terminal(session) = pane {
+                    if let Some((rows, cols)) = session.pane.take_resize_request() {
+                        if self.config.terminal.window_resize {
+                            resize_to = Some((rows, cols));
+                        } else {
+                            tracing::info!(
+                                rows = ?rows,
+                                cols = ?cols,
+                                "a program asked to resize the window; terminal.window_resize is off"
+                            );
+                        }
+                    }
                     let rung = session.pane.take_bells();
                     if rung > 0 {
                         session.bell_at = Some(std::time::Instant::now());
@@ -4514,6 +4581,21 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if bell_rang {
             self.repaint("bell");
+        }
+        // `CSI 8 t`, when the config lets a program move the window: the pane
+        // parked the request because it does not own the surface. It is *kept*
+        // until it can be applied — the request can arrive before the first
+        // frame has measured a cell, and a request dropped then is a request
+        // silently ignored, which is the bug this whole document is about.
+        if resize_to.is_some() {
+            self.pending_resize = resize_to;
+        }
+        if let Some((rows, cols)) = self.pending_resize {
+            if self.resize_window_to(rows, cols) {
+                self.pending_resize = None;
+            } else {
+                self.repaint("a resize is waiting for a measured cell");
+            }
         }
         if bell_behind {
             // The window, not the speaker: dtr never plays a sound, and a hint
@@ -4570,6 +4652,20 @@ impl ApplicationHandler<UserEvent> for App {
                 gpu.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            // `?1004`: a program can ask to be told when the window is focused,
+            // and a shell uses it to change the cursor. Every pane in the tab on
+            // screen hears it, because the focus is the window's; a pane in a
+            // tab nobody is looking at is not "focused" in any sense the program
+            // could act on.
+            WindowEvent::Focused(active) => {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    for pane in tab.leaves.values() {
+                        if let Pane::Terminal(session) = pane {
+                            session.pane.send(crate::pane::Command::Focused(active));
+                        }
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let stroke = crate::keys::KeyStroke {
                     // The position is what a terminal reports; the character a

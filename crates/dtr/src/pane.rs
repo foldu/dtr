@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::io::Read as _;
 use std::io::Write as _;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -28,7 +29,7 @@ use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::terminal::{
     ClipboardReadError, ClipboardReplyContent, ColorScheme, Mode, Point, PointCoordinate,
-    PointSpace, SizeReportSize,
+    PointSpace, ResizeWindow, SizeReportSize,
 };
 use portable_pty::MasterPty;
 
@@ -361,6 +362,11 @@ pub enum Command {
     Dtr(bool),
     Rts(bool),
     Break,
+    /// The window gained or lost focus.
+    ///
+    /// Sent unconditionally: whether the program asked to be told is terminal
+    /// state (`?1004`), and only the pane can read it.
+    Focused(bool),
     Scroll(isize),
     /// Resize the grid to the window, in cells and in pixels.
     Resize {
@@ -514,6 +520,10 @@ pub struct Pane {
     /// How many `BEL`s the program has rung since the UI last asked. A bell is
     /// a flash in the window, never a sound, so this count is the whole signal.
     bells: Arc<AtomicU32>,
+    /// A resize the program asked for (`CSI 8 ; rows ; cols t`), waiting for the
+    /// UI. `None` is "nothing asked"; `(rows, cols)` keeps a missing dimension
+    /// missing, because the program is allowed to want only one.
+    resize_request: Arc<Mutex<Option<(Option<u16>, Option<u16>)>>>,
 }
 
 impl Pane {
@@ -552,6 +562,8 @@ impl Pane {
         let bells = Arc::new(AtomicU32::new(0));
         let rung = Arc::clone(&bells);
         let shared_clipboard = Arc::clone(&clipboard);
+        let resize_request = Arc::new(Mutex::new(None));
+        let asked = Arc::clone(&resize_request);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = async_channel::unbounded::<Command>();
 
@@ -581,6 +593,7 @@ impl Pane {
                     Arc::clone(&cwd_seen),
                     rung,
                     shared_clipboard,
+                    asked,
                     clipboard_read,
                     theme,
                     scrollback,
@@ -605,6 +618,7 @@ impl Pane {
             ended,
             cwd,
             bells,
+            resize_request,
         })
     }
 
@@ -624,6 +638,15 @@ impl Pane {
     /// one, which a boolean could.
     pub fn take_bells(&self) -> u32 {
         self.bells.swap(0, Ordering::Relaxed)
+    }
+
+    /// A window resize the program asked for since the last ask, as
+    /// `(rows, cols)` with a missing side meaning "keep it".
+    pub fn take_resize_request(&self) -> Option<(Option<u16>, Option<u16>)> {
+        self.resize_request
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 
     /// Text the pane copied, if it has produced any since the last call.
@@ -944,6 +967,7 @@ async fn run(
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     bells: Arc<AtomicU32>,
     clipboard: Arc<Mutex<Option<String>>>,
+    resize_request: Arc<Mutex<Option<(Option<u16>, Option<u16>)>>>,
     clipboard_read: bool,
     theme: Option<crate::theme::Theme>,
     scrollback: usize,
@@ -1036,6 +1060,27 @@ async fn run(
                 // Denied covers both "policy says no" and "nothing to give":
                 // the protocol tells the program either way.
                 _ => read.reply(Err(ClipboardReadError::Denied), &[], false),
+            }
+        })?;
+    }
+    // `CSI 8 ; rows ; cols t`: the program asks for a bigger or smaller window.
+    // Parked for the UI, which owns the window, and the config decides whether it
+    // is honoured — a program that can resize the window can resize it while
+    // somebody is typing. A missing side means "keep the current one".
+    {
+        let request = Arc::clone(&resize_request);
+        let wake = Arc::clone(&wake);
+        term.on_resize_window(move |_term, ask| {
+            if let ResizeWindow::Grid { rows, columns } = ask {
+                tracing::debug!(rows = ?rows, columns = ?columns, "the program asked to resize");
+                if let Ok(mut slot) = request.lock() {
+                    *slot = Some((rows.map(NonZeroU16::get), columns.map(NonZeroU16::get)));
+                }
+                // Asking to resize changes no cell, so without the wake the UI
+                // would only hear about it at the next keystroke — which is
+                // exactly what a program printing a progress spinner does not
+                // do.
+                wake();
             }
         })?;
     }
@@ -1775,6 +1820,19 @@ async fn run(
                             if let Err(err) = modem.pulse_break() {
                                 tracing::warn!(%err, "break");
                             }
+                        }
+                    }
+                    Command::Focused(active) => {
+                        // `?1004`: the program asked to be told when the window
+                        // gains or loses focus, and the report goes out on the
+                        // pty because the program is who wanted it.
+                        if term.mode(Mode::FOCUS_EVENT).unwrap_or(false) {
+                            replies.borrow_mut().extend_from_slice(if active {
+                                b"\x1b[I"
+                            } else {
+                                b"\x1b[O"
+                            });
+                            flush_replies(&replies, &mut sink).await;
                         }
                     }
                     Command::Resize {
@@ -4616,6 +4674,51 @@ mod session_tests {
             refused.contains("\x1b]52;c;\x1b\\"),
             "a refused read should still answer, with nothing: {refused:?}"
         );
+    }
+
+    /// `CSI 8 ; rows ; cols t` is the program asking for a different window.
+    /// The pane does not own a window, so it parks the request for the UI — and
+    /// an absent side stays absent rather than becoming zero, because the two
+    /// mean different things.
+    #[test]
+    fn a_window_resize_request_reaches_the_ui() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("resize");
+        let script = reader(r"printf '\033[8;40;100t'; ", &out);
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(request) = pane.take_resize_request() {
+                assert_eq!(request, (Some(40), Some(100)));
+                return;
+            }
+            assert!(Instant::now() < deadline, "the request never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `?1004` is a program asking to be told when the window gains or loses
+    /// focus — a shell uses it to change the cursor. The pane sends `CSI I` and
+    /// `CSI O` only when the program asked, and the bytes go out on the pty
+    /// because the program is who wanted them.
+    #[test]
+    fn focus_is_reported_only_to_a_program_that_asked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("focus");
+        let script = reader(r"printf '\033[?1004h'; ", &out);
+        let pane = pane(script, None, Vec::new());
+        // The mode is parsed a step behind the child, so wait for the pane to
+        // have seen it before asking: `note_modes` runs with the batch.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pane.stats().rx() == 0 {
+            assert!(Instant::now() < deadline, "the program never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        pane.send(Command::Focused(true));
+        wait_for_bytes(&pane, &out, "\x1b[I", "a focus-in report");
+        pane.send(Command::Focused(false));
+        wait_for_bytes(&pane, &out, "\x1b[O", "a focus-out report");
     }
 
     /// The size reports are how a program learns the cell: an image viewer, a
