@@ -19,8 +19,11 @@ window does with what the core parsed.
 That makes the comparison unusually mechanical, because the core publishes the
 list of what a frontend owes it — a struct of callbacks, `Effects`
 (`src/terminal/stream_terminal.zig:154`), whose doc comments say what each one is
-for. Ghostty's frontends fill nearly all of them. dtr registers **two**:
-`on_pty_write` and `on_clipboard_write` (`crates/dtr/src/pane.rs:919-951`).
+for. Ghostty's frontends fill nearly all of them. dtr registered **two** —
+`on_pty_write` and `on_clipboard_write` — until 2026-11-12, when the
+escape-sequence sweep took it to eight (`on_size`, `on_xtversion`,
+`on_color_scheme`, `on_render_hold`, `on_bell`, `on_clipboard_read` are the new
+ones); the table in §2 says what still answers nothing, and why.
 
 The gaps sort into four kinds, and they are not equally excusable:
 
@@ -49,34 +52,35 @@ a terminal that does not understand the question.
 | `OSC 4 ; Ps ; ?` — palette query | answers from the theme | **answers** | — | — |
 | `OSC 10/11/12 ; ?` — dynamic colours | answers | **answers**, because the theme sets them (`theme.rs:96-101`) | — | — |
 | `XTGETTCAP` capability keys (`colors`, `RGB`, …) | answers | **answers** from Ghostty's static map | — | — |
-| `XTGETTCAP TN` — "which terminfo entry are you?" | `xterm-ghostty` | **silence**: `set_terminfo_name` is never called, and the core deliberately refuses to claim Ghostty's own entry | `pane.rs`, one line | S |
-| `CSI > 0 q` — XTVERSION | `ghostty 1.3.2` | **`libghostty`** — the library answers, not the app | `on_xtversion` | S |
-| `CSI 14/16/18/19 t` — window and **cell** size in pixels | answers from the surface | **silence**: no `on_size`, so no cell-pixel size | `pane.rs` (the pane has `Metrics`) | S |
-| `CSI ? 2048 h` — in-band resize reports | reports on every resize | **silence** | same callback | S |
-| `CSI ? 996 n` — "is the terminal light or dark?" | answers from the theme | **silence** | `on_color_scheme` | S |
-| `OSC 52 ; c ; ?` — clipboard **read** | mediated: `clipboard-read = ask/allow/deny` | **silence**, always; the program cannot read and is not told | `on_clipboard_read` + a consent policy | M |
-| `BEL` | `bell-features`: visual, window attention, audio | **dropped** (`on_bell` unregistered) | `pane.rs` + a UI policy | S |
+| `XTGETTCAP TN` — "which terminfo entry are you?" | `xterm-ghostty` | **answers** `xterm-ghostty`: the core refuses to claim an entry unless the embedder names it, and dtr ships that entry | — | done |
+| `CSI > 0 q` — XTVERSION | `ghostty 1.3.2` | **`dtr <version>`**, because `on_xtversion` overrides the library's own answer | — | done |
+| `CSI 14/16/18/19 t` — window and **cell** size in pixels | answers from the surface | **answers** from the cell the last `Command::Resize` measured; silent only before the first resize, when no cell has been measured | — | done |
+| `CSI ? 2048 h` — in-band resize reports | reports on every resize | **answers**: the report carries the new size, flushed on the resize itself rather than waiting for the program to type | — | done |
+| `CSI ? 996 n` — "is the terminal light or dark?" | answers from the theme | **answers** from the theme's background (Rec. 601 luma); no theme means dark | — | done |
+| `OSC 52 ; c ; ?` — clipboard **read** | mediated: `clipboard-read = ask/allow/deny` | **answers**, from the clipboard the UI last read, or **refuses** with an empty selection — `terminal.clipboard_read`, off by default, because dtr has no prompt to ask with | — | done |
+| `BEL` | `bell-features`: visual, window attention, audio | **flashes** the pane for 140 ms and never makes a sound; a bell in a tab nobody is looking at asks the window for attention instead | — | done (visual only) |
 | `OSC 9 ; …`, `OSC 777` — desktop notification | system notification | **dropped** | `on_desktop_notification` | M |
 | `OSC 9 ; 4 ; …` — progress | tab/taskbar progress | **dropped** | `on_progress_report` | M |
 | `OSC 7501` — program status (working, done, waiting) | title/status integration, and the protocol's support query is answered | **dropped**, so the support query is unanswered too and programs see the protocol as unsupported | `on_program_status` | M |
-| `CSI ? 2026 h … l` — synchronized output | holds the frame and captures it at the start of the hold | **dropped**: a full-screen redraw can be painted half-drawn, because `publish` fires on its own gate (`pane.rs:2310`) | `on_render_hold` | M |
-| `OSC 11 ; …` — **set** the default background | repaints the window background | parsed, and invisible: the window clears to the theme's colour (`app.rs`, `LoadOp::Clear`) and only cells carrying `has_bg` paint, so the new colour never reaches the screen (`OSC 4` palette *sets* do work, because cell colours are read per publish) | `app.rs` clear colour, `render.rs` background pass | S |
-| `CSI 8 ; rows ; cols t` — resize the window | may resize the surface (`vt-window-resize-allowed`) | parsed, effect ignored | `on_resize_window` | S |
-| `OSC 22 ; …` — pointer shape | changes the mouse cursor (a text beam over text) | none | `Surface` pointer handling | S |
-| `CSI ? 2031 h`, `? 2033 h` — report scheme and visibility changes | tells the program when the theme flips or the window hides | none | mode plumbing + `on_color_scheme`'s inverse | S |
+| `CSI ? 2026 h … l` — synchronized output | holds the frame and captures it at the start of the hold | **holds**: the burst publish and its gate timer are suppressed until the release, which publishes in the batch that carries it; a scroll or a keystroke still paints | — | done |
+| `OSC 11 ; …` — **set** the default background | repaints the window background | **repaints**: the pane paints its own default background first in the grid pass, the colours come from the terminal's *effective* `bg_color`/`fg_color`, and the frame gate compares them so a set with no cell change still publishes | — | done |
+| `CSI 8 ; rows ; cols t` — resize the window | may resize the surface (`vt-window-resize-allowed`) | parsed, effect ignored | `on_resize_window` + an opt-in config key | S |
+| `OSC 22 ; …` — pointer shape | changes the mouse cursor (a text beam over text) | none, and **cannot** be wired yet: the bindings expose no pointer-shape callback | the binding, then the surface | S |
+| `CSI ? 2031 h`, `? 2033 h` — report scheme and visibility changes | tells the program when the theme flips or the window hides | `?2031` needs nothing while a pane's theme cannot change (it is applied once at spawn); `?2033` needs a `visible` setter the C surface does not expose, though the core would send the report itself | the binding, then a `Command` | S |
 | `OSC 133` — prompt marks | marks, jump-to-prompt, selection, click-to-move | **works**, but through dtr's own scanner in front of the core (`pane.rs:2522`), not the callback | — | — |
 
 Two consequences worth naming, because they are not visible in the table:
 
-- **The size reports are how a program learns the cell.** Without `CSI 16 t`,
-  anything that places pixels in the grid — image viewers, `chafa`, a TUI
-  preview, neovim's image plugins — has to guess from the font size, and
-  guesses wrong on a HiDPI window or a resized pane.
+- **The size reports are how a program learns the cell.** Anything that places
+  pixels in the grid — image viewers, `chafa`, a TUI preview, neovim's image
+  plugins — asks `CSI 16 t`; without an answer it has to guess from the font
+  size, and guesses wrong on a HiDPI window or a resized pane. dtr answers now.
 - **Synchronized output is not a nicety on a slow transport.** A 9600-baud
   screen is written over hundreds of milliseconds; framing that with
   `?2026h`/`?2026l` is the only way a program can ask dtr to show the previous
-  picture until the new one is complete. The core offers the hook; dtr paints on
-  a timer instead.
+  picture until the new one is complete. The core offered the hook and dtr
+  painted on a timer; the hold is honoured now, which matters most on exactly
+  the transport this terminal exists for.
 
 ### 2.1 The probe
 
@@ -209,21 +213,21 @@ preview.
 
 1. **Underline and strikethrough** (S). Two booleans on `Cell`, two solids per
    cell in the same instance buffer, positions from `Metrics`. The largest
-   visible gap per line of code in this document.
-2. **The reply sweep** (S, one sitting): `set_terminfo_name("xterm-ghostty")`,
-   `on_size` (14/16/18/19 t and mode 2048), `on_color_scheme` (`?996 n`),
-   `on_xtversion` (`dtr <version>`), and focus reporting on
-   `WindowEvent::Focused`. Each closes a question a program asks and dtr
-   currently ignores.
-3. **The window background ignores the terminal's default** (S): an `OSC 11` set is
-   parsed and never repainted, because the window clears to the theme's colour and only
-   cells carrying `has_bg` paint. (The cursor half of this item is done: a block inverts
-   its cell.)
-4. **Synchronized output** (M): honour `on_render_hold` — capture at the start of
-   the hold, skip publishes until it ends, with the timeout the core asks for.
-   The complement of the publish gate, not a replacement.
-5. **Bell, notifications, command finished** (M): one effect each and one UI
-   policy for "something happened in the pane I am not looking at".
+   visible gap per line of code in this document. **Not done**: still the
+   biggest hole, and still the first thing to do.
+2. **The reply sweep** — *done 2026-11-12*, except focus reporting:
+   `set_terminfo_name("xterm-ghostty")`, `on_size` (14/16/18/19 t and mode
+   2048), `on_color_scheme` (`?996 n`), `on_xtversion` (`dtr <version>`) and
+   `on_clipboard_read`. `CSI I`/`CSI O` on `WindowEvent::Focused` is still
+   missing: the pane has no way to be told the window's focus yet.
+3. **The window background ignores the terminal's default** — *done*: the pane
+   paints its own background and the colours are read from the terminal. The
+   cursor half went with it (a block inverts its cell).
+4. **Synchronized output** — *done*: the burst publish and its gate timer are
+   held until the release.
+5. **Bell, notifications, command finished** (M): the bell is *done* (flash and
+   window attention, no sound); `OSC 9`/`777`, `OSC 9;4` and `OSC 7501` still
+   have no surface to report to.
 6. **Search** (L). The core has the search (`libghostty_vt::search::Search`); the
    work is the overlay, the six bindings and the colours.
 7. **Confirm close, undo, select-all, font size keys, fullscreen** (S–M).
