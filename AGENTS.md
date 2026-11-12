@@ -793,7 +793,7 @@ the two payloads that are ours.
 | Windows 11 snap layouts never appear over a custom maximize button | the hit test is necessary, not sufficient: `HTMAXBUTTON` is answered (verified with `SendMessage`), and the flyout still does not show in the guest while Edge's does — `docs/chrome.md` §11 |
 | A dtr tab grows to tens of GB and the kernel OOM-kills it | the VT core defaults to unlimited scrollback; `pane::new_terminal` sets a 100 MB limit (`dtr_config::SCROLLBACK_LIMIT`, also the ceiling), so a hit here means a *new* terminal escaped that helper |
 | A stray console window next to dtr on Windows | the exe is console-subsystem; a process started without a console gets one allocated. Launching from `cmd` or Windows Terminal reuses theirs |
-| The exe shows the generic blank in Explorer and in the taskbar's pin menu, while the running window has an icon | those read a resource out of the *file*; `WM_SETICON` is only a window. `crates/dtr/build.rs` compiles `assets/logo/dtr.ico` with `zig rc` — regenerate the artwork with `./scripts/icon.sh` |
+| The exe shows a generic blank in Explorer and the pin menu while the window has an icon | those read a resource out of the *file*; `WM_SETICON` is only a window. `crates/dtr/build.rs` compiles `assets/logo/dtr.ico` with `zig rc` — regenerate the artwork with `./scripts/icon.sh` |
 | `include_image!` paints a small red ⚠ where the picture should be | egui_extras has no decoder enabled for that format: PNG needs its `image` feature, and only `svg` was on. `ui::every_embedded_image_decodes` is the test that fails instead |
 
 ## Where to look
@@ -808,8 +808,8 @@ the two payloads that are ours.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/compio.md` — the compio port: one runtime a thread, why tokio went, and its
   traps.
-- `docs/ghostty.md` — what Ghostty has that dtr does not: the duties the VT core hands
-  the embedder, the renderer and window gaps, and the order worth closing them in.
+- `docs/ghostty.md` — what Ghostty has that dtr does not: the core's duties, the
+  renderer and window gaps, and the order worth closing them in.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face: Han/kana,
   fullwidth punctuation, Nerd Font icons, emoji. Read it before changing `prepare_pane`'s
   placement rules.
@@ -825,8 +825,8 @@ the two payloads that are ours.
 - `docs/input.md` — what the program is told: keys, mouse, IME, selection, and the clipboard.
 - `docs/files.md` — clicking a path a program printed: the VFS, hyperlinks, previews, the
   save dialog, and what materialising a remote file does to its permissions.
-- `docs/windows.md` — the first Windows run, classified: the DPI cluster, serial baud,
-  glyph and icon rendering, resize cost; §2.1 has the measurement at 125 %.
+- `docs/windows.md` — the first Windows run, classified: DPI, serial baud, glyphs,
+  resize cost; §2.1 measures at 125 %.
 - `docs/chrome.md` — how the tabs get into the title bar, and the per-platform metrics
   and glyphs that keep the buttons looking native.
 - `docs/panes.md` — what the pane layer still does not do, in order: the exit bug that
