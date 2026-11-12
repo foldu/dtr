@@ -231,6 +231,16 @@ pub struct Style {
     /// put a 20-point band above a menu's first row and pushed every label 18
     /// points too far right, which read as a list of indented words.
     pub menu_margin: Margin,
+    /// The height of a popover's tip, or `None` for a popover that is a plain
+    /// rounded rectangle.
+    ///
+    /// The tip is the little triangle pointing back at the control the popover
+    /// came from — libadwaita's `popover > arrow`, which GNOME draws 12 points
+    /// tall over a 24-point base, a 45-degree slope each side. It is an absence
+    /// rather than a zero because Windows 11's menus and egui's own popups have
+    /// no beak at all: a tip that is not there is a different shape, not a
+    /// thinner one.
+    pub tip_height: Option<f32>,
     pub title: Title,
     pub section: Section,
     pub footer: Footer,
@@ -259,6 +269,7 @@ impl Style {
             border: 1.0,
             card_margin: Margin::symmetric(20, 18),
             menu_margin: Margin::same(6),
+            tip_height: None,
             title: Title::Eyebrow,
             section: Section::Rule,
             footer: Footer::PrimaryLast,
@@ -297,6 +308,9 @@ impl Style {
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
             menu_margin: Margin::same(6),
+            // `popover > arrow`: a 12-point tip over a 24-point base, the
+            // shape GTK draws under every menubutton's popover.
+            tip_height: Some(12.0),
             title: Title::Bar,
             section: Section::Bold,
             // A GNOME dialog's suggested action is the right-hand one.
@@ -337,6 +351,7 @@ impl Style {
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
             menu_margin: Margin::same(6),
+            tip_height: None,
             title: Title::Bar,
             section: Section::Bold,
             footer: Footer::PrimaryFirst,
@@ -382,6 +397,7 @@ impl Style {
             border: 1.0,
             card_margin: Margin::same(12),
             menu_margin: Margin::same(6),
+            tip_height: None,
             // A title with the cross on its row, a rule between groups, the
             // primary answer last, and no focus ring: all four are what egui's
             // own windows and menus do.
@@ -486,6 +502,12 @@ mod tests {
         assert_eq!(dtr.title, Title::Eyebrow);
         assert_eq!(native.title, Title::Bar);
         assert!(native.shadow.is_some() && dtr.shadow.is_none());
+        // A tip is GNOME's and only GNOME's: Windows 11's menus and egui's own
+        // popups are plain rectangles, and a beak on one of those is a shape
+        // borrowed from the wrong desktop.
+        assert_eq!(dtr.tip_height, None);
+        assert_eq!(native.tip_height, None);
+        assert_eq!(Style::egui().tip_height, None);
     }
 
     /// GNOME's metrics, from the numbers in libadwaita 1.9.3's stylesheet rather
@@ -504,6 +526,8 @@ mod tests {
         // `popover.menu > contents > stack > box { padding: 6px }`: a menu is a
         // popover, and it insets like one rather than like a card.
         assert_eq!(adwaita.menu_margin, Margin::same(6));
+        // `popover > arrow`: a 12-point tip, twice as wide at its base.
+        assert_eq!(adwaita.tip_height, Some(12.0));
         // GNOME's UI text is proportional, its dialogs put the suggested action on
         // the right, and its sections are bold labels rather than rules.
         assert!(!adwaita.mono);

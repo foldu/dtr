@@ -238,6 +238,12 @@ what makes them testable and what lets a caller `--send` into them.
   sized by their target rather than their glyph; `cross_at` takes a rect the tab
   strip has already reserved, which is how a chip gets a close target that does
   not overlap its label.
+- `menu_tip` — the popover's beak: the triangle pointing back at the control the
+  menu came from, which a caller gets from the popup's own rectangle and the
+  button's, so there is no geometry at the call site. `Style::tip_height` is
+  `None` in the looks whose popovers have no beak at all — Windows 11's menus,
+  egui's own popups — because a tip that is not there is a different shape, not
+  a smaller one.
 
 The serial sheet is drawn entirely with these: `serial_dialog.rs` contains no
 colour, radius or stroke width, and its row heights and gaps come from
@@ -325,6 +331,23 @@ the chord column fills the right-hand end the way an application menu does, and
 popover: a tight inset, a 9-point row radius, the pointer's row filled to the content edge —
 and `app_menu` is the same menu in the test's own look. None of it is `App`'s to draw: the
 widget and the tokens are `dtr-widgets`'.
+
+**The beak is what makes it a menubutton's menu.** libadwaita's `popover > arrow`: 12
+points tall over a 24-point base, filled with the popover's own background and outlined
+with its own border, so body and tip read as one outline. Three decisions are in that
+sentence. The outline is a border-coloured triangle *behind* the fill rather than a stroke
+along the slopes, because a one-point stroke at 45 degrees lands on a pixel corner at a
+time and reads as a chain of dots. The body stands a beak's height clear of the button
+(`Popup::gap`), because the beak belongs in the space *between* the two: drawn flush, it
+grows into the button and reads as a flap hanging off it. And the tip goes over the
+*centre* of the control, which a body hanging off the button's edge cannot do — the tip may
+not sit on a rounded corner, so it slides inwards by a corner plus half the base, which is
+`tip_x` and the whole of the "left, middle or right" there is. The body moves instead:
+`app_menu` and the `+` ask for `RectAlign::BOTTOM` when the skin has a tip, and egui falls
+back to an edge alignment when a centred menu would not fit — the `+`'s own menu is 600
+points wide on a machine with four serial ports, so there it is the beak that gives way.
+GNOME moves the popover, not the beak. Only the two strip menus have one: a combo's list is
+a dropdown, and the beak is a menubutton's.
 
 **About is a card, not a dialog** (`crates/dtr/src/about.rs`): every fact on it is a
 compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot disagree with the binary,

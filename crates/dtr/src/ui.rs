@@ -467,7 +467,19 @@ pub fn app_menu(
     let mut chosen = None;
     // A menu of three words, not of a whole row: without a width it takes the
     // strip's.
-    egui::Popup::menu(&response).width(180.0).show(|ui| {
+    let button = response.rect;
+    let mut popup = egui::Popup::menu(&response).width(180.0);
+    if let Some(tip) = skin.style.tip_height {
+        // A beak needs two things the other looks do not. Room: the body stands a
+        // beak's height off the button, so the beak fills the space between them
+        // rather than being drawn over the button. And the middle: a beak cannot
+        // sit on a rounded corner, so a body hanging off the button's edge would
+        // drag its beak inwards and point at nothing in particular — GNOME moves
+        // the popover, not the beak, and egui falls back to an edge alignment
+        // when a centred menu would not fit.
+        popup = popup.align(egui::RectAlign::BOTTOM).gap(tip);
+    }
+    let popup = popup.show(|ui| {
         ui.set_min_width(180.0);
         // The chord is asked of the live map, so a rebinding shows the key a
         // person actually has — and a switched-off binding shows none, which is
@@ -500,6 +512,12 @@ pub fn app_menu(
         dtr_widgets::menu_separator(ui, skin);
         entry(ui, "about", None, Menu::About);
     });
+    // Drawn after the frame, so the beak lands on top of the body and its shadow
+    // rather than under them, and aimed at the button's own rectangle: which
+    // edge it grows from, and where along it, are the widget's to work out.
+    if let Some(popup) = popup {
+        dtr_widgets::menu_tip(&popup.response, skin, button);
+    }
     chosen
 }
 
@@ -704,7 +722,14 @@ pub fn tab_bar(
             "new tab",
             egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
         );
-        let menu = egui::Popup::menu(&response).show(|ui| {
+        let mut popup = egui::Popup::menu(&response);
+        if let Some(tip) = skin.style.tip_height {
+            // Centred under the `+` and a beak's height clear of it, for the same
+            // reasons as the app menu: the beak belongs in the space between the
+            // two, pointing at the middle of the button.
+            popup = popup.align(egui::RectAlign::BOTTOM).gap(tip);
+        }
+        let menu = popup.show(|ui| {
             ui.set_min_width(220.0);
             // A machine with forty hosts gets a menu taller than the screen,
             // and a menu whose last host is below the taskbar is a host you
@@ -762,7 +787,11 @@ pub fn tab_bar(
                     }
                 });
         });
-        let _ = menu;
+        // Same tip as the strip's app menu, because it is the same kind of
+        // button: a menubutton's popover says which button it belongs to.
+        if let Some(menu) = menu {
+            dtr_widgets::menu_tip(&menu.response, &skin, response.rect);
+        }
     });
     // What the horizontal actually took, so a drag region can start after it.
     // Taken from the ui rather than computed from the chips: the `+` is part of
@@ -1375,8 +1404,12 @@ mod kittest_tests {
             // the rows is egui's grey rather than the skin's.
             let skin = look.skin();
             skin.apply(ui.ctx());
+            // Near the strip's right-hand end, where the window puts it, and far
+            // enough in that the menu can centre on it inside this harness: the
+            // thing the picture is for is the tip landing on the middle of the
+            // button rather than being dragged in from it by the corner clamp.
             let rect = egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
+                egui::pos2(ui.ctx().content_rect().right() - 130.0, 0.0),
                 egui::vec2(32.0, crate::ui::TAB_HEIGHT),
             );
             let _ = app_menu(ui, rect, &skin, &keymap);
