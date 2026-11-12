@@ -213,6 +213,15 @@ one that only exists here. The config file used to be watched with `notify`; it 
 `stat` on a 250 ms deadline, which is cheaper than a watch and portable by construction
 (`docs/compio.md` §5).
 
+**`available_ports` lists ports that are not ports.** An x86 kernel creates `/dev/ttyS0..3` —
+COM1–COM4's fixed I/O ports — whether or not the board has a serial header, and
+`/sys/class/tty/ttySN/type` reads `0` (`PORT_UNKNOWN`, what `setserial` prints as `UART:
+unknown`) when the driver found nothing behind one. They arrived in the new-tab menu as four
+detail-less rows, and picking one opened a port that fails or waits forever.
+`sources::is_a_phantom_com_port` drops a `ttyS` whose `type` is `0` and keeps everything else:
+a USB or ACM adapter has no such file, a real 16550A reports `4`, and a host that is not Linux
+has no file at all — so the filter can only remove what the kernel itself has said is empty.
+
 Two traps in the transport. **"No bytes" is not "the reader ended"**: the pane keeps the
 byte sender alive for reconnects, so `bytes_rx.recv()` never returns `None` and a disconnect
 arrives on `closed_rx` instead. And a serial port renders `reconnecting…` when it cannot
