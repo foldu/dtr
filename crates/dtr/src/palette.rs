@@ -124,182 +124,241 @@ impl Palette {
 
         let screen = ui.max_rect();
         let width = 560.0f32.min(screen.width() - 32.0).max(280.0);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(screen.center().x - width / 2.0, screen.top() + 32.0),
-            vec2(width, 300.0),
-        );
-
         let skin = look.skin();
         let palette = skin.palette;
         let style = &skin.style;
-        let painter = ui.painter();
-        painter.rect_filled(rect, style.card_radius, palette.card);
-        painter.rect_stroke(
-            rect,
-            style.card_radius,
-            egui::Stroke::new(style.border, palette.border),
-            egui::StrokeKind::Inside,
+        let inset = 10.0;
+        let top = screen.top() + 32.0;
+        let left = screen.center().x - width / 2.0;
+
+        // The card is painted *after* its body, into two shapes that were added
+        // before the body took its space, so its height is the height of what it
+        // holds. A fixed height was a card that a skin with tall rows outgrew:
+        // the last completions — and the selected row with them — landed below
+        // it, on the window behind. Swapping the shapes afterwards is the only
+        // way to have the frame both behind the text and sized by it.
+        let painter = ui.painter().clone();
+        let backdrop = painter.add(egui::Shape::Noop);
+        let border = painter.add(egui::Shape::Noop);
+
+        // How much of the window the body may use. Everything is measured from
+        // this rather than predicted: the field's height and the skin's row
+        // spacing are egui's and the skin's, not numbers this file knows.
+        let room = egui::Rect::from_min_size(
+            egui::pos2(left + inset, top + inset),
+            vec2(
+                width - 2.0 * inset,
+                (screen.height() - 64.0 - 2.0 * inset).max(style.row),
+            ),
         );
 
         let mut action = None;
         let mut close = false;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(10.0)), |ui| {
-            ui.set_width(ui.available_width());
+        let body = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(room), |ui| {
+                ui.set_width(ui.available_width());
 
-            // Keys first: consuming them here keeps the text field from
-            // also acting on them (arrow keys move the caret otherwise).
-            // Arrows for the fingers that expect them, `C-n`/`C-p` for the
-            // ones that have been navigating lists since Emacs. Both are
-            // consumed here so the text field never sees them.
-            let (down, up, enter, tab, escape) = ui.input_mut(|input| {
-                let down = input.consume_key(Modifiers::NONE, Key::ArrowDown)
-                    | input.consume_key(Modifiers::CTRL, Key::N);
-                let up = input.consume_key(Modifiers::NONE, Key::ArrowUp)
-                    | input.consume_key(Modifiers::CTRL, Key::P);
-                (
-                    down,
-                    up,
-                    input.consume_key(Modifiers::NONE, Key::Enter),
-                    input.consume_key(Modifiers::NONE, Key::Tab),
-                    input.consume_key(Modifiers::NONE, Key::Escape),
-                )
-            });
-            close = escape;
-            if escape {
-                // What was abandoned, so `-v` can show whether a query was
-                // cancelled or never typed.
-                tracing::debug!(query = self.text(), "palette closed");
-            }
-            if down && !self.completions.is_empty() {
-                self.selected = (self.selected + 1) % self.completions.len();
-            }
-            if up && !self.completions.is_empty() {
-                self.selected =
-                    (self.selected + self.completions.len() - 1) % self.completions.len();
-            }
-            if enter {
-                action = self.accept_selected();
-            }
-            if tab {
-                match self.inline.clone() {
-                    Some(inline) => {
-                        self.input = inline.insert;
-                        self.recompute();
-                    }
-                    None => action = self.accept_selected(),
+                // Keys first: consuming them here keeps the text field from
+                // also acting on them (arrow keys move the caret otherwise).
+                // Arrows for the fingers that expect them, `C-n`/`C-p` for the
+                // ones that have been navigating lists since Emacs. Both are
+                // consumed here so the text field never sees them.
+                let (down, up, enter, tab, escape) = ui.input_mut(|input| {
+                    let down = input.consume_key(Modifiers::NONE, Key::ArrowDown)
+                        | input.consume_key(Modifiers::CTRL, Key::N);
+                    let up = input.consume_key(Modifiers::NONE, Key::ArrowUp)
+                        | input.consume_key(Modifiers::CTRL, Key::P);
+                    (
+                        down,
+                        up,
+                        input.consume_key(Modifiers::NONE, Key::Enter),
+                        input.consume_key(Modifiers::NONE, Key::Tab),
+                        input.consume_key(Modifiers::NONE, Key::Escape),
+                    )
+                });
+                close = escape;
+                if escape {
+                    // What was abandoned, so `-v` can show whether a query was
+                    // cancelled or never typed.
+                    tracing::debug!(query = self.text(), "palette closed");
                 }
-            }
-
-            let query_font =
-                FontId::new(style.value_font.size + 2.5, style.value_font.family.clone());
-            let response = TextEdit::singleline(&mut self.input)
-                .hint_text("connect, ssh, shell, replay, files, demo…")
-                .font(query_font.clone())
-                .desired_width(f32::INFINITY)
-                .show(ui);
-            if response.response.changed() {
-                self.recompute();
-            }
-            if ui.memory(|memory| memory.focused().is_none()) {
-                response.response.request_focus();
-            }
-
-            // Ghost text: what Tab would add, painted where it would appear.
-            if let Some(inline) = &self.inline {
-                let origin = response.galley_pos + vec2(response.galley.size().x, 0.0);
-                ui.painter().text(
-                    origin,
-                    Align2::LEFT_TOP,
-                    &inline.suffix,
-                    query_font,
-                    palette.disabled,
-                );
-            }
-
-            ui.add_space(6.0);
-            if self.completions.is_empty() {
-                ui.label(
-                    RichText::new("nothing matches")
-                        .font(style.value_font.clone())
-                        .color(palette.dim),
-                );
-                return;
-            }
-
-            // Ten rows is what fits without scrolling, and a list you can
-            // see at once beats one you have to scroll.
-            // Ten rows is what fits without scrolling, and a list you can
-            // see at once beats one you have to scroll.
-            let visible = 10.min(self.completions.len());
-            let first = self.selected.saturating_sub(visible - 1);
-            let row_height = style.row;
-            for index in first..(first + visible).min(self.completions.len()) {
-                let completion = &self.completions[index];
-                let selected = index == self.selected;
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
-
-                // Background before text: painting the highlight after the
-                // labels hid the selected row's own text.
-                let painter = ui.painter();
-                if selected {
-                    painter.rect_filled(
-                        rect.expand2(vec2(4.0, 0.0)),
-                        style.control_radius.saturating_sub(1),
-                        palette.control_active,
-                    );
+                if down && !self.completions.is_empty() {
+                    self.selected = (self.selected + 1) % self.completions.len();
                 }
-                painter.text(
-                    rect.left_center(),
-                    Align2::LEFT_CENTER,
-                    &completion.item.label,
-                    style.value_font.clone(),
-                    if selected {
-                        palette.accent
-                    } else {
-                        palette.text
-                    },
-                );
-                painter.text(
-                    rect.right_center(),
-                    Align2::RIGHT_CENTER,
-                    &completion.item.detail,
-                    FontId::new(style.label_font.size - 0.5, style.label_font.family.clone()),
-                    palette.dim,
-                );
-                if response.clicked() {
-                    self.selected = index;
+                if up && !self.completions.is_empty() {
+                    self.selected =
+                        (self.selected + self.completions.len() - 1) % self.completions.len();
+                }
+                if enter {
                     action = self.accept_selected();
                 }
-            }
+                if tab {
+                    match self.inline.clone() {
+                        Some(inline) => {
+                            self.input = inline.insert;
+                            self.recompute();
+                        }
+                        None => action = self.accept_selected(),
+                    }
+                }
 
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(
-                    "up/down or ctrl-n/ctrl-p choose   tab complete   enter run   esc close",
-                )
-                .font(egui::FontId::new(
-                    style.label_font.size - 1.5,
-                    style.label_font.family.clone(),
-                ))
-                .color(palette.dim),
-            );
-            // The only place the keys are written down. Nothing else in the
-            // window says that tabs exist, which is how a terminal ends up
-            // with one tab and no idea there could be more.
-            ui.label(
-                RichText::new(
-                    "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
+                let query_font =
+                    FontId::new(style.value_font.size + 2.5, style.value_font.family.clone());
+                let response = TextEdit::singleline(&mut self.input)
+                    .hint_text("connect, ssh, shell, replay, files, demo…")
+                    .font(query_font.clone())
+                    .desired_width(f32::INFINITY)
+                    .show(ui);
+                if response.response.changed() {
+                    self.recompute();
+                }
+                if ui.memory(|memory| memory.focused().is_none()) {
+                    response.response.request_focus();
+                }
+
+                // Ghost text: what Tab would add, painted where it would appear.
+                if let Some(inline) = &self.inline {
+                    let origin = response.galley_pos + vec2(response.galley.size().x, 0.0);
+                    ui.painter().text(
+                        origin,
+                        Align2::LEFT_TOP,
+                        &inline.suffix,
+                        query_font,
+                        palette.disabled,
+                    );
+                }
+
+                ui.add_space(6.0);
+                if self.completions.is_empty() {
+                    ui.label(
+                        RichText::new("nothing matches")
+                            .font(style.value_font.clone())
+                            .color(palette.dim),
+                    );
+                    return;
+                }
+
+                // Ten rows is what a list wants at most, and a list you can see at
+                // once beats one you have to scroll — but the skin decides how tall
+                // a row is, so how many fit is measured from the space the field
+                // left. A compact skin gets ten; a tall one gets fewer rather than
+                // rows outside the card.
+                let row = style.row;
+                let spacing = ui.spacing().item_spacing.y;
+                let fits =
+                    (((ui.available_height() + spacing) / (row + spacing)).floor() as usize).max(1);
+                let visible = 10.min(self.completions.len()).min(fits);
+                let first = self.selected.saturating_sub(visible - 1);
+                let row_height = style.row;
+                for index in first..(first + visible).min(self.completions.len()) {
+                    let completion = &self.completions[index];
+                    let selected = index == self.selected;
+                    let (rect, response) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), row_height),
+                        Sense::click(),
+                    );
+
+                    // Background before text: painting the highlight after the
+                    // labels hid the selected row's own text.
+                    //
+                    // The pair is the palette's `selection`/`on_selection`, not the
+                    // accent on a pressed control: a theme's accent is a colour
+                    // chosen to be *seen*, not one chosen to be read on, and the
+                    // native skin's blue over its own grey band was neither. These
+                    // two slots are the ones a skin fills in to be legible.
+                    let painter = ui.painter();
+                    if selected {
+                        painter.rect_filled(
+                            rect.expand2(vec2(4.0, 0.0)),
+                            style.control_radius.saturating_sub(1),
+                            palette.selection,
+                        );
+                    }
+                    painter.text(
+                        rect.left_center(),
+                        Align2::LEFT_CENTER,
+                        &completion.item.label,
+                        style.value_font.clone(),
+                        if selected {
+                            palette.on_selection
+                        } else {
+                            palette.text
+                        },
+                    );
+                    painter.text(
+                        rect.right_center(),
+                        Align2::RIGHT_CENTER,
+                        &completion.item.detail,
+                        FontId::new(style.label_font.size - 0.5, style.label_font.family.clone()),
+                        if selected {
+                            palette.on_selection.gamma_multiply(0.75)
+                        } else {
+                            palette.dim
+                        },
+                    );
+                    if response.clicked() {
+                        self.selected = index;
+                        action = self.accept_selected();
+                    }
+                }
+
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "up/down or ctrl-n/ctrl-p choose   tab complete   enter run   esc close",
+                    )
+                    .font(egui::FontId::new(
+                        style.label_font.size - 1.5,
+                        style.label_font.family.clone(),
+                    ))
+                    .color(palette.dim),
+                );
+                // The only place the keys are written down. Nothing else in the
+                // window says that tabs exist, which is how a terminal ends up
+                // with one tab and no idea there could be more.
+                ui.label(
+                    RichText::new(
+                        "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
                          ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
                          ctrl+, settings    ctrl+? keys",
-                )
-                .font(egui::FontId::new(
-                    style.label_font.size - 1.5,
-                    style.label_font.family.clone(),
-                ))
-                .color(palette.disabled),
-            );
-        });
+                    )
+                    .font(egui::FontId::new(
+                        style.label_font.size - 1.5,
+                        style.label_font.family.clone(),
+                    ))
+                    .color(palette.disabled),
+                );
+            })
+            .response
+            .rect;
+
+        // The card, now that its body has taken its space: the two placeholders
+        // that were added first become the frame. The top and the left are known
+        // — the body starts at the inset — and the bottom is where the content
+        // ended, which is what makes a tall skin's sheet tall.
+        //
+        // A floor, not a cap: the card keeps the height it has always had, so a
+        // query that filters to three rows does not make it jump under the eye,
+        // while a skin with tall rows grows it instead of spilling out of it.
+        let floor = (top + 300.0).min(screen.bottom() - 4.0);
+        let frame = egui::Rect::from_min_max(
+            egui::pos2(left, top),
+            egui::pos2(left + width, (body.bottom() + inset).max(floor)),
+        )
+        .intersect(screen.shrink(4.0));
+        painter.set(
+            backdrop,
+            egui::Shape::rect_filled(frame, style.card_radius, palette.card),
+        );
+        painter.set(
+            border,
+            egui::Shape::rect_stroke(
+                frame,
+                style.card_radius,
+                egui::Stroke::new(style.border, palette.border),
+                egui::StrokeKind::Inside,
+            ),
+        );
 
         if close {
             self.open = false;
@@ -505,5 +564,24 @@ mod kittest_tests {
             .type_text("s");
         harness.run();
         harness.snapshot("palette");
+    }
+
+    /// The same palette under a look whose rows are tall: the card is as tall as
+    /// its list, so the last completion — and the selected row — are on it
+    /// rather than on the window behind it. A fixed height fitted the compact
+    /// skin and nothing else, which is what `native` is on Linux.
+    #[test]
+    fn the_palette_fits_a_tall_skin() {
+        let mut palette = Palette::new(false);
+        palette.toggle();
+        let look = Look {
+            choice: dtr_widgets::Choice::new(dtr_widgets::Preset::Adwaita),
+            ..Look::default()
+        };
+        let mut harness = Harness::new_ui(|ui| {
+            palette.ui(ui, &look);
+        });
+        harness.run();
+        harness.snapshot("palette_adwaita");
     }
 }

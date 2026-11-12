@@ -463,6 +463,28 @@ highlight was drawn first — and **a solid quad that samples the atlas can vani
 because solids carry a negative uv, take their colour from the instance, and the shader
 branches.
 
+**A frame painted before its body cannot be sized by it, so the palette swaps two shapes
+after the fact.** The card's height used to be a constant 300 points, which fitted the
+terminal's own skin and nothing else: `native` on Linux is Adwaita, whose rows are 34 points
+against dtr's 23, so ten completions plus the field, the gaps and the key hints were taller
+than the card and — with nothing clipping them — were painted *below* it, on the window
+behind. Ten rows of 34 with egui's item spacing is ~430 points. The fix is
+`Painter::add(Shape::Noop)` twice before the body and `Painter::set` on the same two indices
+afterwards, with `ui.min_rect()` of the body as the bottom: the card is behind the text and
+sized by it, in one frame, with no measurement round trip. **How many rows fit is measured,
+not predicted** — `ui.available_height()` after the field, divided by `style.row` plus the
+item spacing — because the field's height belongs to egui and the row's to the skin. The
+floor under the height is the old 300, so a query that filters to three rows does not make
+the card jump under the eye.
+
+**A selected row is `selection` on `on_selection`, not the accent on a pressed control.**
+Those two slots are what a skin fills in to be legible, and a theme's accent is a colour
+chosen to be *seen* rather than read on: on the native skin the palette's cursor was the
+system blue over `control_active`'s grey band, which was neither. On Adwaita that band is now
+`mix(well, accent, 0.25)` with ordinary text — the slot's own rule — and on dtr's own skin a
+solid accent bar with the terminal's background on it, which is the same treatment a chosen
+chip gets.
+
 **A trailing space is a word break, not whitespace to trim**: the palette used to trim it
 before deciding which word was being completed, so `ssh ` looked like the command `ssh` and
 offered commands where hosts belong. `Parsed::of` keeps it, and after a space there is
