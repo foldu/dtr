@@ -24,13 +24,6 @@ use crate::ui::Status;
 
 pub enum UserEvent {
     Frame,
-    /// A watched file changed: `~/.ssh/config` was edited.
-    Files,
-    /// The config file changed on disk: `dtr --config-set`, an editor, a
-    /// `git checkout`. Its own event, because a config is not a destination —
-    /// `Files` starts a scan, and this re-reads the file that describes the
-    /// window.
-    Config,
     /// A background scan finished: the destinations to offer now.
     Destinations(Vec<crate::sources::Destination>),
     /// Something the SFTP worker finished.
@@ -542,30 +535,15 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         },
         ime_caret: None,
         clipboard: None,
-        watcher: crate::watch::Watcher::spawn({
-            let proxy = proxy.clone();
-            move || {
-                let _ = proxy.send_event(UserEvent::Files);
-            }
-        }),
-        config_watch: crate::watch::ConfigWatcher::spawn(&startup.config_path, {
-            let proxy = proxy.clone();
-            move || {
-                let _ = proxy.send_event(UserEvent::Config);
-            }
-        }),
+        config_watch: crate::watch::ConfigWatch::new(&startup.config_path),
         config_settle: crate::watch::Settle::default(),
         config_deferred: false,
+        // Looked at on `ConfigWatch::POLL`, not watched.
+        config_due: std::time::Instant::now(),
         destinations: Vec::new(),
-        // A background runtime for the UI's own slow work, separate from the
-        // panes: those are single-threaded by design, one per session.
-        worker: tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("dtr-scan")
-            .build()
-            .map_err(|err| tracing::warn!(%err, "no worker runtime"))
-            .ok(),
+        // The background runtime is built on first use (`App::bg`), so a
+        // session that never scans or lists starts none.
+        bg_rt: None,
         scanning: false,
         scan_due: std::time::Instant::now(),
         tabs: vec![Tab::new(
@@ -661,13 +639,6 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             }
         }),
         vfs: std::sync::Arc::new(dtr_vfs::Vfs::new()),
-        files_rt: tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("dtr-files")
-            .build()
-            .map_err(|err| tracing::warn!(%err, "no files runtime"))
-            .ok(),
         hover_cell: None,
         hover_link: None,
         thumb: crate::thumb::Cache::default(),
@@ -701,9 +672,10 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     // The desktop's chrome is live: the watcher re-reads it when the platform says
     // it changed — `WM_SETTINGCHANGE` on Windows, `SettingChanged` from the portal
     // on Linux — and asks for a repaint through the same door as every other
-    // background result.
-    if let Some(worker) = app.worker.as_ref() {
-        crate::system::watch(worker.handle(), {
+    // background result. It is the background runtime's first user, so the
+    // runtime exists from the first frame even before anything has scanned.
+    if let Some(bg) = app.bg() {
+        crate::system::watch(&bg, {
             let proxy = app.proxy.clone();
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);
@@ -1104,23 +1076,24 @@ struct App {
     /// then the hosts in `~/.ssh/config`. Typed, so the menu can group them and
     /// the click can open the right kind of session.
     destinations: Vec<crate::sources::Destination>,
-    /// The watcher for destination files. Held so the watch stays alive.
-    #[allow(dead_code)]
-    watcher: Option<crate::watch::Watcher>,
-    /// The config file's own watcher, held for the same reason.
-    #[allow(dead_code)]
-    config_watch: Option<crate::watch::ConfigWatcher>,
+    /// The config file, stat-ed on a deadline rather than watched: a file an
+    /// editor saves is one `stat`'s worth of work, and `notify` was a thread and
+    /// two kernel watches for it (`docs/compio.md` §5).
+    config_watch: crate::watch::ConfigWatch,
     /// The file is written in bursts, so a change only starts a clock.
     config_settle: crate::watch::Settle,
     /// A reload that arrived while the settings sheet was open, waiting for it
     /// to close: the sheet owns the window's look until then, and re-reading
     /// the file under a half-finished draft would take the preview away.
     config_deferred: bool,
-    /// The runtime that does the slow work: enumerating serial ports reads
-    /// udev or SetupAPI, which is milliseconds-to-tens-of-milliseconds — an
-    /// eternity on a thread that is also drawing the frame. The UI thread asks
-    /// for a scan and gets the answer back as an event.
-    worker: Option<tokio::runtime::Runtime>,
+    /// When the config file is looked at next.
+    config_due: std::time::Instant,
+    /// The one runtime that does slow work for the window: enumerating serial
+    /// ports reads udev or SetupAPI, a directory walk and a thumbnail decode are
+    /// not for the drawing thread, and a closing tab's teardown waits on a
+    /// child. Built on first use by `App::bg`; one runtime rather than three so
+    /// the idle count is one thread, not four (`docs/compio.md` §4).
+    bg_rt: Option<tokio::runtime::Runtime>,
     /// A scan is in flight; asking again would only queue duplicate work.
     scanning: bool,
     /// When the next poll is due. Serial devices have no portable notification,
@@ -1197,10 +1170,6 @@ struct App {
     click_script: Option<((f64, f64), bool)>,
     /// The machines this app can read files from.
     vfs: std::sync::Arc<dtr_vfs::Vfs>,
-    /// The runtime files work runs on, separate from `worker`: the user asked
-    /// for scans to move elsewhere, and a directory walk must not queue behind
-    /// a serial-port enumeration.
-    files_rt: Option<tokio::runtime::Runtime>,
     /// The cell the pointer is over, and the link it holds if the pane said so.
     /// Kept together so a reply for an older cell can be dropped.
     hover_cell: Option<(u16, u16)>,
@@ -1894,13 +1863,11 @@ impl App {
         let described = location.describe();
         tracing::info!(target = %described, "opening a link");
 
-        let (Some(runtime), vfs, proxy) = (
-            self.files_rt.as_ref(),
-            std::sync::Arc::clone(&self.vfs),
-            self.proxy.clone(),
-        ) else {
+        let Some(bg) = self.bg() else {
             return;
         };
+        let vfs = std::sync::Arc::clone(&self.vfs);
+        let proxy = self.proxy.clone();
         // A remote file cannot be handed to a viewer as a path, so it is
         // fetched first; a local one is its own path and is never copied.
         let remote = !matches!(location.backend, dtr_vfs::BackendId::Local);
@@ -1910,7 +1877,7 @@ impl App {
             dtr_vfs::BackendId::Ssh(alias) => Some(alias.clone()),
             dtr_vfs::BackendId::Local => None,
         };
-        runtime.spawn(async move {
+        bg.spawn(async move {
             let outcome = async {
                 let meta = vfs.stat(&location).await?;
                 if meta.kind.is_dir() {
@@ -2061,14 +2028,14 @@ impl App {
             tracing::debug!("a save dialog is already up");
             return;
         }
-        let Some(runtime) = self.files_rt.as_ref() else {
+        let Some(bg) = self.bg() else {
             return;
         };
         let default = save_target(&location.path);
         let parent = self.proxy.clone();
         let window = self.gpu.as_ref().map(|gpu| Arc::clone(gpu.window()));
         self.picking_save = true;
-        runtime.spawn_blocking(move || {
+        bg.spawn_blocking(move || {
             let chosen = pick_save_path(window, &default);
             tracing::debug!(?chosen, "save dialog answered");
             let _ = parent.send_event(UserEvent::SavePath {
@@ -2089,17 +2056,15 @@ impl App {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| dest.display().to_string());
-        let (Some(runtime), vfs, proxy) = (
-            self.files_rt.as_ref(),
-            std::sync::Arc::clone(&self.vfs),
-            self.proxy.clone(),
-        ) else {
+        let Some(bg) = self.bg() else {
             return;
         };
+        let vfs = std::sync::Arc::clone(&self.vfs);
+        let proxy = self.proxy.clone();
         // Said before rather than after: a file over a slow link is a silence,
         // and a silence nobody explained reads as a button that did nothing.
         self.toast = Some((format!("saving {name}..."), std::time::Instant::now()));
-        runtime.spawn(async move {
+        bg.spawn(async move {
             let outcome = copy_to(&vfs, &location, &dest).await;
             let note = match outcome {
                 Ok(bytes) => format!(
@@ -2228,13 +2193,11 @@ impl App {
     /// Fetch (if remote) and decode, off this thread, then answer with the key so
     /// a reply for a link the pointer has left cannot replace a newer picture.
     fn load_thumbnail(&mut self, key: crate::thumb::Key, location: dtr_vfs::Location) {
-        let (Some(runtime), vfs, proxy) = (
-            self.files_rt.as_ref(),
-            std::sync::Arc::clone(&self.vfs),
-            self.proxy.clone(),
-        ) else {
+        let Some(bg) = self.bg() else {
             return;
         };
+        let vfs = std::sync::Arc::clone(&self.vfs);
+        let proxy = self.proxy.clone();
         // Claimed only once there is something to claim it with: a request that
         // died between the claim and the spawn would leave the key in flight for
         // the life of the process.
@@ -2242,7 +2205,7 @@ impl App {
             return;
         }
         let described = location.describe();
-        runtime.spawn(async move {
+        bg.spawn(async move {
             let result = async {
                 // The size limit has to come from a `stat`, before the bytes: a
                 // remote 400 MB scan must never be downloaded to find out it is
@@ -2540,7 +2503,35 @@ impl App {
         Some(((cell % cols) as u16, (cell / cols) as u16))
     }
 
-    /// Ask the worker runtime for a fresh destination list.
+    /// The background runtime's handle, building the runtime the first time
+    /// something asks for one.
+    ///
+    /// One runtime, not one per worker thread pool: scans, file listings,
+    /// thumbnails and a closing tab's teardown all answer on the UI thread with
+    /// an event, and a long call is `spawn_blocking`, which gets a thread of its
+    /// own whatever runtime it is on. The census in `docs/compio.md` §4 counted
+    /// four threads for two such runtimes; this is one, and it is built where it
+    /// is first needed rather than at startup for the sake of it.
+    ///
+    /// A `Handle` is returned rather than a borrow, so a caller can hold it
+    /// while it reads the other fields it needs.
+    fn bg(&mut self) -> Option<tokio::runtime::Handle> {
+        if self.bg_rt.is_none() {
+            self.bg_rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                // Each slow call gets a thread of its own from the blocking
+                // pool; the ceiling guards against a runaway, not a queue.
+                .max_blocking_threads(16)
+                .enable_all()
+                .thread_name("dtr-bg")
+                .build()
+                .map_err(|err| tracing::warn!(%err, "no background runtime"))
+                .ok();
+        }
+        self.bg_rt.as_ref().map(|runtime| runtime.handle().clone())
+    }
+
+    /// Ask the background runtime for a fresh destination list.
     ///
     /// Port enumeration touches udev or SetupAPI and the ssh config is a file
     /// read; both are small but neither belongs on the thread that draws the
@@ -2551,12 +2542,12 @@ impl App {
         if self.scanning {
             return;
         }
-        let Some(worker) = self.worker.as_ref() else {
+        let Some(bg) = self.bg() else {
             return;
         };
         self.scanning = true;
         let proxy = self.proxy.clone();
-        worker.spawn_blocking(move || {
+        bg.spawn_blocking(move || {
             let mut destinations = crate::sources::serial_destinations();
             destinations.extend(crate::sources::ssh_destinations());
             let _ = proxy.send_event(UserEvent::Destinations(destinations));
@@ -3222,13 +3213,13 @@ impl App {
         }
         // Dropping a tab tears down a pty and the thread that owns it, which
         // can take as long as the child takes to notice. That is not allowed to
-        // happen between two frames: the tab goes to the worker runtime and the
-        // UI thread moves on.
+        // happen between two frames: the tab goes to the background runtime and
+        // the UI thread moves on.
         let dead = self.tabs.remove(index);
         let at = std::time::Instant::now();
-        match self.worker.as_ref() {
-            Some(worker) => {
-                worker.spawn_blocking(move || {
+        match self.bg() {
+            Some(bg) => {
+                bg.spawn_blocking(move || {
                     let started = std::time::Instant::now();
                     drop(dead);
                     tracing::debug!(ms = started.elapsed().as_millis(), "tab torn down");
@@ -4284,6 +4275,22 @@ impl ApplicationHandler<UserEvent> for App {
             None => {}
         }
 
+        // The config file is looked at on a deadline rather than watched: one
+        // `stat` every 250 ms is the whole mechanism (`docs/compio.md` §5), and
+        // the comparison is against the previous look, so a save that lands
+        // between two of them is seen by the next one. A change only starts the
+        // settle clock below — an editor writes in bursts, and the file has to be
+        // quiet before it is read.
+        let now = std::time::Instant::now();
+        if self.config_due <= now {
+            self.config_due = now + crate::watch::ConfigWatch::POLL;
+            if self.config_watch.changed() {
+                self.config_settle.note(now);
+                self.repaint("config file changed");
+            }
+        }
+        sooner(self.config_due, &mut deadline);
+
         // The config file, once it has been quiet for a moment. A change that
         // arrives while the settings sheet is open waits for it: the sheet owns
         // the window's look, and re-reading the file under a half-finished draft
@@ -4317,17 +4324,6 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Files => {
-                // A file changed: scan now rather than at the next poll.
-                self.scan_due = std::time::Instant::now();
-                self.repaint("watched file changed");
-            }
-            UserEvent::Config => {
-                // The file is written in bursts, so this only starts a clock;
-                // `about_to_wait` reads it once the file has been quiet.
-                self.config_settle.note(std::time::Instant::now());
-                self.repaint("config file changed");
-            }
             UserEvent::Sftp(event) => {
                 self.sftp_event(event);
                 self.repaint("sftp");

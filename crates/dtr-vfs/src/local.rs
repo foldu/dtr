@@ -46,7 +46,8 @@ impl Backend for Local {
     }
 
     fn caps(&self) -> Caps {
-        // notify can watch it; a directory has no length of its own.
+        // A local filesystem can be watched; a directory has no length of its
+        // own.
         Caps {
             watch: true,
             dir_size: false,
