@@ -229,6 +229,148 @@ fn read_dword(key: &str, name: &str) -> Option<u32> {
     (status == 0).then_some(data)
 }
 
+/// The picture Windows has for a program, as RGBA.
+///
+/// An executable carries its own icons in its resources and the shell already
+/// knows how to read them: `SHGetFileInfo` answers with an `HICON`, and the rest
+/// is the conversion a texture needs — `GetIconInfo` to reach the colour bitmap,
+/// `GetDIBits` to read it top-down at 32 bits, and a channel swap because GDI's
+/// little-endian `0xAARRGGBB` is BGRA in memory.
+///
+/// The *large* icon is asked for rather than the small one: a menu draws it in a
+/// 16-point box, so at 1× a 32-pixel source is downsampled and at 2× it is
+/// exact, where a 16-pixel source would be stretched soft on a HiDPI screen.
+///
+/// The mask is deleted either way, and a colour bitmap with no alpha anywhere is
+/// refused rather than drawn: that is an icon whose transparency is in the mask,
+/// where the colour under it is undefined, and drawing it as if it were solid
+/// puts a black square in the row.
+#[cfg(windows)]
+pub(super) fn app_icon(path: &str) -> Option<super::Icon> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW};
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut info: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    let found = unsafe {
+        SHGetFileInfoW(
+            wide.as_ptr(),
+            0,
+            &mut info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if found == 0 || info.hIcon.is_null() {
+        return None;
+    }
+    let icon = unsafe { icon_rgba(info.hIcon) };
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(info.hIcon) };
+    icon
+}
+
+/// The pixels behind an `HICON`, and the bitmaps it borrowed.
+#[cfg(windows)]
+unsafe fn icon_rgba(
+    icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+) -> Option<super::Icon> {
+    use windows_sys::Win32::Graphics::Gdi::DeleteObject;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+
+    let mut info: ICONINFO = unsafe { std::mem::zeroed() };
+    if unsafe { GetIconInfo(icon, &mut info) } == 0 {
+        return None;
+    }
+    let pixels = if info.hbmColor.is_null() {
+        None
+    } else {
+        unsafe { bitmap_rgba(info.hbmColor) }
+    };
+    if !info.hbmMask.is_null() {
+        unsafe { DeleteObject(info.hbmMask as _) };
+    }
+    if !info.hbmColor.is_null() {
+        unsafe { DeleteObject(info.hbmColor as _) };
+    }
+    pixels
+}
+
+/// A colour bitmap's pixels, RGBA and the top row first.
+#[cfg(windows)]
+unsafe fn bitmap_rgba(bitmap: windows_sys::Win32::Graphics::Gdi::HBITMAP) -> Option<super::Icon> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, ReleaseDC,
+    };
+
+    let screen = unsafe { GetDC(std::ptr::null_mut()) };
+    if screen.is_null() {
+        return None;
+    }
+    let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+    info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    // No buffer and no lines asks only for the dimensions.
+    unsafe {
+        GetDIBits(
+            screen,
+            bitmap,
+            0,
+            0,
+            std::ptr::null_mut(),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    let width = info.bmiHeader.biWidth.unsigned_abs() as usize;
+    let height = info.bmiHeader.biHeight.unsigned_abs() as usize;
+    if width == 0 || height == 0 || width > 1024 || height > 1024 {
+        unsafe { ReleaseDC(std::ptr::null_mut(), screen) };
+        return None;
+    }
+    // A negative height is top-down, the order a texture wants; 32 bits is the
+    // only depth that carries an icon's alpha.
+    info.bmiHeader.biHeight = -(height as i32);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    let mut pixels = vec![0u8; width * height * 4];
+    let lines = unsafe {
+        GetDIBits(
+            screen,
+            bitmap,
+            0,
+            height as u32,
+            pixels.as_mut_ptr().cast(),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe { ReleaseDC(std::ptr::null_mut(), screen) };
+    if lines == 0 {
+        return None;
+    }
+    to_rgba(&mut pixels);
+    if !pixels.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+        return None;
+    }
+    Some(super::Icon {
+        width,
+        height,
+        rgba: pixels,
+    })
+}
+
+/// GDI's bytes are little-endian `0xAARRGGBB`, which is BGRA in memory; a texture
+/// takes RGBA. Pure, so a Linux test holds it to a target that has no GDI.
+fn to_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +411,17 @@ mod tests {
         assert_eq!(ladder.base, accent_from_dwm(0xFFD4_7800));
         // A length that is not 32 means the format changed; guessing is worse.
         assert!(ladder_from_registry(&blob[..31]).is_none());
+    }
+
+    /// GDI hands back little-endian `0xAARRGGBB` — BGRA in memory — and a texture
+    /// takes RGBA. Swapping the wrong pair turns PowerShell's blue amber, and
+    /// nothing else complains; the DWM accent above had the same shape of bug one
+    /// layer up.
+    #[test]
+    fn an_icon_bitmap_is_reordered_from_bgra() {
+        // B=0x11, G=0x22, R=0x33, A=0x44, then a second pixel.
+        let mut pixels = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        to_rgba(&mut pixels);
+        assert_eq!(pixels, [0x33, 0x22, 0x11, 0x44, 0x77, 0x66, 0x55, 0x88]);
     }
 }

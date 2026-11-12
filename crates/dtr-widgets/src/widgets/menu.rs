@@ -11,6 +11,12 @@
 //! [`menu_tip`] is the other half of a popover: the triangle pointing back at the
 //! control that opened it, and [`point_at`] is where the body goes so the tip can
 //! point at its middle.
+//!
+//! A row may also carry a mark before its label — the system's own picture of the
+//! program it leads to. [`menu_row_icon`] takes the pixels as a texture, because
+//! they come from the platform at run time rather than from an asset in the
+//! binary, and [`menu_width`] is told which rows have one so the extra column is
+//! measured rather than discovered after the body has been drawn too narrow.
 
 use egui::{Sense, Ui};
 
@@ -20,7 +26,24 @@ use super::check::tick;
 
 /// Draw one menu row and report whether the pointer chose it.
 pub fn menu_row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool) -> bool {
-    row(ui, skin, label, selected, None)
+    row(ui, skin, label, selected, None, None)
+}
+
+/// The same row with the system's picture of what it leads to, before the label.
+///
+/// The mark is a [`egui::TextureId`] rather than an [`egui::ImageSource`]: its
+/// pixels are the platform's, read at run time, so nothing is embedded in the
+/// binary and this crate has no business loading an asset. A program the platform
+/// has no picture for is a plain [`menu_row`] instead — there is no empty box, and
+/// the label starts where it always did.
+pub fn menu_row_icon(
+    ui: &mut Ui,
+    skin: &Skin,
+    icon: egui::TextureId,
+    label: &str,
+    selected: bool,
+) -> bool {
+    row(ui, skin, label, selected, None, Some(icon))
 }
 
 /// The same row with the chord that does it without the menu, at its right.
@@ -30,10 +53,26 @@ pub fn menu_row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool) -> bool {
 /// than a second accent: it is the same sentence as the label, said more
 /// quietly.
 pub fn menu_row_chord(ui: &mut Ui, skin: &Skin, label: &str, chord: &str) -> bool {
-    row(ui, skin, label, false, Some(chord))
+    row(ui, skin, label, false, Some(chord), None)
 }
 
-fn row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool, chord: Option<&str>) -> bool {
+/// The side of a row's mark, in points.
+///
+/// The size of a menu icon on both desktops, and the largest that fits a dtr row
+/// (23 points) with air above and below it. The texture is drawn down into this
+/// box rather than the box grown to fit it: the shell answers with a 32-pixel
+/// icon, which is exactly this at 2×, so a HiDPI window draws it at full
+/// resolution.
+const MARK: f32 = 16.0;
+
+fn row(
+    ui: &mut Ui,
+    skin: &Skin,
+    label: &str,
+    selected: bool,
+    chord: Option<&str>,
+    icon: Option<egui::TextureId>,
+) -> bool {
     let palette = skin.palette;
     let style = &skin.style;
     let galley =
@@ -44,10 +83,15 @@ fn row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool, chord: Option<&str
             .layout_no_wrap(chord.to_owned(), style.label_font.clone(), palette.dim)
     });
     // What the row needs before the menu gives it a width: the label, the chord,
-    // and the mark a chosen value carries.
+    // the mark a chosen value carries, and the picture a row may lead with.
     let tick_side = (style.row * 0.5).min(14.0);
     let mark = if selected { tick_side + style.gap } else { 0.0 };
-    let mut needed = galley.size().x + style.padding.x * 2.0 + mark;
+    let leading = if icon.is_some() {
+        MARK + style.gap
+    } else {
+        0.0
+    };
+    let mut needed = galley.size().x + style.padding.x * 2.0 + mark + leading;
     if let Some(chord) = &chord {
         needed += chord.size().x + style.gap * 2.0;
     }
@@ -60,13 +104,29 @@ fn row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool, chord: Option<&str
     if response.hovered() {
         painter.rect_filled(rect, style.control_radius, palette.control_hover);
     }
+    if let Some(icon) = icon {
+        // Untinted: the system's icon is a picture in its own colours, and a tint
+        // would turn PowerShell's blue into a shade of the text. The quad is the
+        // row's, not the texture's, so a 32-pixel answer from the shell is drawn
+        // at 16 points.
+        let picture = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + style.padding.x + MARK / 2.0, rect.center().y),
+            egui::vec2(MARK, MARK),
+        );
+        painter.image(
+            icon,
+            picture,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
     // The label starts at the row's own padding. It used to start a column
     // further in, a tick gutter reserved on every row of every menu for a mark
     // that the app menu and the new-tab menu never draw — which is what made a
     // short menu read as a column of indented words.
     painter.galley(
         egui::pos2(
-            rect.left() + style.padding.x,
+            rect.left() + style.padding.x + leading,
             rect.center().y - galley.size().y / 2.0,
         ),
         galley,
@@ -105,6 +165,14 @@ fn row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool, chord: Option<&str
     super::pointer_only(response).clicked()
 }
 
+/// One row as the width measure sees it: its label, and whether it leads with a
+/// mark.
+#[derive(Clone, Copy, Debug)]
+pub struct RowSpec<'a> {
+    pub label: &'a str,
+    pub icon: bool,
+}
+
 /// The width a popover needs for its rows, insets and a scroll bar included.
 ///
 /// A row fills the width it is offered — that is what makes the hover fill span
@@ -118,19 +186,29 @@ fn row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool, chord: Option<&str
 /// rows, and it appears only when the list is taller than the room there is; a
 /// body that grows a bar and clips its longest row because nobody reserved the
 /// space is worse than one with a few points to spare.
-pub fn menu_width(ui: &Ui, skin: &Skin, labels: &[&str]) -> f32 {
+///
+/// A row that leads with a mark is measured with it, because the mark is part of
+/// the row: the column is only as wide as the rows that use it, so a menu of
+/// three shells and a long serial port still hugs the port.
+pub fn menu_width(ui: &Ui, skin: &Skin, rows: &[RowSpec<'_>]) -> f32 {
     let style = &skin.style;
-    let widest = labels
+    let widest = rows
         .iter()
-        .map(|label| {
-            ui.painter()
+        .map(|row| {
+            let label = ui
+                .painter()
                 .layout_no_wrap(
-                    (*label).to_owned(),
+                    row.label.to_owned(),
                     style.value_font.clone(),
                     skin.palette.text,
                 )
                 .size()
-                .x
+                .x;
+            if row.icon {
+                label + MARK + style.gap
+            } else {
+                label
+            }
         })
         .fold(0.0_f32, f32::max);
     let scroll = &ui.spacing().scroll;

@@ -11,8 +11,8 @@
 //! would only be checked when somebody remembered to.
 
 use dtr_widgets::{
-    ADWAITA_ACCENT, Button, Card, Edit, Editable, Footer, Palette, Skin, check, row, section,
-    segmented,
+    ADWAITA_ACCENT, Button, Card, Edit, Editable, Footer, Palette, RowSpec, Skin, check, menu_row,
+    menu_row_icon, menu_width, row, section, segmented,
 };
 use egui::{RichText, Stroke, vec2};
 use std::cell::RefCell;
@@ -262,6 +262,101 @@ fn a_card_carries_its_header_and_its_body() {
         });
     harness.run();
     harness.snapshot("card");
+}
+
+/// The row a shell gets when the machine has a picture for it, in the shape the
+/// new-tab menu has: shells with their marks, a rule, then a port without one.
+/// The texture is made here rather than read out of the system, so every machine
+/// that runs the snapshot draws the same picture — what is pinned is the row's
+/// geometry: a 16-point mark, the skin's gap, and a label where an unmarked row
+/// starts.
+#[test]
+fn a_menu_row_can_lead_with_a_mark() {
+    let skin = dtr_skin();
+    let handle: Rc<RefCell<Option<egui::TextureHandle>>> = Rc::new(RefCell::new(None));
+    let slot = handle.clone();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(vec2(320.0, 160.0))
+        .build_ui(move |ui| {
+            skin.apply(ui.ctx());
+            let mut slot = slot.borrow_mut();
+            let mark = slot.get_or_insert_with(|| {
+                ui.ctx().load_texture(
+                    "gallery-mark",
+                    egui::ColorImage::filled([16, 16], egui::Color32::from_rgb(0x35, 0x84, 0xe4)),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            let _ = menu_row_icon(ui, &skin, mark.id(), "shell bash", false);
+            let _ = menu_row_icon(ui, &skin, mark.id(), "shell sh", false);
+            dtr_widgets::menu_separator(ui, &skin);
+            let _ = menu_row(ui, &skin, "serial /dev/ttyUSB0", false);
+        });
+    harness.run();
+    harness.snapshot("menu_row_icon");
+}
+
+/// A shell's mark belongs to its row, and to that row's width: a menu of marked
+/// shells and one long serial port is as wide as the port, not as the port plus
+/// a column no row uses. This is the same arithmetic that made the new-tab menu
+/// 600 points wide before [`menu_width`] existed, one mark further along.
+#[test]
+fn a_mark_is_measured_with_the_row_that_carries_it() {
+    let skin = dtr_skin();
+    let widths: Rc<RefCell<Option<(f32, f32, f32, f32)>>> = Rc::new(RefCell::new(None));
+    let out = widths.clone();
+    let measured = skin.clone();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(vec2(400.0, 200.0))
+        .build_ui(move |ui| {
+            let plain = menu_width(
+                ui,
+                &measured,
+                &[RowSpec {
+                    label: "shell bash",
+                    icon: false,
+                }],
+            );
+            let marked = menu_width(
+                ui,
+                &measured,
+                &[RowSpec {
+                    label: "shell bash",
+                    icon: true,
+                }],
+            );
+            let port = "serial /dev/ttyUSB0  Dual RS232-HS - FTDI - 0403:6010";
+            let mixed = menu_width(
+                ui,
+                &measured,
+                &[
+                    RowSpec {
+                        label: "shell bash",
+                        icon: true,
+                    },
+                    RowSpec {
+                        label: port,
+                        icon: false,
+                    },
+                ],
+            );
+            let only_port = menu_width(
+                ui,
+                &measured,
+                &[RowSpec {
+                    label: port,
+                    icon: false,
+                }],
+            );
+            *out.borrow_mut() = Some((plain, marked, mixed, only_port));
+        });
+    harness.run();
+    let (plain, marked, mixed, only_port) = widths.borrow().expect("the harness measured");
+    assert!(marked > plain, "a mark takes room: {marked} vs {plain}");
+    assert_eq!(
+        mixed, only_port,
+        "a long unmarked row is what decides the menu"
+    );
 }
 
 fn harness(skin: Skin) -> egui_kittest::Harness<'static> {

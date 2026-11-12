@@ -517,6 +517,38 @@ pub fn app_menu(
     chosen
 }
 
+/// The system's picture of a shell, uploaded once per egui context.
+///
+/// The pixels are cached by the platform, because a shell call is not a frame's
+/// work; the texture is cached here, because a texture belongs to a context and
+/// the window, a capture and a test harness each have their own. `None` — Linux,
+/// or a program the machine has no icon for — means the plain row, never an empty
+/// box where a mark would have been.
+fn shell_icon(ui: &Ui, destination: &crate::sources::Destination) -> Option<egui::TextureId> {
+    let crate::sources::Destination::Shell { program, .. } = destination else {
+        return None;
+    };
+    // Globally unique rather than salted: the store is the whole context's, and
+    // every row must find exactly the texture its own program uploaded.
+    let key = egui::Id::unique(("dtr-shell-icon", program.as_str()));
+    if let Some(texture) = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(key))
+    {
+        return Some(texture.id());
+    }
+    let icon = crate::system::app_icon(program)?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([icon.width, icon.height], &icon.rgba);
+    let texture = ui.ctx().load_texture(
+        format!("dtr-shell-icon:{program}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    let id = texture.id();
+    ui.ctx().data_mut(|data| data.insert_temp(key, texture));
+    Some(id)
+}
+
 /// What the strip drew, and how much of the row it took.
 ///
 /// The rectangle is not decoration. With a client-side frame the rest of the
@@ -722,14 +754,28 @@ pub fn tab_bar(
         // the width it is offered, so a body left to decide for itself takes
         // everything from the `+` to the window's edge. Every row the menu can
         // draw is in the list, the fallback and the note included, and the
-        // widest of them is the width.
-        let mut rows: Vec<String> = destinations
+        // widest of them is the width — a shell's mark counted with its row, so
+        // the column is only as wide as the rows that have one.
+        let labels: Vec<String> = destinations
             .iter()
             .map(crate::sources::Destination::label)
             .collect();
-        rows.push("local shell".to_owned());
-        rows.push("no serial ports and no ssh hosts".to_owned());
-        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let mut rows: Vec<dtr_widgets::RowSpec> = labels
+            .iter()
+            .zip(destinations)
+            .map(|(label, destination)| dtr_widgets::RowSpec {
+                label: label.as_str(),
+                icon: shell_icon(ui, destination).is_some(),
+            })
+            .collect();
+        rows.push(dtr_widgets::RowSpec {
+            label: "local shell",
+            icon: false,
+        });
+        rows.push(dtr_widgets::RowSpec {
+            label: "no serial ports and no ssh hosts",
+            icon: false,
+        });
         let width = dtr_widgets::menu_width(ui, &skin, &rows).max(220.0);
 
         let mut popup = egui::Popup::menu(&response).width(width);
@@ -779,7 +825,19 @@ pub fn tab_bar(
                         }
                     }
                     for destination in shells {
-                        if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
+                        // The mark is the machine's own picture of the program —
+                        // Windows reads it out of the executable — so two
+                        // machines with the same bash can show different
+                        // pictures, and a shell nobody has drawn a logo for is
+                        // simply a row without one.
+                        let label = destination.label();
+                        let picked = match shell_icon(ui, destination) {
+                            Some(icon) => {
+                                dtr_widgets::menu_row_icon(ui, &skin, icon, &label, false)
+                            }
+                            None => dtr_widgets::menu_row(ui, &skin, &label, false),
+                        };
+                        if picked {
                             clicked = Some(TabHit::New(Some(destination.clone())));
                             ui.close();
                         }

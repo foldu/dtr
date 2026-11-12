@@ -231,7 +231,10 @@ what makes them testable and what lets a caller `--send` into them.
   column rested on every row of every menu for a mark that mostly never came,
   and pushed the labels in. `menu_row_chord` is the same row with the chord
   that does it from the keyboard, right-aligned and dim — libadwaita's
-  `popover.menu accelerator`. `menu_separator` is the rule between groups, as
+  `popover.menu accelerator`. `menu_row_icon` is the row that leads with a
+  program's picture, and `menu_width` takes a `RowSpec` per row rather than a
+  list of labels, so the column it reserves is only as wide as the rows that use
+  it. `menu_separator` is the rule between groups, as
   wide as a row: `ui.separator()` takes the popup's width, not the content's,
   and drew across the menu's rounded corners.
 - `cross`, `cross_at`, `plus` — the icon buttons, drawn from two strokes and
@@ -628,6 +631,21 @@ rewrites it to `#ffffff` and each file becomes a white mask the tint colours.
 `install_image_loaders` is idempotent and `tab_bar` calls it rather than trusting startup,
 because a kittest harness makes its own `Context` and would otherwise draw egui's
 missing-image glyph, a `⚠` egui's own fonts cannot render.
+
+**A shell's mark is the system's, not an asset.** The rows that name a program draw what the
+machine has for it: `system::app_icon` asks Windows for the executable's own icon
+(`SHGetFileInfo`'s large icon, converted to RGBA — the same picture Explorer and the taskbar
+show) and answers `None` on Linux, where a shell has neither an icon-theme entry nor a desktop
+file, so every program there is `application-x-executable` and a row would repeat one glyph five
+times. Nothing is embedded, which is the point: there is no brand asset to licence, redraw or let
+go stale, and a machine that installs a shell gets its picture with no change to the binary. Two
+consequences worth knowing. The mark is a **texture**, not an `ImageSource`, so `menu_row_icon`
+takes what the caller uploaded (`ui::shell_icon` caches one per context; a texture belongs to a
+context, the pixels to the platform) and the row is drawn from 32-pixel pixels into a 16-point
+box, which is exact at 2×. And the icon is **the system's answer, including its absence**: an
+executable Windows has no icon of its own for — an App Execution Alias is one, and the guest's
+`pwsh` is one — draws Windows' generic application icon, and a program with nothing at all gets
+the plain row rather than an empty box.
 
 ## Driving the UI from a script
 

@@ -11,8 +11,14 @@
 //! where the platform code lives; the crate only knows how to build a palette
 //! from the facts.
 //!
-//! It is *live*: a desktop changes its scheme at sunset and its accent when the
-//! user picks one, and a terminal that keeps the chrome it started with is a
+//! The same module answers one more question about the system, because it is the
+//! same kind of question — what does this machine already know that dtr would
+//! otherwise draw itself. Windows keeps an executable's icons inside the
+//! executable and the shell can read them back, so [`app_icon`] is the picture
+//! Explorer would show; Linux keeps no per-shell icon at all and says so.
+//!
+//! The reading is live: a desktop changes its scheme at sunset and its accent when
+//! the user picks one, and a terminal that keeps the chrome it started with is a
 //! window that stopped matching everything beside it. So the answer sits in one
 //! cell that a frame reads, and a watcher rewrites that cell when the platform
 //! says it changed — `WM_SETTINGCHANGE` on Windows, `SettingChanged` on the
@@ -23,7 +29,11 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-use std::sync::{OnceLock, RwLock};
+#[cfg(windows)]
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::sync::Mutex;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use dtr_widgets::{AccentLadder, Origin, Skin};
 use egui::Color32;
@@ -337,6 +347,49 @@ pub fn accent_hex(skin: &Skin) -> String {
 /// A colour as `#RRGGBB`, for a log line.
 pub fn hex(colour: Color32) -> String {
     format!("#{:02X}{:02X}{:02X}", colour.r(), colour.g(), colour.b())
+}
+
+/// A picture the system has for a program: RGBA, the top row first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Icon {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
+/// The picture the machine draws for the program at `path`, or `None` where it
+/// has none to give.
+///
+/// Windows keeps an executable's icons in the executable and the shell knows how
+/// to read them, so this is the same picture Explorer shows — not a brand asset
+/// drawn into the binary, which would be a licence, a redraw and a stale
+/// duplicate of what the machine already has. Linux has nothing to read: a shell
+/// is not in the icon theme and has no desktop entry, so every program there
+/// answers `None` and a menu row starts its label where a marked one ends its
+/// mark.
+///
+/// Cached for the run, because a menu is rebuilt every frame and the answer costs
+/// a shell call. An icon is not a behaviour: a program reinstalled while dtr runs
+/// keeps the picture it had until the next start.
+pub fn app_icon(path: &str) -> Option<Arc<Icon>> {
+    #[cfg(windows)]
+    {
+        static ICONS: OnceLock<Mutex<HashMap<String, Option<Arc<Icon>>>>> = OnceLock::new();
+        let icons = ICONS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut icons = icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        icons
+            .entry(path.to_owned())
+            .or_insert_with(|| windows::app_icon(path).map(Arc::new))
+            .clone()
+    }
+    #[cfg(not(windows))]
+    {
+        // Named so a platform with no answer does not warn about the question.
+        let _ = path;
+        None
+    }
 }
 
 #[cfg(test)]
