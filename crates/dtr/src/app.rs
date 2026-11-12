@@ -1539,7 +1539,7 @@ impl App {
                 self.repaint("settings closed");
                 return;
             }
-            match self.settings.handle(&stroke.key) {
+            match self.settings.handle(&stroke.key, stroke.mods) {
                 Some(crate::settings::Effect::Apply) => self.apply_settings(),
                 Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
                 Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),

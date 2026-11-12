@@ -405,7 +405,17 @@ impl Settings {
         self.open = false;
     }
 
-    pub fn handle(&mut self, key: &winit::keyboard::Key) -> Option<Effect> {
+    /// What a key did to the sheet.
+    ///
+    /// `mods` is here for one chord: **ctrl+tab moves between the panels**, and
+    /// shift reverses it. The tabs are pointer targets like every other control in
+    /// this sheet, and a keyboard with no way to reach the second panel is a
+    /// keyboard that cannot change the window's look at all.
+    pub fn handle(
+        &mut self,
+        key: &winit::keyboard::Key,
+        mods: winit::keyboard::ModifiersState,
+    ) -> Option<Effect> {
         use winit::keyboard::Key;
         match key {
             Key::Named(winit::keyboard::NamedKey::Escape) => {
@@ -413,6 +423,18 @@ impl Settings {
                 return Some(Effect::Cancel);
             }
             Key::Named(winit::keyboard::NamedKey::Enter) => return Some(Effect::Apply),
+            // Ctrl+tab is the panel's, and plain tab stays the rows'.
+            Key::Named(winit::keyboard::NamedKey::Tab) if mods.control_key() => {
+                let count = Panel::ALL.len() as i32;
+                let at = Panel::ALL
+                    .iter()
+                    .position(|panel| *panel == self.panel)
+                    .unwrap_or(0) as i32;
+                let step = if mods.shift_key() { -1 } else { 1 };
+                self.panel = Panel::ALL[(at + step).rem_euclid(count) as usize];
+                self.row = 0;
+                return Some(Effect::Changed);
+            }
             Key::Named(winit::keyboard::NamedKey::ArrowDown)
             | Key::Named(winit::keyboard::NamedKey::Tab) => {
                 let count = self.rows().len();
@@ -620,6 +642,17 @@ impl Settings {
         let skin = look.skin();
         let palette = skin.palette;
         let style = &skin.style;
+        // The scheme the *draft* would draw in, which is what the accent field has
+        // to show: the applied skin may be a different look with a different
+        // scheme, and the field is about what a save would produce. Asking
+        // `Choice::skin` for it keeps the desktop and theme fallbacks in one place.
+        let draft_dark = crate::ui::Look::choice_of(&self.draft)
+            .skin(
+                dtr_widgets::Palette::dtr(look.background, look.foreground, look.accent),
+                crate::system::native_skin(),
+            )
+            .palette
+            .is_dark();
         // Header, the tab row, the longest panel's rows, the hint and the buttons.
         // A fixed height, like the keyboard map: the card must not resize itself
         // when the serial rows come and go or a look hides its scheme, or the
@@ -705,7 +738,7 @@ impl Settings {
                             clicked.set(Some(Change::Select(index)));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(edit) = self.control(ui, *row, &skin) {
+                            if let Some(edit) = self.control(ui, *row, &skin, draft_dark) {
                                 clicked.set(Some(edit));
                             }
                         });
@@ -739,48 +772,76 @@ impl Settings {
     /// Each control names itself for accessibility. A combo box and a checkbox
     /// carry no text of their own here, so without this they are anonymous —
     /// invisible to a screen reader and impossible for the test harness to find.
-    fn control(&self, ui: &mut egui::Ui, row: Row, skin: &dtr_widgets::Skin) -> Option<Change> {
+    fn control(
+        &self,
+        ui: &mut egui::Ui,
+        row: Row,
+        skin: &dtr_widgets::Skin,
+        draft_dark: bool,
+    ) -> Option<Change> {
         let dim = skin.palette.dim;
         // `theme value`, not `theme`: the row's own label carries the bare name,
         // and two identical names make a control impossible to address.
         let name = format!("{} value", row.key());
         match row {
             Row::Widgets => {
-                // Five looks, all of them drawn by this program: the two that read
-                // the machine and the three that carry their own colours. A chip
-                // names its own value, so the group is the row's key rather than
-                // the field name a single control would carry.
-                let options: Vec<(dtr_config::Widgets, String)> = dtr_config::Widgets::ALL
-                    .iter()
-                    .map(|widgets| (*widgets, widgets.to_string()))
-                    .collect();
-                let borrowed: Vec<(dtr_config::Widgets, &str)> = options
-                    .iter()
-                    .map(|(widgets, label)| (*widgets, label.as_str()))
-                    .collect();
-                dtr_widgets::segmented(ui, skin, &row.key(), self.draft.ui.widgets, &borrowed)
-                    .map(Change::Widgets)
+                // A dropdown, like every other fixed list here: the four looks are
+                // a closed set, and a row of chips spent the width the values
+                // themselves need — on Windows' 32-point metrics it was the row
+                // that made the sheet scroll.
+                let current = self.draft.ui.widgets;
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("ui-widgets")
+                    .selected_text(egui::RichText::new(current.to_string()).size(12.0))
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for widgets in dtr_config::Widgets::ALL {
+                            let label = widgets.to_string();
+                            if dtr_widgets::menu_row(ui, skin, &label, widgets == current) {
+                                change = Some(Change::Widgets(widgets));
+                            }
+                        }
+                    });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+                change
             }
-            Row::Scheme => dtr_widgets::segmented(
-                ui,
-                skin,
-                &row.key(),
-                self.draft.ui.scheme,
-                &[
-                    (dtr_config::Scheme::System, "system"),
-                    (dtr_config::Scheme::Light, "light"),
-                    (dtr_config::Scheme::Dark, "dark"),
-                ],
-            )
-            .map(Change::Scheme),
+            Row::Scheme => {
+                let current = self.draft.ui.scheme;
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("ui-scheme")
+                    .selected_text(egui::RichText::new(current.to_string()).size(12.0))
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for scheme in dtr_config::Scheme::ALL {
+                            let label = scheme.to_string();
+                            if dtr_widgets::menu_row(ui, skin, &label, scheme == current) {
+                                change = Some(Change::Scheme(scheme));
+                            }
+                        }
+                    });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+                change
+            }
             Row::Accent => {
                 // A hex number, which is what the config file holds; the arrow
                 // offers the accent every look ships with, so the way back to a
-                // default does not need a code remembered.
+                // default does not need a code remembered. The field shows the
+                // colour a save would use, so "unset" is a colour and not a blank.
                 let valid = self.accent_text.trim().is_empty()
                     || dtr_config::parse_hex(&self.accent_text).is_some();
+                let shown = if self.accent_text.is_empty() {
+                    self.effective_accent(draft_dark)
+                        .map(dtr_config::hex)
+                        .unwrap_or_default()
+                } else {
+                    self.accent_text.clone()
+                };
                 let choices = accent_choices();
-                let edit = dtr_widgets::Editable::new("ui-accent", &self.accent_text, &name)
+                let edit = dtr_widgets::Editable::new("ui-accent", &shown, &name)
                     .choices_label("accent choices")
                     .width(140.0)
                     .valid(valid)
@@ -926,6 +987,26 @@ impl Settings {
 }
 
 impl Settings {
+    /// The accent this sheet would draw with right now: the draft's if it has
+    /// one, else the chosen look's own.
+    ///
+    /// Asked so the field can *show* the answer. An empty box beside `ui.accent`
+    /// reads as a missing value rather than as "the look's own", and the difference
+    /// between Windows' `#005FB8` and egui's `#009BFF` is exactly what a person
+    /// opening that row wants to see before deciding to change it. `dark` is the
+    /// scheme the draft resolves to — the caller asks `Choice::skin` for it, so the
+    /// desktop and theme fallbacks are the same ones the window uses.
+    fn effective_accent(&self, dark: bool) -> Option<[u8; 3]> {
+        let choice = crate::ui::Look::choice_of(&self.draft);
+        if let Some(accent) = choice.accent {
+            return Some([accent.r(), accent.g(), accent.b()]);
+        }
+        choice
+            .preset
+            .default_accent(dark)
+            .map(|accent| [accent.r(), accent.g(), accent.b()])
+    }
+
     /// The port record to store, when a serial port is focused and its settings
     /// were edited.
     pub fn serial_write(&self) -> Option<(String, dtr_store::SerialSettings)> {
@@ -963,9 +1044,10 @@ mod tests {
         assert!(settings.draft().font.size > before);
 
         assert_eq!(
-            settings.handle(&winit::keyboard::Key::Named(
-                winit::keyboard::NamedKey::Escape
-            )),
+            settings.handle(
+                &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+                winit::keyboard::ModifiersState::empty()
+            ),
             Some(Effect::Cancel)
         );
         assert_eq!(settings.draft().font.size, before);
@@ -1227,6 +1309,66 @@ mod tests {
         assert_eq!(settings.value(Row::Accent), "the look's own");
     }
 
+    /// The draft a save writes is the skin the window draws: menu, config file
+    /// and skin are one chain, and a test that stopped at the file would not
+    /// notice the chain being cut in the middle — which is what a look that saved
+    /// correctly and never applied would look like.
+    #[test]
+    fn the_draft_a_save_writes_is_the_skin_the_window_draws() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
+        settings.apply(Change::Widgets(dtr_config::Widgets::Adwaita));
+        settings.apply(Change::Scheme(dtr_config::Scheme::Light));
+        settings.apply(Change::Accent("#ED5B00".to_owned()));
+
+        // `apply_settings` writes this draft to the file and hands it to
+        // `Look::choice_of`; both halves are asked here.
+        let choice = crate::ui::Look::choice_of(settings.draft());
+        assert_eq!(choice.preset, dtr_widgets::Preset::Adwaita);
+        assert_eq!(choice.scheme, dtr_widgets::Scheme::Light);
+        assert_eq!(
+            choice.accent,
+            Some(egui::Color32::from_rgb(0xED, 0x5B, 0x00))
+        );
+
+        let skin = choice.skin(
+            dtr_widgets::Palette::dtr([0x0b, 0x0f, 0x0e], [0xdc, 0xdf, 0xdd], [0xff, 0xb0, 0x00]),
+            None,
+        );
+        assert_eq!(skin.origin, dtr_widgets::Origin::Adwaita);
+        assert!(!skin.palette.is_dark(), "the scheme row said light");
+        assert_eq!(
+            skin.palette.accent,
+            egui::Color32::from_rgb(0xED, 0x5B, 0x00)
+        );
+    }
+
+    /// The accent field shows the colour a save would use, so an unset accent is
+    /// not a blank box: Windows' own is `#005FB8` in the light and `#60CDFF` in
+    /// the dark, and which one is only knowable once the scheme has been resolved.
+    #[test]
+    fn the_accent_field_shows_the_colour_a_save_would_use() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
+        // `native` has no accent of its own — the desktop's is not ours to show.
+        assert_eq!(settings.effective_accent(true), None);
+
+        settings.apply(Change::Widgets(dtr_config::Widgets::Adwaita));
+        assert_eq!(settings.effective_accent(true), Some([0x35, 0x84, 0xE4]));
+
+        settings.apply(Change::Widgets(dtr_config::Widgets::Windows));
+        settings.apply(Change::Scheme(dtr_config::Scheme::Light));
+        assert_eq!(settings.effective_accent(false), Some([0x00, 0x5F, 0xB8]));
+        settings.apply(Change::Scheme(dtr_config::Scheme::Dark));
+        assert_eq!(settings.effective_accent(true), Some([0x60, 0xCD, 0xFF]));
+
+        // A chosen accent beats the look's own, which is what the field then shows.
+        settings.apply(Change::Accent("#ED5B00".to_owned()));
+        assert_eq!(settings.effective_accent(true), Some([0xED, 0x5B, 0x00]));
+    }
+
     /// The accent list is the looks' own defaults, because a way back to a default
     /// that has to be remembered is not a way back.
     #[test]
@@ -1273,18 +1415,46 @@ mod kittest_tests {
     /// draft: a menu you cannot back out of is worse than no menu.
     #[test]
     fn escape_cancels_without_writing() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.handle(&winit::keyboard::Key::Named(
-            winit::keyboard::NamedKey::ArrowRight,
-        ));
+        settings.handle(&Key::Named(NamedKey::ArrowRight), ModifiersState::empty());
         assert!(!settings.writes().is_empty(), "the change is in the draft");
         assert_eq!(
-            settings.handle(&winit::keyboard::Key::Named(
-                winit::keyboard::NamedKey::Escape
-            )),
+            settings.handle(&Key::Named(NamedKey::Escape), ModifiersState::empty()),
             Some(Effect::Cancel)
         );
+    }
+
+    /// **Ctrl+tab is the panels'**, and it is the only way a keyboard has to reach
+    /// the appearance panel: plain tab is the rows', so a chord has to be the
+    /// difference. Shift walks back, and both wrap.
+    #[test]
+    fn ctrl_tab_moves_between_the_panels() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(settings.panel(), Panel::General);
+
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(
+            settings.handle(&Key::Named(NamedKey::Tab), ctrl),
+            Some(Effect::Changed)
+        );
+        assert_eq!(settings.panel(), Panel::Appearance);
+        assert_eq!(
+            settings.handle(&Key::Named(NamedKey::Tab), ctrl),
+            Some(Effect::Changed)
+        );
+        assert_eq!(settings.panel(), Panel::General, "the panels wrap");
+
+        let back = ctrl | ModifiersState::SHIFT;
+        settings.handle(&Key::Named(NamedKey::Tab), back);
+        assert_eq!(settings.panel(), Panel::Appearance, "shift walks back");
+
+        // Plain tab still moves the row, and does not touch the panel.
+        settings.handle(&Key::Named(NamedKey::Tab), ModifiersState::empty());
+        assert_eq!(settings.panel(), Panel::Appearance);
     }
 
     /// The theme is a combo box: click it, click a theme, get the edit. This is
@@ -1353,9 +1523,10 @@ mod kittest_tests {
     fn the_menu_renders() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.handle(&winit::keyboard::Key::Named(
-            winit::keyboard::NamedKey::ArrowDown,
-        ));
+        settings.handle(
+            &winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            winit::keyboard::ModifiersState::empty(),
+        );
         let look = crate::ui::Look::default();
         let mut harness = Harness::new_ui(|ui| {
             settings.ui(ui, &look);
@@ -1431,7 +1602,9 @@ mod kittest_tests {
         );
     }
 
-    /// The look is a segmented row of four, and a press on one of them reports it.
+    /// The look is a dropdown of four, and picking one reports it.
+    ///
+    /// The same two presses the theme row takes: one opens the list, one picks.
     #[test]
     fn picking_a_look_reports_it() {
         let mut settings = Settings::new();
@@ -1446,7 +1619,9 @@ mod kittest_tests {
             }
         });
         harness.run();
-        harness.get_by_label("ui.widgets windows").click();
+        harness.get_by_label("ui.widgets value").click();
+        harness.run();
+        harness.get_by_label("windows").click();
         harness.run();
         assert_eq!(
             *asked.borrow(),

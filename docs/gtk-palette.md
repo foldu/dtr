@@ -64,7 +64,7 @@ look that matches neither.
 ## 2. What was wrong
 
 `native` on Linux resolves to the `dtr` skin "by decision: there is no portable
-system palette" (`docs/ui.md` §Two presets). That was a defensible answer when
+system palette" (`docs/ui.md` §Four presets). That was a defensible answer when
 it was written. It is no longer the whole truth:
 
 - the XDG portal now publishes `color-scheme` and `accent-color`, and
@@ -406,7 +406,7 @@ Windows registry read is cached (`crates/dtr/src/system.rs`).
 **Read order, as shipped.** `zbus` first (cross-desktop, resolved values, no GLib,
 typed). Then `settings.ini` and `GTK_THEME` for the theme *name*, which is the
 gate and, when the portal has no preference, the scheme. Then `None`, which
-`Skin::resolve` turns into the dtr skin. **`gsettings` is not used**: it was the
+`Choice::skin` turns into the terminal's own chrome. **`gsettings` is not used**: it was the
 third source for the theme name, and it costs a subprocess for a value the two
 files above already hold on every desktop that sets one (§4.2, §5).
 

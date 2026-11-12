@@ -671,12 +671,18 @@ account behind each of these.
   (the renderer holds a borrow), so a control *reports* its edit as a `Change` and
   `Settings::apply` writes the draft. Every control declares an accessible name of the form
   `<row> value`, not the row name, because the row's label already carries the bare name and
-  two nodes with one name cannot be addressed from a test. **General comes first and the
-  sheet opens on it**, so where the rows are never moves between openings; **a row belongs
-  to exactly one tab** (`Row::panel`), and which rows a tab shows right now is a filter —
-  port rows when a port is focused, the look's scheme and accent only when
-  `owns_its_colours`. The card is as tall as the *longest* tab, or switching tabs would
-  move the buttons under the pointer. **A menu that opens slowly the first time is doing its
+  two nodes with one name cannot be addressed from a test. **A closed list is a dropdown,
+  not a row of chips**: chips spend the width the values themselves need, and on Windows'
+  32-point metrics the look row was the one that made the sheet scroll. **General comes
+  first and the sheet opens on it**, so where the rows are never moves between openings; **a
+  row belongs to exactly one tab** (`Row::panel`), and which rows a tab shows right now is a
+  filter — port rows when a port is focused, the look's scheme and accent only when
+  `owns_its_colours`. **`ctrl+tab` moves between the tabs** (`ctrl+shift+tab` back, plain tab
+  is the rows'): a tab that only a pointer can reach is a window whose look a keyboard cannot
+  change. The card is as tall as the *longest* tab, or switching tabs would
+  move the buttons under the pointer. **A field with an "unset" state shows the value it
+  would use** rather than nothing — an empty accent box reads as a broken control, and the
+  colour a save would keep is the thing being decided. **A menu that opens slowly the first time is doing its
   work in the frame**: `usable_families` is a fontconfig walk that parses a face per family
   — 300 ms on a desktop with 47 families — so it is cached in a `OnceLock`, warmed by the
   `dtr-warm` thread `main` starts before the window, and read by the menu through

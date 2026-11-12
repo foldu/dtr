@@ -364,18 +364,22 @@ move its own buttons under the pointer. Settings is the only tabbed card; the
 
 ## The settings menu
 
-The settings menu is mouse-first: rows are click targets, font size is a drag value, family
-and theme are combo boxes, the look and the scheme are segmented rows, the accent is a hex
-field, and toggles are checkboxes. `Settings::ui` takes `&self` — the
-renderer holds a borrow — so a control *reports* its edit as a `Change` and `Settings::apply`
-writes the draft.
+The settings menu is mouse-first: rows are click targets, font size is a drag value, and
+every closed list — the look, the scheme, the theme, the family — is a combo box whose list
+is `menu_row`s, the accent is a hex field, and toggles are checkboxes. `Settings::ui` takes
+`&self` — the renderer holds a borrow — so a control *reports* its edit as a `Change` and
+`Settings::apply` writes the draft.
+
+A closed list is a dropdown rather than a row of chips because the chips spent the width the
+values need: on Windows' 32-point metrics the look row was the one that made the sheet
+scroll. The look was chips first, `native adwaita windows egui` across a 300-point body,
+and the last of them sat under the card's edge.
 
 Every control declares an accessible name of the form `<row> value`, not the row name,
 because the row's label already carries the bare name and two nodes with one name cannot be
-addressed from a test. (A segmented row is the exception and names each chip `<row> <value>`,
-because each chip names its own value.) Which rows are shown is a filter rather than a
-layout: port rows exist only when a port is focused — baud and CR translation belong to one
-device — and the look's scheme and accent only when the look owns its colours.
+addressed from a test. Which rows are shown is a filter rather than a layout: port rows exist
+only when a port is focused — baud and CR translation belong to one device — and the look's
+scheme and accent only when the look owns its colours.
 
 **Two tabs, and general comes first.** The sheet outgrew one column: it holds the window's
 look (four presets, a scheme, an accent), the grid's colours and font, and a session's
@@ -383,18 +387,24 @@ serial policy. General is the first tab and the sheet opens on it, so where the 
 never moves between openings; `Row::panel` is the one place the split is written, and a row
 that belonged to neither tab is a setting nobody can reach (there is a test for that).
 
-The look row is five chips in the earlier screenshots and four now: `native`, `adwaita`,
-`windows`, `egui`. `dtr` was a fifth, and it was the same thing as `egui` twice — the
-chrome this program draws with egui's own widgets — so the config reads `dtr` as an old
-spelling of `egui` and the menu offers one chip.
+The look's list is four: `native`, `adwaita`, `windows`, `egui`. `dtr` was a fifth, and it
+was the same thing as `egui` twice — the chrome this program draws with egui's own widgets —
+so the config reads `dtr` as an old spelling of `egui` and the menu offers one entry.
+
+**The tabs are the mouse's, and ctrl+tab's.** A tab row is a pointer target like
+every other control here, and a keyboard with no way to reach the second panel is
+a keyboard that cannot change the window's look at all — so `ctrl+tab` moves
+between them and `ctrl+shift+tab` walks back, with plain tab left to the rows. The
+sheet opens on the first tab, always, so where the rows are never moves between
+openings.
 
 The accent is a **hex number, not a colour picker**: egui has no picker, and a terminal
-config file already speaks `#RRGGBB`. The field takes typing and offers the four looks'
-own accents behind its arrow, with `default` first — an empty accent means "the look's
-own", the same way an empty theme means the built-in colours, and that has to be
-*reachable* rather than only reachable by deleting text. A half-typed hex is not a colour:
-the field keeps what was typed, marks itself, and the draft keeps the last thing that
-parsed.
+config file already speaks `#RRGGBB`. The field shows the colour a save would use — the
+draft's accent, or the look's own for the scheme it would resolve to — so an unset accent
+is Windows' `#005FB8` in the light rather than an empty box that reads as a broken control.
+Behind its arrow are the four looks' own accents, with `default` first, so "the look's
+own" stays reachable without deleting text. A half-typed hex is not a colour: the field
+keeps what was typed, marks itself, and the draft keeps the last thing that parsed.
 
 **The card is the keyboard map's kind, with both ways out.** It has the same header (a
 title and a `cross`), the same centered dimmed card, and a footer with `save` (primary) and
@@ -513,8 +523,8 @@ the plain run compares, with one snapshot per state worth seeing — `tab_bar` a
 `tab_bar_hover` — because a hand-painted hover fill is invisible to every test where the
 pointer is elsewhere. The settings sheet has three, because it is the card with the most
 states: `settings_menu` (the first tab as it opens), `settings_appearance` (a look that owns
-its colours, so the scheme chips and the accent field are there) and `settings_general` (a
-port's rows). `tabs` is the primitive's own gallery picture.
+its colours, so the scheme and accent rows are there) and `settings_general` (a port's rows).
+`tabs` is the primitive's own gallery picture.
 
 These baselines follow the same LFS rule as the widget gallery — `.gitignore` ignores `*.png`
 with an exception for this directory, and `.gitattributes` sends it through LFS — so a

@@ -543,10 +543,10 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    // `--widgets` names the same five looks the config's `[ui] widgets` does, and
-    // the parser is the crate's, so the flag and the file cannot disagree about
-    // what a look is called. The scheme and the accent still come from the file:
-    // the flag chooses a look, it does not reset it.
+    // `--widgets` names the same four looks the config's `[ui] widgets` does — and
+    // the old `dtr` spelling, because the parser is the crate's, so the flag and the
+    // file cannot disagree about what a look is called. The scheme and the accent
+    // still come from the file: the flag chooses a look, it does not reset it.
     let mut choice = ui::Look::choice_of(&config);
     if let Some(name) = args.widgets.as_deref() {
         choice.preset = dtr_widgets::Preset::parse(name).ok_or_else(|| {

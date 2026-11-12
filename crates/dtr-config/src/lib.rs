@@ -179,6 +179,11 @@ impl fmt::Display for Scheme {
     }
 }
 
+impl Scheme {
+    /// Every scheme the parser accepts, for a menu that offers them.
+    pub const ALL: [Scheme; 3] = [Scheme::System, Scheme::Light, Scheme::Dark];
+}
+
 /// The controls' look. `[ui]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ui {
@@ -843,6 +848,12 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
         ] {
             let file = format!("[ui]\nscheme = \"{text}\"\n");
             assert_eq!(Config::parse(&file).unwrap().ui.scheme, expected);
+        }
+        // The menu offers `Scheme::ALL`, so a scheme the parser takes and the list
+        // does not is a value nobody can pick — the same round trip the looks get.
+        for scheme in super::Scheme::ALL {
+            let text = format!("[ui]\nscheme = \"{scheme}\"\n");
+            assert_eq!(Config::parse(&text).unwrap().ui.scheme, scheme);
         }
         let error = Config::parse("[ui]\nscheme = \"sepia\"\n")
             .unwrap_err()
