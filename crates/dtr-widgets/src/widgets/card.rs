@@ -15,9 +15,19 @@
 //!   **trailing** detail (the serial sheet's `115200 8N1`);
 //! - the **cross**, named for accessibility.
 //!
-//! The footer belongs to the body. Settings wants two buttons, the keyboard map
-//! a hint, the serial sheet both — and a card that guessed would have to grow a
-//! slot for every screen's idea of a footer.
+//! **The body scrolls**, because a card is clamped to the window and a form is
+//! not: a settings menu on a short window, a keyboard map beside a small
+//! terminal or a serial sheet with a long detail line would otherwise draw past
+//! the sheet's own edge. The scroll area is the card's, so no screen has to
+//! remember it, and its bar is solid — the floating bar egui defaults to paints
+//! over the body's right edge, which is exactly where a card's values and key
+//! names end.
+//!
+//! The **footer** is a row the card reserves *below* the scroll area and draws
+//! outside it. Settings wants two buttons, the keyboard map a hint, the serial
+//! sheet both — and a footer is how one leaves a sheet, so a button that
+//! scrolls out of reach is a button that is not there. It is one row: a card
+//! that asked for two would have a body that is not the card.
 
 use egui::{Align, Context, FontId, Id, Layout, Rect, RichText, Stroke, Ui, Vec2};
 
@@ -51,6 +61,12 @@ pub struct Card<'a> {
     note: Option<&'a str>,
     trailing: Option<&'a str>,
     close: Option<&'a str>,
+    /// The answers a card is asking for, drawn under the scrolling body.
+    ///
+    /// Boxed because the card is a builder: a generic footer would make every
+    /// builder method generic over it, and a `Card<'a, F>` is a worse thing to
+    /// read than one allocation per frame.
+    footer: Option<Box<dyn FnOnce(&mut Ui) + 'a>>,
     /// The width the body may not shrink below, inside the card's margin.
     body_min: f32,
 }
@@ -73,6 +89,7 @@ impl<'a> Card<'a> {
             note: None,
             trailing: None,
             close: None,
+            footer: None,
             body_min: 0.0,
         }
     }
@@ -119,9 +136,22 @@ impl<'a> Card<'a> {
         self
     }
 
-    /// The narrowest the body may be, inside the card's margin. The keyboard map
-    /// and the serial sheet are forms, not prose: below this they would be
-    /// unreadable rather than merely small.
+    /// A row of answers, drawn under the scrolling body and outside it.
+    ///
+    /// The card reserves the skin's row plus its gap for it, so a footer whose
+    /// own controls are row-high fits where the card put it. Whatever it reports
+    /// is the screen's to collect — a closure cannot hand a value back through
+    /// the card without a second type parameter, so a footer writes into the
+    /// same cell its body does.
+    pub fn footer(mut self, footer: impl FnOnce(&mut Ui) + 'a) -> Self {
+        self.footer = Some(Box::new(footer));
+        self
+    }
+
+    /// The narrowest the sheet's content may be, inside the card's margin. The
+    /// keyboard map and the serial sheet are forms, not prose: below this they
+    /// would be unreadable rather than merely small. The body is handed this
+    /// width less the scroll bar, when a bar is showing.
     pub fn body_min(mut self, width: f32) -> Self {
         self.body_min = width;
         self
@@ -130,10 +160,11 @@ impl<'a> Card<'a> {
     /// Draw the card and call `body` with the inner Ui and its content width.
     ///
     /// The width is passed rather than asked of the body because the card owns
-    /// the clamp: a body that recomputed `size - margin` would disagree with the
-    /// card on a window narrower than the requested size.
+    /// the clamp and the scroll bar: a body that recomputed `size - margin`
+    /// would disagree with the card on a window narrower than the requested
+    /// size, and one that did not subtract the bar would draw under it.
     pub fn show<R>(
-        self,
+        mut self,
         ui: &mut Ui,
         skin: &Skin,
         body: impl FnOnce(&mut Ui, f32) -> R,
@@ -148,6 +179,8 @@ impl<'a> Card<'a> {
         // read the card against, not so much that the window looks disabled.
         ui.painter().rect_filled(screen, 0.0, skin.palette.scrim);
 
+        let footer = self.footer.take();
+        let margin = skin.style.card_margin;
         let mut close = false;
         let mut result = None;
         egui::Area::new(self.id)
@@ -169,10 +202,43 @@ impl<'a> Card<'a> {
                     .corner_radius(skin.style.card_radius)
                     .inner_margin(skin.style.card_margin)
                     .show(ui, |ui| {
-                        let inner = (width - skin.style.card_margin.sum().x).max(self.body_min);
+                        let inner = (width - margin.sum().x).max(self.body_min);
                         ui.set_width(inner);
                         close = self.header(ui, skin);
-                        result = Some(body(ui, inner));
+
+                        // The room down to the window's edge — the margin the
+                        // card was clamped by, the sheet's own margin and the
+                        // band the footer was promised taken out. The requested
+                        // size is where the card is *centered*, not how tall it
+                        // may be: a card that needs a little more than it asked
+                        // for grows, and only a window too small for it makes
+                        // the body scroll.
+                        let band = if footer.is_some() {
+                            skin.style.row + skin.style.gap
+                        } else {
+                            0.0
+                        };
+                        let bottom = screen.max.y - 16.0 - margin.bottomf();
+                        let room = (bottom - ui.cursor().top() - band).max(1.0);
+                        // A floating bar paints over the body's right edge, which
+                        // is where a value or a key name ends; a solid one takes
+                        // that space out of `available_width` instead.
+                        ui.spacing_mut().scroll.floating = false;
+                        egui::ScrollArea::vertical()
+                            .id_salt(self.id.with("body"))
+                            .max_height(room)
+                            .auto_shrink([false, true])
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .show(ui, |ui| {
+                                let inner = ui.available_width();
+                                result = Some(body(ui, inner));
+                            });
+                        if let Some(footer) = footer {
+                            ui.add_space(skin.style.gap);
+                            footer(ui);
+                        }
                     });
             });
         CardOutput {
@@ -294,5 +360,52 @@ mod tests {
         harness.get_by_label("close test card").click();
         harness.run();
         assert!(closed.get(), "the cross must be reported");
+    }
+
+    /// A body longer than the sheet scrolls inside it, and the footer stays in
+    /// the card: a card is clamped to the window, so the one thing a long body
+    /// must not do is draw past the card's own edge — and the one thing a footer
+    /// must not do is leave with it.
+    #[test]
+    fn a_long_body_scrolls_and_the_footer_stays_in_the_card() {
+        let skin = skin();
+        let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let sink = pressed.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(360.0, 300.0))
+            .build_ui(move |ui| {
+                let footer_skin = skin.clone();
+                let sink = sink.clone();
+                let _ = Card::new(egui::Id::unique("test-scrolling-card"), "long")
+                    .size(420.0, 560.0)
+                    .min(300.0, 200.0)
+                    .close("close test card")
+                    .footer(move |ui| {
+                        if crate::Button::new("done").primary().show(ui, &footer_skin) {
+                            sink.set(true);
+                        }
+                    })
+                    .show(ui, &skin, |ui, _inner| {
+                        for line in 0..40 {
+                            ui.label(format!("line {line}"));
+                        }
+                    });
+            });
+        harness.run();
+        harness.snapshot("card_scrolled");
+
+        // The card is the window less 32 points either way, centered: 328 × 268
+        // at the corner's 16. The footer's row must be inside that.
+        let footer = harness.get_by_label("done").rect();
+        assert!(
+            footer.max.y <= 284.5,
+            "the footer left the card: {footer:?}"
+        );
+        assert!(footer.min.y >= 16.0, "the footer left the card: {footer:?}");
+
+        // And it is a footer, not a picture of one: it still answers.
+        harness.get_by_label("done").click();
+        harness.run();
+        assert!(pressed.get(), "the footer must be pressable");
     }
 }

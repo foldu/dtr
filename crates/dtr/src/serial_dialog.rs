@@ -279,6 +279,9 @@ impl SerialDialog {
         let s = &skin.style;
         let baud_ok = self.baud().is_some();
         let summary = self.settings.summary();
+        // Connect and cancel are the card's footer: the form above them scrolls
+        // when the sheet is clamped, and the answers must not leave with it.
+        let answers = std::cell::RefCell::new(None::<Event>);
         let out = dtr_widgets::Card::new(egui::Id::new("dtr-serial-dialog"), &self.port)
             .size(WIDTH, HEIGHT)
             .min(360.0, 320.0)
@@ -286,6 +289,9 @@ impl SerialDialog {
             .kicker("serial connection")
             .trailing(&summary)
             .close("close serial connection")
+            .footer(|ui| {
+                *answers.borrow_mut() = self.footer_ui(ui, &skin, baud_ok);
+            })
             .show(ui, &skin, |ui, _inner| {
                 let mut event = None;
                 if !self.detail.is_empty() {
@@ -307,14 +313,12 @@ impl SerialDialog {
                 self.signals_ui(ui, &skin, &mut event);
                 ui.add_space(s.gap);
                 self.terminal_ui(ui, &skin, &mut event);
-                ui.add_space(s.gap * 3.0);
-                self.footer_ui(ui, &skin, baud_ok, &mut event);
                 event
             });
         if out.close {
             Some(Event::Cancel)
         } else {
-            out.body
+            answers.into_inner().or(out.body)
         }
     }
 
@@ -459,9 +463,13 @@ impl SerialDialog {
         }
     }
 
-    fn footer_ui(&self, ui: &mut egui::Ui, skin: &Skin, baud_ok: bool, event: &mut Option<Event>) {
+    /// The answers, as the card's footer: `connect` asks for the port, `cancel`
+    /// hands it back. Returned rather than written into the body's answer,
+    /// because the footer is drawn after the body has returned.
+    fn footer_ui(&self, ui: &mut egui::Ui, skin: &Skin, baud_ok: bool) -> Option<Event> {
         let p = skin.palette;
         let s = &skin.style;
+        let mut event = None;
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("enter connect   esc cancel")
@@ -493,16 +501,17 @@ impl SerialDialog {
                     }
                 };
                 if cancel {
-                    *event = Some(Event::Cancel);
+                    event = Some(Event::Cancel);
                 } else if connect && baud_ok {
                     let mut settings = self.settings.clone();
                     if let Some(baud) = self.baud() {
                         settings.baud = baud;
                     }
-                    *event = Some(Event::Connect(settings));
+                    event = Some(Event::Connect(settings));
                 }
             });
         });
+        event
     }
 }
 

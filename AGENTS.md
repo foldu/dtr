@@ -588,11 +588,15 @@ account behind each of these.
   `chrome skin=… requested=… accent=… source=…`, which is the difference between a
   preference and an outcome, and `source=` names the reader that answered.
 - **An overlay is a `Card` body, not its own window.** `dtr_widgets::Card` owns
-  the modal shell (centered clamped rect, primed area, scrim, frame, skin) and the
-  header convention; a screen supplies only its body, and its footer when it has
-  one. About, the keyboard map, settings and the serial sheet each had a copy of
-  that shell before it existed, which is how their scrims and margins could
-  disagree (`docs/ui.md` §The card).
+  the modal shell (centered clamped rect, primed area, scrim, frame, skin), the
+  header convention, the **scrolling body** and the **footer band**; a screen
+  supplies only its body, and its footer when it has one. The body scrolls because
+  a card is clamped to the window and a form is not — the serial sheet overran the
+  window with its connect button half off screen — and the footer is drawn
+  *outside* that viewport, because a button that scrolls out of reach is not there
+  (`docs/ui.md` §The card). About, the keyboard map, settings and the serial sheet
+  each had a copy of the shell before it existed, which is how their scrims and
+  margins could disagree.
 - **Painted controls belong in `crates/dtr-widgets/src/widgets/`**: `Editable` (a text
   field with a dropdown arrow, reporting `Edit::Typed` and `Edit::Picked` as different
   answers), the layout primitives `label_cell`/`row`/`section`, and `check`, `Button`,
@@ -692,8 +696,8 @@ account behind each of these.
   `dtr_config::remove_value` — not "write the default back", because deleting the override
   is what lets a future default apply. `keys::refuse_reason` is the one policy for a chord
   that cannot be taken, and the popup says which. **The chord column is measured, not a
-  constant**, and the scroll bar's width is reserved, or a floating bar paints over the last
-  characters of the `[keys]` names.
+  constant** — each column asks its widest chord — and the card hands the body the width
+  *inside* its solid scroll bar, so a column no longer reserves for one.
 - **Icons are Lucide SVGs, fetched by a skill in this repository**:
   `.dsh/skills/lucide-icons/scripts/fetch.sh`, `egui::include_image!`, rasterised by
   `egui_extras` so the one-file build carries them. `fetch.sh` rewrites `currentColor` to

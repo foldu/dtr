@@ -270,11 +270,30 @@ drift.
 The header convention is the card's too: an optional dim **kicker** above the
 title (it carries the cross, because that is the way out of the sentence the
 kicker starts), the **title**, an inline **note** (`version 0.1.0`) or a
-right-aligned **trailing** detail (`115200 8N1`), and the named cross. The footer
-belongs to the body: settings wants save/cancel, the keyboard map a hint, the
-serial sheet both, and a card that guessed would grow a slot per screen.
+right-aligned **trailing** detail (`115200 8N1`), and the named cross.
+
+**The body scrolls, and the footer does not.** A card is clamped to the window and
+a form is not: the serial sheet is nine rows tall, and the 800×600 the harness
+draws it at is already too small — before this, the card simply grew and the
+window cut it, footer and all. The body is now an `egui::ScrollArea` the card
+owns, capped at the window's edge less the margin and the footer's band, with a
+**solid** bar: a floating one paints over the right-hand edge of the body, which is
+where a value, a key name or a `[keys]` spelling ends. A screen that wants an
+answer at the bottom supplies a **footer** closure, drawn *outside* that viewport
+in a band of one row plus a gap — save/cancel, connect/cancel, the keyboard map's
+hint. A button that scrolls out of reach is a button that is not there, and a
+settings menu whose Save you must hunt for is the bug this shape prevents.
+
+The requested `size` stays what it was: where the sheet is *centered* and how big
+it is meant to look, not a hard cap, because a card one line taller than its
+formula should grow rather than produce a scroll bar for a line. Only a window
+too small for the body scrolls.
+
 `crates/dtr-widgets/tests/widgets.rs` keeps the standalone `card` baseline, so a
-margin or a header row that moves is a picture before it is a dialog.
+margin or a header row that moves is a picture before it is a dialog, and
+`crates/dtr-widgets/src/widgets/card.rs` takes `card_scrolled` — forty lines in a
+360×300 window — where the body is clipped, the bar is visible and the `done`
+button is asserted to be inside the sheet and clickable.
 
 ## The settings menu
 
@@ -364,10 +383,12 @@ The columns, rows and fonts come from the skin, so the native style gets a talle
 body scrolls inside the same 588 points. **The chord column is measured, not a constant**:
 each column asks the widest chord it holds, because `ctrl-alt-shift-right` and `shift-pageup`
 are in different columns and one width that fits the first wastes a third of the second. The
-scroll bar's width is reserved for the same reason — a floating bar paints over the last
-characters of the `[keys]` names, which are the point of that column — and `Group::COLUMNS` is
-the index the two columns divide at, with a test that keeps the halves about as tall as each
-other.
+bar's width is the card's to reserve: a body is handed the width it has *inside* a solid bar,
+which is why the columns no longer subtract one, and the `[keys]` names in the right-hand
+column — the point of that column — are never painted over. `Group::COLUMNS` is the index the
+two columns divide at, with a test that keeps the halves about as tall as each other. The
+**rebind popup is an `Area`**, a layer of its own, because the body it is drawn from scrolls
+and a child `Ui` would inherit the viewport's clip rect and be cut off at the sheet's edge.
 
 ## Icons
 

@@ -69,81 +69,9 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
         .min(360.0, 280.0)
         .body_min(320.0)
         .close("close keyboard map")
-        .show(ui, &skin, |ui, inner| {
-            ui.add_space(style.gap * 2.0);
-            let mut event = None;
-            // Where the row being rebound is, so the popup can sit under it.
-            // Found while the rows are painted, which is the only pass there is.
-            let mut anchor = None;
-
-            egui::ScrollArea::vertical()
-                .id_salt(egui::Id::unique("dtr-keymap-columns"))
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        for (index, groups) in columns.iter().enumerate() {
-                            if index > 0 {
-                                ui.add_space(style.gap * 3.0);
-                            }
-                            ui.vertical(|ui| {
-                                // Room for the scroll bar, because a
-                                // floating one paints over the last
-                                // characters of the key names in the
-                                // right-hand column — which is exactly
-                                // the column the `[keys]` spellings are
-                                // in. When the map fits, the reserve is
-                                // a few points of margin.
-                                let bar = ui.spacing().scroll.bar_width;
-                                ui.set_width((inner - bar) / 2.0 - style.gap * 2.0);
-                                // The columns do not hold chords of the
-                                // same length — `ctrl-alt-shift-right`
-                                // against `shift-pageup` — so each asks
-                                // its own widest instead of sharing one
-                                // guess that is cramped in one column and
-                                // wasteful in the other.
-                                let chord_width =
-                                    chord_width(ui, &skin, keymap, groups);
-                                for (position, group) in groups.iter().enumerate() {
-                                    // The gap goes before each group but
-                                    // the first, not after each: a
-                                    // trailing gap is what makes the
-                                    // body one line taller than the card.
-                                    if position > 0 {
-                                        ui.add_space(style.gap * 1.5);
-                                    }
-                                    section(ui, &skin, group.title());
-                                    ui.add_space(style.gap);
-                                    for action in crate::keys::ALL
-                                        .iter()
-                                        .copied()
-                                        .filter(|action| action.group() == *group)
-                                    {
-                                        let editing = overlay
-                                            .edit
-                                            .as_ref()
-                                            .is_some_and(|(editing, _)| *editing == action);
-                                        let row = row(
-                                            ui,
-                                            &skin,
-                                            keymap,
-                                            action,
-                                            editing,
-                                            chord_width,
-                                        );
-                                        if editing {
-                                            anchor = Some(row.rect);
-                                        }
-                                        if row.clicked && event.is_none() {
-                                            event = Some(Event::Edit(action));
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    });
-                });
-
-            ui.add_space(style.gap);
+        // A hint under a scrolling list belongs to the card's footer, or it
+        // scrolls away with the rows it explains.
+        .footer(|ui| {
             ui.label(
                 egui::RichText::new(
                     "esc closes   ·   press a row to rebind it   ·   the names are [keys] in the config",
@@ -154,9 +82,64 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
                 ))
                 .color(palette.dim),
             );
+        })
+        .show(ui, &skin, |ui, inner| {
+            ui.add_space(style.gap * 2.0);
+            let mut event = None;
+            // Where the row being rebound is, so the popup can sit under it.
+            // Found while the rows are painted, which is the only pass there is.
+            let mut anchor = None;
 
-            // The popup is the second thing drawn and the last in the
-            // layer, so it floats above the rows it is anchored to.
+            // The card scrolls the body, so the map needs no `ScrollArea` of
+            // its own — and `inner` is the width it has *inside* the card's bar,
+            // which is why the columns no longer subtract one.
+            ui.horizontal_top(|ui| {
+                for (index, groups) in columns.iter().enumerate() {
+                    if index > 0 {
+                        ui.add_space(style.gap * 3.0);
+                    }
+                    ui.vertical(|ui| {
+                        ui.set_width(inner / 2.0 - style.gap * 2.0);
+                        // The columns do not hold chords of the same length —
+                        // `ctrl-alt-shift-right` against `shift-pageup` — so
+                        // each asks its own widest instead of sharing one guess
+                        // that is cramped in one column and wasteful in the
+                        // other.
+                        let chord_width = chord_width(ui, &skin, keymap, groups);
+                        for (position, group) in groups.iter().enumerate() {
+                            // The gap goes before each group but the first,
+                            // not after each: a trailing gap is what makes the
+                            // body one line taller than the card.
+                            if position > 0 {
+                                ui.add_space(style.gap * 1.5);
+                            }
+                            section(ui, &skin, group.title());
+                            ui.add_space(style.gap);
+                            for action in crate::keys::ALL
+                                .iter()
+                                .copied()
+                                .filter(|action| action.group() == *group)
+                            {
+                                let editing = overlay
+                                    .edit
+                                    .as_ref()
+                                    .is_some_and(|(editing, _)| *editing == action);
+                                let row =
+                                    row(ui, &skin, keymap, action, editing, chord_width);
+                                if editing {
+                                    anchor = Some(row.rect);
+                                }
+                                if row.clicked && event.is_none() {
+                                    event = Some(Event::Edit(action));
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
+            // The popup is the second thing drawn and the last in the layer, so
+            // it floats above the rows it is anchored to.
             if let Some((action, notice)) = &overlay.edit {
                 let screen = ui.ctx().content_rect();
                 let at = anchor.unwrap_or_else(|| ui.max_rect());
@@ -281,10 +264,13 @@ struct Row {
 
 /// The "press a key" card, under the row it is for.
 ///
-/// It is a child `Ui` at an absolute rectangle, not an `Area`: an Area inside an
-/// Area paints in a layer of its own, and the rows underneath showed through it.
-/// A child Ui paints after the rows in the same layer, so a filled frame is a
-/// filled frame.
+/// It is an `Area` — a layer of its own — because the body it is drawn from
+/// scrolls, and a child `Ui` inherits the scroll viewport's clip rect, so the
+/// card would be cut off at the sheet's edge exactly when the row is near it.
+/// It used to be a child `Ui` because an `Area` fades in, and a frame that is
+/// still fading lets the rows underneath show through it; `fade_in(false)` is
+/// the answer to that, and the same reason the sheet itself has it.
+#[allow(deprecated)] // one fixed popup: the id is a name, not a hash of state
 fn popup(
     ui: &mut Ui,
     skin: &Skin,
@@ -307,54 +293,57 @@ fn popup(
             .min(screen.bottom() - size.y - 8.0)
             .max(screen.top() + 8.0),
     );
-    let mut popup = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_size(origin, size))
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    egui::Frame::new()
-        .fill(palette.card)
-        .stroke(egui::Stroke::new(style.border, palette.border_strong))
-        .corner_radius(style.control_radius)
-        .shadow(style.shadow.clone().unwrap_or_default())
-        .inner_margin(egui::Margin::symmetric(10, 8))
-        .show(&mut popup, |ui| {
-            ui.set_width(size.x);
-            ui.label(
-                egui::RichText::new("press a key")
-                    .font(style.value_font.clone())
-                    .color(palette.text),
-            );
-            ui.label(
-                egui::RichText::new(format!("for {}", action.label()))
-                    .font(egui::FontId::new(
-                        style.label_font.size - 0.5,
-                        style.label_font.family.clone(),
-                    ))
-                    .color(palette.dim),
-            );
-            if let Some(notice) = notice {
-                ui.label(
-                    egui::RichText::new(notice)
-                        .font(egui::FontId::new(
-                            style.label_font.size - 0.5,
-                            style.label_font.family.clone(),
-                        ))
-                        .color(palette.danger),
-                );
-            }
-            ui.add_space(style.gap);
-            ui.horizontal(|ui| {
-                if dtr_widgets::Button::new("reset").width(64.0).show(ui, skin) {
-                    event = Some(Event::Reset(action));
-                }
-                if dtr_widgets::Button::new("cancel")
-                    .width(64.0)
-                    .show(ui, skin)
-                {
-                    event = Some(Event::Cancel);
-                }
-            });
+    egui::Area::new(egui::Id::new("dtr-keymap-rebind"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(origin)
+        .constrain(false)
+        .movable(false)
+        .fade_in(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(palette.card)
+                .stroke(egui::Stroke::new(style.border, palette.border_strong))
+                .corner_radius(style.control_radius)
+                .shadow(style.shadow.clone().unwrap_or_default())
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.set_width(size.x);
+                    ui.label(
+                        egui::RichText::new("press a key")
+                            .font(style.value_font.clone())
+                            .color(palette.text),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("for {}", action.label()))
+                            .font(egui::FontId::new(
+                                style.label_font.size - 0.5,
+                                style.label_font.family.clone(),
+                            ))
+                            .color(palette.dim),
+                    );
+                    if let Some(notice) = notice {
+                        ui.label(
+                            egui::RichText::new(notice)
+                                .font(egui::FontId::new(
+                                    style.label_font.size - 0.5,
+                                    style.label_font.family.clone(),
+                                ))
+                                .color(palette.danger),
+                        );
+                    }
+                    ui.add_space(style.gap);
+                    ui.horizontal(|ui| {
+                        if dtr_widgets::Button::new("reset").width(64.0).show(ui, skin) {
+                            event = Some(Event::Reset(action));
+                        }
+                        if dtr_widgets::Button::new("cancel")
+                            .width(64.0)
+                            .show(ui, skin)
+                        {
+                            event = Some(Event::Cancel);
+                        }
+                    });
+                });
         });
     event
 }

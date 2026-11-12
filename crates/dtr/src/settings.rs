@@ -416,9 +416,43 @@ impl Settings {
         // keyboard map: the card must not resize itself when the serial rows
         // come and go, or the button under the pointer moves as it is pressed.
         let height = 52.0 + rows * (style.row + 1.0) + 58.0;
+        // The buttons are the card's footer, not the body's last row: the rows
+        // above them scroll, and save and cancel must not scroll away with them.
+        // A footer writes where its body does, which is why this is a cell.
+        let answers = std::cell::RefCell::new(None::<Reply>);
         let out = dtr_widgets::Card::new(egui::Id::new("dtr-settings"), "settings")
             .size(420.0, height)
             .close("close settings")
+            .footer(|ui| {
+                // The keyboard still works — Enter and Esc are handled by the
+                // event loop — so the hint names the keys; the buttons are the
+                // same two answers for the mouse.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("enter saves   ·   esc cancels")
+                            .font(egui::FontId::new(
+                                style.label_font.size - 1.0,
+                                style.label_font.family.clone(),
+                            ))
+                            .color(palette.dim),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if dtr_widgets::Button::new("save")
+                            .primary()
+                            .width(72.0)
+                            .show(ui, &skin)
+                        {
+                            *answers.borrow_mut() = Some(Reply::Apply);
+                        }
+                        if dtr_widgets::Button::new("cancel")
+                            .width(72.0)
+                            .show(ui, &skin)
+                        {
+                            *answers.borrow_mut() = Some(Reply::Cancel);
+                        }
+                    });
+                });
+            })
             .show(ui, &skin, |ui, _inner| {
                 ui.add_space(8.0);
                 let mut reply = None;
@@ -458,41 +492,12 @@ impl Settings {
                         ui.add_space(2.0);
                     }
                 }
-                ui.add_space(6.0);
-                // The keyboard still works — Enter and Esc are handled by
-                // the event loop — so the hint names the keys; the
-                // buttons are the same two answers for the mouse.
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("enter saves   ·   esc cancels")
-                            .font(egui::FontId::new(
-                                style.label_font.size - 1.0,
-                                style.label_font.family.clone(),
-                            ))
-                            .color(palette.dim),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if dtr_widgets::Button::new("save")
-                            .primary()
-                            .width(72.0)
-                            .show(ui, &skin)
-                        {
-                            reply = Some(Reply::Apply);
-                        }
-                        if dtr_widgets::Button::new("cancel")
-                            .width(72.0)
-                            .show(ui, &skin)
-                        {
-                            reply = Some(Reply::Cancel);
-                        }
-                    });
-                });
                 reply
             });
         if out.close {
             Some(Reply::Cancel)
         } else {
-            out.body
+            answers.into_inner().or(out.body)
         }
     }
 
