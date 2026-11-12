@@ -114,18 +114,32 @@ impl<'a> Editable<'a> {
         // to the *child widget's* rect — the text, not the field — so the next
         // control is placed over the arrow end of this one. The space was already
         // reserved by `allocate_exact_size` above; nothing here may shrink it.
+        //
+        // **The text is centred in the row, not in a control.** A single-line
+        // `TextEdit` allocates `interact_size.y` and draws its galley at the top
+        // of that rect, and `interact_size` is the *parent's* idea of a control,
+        // not this row's — which put the accent's `#RRGGBB` against the top of a
+        // 34-point Adwaita field while the dropdowns beside it were centred, and
+        // did the same to the serial sheet's baud and profile rows. So the field
+        // is made exactly as tall as the row and the galley is asked to centre
+        // itself in it.
         let response = {
             let mut field = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(text_rect.shrink2(Vec2::new(7.0, 2.0)))
+                    .max_rect(text_rect.shrink2(Vec2::new(7.0, 0.0)))
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
+            field.spacing_mut().interact_size.y = text_rect.height();
             field.add(
                 egui::TextEdit::singleline(&mut buffer)
                     .id_salt((self.id, "text"))
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
                     .font(egui::TextStyle::Body)
+                    // Left-aligned in the field, centred in the row: `align` is
+                    // both, and `LEFT_TOP` — the default — is the top half of the
+                    // bug.
+                    .align(egui::Align2::LEFT_CENTER)
                     .desired_width((text_rect.width() - 14.0).max(20.0)),
             )
         };

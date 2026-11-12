@@ -199,7 +199,13 @@ what makes them testable and what lets a caller `--send` into them.
 
 - `Editable` — a text field with a dropdown arrow. It reports `Edit::Typed` and
   `Edit::Picked` as different answers, because a name that happens to equal a
-  saved profile's must not silently load it.
+  saved profile's must not silently load it. **Its text is centred in the row, not in a
+  control**: a single-line `TextEdit` allocates `interact_size.y` and draws its galley at
+  the top of that rect, and `interact_size` is the *parent's* idea of a control rather than
+  this row's — so the field is made row-height and the galley asks to centre itself
+  (`align(Align2::LEFT_CENTER)`). Without that the accent's `#RRGGBB` sat against the top of
+  a 34-point Adwaita field while the dropdowns beside it were centred, and the serial
+  sheet's profile and baud fields had the same tilt.
 - `label_cell`, `row`, `section` — the layout of a sheet: a fixed label column,
   a row of one control, and the two ways a group announces itself.
 - `check` — a 16- or 20-point box with the tick drawn from two strokes, because
