@@ -151,8 +151,8 @@ Three consequences that shape the design:
 - `Frame` needs **no new fields**: once the terminal has defaults, `default_fg`/`default_bg` and
   every cell's `fg`/`bg` are already themed.
 - `ui.rs` needs no change for fg/bg. The only places it wants the new slots are the cursor
-  (`theme.cursor` becomes `Look::accent`, which is what the block is painted with — a theme
-  has a real `cursor` and `cursor_text`, and only the first is wired up) and,
+  (`theme.cursor` becomes `Look::accent`, which the block is painted with, and
+  `theme.cursor_text` — the glyph over it, defaulting to the background) and,
   in M2, selection.
 - Apply the theme **on the pane thread**, after `Terminal::new(COLS, ROWS)` and before the first
   `vt_write`, because `Terminal` is `!Send`. `Theme` is plain `[u8; 3]`s and a `String`, so clone
@@ -708,9 +708,8 @@ is missing.
 **As built (2026-11-12), this table is the design, not the code.** The rows that differ:
 a missing `palette = N` is logged and the default kept, not a rejection naming the index;
 `palette = N` for N ≥ 16 is dropped, not stored as an override; "dtr writes" means the fields
-the theme set — the `.itermcolors` importer is what fills all 22; `cursor-text` is **not**
-honoured, because the block cursor is painted over the glyph (`docs/ghostty.md` §4); and
-`selection-*` are composited by the renderer rather than set on the core.
+the theme set — the `.itermcolors` importer is what fills all 22; and `selection-*` are
+composited by the renderer rather than set on the core.
 
 A dtr theme file is a **Ghostty theme file**, and dtr writes a complete one — all 22 values — so
 that a file dtr writes is also a file Ghostty can use unchanged.

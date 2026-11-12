@@ -951,15 +951,34 @@ impl GridRenderer {
             (index / cols) < rows_fit && (index % cols) < cols_fit
         };
 
+        // A block cursor is a cell *inverted*, not a rectangle laid over the
+        // glyph: the cursor colour goes down with the backgrounds and the glyph
+        // is drawn in `cursor-text` above it. Painted afterwards it hid the
+        // character it sat on, which made a block cursor a solid square and a
+        // prompt's cursor a hole in the text.
+        let block = match (pane.cursor, frame.cursor) {
+            (true, Some(cursor)) => block_span(frame, &cursor),
+            _ => None,
+        };
+        let under_block =
+            |index: usize| block.is_some_and(|(head, span)| index >= head && index < head + span);
+
         // Backgrounds first: a glyph must never sit under a later rectangle.
         for (index, cell) in frame.cells.iter().enumerate() {
-            if !cell.has_bg || !visible(index) {
+            if !visible(index) {
                 continue;
             }
+            let colour = if under_block(index) {
+                look.accent
+            } else if cell.has_bg {
+                cell.bg
+            } else {
+                continue;
+            };
             let (x, y) = cell_origin(index, frame.cols, cell_w, cell_h);
             let (x, y) = (x + origin_x, y + origin_y);
             self.instances
-                .push(Instance::solid([x, y, cell_w, cell_h], cell.bg, 1.0));
+                .push(Instance::solid([x, y, cell_w, cell_h], colour, 1.0));
         }
 
         // Then the glyphs. One size for the whole frame: the physical size the
@@ -985,6 +1004,13 @@ impl GridRenderer {
             // A symbol or a graphics element is a different question, and
             // `constraint_width` answers it from the neighbours.
             let cells = constraint_width(frame, index);
+            // Over a block cursor the character is still the character: it is
+            // drawn in the cursor's text colour instead of the cell's own.
+            let colour = if under_block(index) {
+                look.cursor_text
+            } else {
+                cell.fg
+            };
             for ch in cell.text.chars() {
                 let Some(glyph) = self.glyph(device, queue, ch, style, size, cells) else {
                     continue;
@@ -997,7 +1023,7 @@ impl GridRenderer {
                         glyph.height,
                     ],
                     uv: glyph.uv,
-                    colour: rgb(cell.fg),
+                    colour: rgb(colour),
                     flags: if glyph.colour { 1.0 } else { 0.0 },
                 });
             }
@@ -1022,7 +1048,15 @@ impl GridRenderer {
             }
         }
 
-        if let (true, Some(cursor)) = (pane.cursor, frame.cursor) {
+        // A bar and an underline sit *over* the character — that is how an
+        // insert cursor says "typing goes in here" without hiding anything — so
+        // they are drawn last. A block is not: it inverts the cell, so its
+        // colour went down with the backgrounds and the glyph was drawn on top.
+        let mark = match (pane.cursor, frame.cursor) {
+            (true, Some(cursor)) if over_glyphs(cursor.shape) => Some(cursor),
+            _ => None,
+        };
+        if let Some(cursor) = mark {
             let (x, y) = cell_origin(
                 usize::from(cursor.y) * usize::from(frame.cols) + usize::from(cursor.x),
                 frame.cols,
@@ -1031,12 +1065,9 @@ impl GridRenderer {
             );
             // A cursor on the tail of a two-cell character belongs to the
             // character, not to the invisible half: move it back one cell so a
-            // block covers both, and a bar sits at the character's own left
-            // edge. Ghostty does the same (`renderer/generic.zig`, `addCursor`).
+            // bar sits at the character's own left edge. Ghostty does the same
+            // (`renderer/generic.zig`, `addCursor`).
             let (dx, width) = cursor_cell(&cursor, cell_w);
-            // Not the whole cell unless the program asked for a block: an insert
-            // cursor is a bar against the left edge, which is how a terminal says
-            // "typing goes in here" without covering the character it sits on.
             let mark = cursor.mark(crate::layout::Rect::new(
                 x + origin_x + dx,
                 y + origin_y,
@@ -1351,26 +1382,56 @@ fn cell_origin(index: usize, cols: u16, cell_w: f32, cell_h: f32) -> (f32, f32) 
     (col as f32 * cell_w, row as f32 * cell_h)
 }
 
-/// The rectangle a cursor's mark is measured against: `(offset from the
+/// The rectangle a bar or an underline is measured against: `(offset from the
 /// reported cell, width)`.
 ///
 /// A cursor on the second half of a two-cell character is reported on the
-/// invisible half, so a block has to move back one cell and cover both. A bar
-/// or an underline stays at the character's own left edge — a bar marks where
-/// typing begins, and the middle of a glyph is not that — but the cell it is
-/// measured against is still the character's, so the bar lands on the character
-/// and not on the spacer. Ghostty's `addCursor` does the same with
-/// `cursor_wide`.
+/// invisible half, so the mark moves back onto the character — a bar marks where
+/// typing begins, and the middle of a glyph is not that. A block does not come
+/// here: `block_span` gives the cells it inverts, and the painter draws them
+/// with the backgrounds so the glyph can sit on top. Ghostty's `addCursor` does
+/// the same with `cursor_wide`.
 fn cursor_cell(cursor: &Cursor, cell_w: f32) -> (f32, f32) {
     if !cursor.wide_tail {
         return (0.0, cell_w);
     }
-    let width = if cursor.shape == CursorShape::Block {
-        cell_w * 2.0
-    } else {
-        cell_w
+    (-cell_w, cell_w)
+}
+
+/// Whether a cursor shape is painted *over* the glyphs.
+///
+/// A bar and an underline are marks: they sit on top and cover a corner at
+/// most. A block is not a mark — it inverts the whole cell — so it is painted
+/// with the backgrounds (see `block_span`) and the character is drawn over it in
+/// the cursor's text colour. Getting this backwards turned a block cursor into a
+/// solid square over the character it was on.
+fn over_glyphs(shape: CursorShape) -> bool {
+    shape != CursorShape::Block
+}
+
+/// The cells a **block** cursor inverts: the head cell's frame index, and how
+/// many cells it covers.
+///
+/// A block is the only shape that hides what is under it, so it is the only one
+/// that has to be drawn as a background rather than as a mark: the cursor colour
+/// goes down before the glyphs and the character is drawn in the cursor's text
+/// colour. A cursor reported on a wide character's tail belongs to the
+/// character, so the block starts one cell back and covers both. `None` when the
+/// cursor is not a block, or has scrolled out of the frame — nothing to invert.
+fn block_span(frame: &Frame, cursor: &Cursor) -> Option<(usize, usize)> {
+    if cursor.shape != CursorShape::Block {
+        return None;
+    }
+    let cols = usize::from(frame.cols).max(1);
+    let (x, y) = (usize::from(cursor.x), usize::from(cursor.y));
+    if x >= cols || y >= usize::from(frame.rows) {
+        return None;
+    }
+    let (head, span) = match (cursor.wide_tail, x) {
+        (true, 1..) => (x - 1, 2),
+        _ => (x, 1),
     };
-    (-cell_w, width)
+    Some((y * cols + head, span))
 }
 
 fn bytemuck_cast<T: Copy>(slice: &[T]) -> &[u8] {
@@ -2634,9 +2695,10 @@ mod font_tests {
         );
     }
 
-    /// A wide-character cursor moves back onto the character and covers it.
+    /// A wide-character cursor moves back onto the character: the block covers
+    /// both cells, and a bar lands on the character's own left edge.
     #[test]
-    fn a_block_cursor_on_a_wide_tail_covers_both_cells() {
+    fn a_cursor_on_a_wide_tail_moves_back_onto_the_character() {
         let cell_w = 9.0;
         let block = Cursor {
             x: 5,
@@ -2644,7 +2706,7 @@ mod font_tests {
             shape: CursorShape::Block,
             wide_tail: true,
         };
-        assert_eq!(cursor_cell(&block, cell_w), (-cell_w, 2.0 * cell_w));
+        assert_eq!(block_span(&frame_of(8, 1), &block), Some((4, 2)));
         // A bar is a mark against where typing starts, so it stays one cell
         // wide and lands on the character's own left edge.
         let bar = Cursor {
@@ -2652,12 +2714,55 @@ mod font_tests {
             ..block
         };
         assert_eq!(cursor_cell(&bar, cell_w), (-cell_w, cell_w));
+        assert_eq!(block_span(&frame_of(8, 1), &bar), None);
         // And off a wide character there is nothing to move.
         let narrow = Cursor {
+            x: 5,
             wide_tail: false,
             ..block
         };
-        assert_eq!(cursor_cell(&narrow, cell_w), (0.0, cell_w));
+        assert_eq!(block_span(&frame_of(8, 1), &narrow), Some((5, 1)));
+    }
+
+    /// The bug this fixed: a block cursor used to be a rectangle over the
+    /// glyphs, so the character under it vanished. A block must be painted with
+    /// the backgrounds and the glyph drawn over it, which is the opposite of
+    /// what a bar and an underline want.
+    #[test]
+    fn a_block_cursor_is_painted_under_the_glyph_and_the_others_over_it() {
+        assert!(!over_glyphs(CursorShape::Block));
+        assert!(over_glyphs(CursorShape::Bar));
+        assert!(over_glyphs(CursorShape::Underline));
+    }
+
+    /// A cursor that has scrolled out of the frame has no cell to invert.
+    #[test]
+    fn a_cursor_outside_the_frame_has_nothing_to_invert() {
+        let block = |x, y| Cursor {
+            x,
+            y,
+            shape: CursorShape::Block,
+            wide_tail: false,
+        };
+        // Past the last column.
+        assert_eq!(block_span(&frame_of(8, 2), &block(8, 0)), None);
+        // Past the last row.
+        assert_eq!(block_span(&frame_of(8, 2), &block(0, 2)), None);
+        // The last cell of the last row is still inside.
+        assert_eq!(block_span(&frame_of(8, 2), &block(7, 1)), Some((15, 1)));
+    }
+
+    fn frame_of(cols: u16, rows: u16) -> Frame {
+        Frame {
+            cols,
+            rows,
+            default_fg: [255; 3],
+            default_bg: [0; 3],
+            cursor: None,
+            selection: None,
+            cells: Vec::new(),
+            title: String::new(),
+        }
     }
 
     /// The configured list is an *opinion*, and it beats dtr's own: if it did

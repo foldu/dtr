@@ -126,8 +126,8 @@ tag mirroring on.
   `input::unescape` turns `\n`, `\r`, `\t`, `\e` and `\\` into bytes, so
   `--send "printf \"one\\ntwo\\n\""` types a *newline* inside the quoted string and
   leaves the shell in a continuation prompt. Escape the backslash again, or put the
-  sample in a file and type its path. (A sample that prints bare `\n` is fine now —
-  the kernel's line discipline turns it into CR LF; see the pty bullet below.)
+  sample in a file and type its path. (A sample that prints bare `\n` is fine now: the line
+  discipline adds the CR.)
 - **This file has a budget, and it is silent when it is exceeded**: a session loads at most
   64 KB of `AGENTS.md` and drops the rest, so a file that grows past it loses its *tail* —
   which is the index. Keep it to rules: the rule, and the clause that makes it stick. The
@@ -186,7 +186,9 @@ tag mirroring on.
   publish after a session starts is forced. **A cursor is not a dirty cell** — hiding or
   restyling it changes no cell, so `publish` compares the `Cursor` (position plus DECSCUSR
   style) with the last frame's and a hidden cursor draws nothing; that is the only
-  non-cell gate, so do not add a second. **A frame per read chunk is a thousand frames
+  non-cell gate, so do not add a second. **A block cursor is an inverted cell, not a mark
+  over the glyph**: colour with the backgrounds, glyph in `Look::cursor_text` — bars and
+  underlines are the marks, drawn last. **A frame per read chunk is a thousand frames
   nobody sees**: publish on a gate of half a refresh interval, with a timer arm so a
   skipped publish cannot leave the picture stale.
 - **`Terminal::resize`'s pixel arguments are the cell's, not the pane's** — the pane size

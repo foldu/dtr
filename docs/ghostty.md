@@ -141,7 +141,7 @@ one look identical. Strikethrough is the same bug with a smaller blast radius.
 | tab verbs | move, `goto_tab N`, tab bar hidden or at the bottom, inherit cwd | `alt+digit` picks a tab by its number and `ctrl-tab` cycles, but chips cannot be reordered or moved between windows, and the strip is always on top (`docs/panes.md`) | S–M |
 | split verbs | equalize, swap, move between tabs/windows, divider colour, preserve zoom | split, focus, resize, zoom (`docs/panes.md`) | S–M |
 | padding | `window-padding-x/y`, balanced, coloured | a fixed four-point gap (`ui.rs` `GRID_GAP`), not configurable | S |
-| cursor | a block **inverts its cell** and draws the glyph in `cursor-text`; plus opacity, blink and click-to-move | the colour is right — `theme.cursor` reaches `Look::accent` (`ui.rs:82`) — and the shape follows DECSCUSR, but a block is painted as an **opaque solid after the glyphs**, so the character under it disappears: measured, `printf 'ABC'; printf '\e[D'` captures as `AB` and a solid block. No `cursor-text`, no blink, no opacity | S |
+| cursor | a block **inverts its cell** and draws the glyph in `cursor-text`; plus opacity, blink and click-to-move | **fixed**: a block is painted with the backgrounds and its glyph in the theme's `cursor-text` (its background when the theme has none) — measured, `ABC` with the cursor moved left shows the `C` in the background colour on the cursor block, and `啊` inverts across both cells. What is left is the options: no blink, no opacity, no click-to-move | S |
 | font size at runtime | four actions, plus a per-window size | a row in the settings menu | S |
 | selection policy | clear-on-typing, clear-on-copy, word characters, `select_all` | copy-on-select **is** done (`app.rs:2487`), unconditionally; the selection survives typing, the word set is the core's default, and there is no select-all (`Terminal::select_all` is in the binding) | S each |
 | clipboard policy | paste protection (a 100-line paste asks), trim trailing spaces, codepoint map, read/write policy | bracketed paste only; no protection, no trim knobs | S–M |
@@ -215,11 +215,10 @@ preview.
    `on_xtversion` (`dtr <version>`), and focus reporting on
    `WindowEvent::Focused`. Each closes a question a program asks and dtr
    currently ignores.
-3. **The cursor covers its character** (S): draw the cell inverted — background in
-   `cursor` and the glyph in `cursor-text` — instead of an opaque block on top of the
-   glyphs, and take the window background from the terminal's default so an `OSC 11` set is
-   visible (`app.rs` clear vs the theme). One is a bug and the other is a missing repaint;
-   both read as Ghostty features.
+3. **The window background ignores the terminal's default** (S): an `OSC 11` set is
+   parsed and never repainted, because the window clears to the theme's colour and only
+   cells carrying `has_bg` paint. (The cursor half of this item is done: a block inverts
+   its cell.)
 4. **Synchronized output** (M): honour `on_render_hold` — capture at the start of
    the hold, skip publishes until it ends, with the timeout the core asks for.
    The complement of the publish gate, not a replacement.

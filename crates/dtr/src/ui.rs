@@ -27,6 +27,11 @@ pub struct Look {
     pub foreground: [u8; 3],
     /// Cursor/selection accent; the theme's cursor colour when it has one.
     pub accent: [u8; 3],
+    /// The glyph a **block** cursor sits on is drawn in this, over `accent`.
+    /// The theme's `cursor-text`, and its background when it has none — which
+    /// is Ghostty's default, and the only value that reads on every cursor
+    /// colour.
+    pub cursor_text: [u8; 3],
     /// Status bar and palette background: the terminal background lifted just
     /// enough to be a separate surface.
     pub surface: [u8; 3],
@@ -46,6 +51,7 @@ impl Default for Look {
             background: [0x0b, 0x0f, 0x0e],
             foreground: [0xdc, 0xdf, 0xdd],
             accent: [0xff, 0xb0, 0x00],
+            cursor_text: [0x0b, 0x0f, 0x0e],
             surface: [0x14, 0x18, 0x16],
             dim: [0x6b, 0x77, 0x72],
             choice: dtr_widgets::Choice::default(),
@@ -86,6 +92,10 @@ impl Look {
         } else if let Some(yellow) = theme.palette[3] {
             look.accent = yellow;
         }
+        // The glyph under a block cursor: the theme's `cursor-text`, and its
+        // background when it has none. Read here, after `background`, because
+        // the default is *that* colour and not the built-in one.
+        look.cursor_text = theme.cursor_text.unwrap_or(look.background);
         look.surface = mix(look.background, look.foreground, 0.10);
         look.dim = mix(look.background, look.foreground, 0.55);
         look
