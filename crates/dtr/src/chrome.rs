@@ -83,13 +83,14 @@ pub const ADWAITA_TITLEBAR: f32 = 46.0;
 ///   numbers in its test.
 /// - **Adwaita** is [`ADWAITA_TITLEBAR`], measured out of the theme.
 pub fn title_height(scale: f32) -> f32 {
-    let platform = match kind() {
-        Kind::Windows => caption_height(scale).unwrap_or(0.0),
+    match kind() {
+        // The platform's answer or, when it has none, what dtr always had. Not a
+        // floor on the answer: Windows' band is 58 pixels at 200 %, which is 29
+        // points, and rounding that up to a tab row would be two pixels of guess
+        // on top of a measurement.
+        Kind::Windows => caption_height(scale).unwrap_or(crate::ui::TAB_HEIGHT),
         Kind::Adwaita => ADWAITA_TITLEBAR,
-    };
-    // The strip is also the tab row, and a tab row shorter than a tab is not a
-    // tab row. A platform that answers nothing gets what dtr always had.
-    platform.max(crate::ui::TAB_HEIGHT)
+    }
 }
 
 #[cfg(target_os = "windows")]
