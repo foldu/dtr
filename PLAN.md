@@ -18,7 +18,7 @@ dtr --port /dev/ttyUSB0 --baud 115200
 - Reads bytes on a thread, feeds them to `libghostty-vt`, draws the resulting grid.
 - Sends keystrokes back to the port, encoded by libghostty's key encoder.
 - Shows a status line: port, baud, RX/TX byte counts, DTR/RTS.
-- Can screenshot itself (`--screenshot`, `F12`) so the UI is inspectable without a human.
+- Can screenshot itself (`--screenshot`, and `--capture PATH` for the live surface) so the UI is inspectable without a human.
 - Builds and runs natively on Linux; cross-compiles to `dtr.exe`.
 
 **Non-goals for MVP:** tabs, splits, multiple windows, ConPTY/local shells, config files, themes,
@@ -114,13 +114,14 @@ crates/
   dtr/                // the binary: CLI, wiring, window
     Cargo.toml
     src/…
-  dtr-sshconfig/      // ~/.ssh/config parser, for the future host picker
+  dtr-sshconfig/      // ~/.ssh/config parser, for the host picker
 ```
 
-`dtr-sshconfig` exists already (landed ahead of its feature): OpenSSH config grammar, `Include`
+`dtr-sshconfig` is pure parsing with no network or async — OpenSSH config grammar, `Include`
 with globs and cycle/depth limits, `*`/`?`/negation host patterns, and first-value-wins
-resolution. It is pure parsing with no network or async, so it can be tested and reviewed
-independently of the terminal.
+resolution — so it can be tested and reviewed independently of the terminal. It landed ahead of
+the picker and the picker uses it now: `sources.rs` builds `Destination::Ssh` from it, and the
+`+` menu groups the hosts.
 
 One crate for now is deliberate. The split below is where it should go as boundaries earn it, not
 a target to hit up front:
@@ -275,7 +276,7 @@ lock.
 | 0.5 | `tokio-serial` transport + pane LocalSet + remembered settings | clap flags `--port --baud --data-bits --parity --stop-bits --flow --imap --db --no-remember`; redb `settings` row written after a successful open (§2.2) |
 | 0.6 | key input → libghostty key encoder → `write_all` | Port ghostling-rs's key mapping to winit events |
 | 0.7 | serial byte mapper, **CR→CRLF on by default** (`--imap cr=crlf`, `lf=crlf`, `del=bs`, `--imap none`) | Needs a pending-`\r` state machine, not a blind replace: emit `\r\n` for a lone CR, never double an existing CRLF, flush the pending CR when the stream goes idle |
-| 0.8 | screenshot: `--screenshot out.png`, `F12`, `--headless` | See §4 |
+| 0.8 | screenshot: `--screenshot out.png`, and `--capture` for the live surface | See §4. `F12` and `--headless` were planned and never needed: the offscreen path needs no flag |
 | 0.9 | Windows cross build in the flake; smoke-run under Wine or a VM | `nix build .#windows` |
 | 0.10 | `scripts/dev-serial.sh` (socat pair + shell) | See §6 |
 | 0.11 | Single-file discipline: embed icon/shaders/fonts, `--licenses`, `checks.single-exe` | See §7, §8 |
@@ -399,14 +400,20 @@ Two things worth recording from getting a shell to run:
 - **Because no test proved otherwise.** fish rendered nothing until terminal *replies* were wired:
   libghostty produces its DA1/XTGETTCAP answers through `on_pty_write`, and dropping them leaves
   the shell waiting on an alt-screen that never fills. bash never asked, so the gap stayed hidden.
+  One key is still silent: `XTGETTCAP TN` is deliberately *not* answered from Ghostty's static map
+  — an embedder that never names its terminfo entry must not claim Ghostty's — so dtr has to call
+  `set_terminfo_name("xterm-ghostty")` before a program that asks hears anything
+  (`docs/ghostty.md` §2).
 - **`TERM` should be `xterm-ghostty`**, not `xterm-256color`. We are a libghostty terminal and the
   terminfo entry describes what we actually implement; it ships with ghostty and in nixpkgs. A
-  system without the entry needs a fallback (open question).
+  system without the entry was an open question here; it is answered by shipping the entry and
+  installing it: `crates/dtr/assets/terminfo/xterm-ghostty` goes over a second `ssh -T`
+  (`crates/dtr/src/terminfo.rs`, `docs/sessions.md`).
 
 **Acceptance:** `scripts/dev-serial.sh` starts a socat pair with `bash` on the far end;
 `nix run .#default -- --port /dev/pts/N` shows a working shell prompt, colours, and line
-editing; `nix build .#windows` produces `dtr.exe`; `--headless --screenshot` writes a PNG
-in CI with no display server.
+editing; `nix build .#windows` produces `dtr.exe`; `--screenshot out.png` writes a PNG
+on a machine with no display server.
 
 The Linux package is also *installable*, not just runnable: `assets/dtr.desktop` is installed to
 `$out/share/applications`, and the logo set goes to `$out/share/icons/hicolor` under the name the
@@ -443,13 +450,13 @@ can be exercised with no hardware) and `--log <file>` (raw bytes as they arrived
 CR→CRLF mapping — verified byte-identical against a socat far end that sent `alpha\rbeta\r\ngamma\r`,
 CRs intact, while the screen still showed three translated lines).
 
-**DTR/RTS/break are blocked on a real design problem, not on effort.** `tokio_serial::SerialStream`
-refuses `try_clone` ("Cannot clone Tokio handles"), and `tokio::io::split` — which the pane needs so
-`select!` can read and write at once — yields halves that do not implement `SerialPort`. So there is
-no handle left to call `write_data_terminal_ready` on, and opening the device a second time would
-assert DTR again, resetting the board you were trying to talk to. The fix is to give the port to a
-single owner task that receives `Write`/`Dtr`/`Rts`/`Break` commands, which means replacing the
-split-read design; that is its own piece of work.
+**DTR/RTS/break were blocked on the split-read design, and that is gone.** In the tokio era
+`tokio_serial::SerialStream` refused `try_clone` ("Cannot clone Tokio handles") and `tokio::io::split`
+yielded halves that do not implement `SerialPort`, so no handle was left to call
+`write_data_terminal_ready` on. After the compio port the port has one owner — the reader thread —
+and `crates/dtr/src/modem.rs` duplicates the descriptor for the control calls, so DTR, RTS and break
+work on Unix. Windows still refuses: it needs `EscapeCommFunction` through a duplicated HANDLE, and
+blind unsafe FFI on the platform we cannot run is worse than a clear refusal (it logs).
 
 **The picker is a palette, and its logic is `crates/dtr-complete`.** One input line that means
 different things by its first word — `connect /dev/ttyUSB0`, `ssh jupiter.home`, `exec fish` — so the
@@ -484,8 +491,9 @@ for that port.
 Sources are read when the palette opens, not at startup: the device you want is usually the one you
 just plugged in. Ports carry USB VID:PID and product strings, which is what tells two identical
 adapters apart and what reconnect-by-device will match on. SSH hosts come from `dtr-sshconfig` as
-aliases only — a wildcard pattern is not something you can connect to — and `ssh` currently reports
-that it is not implemented rather than silently doing nothing.
+aliases only — a wildcard pattern is not something you can connect to — and `ssh` runs as a session
+now (`pty::Config::ssh`); the only transport that still says "not implemented" is Windows modem
+control.
 
 Two things this cost: `egui::Window` produced nothing inside a `run_ui` pass (the palette drew no
 shapes at all), and painting the selected row's highlight *after* its labels hid the selected row's
@@ -516,14 +524,16 @@ blind unsafe FFI on the platform we cannot run is worse than a clear refusal; it
 nothing there.
 
 **Clipboard in and out.** `Ctrl+Shift+C` copies the visible screen — rows trimmed of trailing blanks,
-no empty tail — which is what copy means in a terminal; scrollback and mouse selection wait for the M2
-renderer, where hit-testing lives. Paste comes in as an egui `Event::Paste`; on a **serial** transport the pane writes it 128 bytes at a
+no empty tail — which is what copy means in a terminal; scrollback and mouse selection waited for the
+M2 renderer, where hit-testing lives, and both landed with it (`docs/input.md`). Paste comes in as an
+egui `Event::Paste`; on a **serial** transport the pane writes it 128 bytes at a
 time, 20 ms apart, because a device with a small input buffer drops bytes when the whole clipboard
 arrives at once. On a shell in a pty the paste is handed over in one write — that buffer is the
 kernel's, pacing it only makes the terminal feel broken.
 
-That closes M1 except two honest gaps: **mouse selection** (needs the M2 renderer's grid hit-testing)
-and **reconnect by USB serial number** (only exercised against a pty here — no adapter to unplug).
+That closes M1 except two honest gaps: **mouse selection** (needed the M2 renderer's grid hit-testing,
+and landed with it) and **reconnect by USB serial number** (only exercised against a pty here — no
+adapter to unplug).
 M1's own line item "selection" is therefore half done: copy exists, choosing what to copy does not.
 
 **Config and font are configurable.** `crates/dtr-config` reads
@@ -607,8 +617,8 @@ redistributable — which is why dtr reads theme files and ships one MIT-license
 corpus), and specifies an
 `.itermcolors` importer and a `[theme.overrides]` table. Two deliberate divergences: the config uses
 the owner's shape `theme = "kanagawa wave"` rather than a `[theme] name = ...` table, and the
-`[theme.overrides]` table is not implemented, so `dtr config set` never needs to walk a three-level
-dotted path.
+`[theme.overrides]` table is not implemented, so `--config-set` never needs to walk a three-level
+dotted path. (The `dtr config` subcommand that exists writes `theme` only.)
 
 `dtr theme import <file> [--name NAME] [--force]` implements the importer that memo specifies. It is
 the first real subcommand rather than another flat flag, because `theme` is a family (`list`, `cp`,
@@ -640,8 +650,8 @@ texel (0,0) made every solid quad invisible with no validation error, and `queue
 
 **The font comes from fontique** (system discovery, DirectWrite on Windows, fontconfig on Linux) with
 **swash** rasterising. That means a real system face — DejaVu Sans Mono here — instead of egui's bundled
-one, and `font.path` still wins when set. Bold and italic are the next slice: the atlas is keyed by
-glyph id and size, not by face, so the face selection has to come first.
+one, and `font.path` still wins when set. Bold and italic were the next slice and landed: the atlas
+key includes the face index, and the cell's `bold`/`italic` flags pick one of four loaded faces.
 
 **Scrollback you can see.** The wheel scrolls, `Shift+PageUp/PageDown` scrolls a page and `Shift+Home/End`
 jump to the ends, and the status bar says `↑ 20 lines` while you are away from the live screen — because
@@ -802,8 +812,10 @@ and not a blank rectangle. The egui pane is clipped to its leaf, and the palette
 overlay so it cannot be covered by a listing. Ordering, selection clamping, parent resolution and
 `~` display are pure functions with tests that never touch a disk.
 
-**SFTP is deliberately not here.** The owner's plan is a small file-explorer pane later on, not a
-transfer command; `docs/sftp.md` has the measurements for when that happens.
+**SFTP was deliberately not here, and it arrived anyway.** The owner's plan was a small
+file-explorer pane later on, not a transfer command; the explorer downloads through it now —
+`crates/dtr-sftp` is our own codec over the `ssh -s sftp` child, and `docs/sftp.md` has the
+measurements that shaped it.
 
 **The mouse is the program's when the program said so, and the terminal's otherwise.** Three gestures
 collide in a terminal: this one selects text, a program that asked for the mouse expects clicks, and the
@@ -913,10 +925,14 @@ it is opened with.
 
 ### M3 — the rest — the rest of a terminal
 
-- ConPTY transport (`portable-pty` or hand-rolled `CreatePseudoConsole`), local shells, WSL.
-- Tabs/splits, torn-off windows (`egui::ViewportBuilder`), session restore.
-- IME/TSF preedit, kitty graphics, search (needs hand-bound C API — not in the 0.2.2 Rust surface).
-- Quake mode, tray, taskbar progress, single-instance CLI.
+- ConPTY transport (done: `portable-pty`), local shells (done), WSL.
+- Torn-off windows (`egui::ViewportBuilder`) and session restore; tabs and splits are
+  done (`crates/dtr/src/layout.rs`), and so is IME/TSF-style preedit (`crate::ime`).
+- Search and kitty graphics are **not** blocked on the Rust surface any more: the
+  pinned binding exposes `libghostty_vt::search::Search`, and kitty graphics is a
+  `kitty-graphics` crate feature dtr compiles out with `default-features = false`.
+  Both are UI and renderer work now; the ordered list is `docs/ghostty.md`.
+- Quake mode (quick terminal), tray, taskbar progress (`OSC 9;4`), single-instance CLI.
 
 ---
 
@@ -930,11 +946,12 @@ Three paths, all thin wrappers over one function:
 
 1. **In-app frame capture.** After `egui_wgpu` render, `copy_texture_to_buffer` → map → encode PNG.
    Works on Windows and Linux, exact pixels, no compositor involvement.
-   - `F12` → `$XDG_PICTURES_DIR/dtr-<ts>.png` (Windows: `%USERPROFILE%\Pictures`).
-   - `--screenshot <path>` → capture the frame after `--screenshot-delay-ms` (default 500), then exit 0.
-2. **Headless render.** `--headless --screenshot out.png` constructs wgpu with no surface,
-   renders egui to an offscreen texture, writes PNG. No display server, no window manager —
-   this is the CI path (`VK_ICD_FILENAMES` → lavapipe or `LIBGL_ALWAYS_SOFTWARE=1`).
+   - `--screenshot <path>` → capture the frame after `--screenshot-delay` (default 300), then exit 0.
+   - `--capture <path> --capture-after MS` → the live window's surface, which is what shows a menu
+     or a font difference the offscreen path cannot.
+2. **Headless render.** `--screenshot out.png` with no display constructs wgpu with no surface,
+   renders egui to an offscreen texture, writes PNG. No display server, no window manager — this is
+   how a display-less machine reviews the UI (lavapipe, or a real adapter through `--gpu`).
    Fed with `--replay` bytes so the image has predictable content.
 3. **Deterministic fixtures.** `tests/golden/*.vt` fed through `--replay`, with the resulting PNG
    compared by a tolerance check (or just committed for human/agent review).
@@ -1109,9 +1126,9 @@ which is a small argument for serial-first.
 - `packages.default` build (through `desktop-entry`), and `packages.windows` through
   `single-exe`.
 - `single-exe`: DLL allowlist assertion on the Windows binary (§7).
-- Still to come: `clippy`, and a `screenshot` check — `--headless --replay fixture
-  --screenshot $out.png` under lavapipe, asserting a non-blank image, with the PNG as the
-  artifact.
+- Still to come: `clippy`, and a `screenshot` check — `--replay fixture --screenshot
+  $out.png` under lavapipe, asserting a non-blank image, with the PNG as the artifact.
+  (`--screenshot` alone is the display-less path; there is no `--headless` switch.)
 
 **Release:** `just release X.Y.Z` bumps the version in `Cargo.toml` (the only copy —
 `flake.nix` imports it), commits, tags and pushes; `.github/workflows/release.yml` builds
@@ -1214,8 +1231,9 @@ Practical implementation:
 
 ## 10. Open questions
 
-1. **Windows-native look**: stay with winit decorations for M0, or custom titlebar immediately?
-   (Mica/acrylic is M3 territory either way.)
+1. ~~**Windows-native look**: stay with winit decorations for M0, or custom titlebar immediately?~~
+   Answered: `[window] chrome = client | native`, and `client` is the default on both platforms
+   (`docs/chrome.md`). Mica/acrylic is still M3 territory.
 
 ---
 
@@ -1389,8 +1407,9 @@ replaces Tera Term without running TTL inherits none of the scripts. So TTL is a
 the first deliverable is not an interpreter but the **specification** one can be written against:
 `crates/dtr-ttl/MANUAL.md`.
 
-The crate `dtr-ttl` exists with that manual and its design intent in `src/lib.rs`. No interpreter
-yet. The manual is distilled from the Tera Term 5 macro reference (196 commands, eight syntax
+The crate `dtr-ttl` exists with that manual and its design intent in `src/lib.rs`, and an
+interpreter that runs the vendored corpus (`src/interp.rs`, `tests/run_corpus.rs`). What it still
+does not do is `docs/ttl-gaps.md`. The manual is distilled from the Tera Term 5 macro reference (196 commands, eight syntax
 chapters, five appendices), reorganised into a single narrative: the execution model first, then
 lexical structure, types, expressions, statements, and the command reference grouped the way the
 upstream index groups it. Every version gate is kept, and §5.5 lists what upstream leaves
@@ -1416,9 +1435,10 @@ host interface the terminal implements. Five facts shape that interface and are 
 
 What does not map onto dtr is the interesting part, and it is a list of decisions rather than
 work: `connect` and `cygconnect` take a *Tera Term command line* (`connect '/C=1 /BAUD=115200'`),
-so dtr needs either that vocabulary or a translation; `callmenu`, `sendkcode`, `loadkeymap` and
-`restoresetup` address Tera Term's menus and keyboard setup file, which dtr does not have; and
-`getttpos`, `showtt` and `getspecialfolder` are window and shell concepts with no equivalent yet.
+so dtr needs either that vocabulary or a translation; `callmenu` and `sendkcode` address Tera
+Term's menus and keyboard setup file, which dtr does not have, so they are accepted and do
+nothing (`commands.rs`); `loadkeymap` and `restoresetup` have no equivalent either; and `getttpos`
+and `showtt` are window concepts with no equivalent, while `getspecialfolder` is implemented.
 They are separable, though: nothing else in the language depends on them, so the first
 implementation can refuse them explicitly — a macro that reaches such a command should be told
 so, not left to conclude that its menu command worked.

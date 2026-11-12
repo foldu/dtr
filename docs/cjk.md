@@ -5,11 +5,11 @@ Status: research, 2026-11-07 · Scope: *how* dtr draws text outside its grid fac
 compared with Ghostty, then the order to close the gap. Not a rewrite of the
 glyph pipeline.
 
-**Landed so far: M0, M1 and M2** (§5). `dtr --font-report` exists, every glyph is
-placed on one grid baseline at its design size, and the cell width comes from the
-VT core. §1 keeps the before-numbers because that is the evidence the plan rests
-on; the "now" column in that table is what the binary prints. M3–M6 are still
-plans.
+**M0–M7 have landed** (§5): `--font-report`, one grid baseline, the core's cell
+width, Ghostty's constraint rules, the fallback policy, colour emoji, a sprite
+face for box drawing, and a grid face chosen per platform. §1 keeps the
+before-numbers because that is the evidence the plan rests on; the "now" column is
+what the binary prints. What is left is §9 — its head is gap 9 in §4.
 
 Question: the grid face covers Latin, so everything else arrives through
 `Fonts::face_for` and is placed by `render::prepare_pane`. On this machine that
@@ -46,8 +46,9 @@ is what M1–M2 made it draw.
 
 The "drew before" column is the old rule applied to the measured ink (the ink
 does not change with placement, so the arithmetic is exact); the "draws now"
-column is `--font-report`. The first four rows are fixed; the last three are
-what M3–M4 are for.
+column is `--font-report`. The first four rows are fixed by M1–M2, and the last
+three by M3–M5 and M7; the Nerd Font row now needs a patched family installed,
+which is a §9 row rather than a placement bug.
 
 `啊` (`U+554A`) is the repository's CJK test character (`AGENTS.md`), so it is
 in this table and in the tests: one glyph, chosen for ink in all four quadrants,
@@ -74,24 +75,23 @@ Three rules produced every "before" row, and each was wrong in a different way:
    renderer. And a PUA icon whose design advance is 1 em (14 px) was drawn at
    that size inside a 9 px cell — the powerline arrow above is 8 px wide but
    18 px tall in a 17 px row, so a powerline prompt overlapped the row above.
-   Nothing fits a symbol to its cell and nothing gives a wide icon the second
-   cell; **still true, M3**.
+   Nothing fitted a symbol to its cell and nothing gave a wide icon the second
+   cell. Both are fixed: `render::Constraint` and `constraint_width` (M3).
 
-The width half of rule 3 is fixed (`fill_cells` reads `Cell::wide()`); the symbol
-half is M3.
+The width half of rule 3 is fixed too (`fill_cells` reads `Cell::wide()`, M2).
 
-**The fallback face is not a policy, it is whatever comes first** — still true,
-M4. Running the same probe twice against the same config produced
-`0xProto Nerd Font Mono` first and then `Courier New`; `face_for` walks
-`collection.family_ids()` and takes the first family whose charmap maps the
-character. A proportional Latin face with a stray PUA mapping wins over the
-installed Nerd Font whenever fontconfig happens to list it first. Emoji come from
-`Unifont Upper` (or DejaVu Sans) for the same reason — the first family with the
-codepoint, not the terminal-appropriate one.
+**The fallback face was whatever came first** — fixed by M4: the configured list,
+then `fonts::FALLBACK`, then the platform's script preference, then a walk with
+Nerd Fonts first and monospaced before proportional. Before that, running the same
+probe twice against the same config produced
+`0xProto Nerd Font Mono` first and then `Courier New`; `face_for` walked
+`collection.family_ids()` and took the first family whose charmap mapped the
+character, so a proportional Latin face with a stray PUA mapping beat the
+installed Nerd Font whenever fontconfig happened to list it first.
 
-Also still true and cheap to fix (M6): a block element (`█`, from the grid face)
-is 10×18 at (-1,-1) in a 9×17 cell, so full blocks overlap their neighbours and
-every TUI box leaks by a pixel.
+Also fixed by M6: a block element (`█`, from the grid face) used to be 10×18 at
+(-1,-1) in a 9×17 cell, so full blocks overlapped their neighbours and every TUI
+box leaked by a pixel. The sprite face draws it into the cell.
 
 ---
 
@@ -102,7 +102,7 @@ every TUI box leaks by a pixel.
 | cell metrics and the one baseline | `render.rs` `Metrics`, computed in `Fonts::load` |
 | which family is the grid | `render.rs` `GRID_CANDIDATES` + `load_faces` — the configured family, then the fixed-pitch names, then the platform's own monospace family |
 | which face has a character | `render.rs` `Fonts::face_for` — preferred list (`fonts::FALLBACK`), then every family |
-| rasterise | `render.rs` `Fonts::rasterise` — swash, `Source::Outline` only, `.hint(true)` |
+| rasterise | `render.rs` `Fonts::rasterise` — swash, `[ColorOutline, ColorBitmap, Outline]`, `.hint(true)` |
 | place it | `render.rs` `placement` — the bearings on `Metrics::baseline`, shared with `--font-report` |
 | constrain it | `render.rs` `Constraint` / `lay_out` — a port of Ghostty's rule set; `constraint_for` is the per-codepoint policy |
 | how many cells it may use | `render.rs` `constraint_width` — Ghostty's `renderer/cell.zig` rule, from the frame's neighbours |
@@ -112,10 +112,10 @@ every TUI box leaks by a pixel.
 | report | `main.rs` `--font-report` → `render::font_report` |
 | UI text fallback | `fonts.rs` `ui_fallback` (egui's own faces are Latin-only) |
 
-The atlas key is `(face, glyph id, size × 4, constraint, cells)`; the size is
-the same for every face, so a fallback is rasterised at the grid's point size
-with no adjustment (M4 changes that), and a constrained glyph is a different
-raster because it is rasterised at a different size.
+The atlas key is `(face, glyph id, size × 4, constraint, cells)`; the size is the
+grid's point size for every face, and a fallback multiplies it by its `adjust`
+(M4), so a constrained glyph is a different raster because it is rasterised at a
+different size.
 
 ---
 
@@ -242,7 +242,7 @@ because a patched 1 em icon in a 0.6 em cell is the common case.
 | 6 | colour glyphs never requested | monochrome emoji, and boxes for bitmap-only faces | **done**, M5: a second RGBA atlas and swash's colour sources |
 | 7 | graphics elements come from a font | `█`/box drawing leak a pixel, seams between blocks | **done**, M6: a sprite face draws box drawing, blocks and braille into the cell; the arcs, diagonals and legacy blocks still come from a font |
 | 8 | cell width guessed by `unicode-width` | wrong for VS16/ZWJ clusters; spacer cells unhandled | **done**, M2: `Cell::wide()` from the core |
-| 9 | no per-cell shaper | combining marks stack on the base; VS15/VS16 do nothing | not scheduled: shape a cell's cluster before placing |
+| 9 | no per-cell shaper | every codepoint of a cluster is placed at the cell's origin, one glyph each: a combining mark lands over its base by luck, a flag or a ZWJ family draws blank, VS15/VS16 do nothing | not scheduled: shape a cell's cluster before placing |
 | 10 | cursor is one cell | a block cursor covers half a Han character | **done**, M2: `wide_tail`, 2-cell block |
 | 11 | the grid face is a list of Linux families | a fresh Windows drew every character from Segoe UI Emoji at 1.6× the cell: `Microsoft` → `M crosoft`, SGR as literal `[0m` | **done**, M7: the platform's generic monospace family, and the fixed-pitch names each OS ships |
 | 12 | the first face with a glyph answers | emoji come out monochrome once a symbol face has loaded | **done**, M7: a pictograph skips the already-loaded shortcut and asks the preference list |
@@ -255,8 +255,8 @@ Ordered so each step is independently visible and testable. M0 is the
 instrument every later step needs; M1–M2 are the CJK fix proper; M3–M4 the
 icons; M5–M6 the remaining families. Estimates are for a tested slice.
 
-**Done: M0, M1, M2, M3.** Their acceptance lines are the tests named in §7.2,
-and `dtr --font-report` prints the "draws now" column of §1.
+**Done: M0–M7** (M6 for the structural ranges only). Their acceptance lines are the
+tests named in §7.2, and `dtr --font-report` prints the "draws now" column of §1.
 
 ### M0 — make it measurable (`--font-report`) — done
 
@@ -276,8 +276,8 @@ Risk: none. Do this first or the later steps are judged by eye.
 
 *Landed:* `--font-report` (not a subcommand — the existing non-interactive flags
 are flat, and this one wants the same `Look` a window would use, so it sits after
-the config and theme are read). The `-v` line now carries the fallback face's
-ascended size; "how it was found" is still the walk, so it says nothing yet.
+the config and theme are read). The `-v` line carries the fallback face's ascended
+size and how it was found — `configured`, `listed`, `script` or `walk`.
 
 ### M1 — one cell canvas, one baseline — done
 
@@ -459,9 +459,10 @@ Measured on this machine (DejaVu Sans Mono at 28 pt, cell 17×33): `啊` 25×27 
 26×28 with `adj 1.04`; `あ` → 24×26; `。` → 10×10; `F015` from a monospaced
 Nerd Font at 19×17; the same answer three runs in a row and after `fc-cache -f`.
 
-Not done: emoji families are *not* in the built-in list. Putting Noto Color Emoji
-there before M5 would only make `😀` blank on purpose, so the list lands in M5
-where the glyphs do.
+Landed in M5: the emoji families are in the built-in list now (`fonts::FALLBACK`
+carries Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji and Twemoji), after the
+colour atlas existed to draw them; before that they would only have made `😀`
+blank on purpose.
 
 ### M5 — colour emoji — done
 
@@ -684,7 +685,7 @@ The probe that produced §1 is a flag now:
 
 ```sh
 dtr --font-report              # honours [font] size/family/path and the theme
-dtr --font-report --font-family 'Noto Sans Mono CJK SC'
+dtr --fonts                    # the families the probe will accept, with coverage
 ```
 
 It loads the real `Fonts`, walks the same sample (`M`, `g`, `啊`, `あ`, `。`, `─`,
@@ -743,12 +744,15 @@ the rasteriser-disagreement problem the UI snapshots already have). Landed:
 * `the_fallback_list_is_read_in_order`, `a_fallback_that_is_not_a_list_says_so`
   (dtr-config) — the key parses, keeps order, and drops an empty name.
 
-Still to write, with the milestone that makes them mean something:
+Still to write, though the code they would cover has landed:
 
-* `a_block_fills_its_cell` — `█` size equals the cell (M6, if the sprite face
-  lands; a block element is deliberately untouched until then).
+* `a_block_fills_its_cell` — `█` size equals the cell. The sprite face draws it
+  (M6) and `a_full_block_leaves_no_seam` checks the picture; a direct size
+  assertion is still missing.
 * `a_monospace_family_wins_over_a_proportional_one` — the M4 policy, with a
-  synthetic candidate list.
+  synthetic candidate list. The rule is in `face_for`'s walk;
+  `a_preferred_fallback_family_is_chosen_over_an_arbitrary_one` covers the
+  preferred half.
 
 All of them skip when the font is absent, like the existing CJK tests, because
 the devShell pins `FONTCONFIG_FILE` to `fontPackages` — see §7.3.
@@ -869,7 +873,7 @@ it, and the guest measures 102 × 34 cells at 125 % where the broken build had
 
 | what | how it reads | where it starts |
 |---|---|---|
-| **No per-cell shaper** (gap 9). A cell draws its first `char`, so `❤️` is `❤`, `VS15`/`VS16` do nothing, and a combining mark stacks on the base instead of being shaped with it. | an emoji that will not take its colour form; a decomposed dakuten landing in the previous cell | shape the cell's cluster (swash `shape`) before `constraint_for`; the atlas key becomes `(face, cluster hash, size, constraint, cells)` |
+| **No per-cell shaper** (gap 9). A cell's cluster is drawn as its codepoints, each at the cell's origin, so `❤️` is `❤` and `❤` + VS16 is two glyphs on one spot, `VS15`/`VS16` change nothing, a flag or a ZWJ family draws blank, and a decomposed dakuten lands by luck on its base rather than being shaped with it. | an emoji that will not take its colour form; a blank flag; a ZWJ sequence in a prompt | shape the cell's cluster (swash `shape`) before `constraint_for`; the atlas key becomes `(face, cluster hash, size, constraint, cells)` |
 | **Legacy computing, arcs and diagonals** still come from a font: `╭╮╯╰`, `╱╲╳`, and Ghostty's 1 413 + 633 lines of legacy block drawing. | a seam or a one-pixel overlap in a TUI that uses them — rare outside the structural ranges M6 draws | port `sprite/draw/arc.zig` and the legacy ranges into `crates/dtr/src/sprite.rs` |
 | **Nerd Fonts are unverified on Windows.** The guest has none installed, so `U+F015` answers *no face has this character* and the powerline arrow falls to Segoe UI Symbol. | on a Windows machine without a patched family, an icon column that is empty or monochrome | install one family in the guest (or point `[font] path` at a `.ttf`) and re-run `--font-report` |
 | **150 % and 200 % have never been observed.** The guest offers only 100 % and 125 % at 1280 × 800 on `virtio-vga`, so the scaling fix is verified at 1× and 1.25× only. | an integer factor is the case where `ceil` costs the least; 1.5× is where a half-pixel cell would show | a bigger `virtio-vga` mode or a second head, then the same two runs |

@@ -797,25 +797,23 @@ the two payloads that are ours.
 
 - `PLAN.md` — design, milestones, spike findings, and reversed decisions.
 - `crates/dtr-ttl/MANUAL.md` — the Tera Term macro language, distilled.
-- `crates/dtr-ttl/tests/corpus/` — Tera Term's own 53 macro tests, vendored under their
-  BSD-3 notice; its README says what they pin and what they cannot. Totals in
-  `tests/corpus.rs` move only when the corpus is re-vendored, `tests/run_corpus.rs` runs
-  them against a recording host, and `tests/corpus/corpus-dialogs.txt` is what they said —
-  regenerate with `UPDATE_CORPUS_DIALOGS=1`.
+- `crates/dtr-ttl/tests/corpus/` — Tera Term's own 53 macro tests under their BSD-3
+  notice; `tests/corpus.rs` totals move only on a re-vendor, `run_corpus.rs` runs them
+  against a recording host, and `UPDATE_CORPUS_DIALOGS=1` regenerates the dialogs file.
 - `docs/ttl-gaps.md` — what the TTL interpreter still does not do, and the order worth
   doing it in.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
 - `docs/compio.md` — the compio port: one runtime a thread, why tokio went, and its
   traps.
+- `docs/ghostty.md` — what Ghostty has that dtr does not: the duties the VT core hands
+  the embedder, the renderer and window gaps, and the order worth closing them in.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face: Han/kana,
   fullwidth punctuation, Nerd Font icons, emoji. Read it before changing `prepare_pane`'s
   placement rules.
 - `docs/bench.md` — what a vtebench number means and what a `.dat` is worth.
 - `docs/themes.md` — which terminal theme formats dtr could read.
-- `docs/gtk-palette.md` — how `native` reads the GTK4/libadwaita palette on Linux
-  without linking GLib: the portal for scheme and accent, the constants and metrics
-  measured out of libadwaita's gresource, the live signal, and why v1 does not parse
-  user CSS.
+- `docs/gtk-palette.md` — how `native` reads the GTK4/libadwaita palette without linking
+  GLib: the portal, libadwaita's constants, and the live signal.
 - `docs/ui.md` — the chrome: why it has a skin at all, what a token is, what `native` means
   on each platform, and the rules the tab strip, the settings menu, the palette and the
   keyboard map obey.
@@ -824,15 +822,13 @@ the two payloads that are ours.
 - `docs/input.md` — what the program is told: keys, mouse, IME, selection, and the clipboard.
 - `docs/files.md` — clicking a path a program printed: the VFS, hyperlinks, previews, the
   save dialog, and what materialising a remote file does to its permissions.
-- `docs/windows.md` — the first Windows run, classified: the DPI cluster (grid font size,
-  status bar), serial baud and autobaud, glyph and icon rendering, resize cost; §2.1
-  carries the measurement at 125 %.
-- `docs/chrome.md` — how the tabs get into the title bar: client chrome on Windows and
-  Linux, and the per-platform metrics and glyphs that keep the buttons looking native.
-- `docs/panes.md` — what the pane layer still does not do, in the order it is worth
-  doing: the exit bug that closes a tab, move/swap, split-before, a drawn divider, and
-  the boundary against the session multiplexer. Read it before adding a pane verb, so
-  the geometry keeps living in `layout.rs` instead of growing a second copy.
+- `docs/windows.md` — the first Windows run, classified: the DPI cluster, serial baud,
+  glyph and icon rendering, resize cost; §2.1 has the measurement at 125 %.
+- `docs/chrome.md` — how the tabs get into the title bar, and the per-platform metrics
+  and glyphs that keep the buttons looking native.
+- `docs/panes.md` — what the pane layer still does not do, in order: the exit bug that
+  closes a tab, move/swap, split-before, a drawn divider, and the multiplexer boundary.
+  Read it before adding a pane verb, so the geometry stays in `layout.rs`.
 - `crates/dtr/src/pane.rs` — transports, publish, reconnect, modem, paste.
 - `crates/dtr/src/app.rs` — the event loop, keys, and the palette glue.
 - `crates/dtr/src/layout.rs` — the split tree. It knows nothing about terminals; a leaf is
