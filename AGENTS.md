@@ -532,6 +532,12 @@ like when it was wrong.
   400 MB scan must never be downloaded to find out it is too big. The cache key is
   **`{ machine, path }`**, not a path; the preview is a tooltip-layer `Area`,
   `interactable(false)`, flipped at the edges with the clamp last, and `CursorLeft` clears it.
+  **A preview belongs to the grid**: it is suppressed while `App::overlay_open` says an
+  overlay has the window — the tooltip layer is above the foreground one, so a stale preview
+  paints *over* the card that covered it — and while `Context::layer_id_at` puts the pointer
+  on an egui surface (a card, a menu, a file pane, a scroll bar); `App::cell_at` returns no
+  cell outside the focused pane, or a pointer over the tab strip maps to row 0 and previews a
+  file behind the tabs.
 - **Right-clicking a link is a menu** with `Open`, `Save as...`, `Copy path`, and only a link
   *under the pointer* gets one. A left press outside closes it *and goes nowhere else*, or
   dismissing a menu also starts a selection, which needs the menu's rect from the last frame

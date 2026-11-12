@@ -887,6 +887,37 @@ fn closed(active: usize, count: usize) -> Option<usize> {
     Some(active.min(count - 2))
 }
 
+/// The cell of the grid under a physical point, or `None` when it is not the
+/// grid's.
+///
+/// A point outside the pane is no cell at all. Clamping it to the nearest one —
+/// which is what the mapping did, on the argument that a drag leaving the grid
+/// should still report — made the tab strip's row the grid's first row: a
+/// pointer over the tabs asked the pane about a link there and raised the
+/// pointing hand and an image preview of a file behind the tabs, and a press in
+/// the strip anchored a selection in row 0. Reports to a *program* still clamp,
+/// and that is `App::pane_pixels`; this is the one that answers "what is under
+/// the pointer", which has a true answer only inside the grid.
+///
+/// `grid` is the frame's rows and columns, which can be smaller than the pane
+/// while a resize settles, so the cell has to be checked against both.
+fn cell_of(
+    pane: crate::layout::Rect,
+    cell: (f32, f32),
+    grid: (u32, u32),
+    at: (f64, f64),
+) -> Option<(u32, u32)> {
+    if cell.0 <= 0.0 || cell.1 <= 0.0 || !pane.contains(at.0 as f32, at.1 as f32) {
+        return None;
+    }
+    let col = ((at.0 as f32 - pane.x) / cell.0).floor().max(0.0) as u32;
+    let row = ((at.1 as f32 - pane.y) / cell.1).floor().max(0.0) as u32;
+    if col >= grid.0 || row >= grid.1 {
+        return None;
+    }
+    Some((col, row))
+}
+
 /// Translate the keys a file pane understands. Named arrows are
 /// keyboard-layout independent; `h`, `r`, `g` and `G` are the vim-ish ones the
 /// brief asks for. Modifiers are filtered by the caller.
@@ -1287,18 +1318,29 @@ impl App {
         self.active = index;
     }
 
+    /// Whether an overlay is up, and so owns the window.
+    ///
+    /// One list, because a surface that has taken the keys has taken the pointer
+    /// with them: a link hovered behind a card lit a pointing hand and raised a
+    /// preview *above* the card — the tooltip layer is above the foreground one —
+    /// of a cell the person could not see. A new modal belongs here.
+    fn overlay_open(&self) -> bool {
+        self.palette.open
+            || self.settings.open
+            || self.keymap_card.open
+            || self.about_open
+            || self.pager.is_open()
+            || self.link_menu.is_open()
+            || self.serial_dialog.is_some()
+    }
+
     /// Whether keys belong to the terminal rather than to an overlay.
     ///
     /// The same surfaces `on_key` hands the keyboard to: a composition that
     /// committed into the shell behind an open palette would type somewhere the
-    /// person is not looking. A new modal belongs in both places.
+    /// person is not looking.
     fn terminal_owns_keys(&self) -> bool {
-        !self.palette.open
-            && !self.settings.open
-            && !self.keymap_card.open
-            && !self.about_open
-            && !self.pager.is_open()
-            && self.serial_dialog.is_none()
+        !self.overlay_open()
     }
 
     /// Handle one event from the platform's input method.
@@ -1737,6 +1779,22 @@ impl App {
         ))
     }
 
+    /// Whether the pointer is over an egui surface — a file pane, a card, a menu,
+    /// a scroll bar — rather than the grid.
+    ///
+    /// `layer_id_at` answers for the areas egui drew above the base layer, which
+    /// is what a card, a popup and a file pane are. The tab strip and the status
+    /// bar are painted, not areas, so they are the cell mapping's business:
+    /// `cell_at` refuses a point outside the pane.
+    fn over_egui(&self, at: (f64, f64)) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return false;
+        };
+        let scale = self.scale();
+        let points = egui::pos2(at.0 as f32 / scale, at.1 as f32 / scale);
+        gpu.egui_state.egui_ctx().layer_id_at(points).is_some()
+    }
+
     /// The pointer moved: if it entered a different cell, ask the pane what
     /// link is on it.
     ///
@@ -1746,7 +1804,9 @@ impl App {
     fn hover(&mut self, at: (f64, f64)) {
         // A program that owns the mouse owns its links too: a pointing hand and a
         // thumbnail are an invitation to click, and that click is the program's.
-        if self.mouse_captured() {
+        // An overlay has the window for the same reason, and an egui surface the
+        // pointer is over is not the grid: no cell there is being pointed at.
+        if self.mouse_captured() || self.overlay_open() || self.over_egui(at) {
             self.hover_cell = None;
             self.hover_link = None;
             self.thumb_pending = None;
@@ -2186,11 +2246,18 @@ impl App {
         scale: f32,
         ctx: &egui::Context,
     ) -> Option<(egui::TextureHandle, egui::Vec2)> {
-        // The pager owns the window while it is open; a tooltip over it would be
+        // An overlay owns the window while it is open; a tooltip over it would be
         // a picture of a file the user is not pointing at. The link menu is a
         // sharper case: it opens *at* the pointer, exactly where the preview would
-        // be, and the tooltip layer sits above a foreground menu.
-        if self.pager.is_open() || self.link_menu.is_open() {
+        // be, and the tooltip layer sits above a foreground menu. The pointer over
+        // an egui surface — a menu, a file pane, a scroll bar — is the same answer
+        // for the same reason: the preview would follow it there.
+        if self.overlay_open() {
+            return None;
+        }
+        if let Some(pointer) = ctx.pointer_latest_pos()
+            && ctx.layer_id_at(pointer).is_some()
+        {
             return None;
         }
         let uri = self.hover_link.as_ref()?.uri.clone();
@@ -3625,35 +3692,23 @@ impl App {
     fn cell_at(&self, x: f64, y: f64) -> Option<usize> {
         let gpu = self.gpu.as_ref()?;
         let metrics = gpu.metrics();
-        if metrics.cell_width <= 0.0 || metrics.cell_height <= 0.0 {
-            return None;
-        }
         let session = self.session()?;
         let frame = session.frame.as_ref()?;
-        let cols = u32::from(frame.cols);
-        let rows = u32::from(frame.rows);
-        if cols == 0 || rows == 0 {
-            return None;
-        }
         // Relative to the focused pane: a split moves the grid's origin.
         let tab = &self.tabs[self.active];
-        let gpu = self.gpu.as_ref()?;
         let screen = (gpu.config.width as f32, gpu.config.height as f32);
-        let origin = self
+        let pane = self
             .pane_views(tab, metrics, screen, gpu.scale())
             .into_iter()
             .find(|(id, _)| *id == tab.focus)
-            .map(|(_, pane)| (pane.rect.x, pane.rect.y))?;
-        let col = ((x as f32 - origin.0) / metrics.cell_width)
-            .floor()
-            .max(0.0) as u32;
-        let row = ((y as f32 - origin.1) / metrics.cell_height)
-            .floor()
-            .max(0.0) as u32;
-        if col >= cols || row >= rows {
-            return None;
-        }
-        Some((row * cols + col) as usize)
+            .map(|(_, pane)| pane.rect)?;
+        let (col, row) = cell_of(
+            pane,
+            (metrics.cell_width, metrics.cell_height),
+            (u32::from(frame.cols), u32::from(frame.rows)),
+            (x, y),
+        )?;
+        Some(row as usize * usize::from(frame.cols) + col as usize)
     }
 
     /// Open the connection sheet for `port`, prefilled from the store.
@@ -4267,14 +4322,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some((position.x, position.y));
-                // While the pager is open the pointer belongs to egui: hovering
-                // the grid underneath would light up a link the pager covers, and
-                // a drag would select text nobody can see. A menu is the same: it
-                // is about one file, not about the cell under the pointer.
-                if !self.pager.is_open()
-                    && !self.link_menu.is_open()
-                    && self.serial_dialog.is_none()
-                {
+                // While an overlay is up the pointer belongs to it: hovering the
+                // grid underneath would light up a link it covers, and a drag
+                // would select text nobody can see. `hover` asks the same
+                // question about egui's own surfaces.
+                if !self.overlay_open() {
                     self.pointer_move((position.x, position.y));
                     // A divider drag is not a hover: the pointer is over a gap,
                     // and asking the pane about a cell that is not under it
@@ -4438,10 +4490,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // has an underline or a handle to draw. While a divider is
                     // being dragged the arrow stays put, because the pointer
                     // running ahead of the split does not mean the drag ended.
-                    let resizing = if self.pager.is_open()
-                        || self.link_menu.is_open()
-                        || self.serial_dialog.is_some()
-                    {
+                    // An overlay takes both affordances with the window: a hand
+                    // over a card is pointing at a link the card covers.
+                    let resizing = if self.overlay_open() {
                         None
                     } else {
                         let held = self.divider.as_ref().map(|divider| divider.axis);
@@ -4456,7 +4507,9 @@ impl ApplicationHandler<UserEvent> for App {
                             winit::window::CursorIcon::ColResize
                         }
                         Some(crate::layout::Axis::Vertical) => winit::window::CursorIcon::RowResize,
-                        None if self.hover_link.is_some() => winit::window::CursorIcon::Pointer,
+                        None if self.hover_link.is_some() && !self.overlay_open() => {
+                            winit::window::CursorIcon::Pointer
+                        }
                         None => winit::window::CursorIcon::Default,
                     };
                     if self.cursor_icon != Some(wanted) {
@@ -5734,7 +5787,43 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{closed, copy_to, cycled, mouse_goes_to_program, save_name, tab_name};
+    use super::{cell_of, closed, copy_to, cycled, mouse_goes_to_program, save_name, tab_name};
+
+    /// A point outside the pane is no cell at all.
+    ///
+    /// The tab strip is above the grid and the status bar below it, and both are
+    /// the window's rather than a cell's. Clamping either to the nearest row is
+    /// what put a pointing hand and an image preview behind the tabs.
+    #[test]
+    fn a_point_outside_the_pane_is_no_cell() {
+        // 800 × 600 at (100, 30), in 10 × 20 cells: 80 columns, 30 rows.
+        let pane = crate::layout::Rect::new(100.0, 30.0, 800.0, 600.0);
+        let cell = (10.0, 20.0);
+        let grid = (80, 30);
+        assert_eq!(cell_of(pane, cell, grid, (100.0, 30.0)), Some((0, 0)));
+        assert_eq!(cell_of(pane, cell, grid, (895.0, 625.0)), Some((79, 29)));
+        assert_eq!(
+            cell_of(pane, cell, grid, (500.0, 10.0)),
+            None,
+            "the tab strip"
+        );
+        assert_eq!(cell_of(pane, cell, grid, (50.0, 300.0)), None, "left of it");
+        assert_eq!(
+            cell_of(pane, cell, grid, (900.0, 300.0)),
+            None,
+            "right of it"
+        );
+        assert_eq!(
+            cell_of(pane, cell, grid, (500.0, 630.0)),
+            None,
+            "the status bar"
+        );
+        // A pane larger than the frame's grid — a resize that has not settled —
+        // is still bounded by the grid.
+        assert_eq!(cell_of(pane, cell, (10, 2), (500.0, 300.0)), None);
+        // No cell size is no cell: the grid is not laid out yet.
+        assert_eq!(cell_of(pane, (0.0, 0.0), grid, (500.0, 300.0)), None);
+    }
 
     /// A program's title names the tab, and silence does not.
     ///

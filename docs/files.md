@@ -89,6 +89,26 @@ preview is a tooltip-layer `Area` with `interactable(false)`, placed below-right
 and flipped at the edges with the clamp applied last, and `CursorLeft` clears the hover so a
 preview cannot outlive the pointer that asked for it.
 
+**A preview belongs to the grid, so it is suppressed by anything that is not the grid.** Two
+surfaces were wrong in the same way. An overlay — a card, the palette, the pager, a menu — has
+the window, and the preview is in the *tooltip* layer, above the foreground layer an overlay is
+drawn in: a link hovered before `ctrl+?` raised its picture over the keyboard map, of a cell
+nobody could see. And the cell mapping clamped a point outside the pane to the nearest one, so
+the pointer over the tab strip (or the status bar, or above a split) mapped to row 0 and asked
+the pane what link was there — a pointing hand and a preview of a file behind the tabs. The
+answers are one list and one rect: `App::overlay_open` is every surface that has taken the
+keyboard, `Context::layer_id_at` is egui's own answer for a card, a popup, a file pane or a
+scroll bar under the pointer, and `App::cell_at` returns `None` outside the focused pane's
+rectangle rather than the nearest cell — `cell_of` is that mapping, and
+`a_point_outside_the_pane_is_no_cell` is the test. Reports to a *program* still clamp
+(`pane_pixels`), because a drag that leaves the grid is still its drag; the question here is
+"what is under the pointer", which has a true answer only inside the grid. The pointing hand
+follows the same rule, because a hand over a card points at a link the card covers.
+
+The image preview is suppressed while the link menu is open for the sharper version of the same
+reason: the menu opens *at* the pointer and the preview draws 14 points from it, in a layer
+above the menu.
+
 ## 7. Right-clicking a link is a menu
 
 `Open`, `Save as...`, `Copy path` — and only a link *under the pointer* gets one; a right click
