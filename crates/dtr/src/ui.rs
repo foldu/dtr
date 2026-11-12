@@ -413,10 +413,11 @@ pub enum TabHit {
     /// The strip's own menu: the commands that belong to the window rather than
     /// to a tab.
     Menu(Menu),
-    /// Open a new tab: `None` is the local shell, `Some(destination)` is a
-    /// serial port or an ssh host. The destination travels *typed*: the app
-    /// used to open every non-`None` answer as `ssh`, which ran
-    /// `ssh /dev/ttyUSB0` when the entry picked was a serial port.
+    /// Open a new tab: `None` is a shell the spawner picks for itself,
+    /// `Some(destination)` is one of the shells, ports and hosts the menu
+    /// offers. The destination travels *typed*: the app used to open every
+    /// non-`None` answer as `ssh`, which ran `ssh /dev/ttyUSB0` when the entry
+    /// picked was a serial port.
     New(Option<crate::sources::Destination>),
 }
 
@@ -707,10 +708,10 @@ pub fn tab_bar(
         }
 
         // The new-tab button. Its menu is where a terminal's destinations live:
-        // the local shell first, then the serial ports and the ssh hosts, each
-        // group behind a separator. Pointer only, like the chips, so Enter in
-        // the shell never opens a menu — `plus` returns a response that cannot
-        // have been clicked by a key.
+        // the shells this machine has, then the serial ports and the ssh hosts,
+        // each kind behind its own separator. Pointer only, like the chips, so
+        // Enter in the shell never opens a menu — `plus` returns a response
+        // that cannot have been clicked by a key.
         let response = dtr_widgets::plus(
             ui,
             &skin,
@@ -745,21 +746,50 @@ pub fn tab_bar(
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
                     ui.set_min_width(220.0);
-                    if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
-                        clicked = Some(TabHit::New(None));
-                        ui.close();
+                    // The shells are their own group and they come first: a
+                    // local shell is what a `+` is usually for. They are
+                    // discovered rather than listed, so a machine with three
+                    // installed shells gets three rows, the first being the one
+                    // a bare `+` would have started.
+                    let shells: Vec<&crate::sources::Destination> = destinations
+                        .iter()
+                        .filter(|destination| destination.is_shell())
+                        .collect();
+                    if shells.is_empty() {
+                        // Nothing was discovered — a container with no
+                        // `/etc/shells` and no shell on `PATH`. The row is
+                        // still there, because the spawner walks its own list
+                        // and "a terminal with no shell" is not a menu item.
+                        if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
+                            clicked = Some(TabHit::New(None));
+                            ui.close();
+                        }
                     }
-                    // The groups are separated, not just prefixed. `serial …` and
-                    // `ssh …` are different verbs that lead to different panes, and a
-                    // run of `/dev/tty…` rows with an `ssh` row in the middle is one
-                    // where the pointer lands on the wrong half of the menu. A group
-                    // that is empty takes its separator with it, so a machine with no
-                    // serial ports looks like it always did.
-                    for serial in [true, false] {
-                        let group: Vec<&crate::sources::Destination> = destinations
+                    for destination in shells {
+                        if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
+                            clicked = Some(TabHit::New(Some(destination.clone())));
+                            ui.close();
+                        }
+                    }
+                    // The remaining groups are separated, not just prefixed.
+                    // `serial …` and `ssh …` are different verbs that lead to
+                    // different panes, and a run of `/dev/tty…` rows with an
+                    // `ssh` row in the middle is one where the pointer lands on
+                    // the wrong half of the menu. A group that is empty takes
+                    // its separator with it, so a machine with no serial ports
+                    // looks like it always did.
+                    for group in [
+                        destinations
                             .iter()
-                            .filter(|destination| destination.is_serial() == serial)
-                            .collect();
+                            .filter(|destination| destination.is_serial())
+                            .collect::<Vec<_>>(),
+                        destinations
+                            .iter()
+                            .filter(|destination| {
+                                !destination.is_shell() && !destination.is_serial()
+                            })
+                            .collect(),
+                    ] {
                         if group.is_empty() {
                             continue;
                         }
@@ -771,7 +801,10 @@ pub fn tab_bar(
                             }
                         }
                     }
-                    if destinations.is_empty() {
+                    if destinations
+                        .iter()
+                        .all(crate::sources::Destination::is_shell)
+                    {
                         ui.label(
                             egui::RichText::new("no serial ports and no ssh hosts")
                                 .font(egui::FontId::new(
@@ -968,8 +1001,9 @@ mod kittest_tests {
         assert_ne!(look.dim, look.foreground, "dim is mixed, not copied");
     }
 
-    /// The new-tab button offers the destinations a terminal has, each kind
-    /// behind its own separator: the local shell, the serial ports, the hosts.
+    /// The new-tab button offers every destination a terminal has, each kind
+    /// behind its own separator: the shells this machine has, the serial ports,
+    /// the hosts.
     ///
     /// The grouping is also the *type*, and that is the point. The menu used to
     /// decide "serial" by whether the destination began with `/`, and the app
@@ -977,7 +1011,7 @@ mod kittest_tests {
     /// `ssh /dev/ttyUSB0`, and a `Host` someone spelled `prod/db` would have
     /// been run as a port. Both are checked here.
     #[test]
-    fn the_new_tab_menu_offers_the_local_shell_and_each_kind_of_destination() {
+    fn the_new_tab_menu_offers_every_shell_and_each_kind_of_destination() {
         use crate::sources::Destination;
 
         let look = Look::default();
@@ -985,6 +1019,10 @@ mod kittest_tests {
         let sink = clicked.clone();
         let labels = vec!["demo".to_owned()];
         let destinations = vec![
+            Destination::Shell {
+                name: "bash".to_owned(),
+                program: "/bin/bash".to_owned(),
+            },
             Destination::Serial {
                 path: "/dev/ttyUSB0".to_owned(),
                 detail: "FTDI".to_owned(),
@@ -1009,12 +1047,15 @@ mod kittest_tests {
 
         harness.get_by_label("new tab").click();
         harness.run();
-        harness.get_by_label("local shell").click();
+        harness.get_by_label("shell bash  /bin/bash").click();
         harness.run();
         assert_eq!(
             clicked.borrow().clone(),
-            Some(TabHit::New(None)),
-            "the first entry is the local shell"
+            Some(TabHit::New(Some(Destination::Shell {
+                name: "bash".to_owned(),
+                program: "/bin/bash".to_owned(),
+            }))),
+            "a shell row opens that shell"
         );
 
         *clicked.borrow_mut() = None;
@@ -1059,7 +1100,37 @@ mod kittest_tests {
         );
     }
 
-    /// The menu with both groups in it: local shell, the ports, the hosts.
+    /// A machine where no shell could be discovered — a stripped container —
+    /// still offers a shell, because the spawner walks its own list. The row
+    /// answers `None`, which is "whatever the spawner finds".
+    #[test]
+    fn a_machine_with_no_shell_discovered_still_opens_one() {
+        use crate::sources::Destination;
+        let look = Look::default();
+        let clicked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = clicked.clone();
+        let labels = vec!["demo".to_owned()];
+        let destinations = vec![Destination::Ssh {
+            alias: "web".to_owned(),
+            detail: String::new(),
+        }];
+        let mut harness = Harness::new_ui(move |ui| {
+            if let Some(hit) =
+                tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT, &[]).hit
+            {
+                *sink.borrow_mut() = Some(hit);
+            }
+        });
+        harness.run();
+
+        harness.get_by_label("new tab").click();
+        harness.run();
+        harness.get_by_label("local shell").click();
+        harness.run();
+        assert_eq!(clicked.borrow().clone(), Some(TabHit::New(None)));
+    }
+
+    /// The menu with every group in it: the shells, the ports, the hosts.
     ///
     /// A separator is a painted line — no accessibility node, nothing the
     /// queries above can see — so a picture is the only proof the grouping is
@@ -1071,6 +1142,14 @@ mod kittest_tests {
         let look = Look::default();
         let labels = vec!["demo".to_owned()];
         let destinations = vec![
+            Destination::Shell {
+                name: "bash".to_owned(),
+                program: "/bin/bash".to_owned(),
+            },
+            Destination::Shell {
+                name: "fish".to_owned(),
+                program: "/usr/bin/fish".to_owned(),
+            },
             Destination::Serial {
                 path: "/dev/ttyUSB0".to_owned(),
                 detail: "FTDI".to_owned(),

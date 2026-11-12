@@ -384,3 +384,44 @@ Not done, in the order they would be felt: clicking a session name in the strip 
 tab; `dtr --server` (a native mux, so the far end needs dtr installed and version-matched)
 is a different project with a different security story; and nothing here makes a *local*
 shell survive the window closing.
+
+## 13. The shells a machine has
+
+The menu used to offer one row, `local shell`, which opened `$SHELL` — or, on Windows, the
+first of `pwsh`, `powershell`, `$COMSPEC`, `cmd` — with a fixed list behind it: `/bin/bash`,
+`/bin/sh` and `/usr/bin/fish` there, `pwsh.exe`, `powershell.exe` and `cmd.exe` here, each kept
+only if it existed. That is the author's list, not the machine's: a person whose shells are
+`/bin/zsh` and `/usr/bin/fish` saw neither, and a container with its shells under
+`/usr/local/bin` saw whatever happened to be in `/bin`.
+
+So the list is discovered. Unix has a file for exactly this question — `/etc/shells`, whose
+purpose is to say which programs may be a login shell — and it is read comments and all, then
+checked line by line: a path nothing answers to is a typo or a garbage-collected store path, not
+a shell (this machine's file names `baash`, which turns out to be a real package). Windows has
+no such file, so the places a shell is installed are searched — `%COMSPEC%`, the two PowerShells
+in `System32` and in `%ProgramFiles%\PowerShell\7`, Git for Windows' `bash.exe`, MSYS2, Cygwin —
+and `PATH` is walked for the names a shell has.
+
+Both platforms then fall back to the usual paths (`/bin/sh`, `/usr/bin/zsh`,
+`/usr/local/bin/fish`, …) because a container, a chroot or a fresh install may have none of
+these lists, and the menu still has to offer something to type in. If nothing at all is found the
+old `local shell` row comes back, and it asks the spawner to walk its own candidate list.
+
+Two rules keep the list a menu rather than an inventory:
+
+- **One row per name**, and the first candidate of that name wins: `$SHELL`, then `/etc/shells`,
+  then the well-known paths, then `PATH`. So a NixOS profile symlinked into the store and named
+  twice in `/etc/shells` is one row, the one the machine means, and a `nix develop` that puts a
+  second `bash` first on `PATH` does not get a second row. The name is the executable's without
+  the `.exe` Windows builds carry, and the detail column is the program, because `bash` alone
+  does not say which bash.
+- **The first row is the shell a bare `+` starts**, because it is the first candidate
+  `pty::candidates()` would spawn. A menu whose first row is not what `Ctrl+Shift+T` does would
+  be a lie about the default.
+
+`dtr --shells` prints the same list — name, tab, program — which is how the Windows guest was
+checked and how a person sees what was found without opening the menu.
+
+Not in the list: `wsl.exe`, whose shells belong to another virtual machine and are found by
+running `wsl -l` — a process launch inside a scan that runs every two seconds — and anything that
+is not a file, since a name is only offered when something answers to it.

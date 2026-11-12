@@ -2649,7 +2649,8 @@ impl App {
         self.scanning = true;
         let proxy = self.proxy.clone();
         self.bg_blocking(move || {
-            let mut destinations = crate::sources::serial_destinations();
+            let mut destinations = crate::sources::shell_destinations();
+            destinations.extend(crate::sources::serial_destinations());
             destinations.extend(crate::sources::ssh_destinations());
             let _ = proxy.send_event(UserEvent::Destinations(destinations));
         });
@@ -3252,6 +3253,27 @@ impl App {
 
     fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
         self.tabs[self.active].focused_explorer_mut()
+    }
+
+    /// Open a new tab on a local shell, in the focused tab's directory when that
+    /// tab is local.
+    ///
+    /// `program` is one of the shells the new-tab menu discovered, or `None` for
+    /// "whatever the spawner finds" — the row the menu draws when nothing could
+    /// be discovered. A remote tab's directory is a path on *another* machine,
+    /// so a shell that inherited it would try to `cd` into a directory that is
+    /// not here.
+    fn open_shell(&mut self, program: Option<String>) {
+        let cwd = self
+            .session()
+            .filter(|session| !session.remote)
+            .and_then(|session| session.pane.cwd());
+        self.open(Transport::Shell(crate::pty::Config {
+            program,
+            cwd,
+            ..Default::default()
+        }));
+        self.repaint("new tab");
     }
 
     /// Open a tab to an ssh host, asking what its tmux has first when the
@@ -5424,17 +5446,12 @@ impl ApplicationHandler<UserEvent> for App {
                             Some(crate::sources::Destination::Ssh { alias, .. }) => {
                                 self.open_ssh(alias)
                             }
-                            None => {
-                                let cwd = self
-                                    .session()
-                                    .filter(|session| !session.remote)
-                                    .and_then(|session| session.pane.cwd());
-                                self.open(Transport::Shell(crate::pty::Config {
-                                    cwd,
-                                    ..Default::default()
-                                }));
-                                self.repaint("new tab");
+                            // A shell the menu named: the program is opened
+                            // explicitly, because the row said which one it was.
+                            Some(crate::sources::Destination::Shell { program, .. }) => {
+                                self.open_shell(Some(program))
                             }
+                            None => self.open_shell(None),
                         },
                         _ => {}
                     }

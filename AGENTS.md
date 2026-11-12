@@ -573,10 +573,10 @@ like when it was wrong.
   opened sat on `loading…` forever — and the reply is routed by host *and* by the directory
   asked for. `take_request` consumes `pending`, so matching a reply against it matched
   nothing, and `awaiting` survives the send.
-- **The new-tab button is a menu, not a chord**: the `+` opens `egui::Popup::menu` — local
-  shell, then serial ports, then `~/.ssh/config` hosts — and the answer is
-  `TabHit::New(Option<Destination>)`, typed because the menu used to guess "serial" from a
-  leading `/` while the app opened *every* entry as `ssh`, so picking a port ran
+- **The new-tab button is a menu, not a chord**: the `+` opens `egui::Popup::menu` — the shells
+  it found (`sources::local_shells`), then serial ports, then `~/.ssh/config` hosts — and the
+  answer is `TabHit::New(Option<Destination>)`, typed because the menu used to guess "serial"
+  from a leading `/` while the app opened *every* entry as `ssh`, so picking a port ran
   `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers its baud rate and
   CR translation; a host is `ssh -t <alias>`.
 

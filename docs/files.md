@@ -171,10 +171,13 @@ matched nothing, and `awaiting` has to survive the send.
 
 ## 12. The new-tab button is a menu, not a chord
 
-The `+` opens `egui::Popup::menu`: local shell, then serial ports, then `~/.ssh/config` hosts,
-each group behind a separator and each row saying which it is.
+The `+` opens `egui::Popup::menu`: the shells this machine has, then serial ports, then
+`~/.ssh/config` hosts, each group behind a separator and each row saying which it is. The shells
+are discovered rather than listed — `/etc/shells` on Unix, the well-known installs and `PATH` on
+Windows — one row per name with the login shell first (`docs/sessions.md` §13).
 
 The answer is `TabHit::New(Option<Destination>)`, and it is a *typed* destination because the
 menu used to infer "serial" from a leading `/` while the app opened every entry as `ssh` — so
 picking a port ran `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers
-its baud rate and CR translation; a host is `ssh -t <alias>`.
+its baud rate and CR translation; a host is `ssh -t <alias>`; a shell is that program, opened in
+the focused tab's directory when that tab is local.

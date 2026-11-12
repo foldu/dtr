@@ -419,7 +419,12 @@ fn set_sane(fd: std::os::unix::io::RawFd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn candidates() -> Vec<String> {
+/// The shells a tab started without a program tries, in order.
+///
+/// `pub(crate)` because the new-tab menu offers them: the first row of the shell
+/// list has to be the shell this list would start, or the menu promises one
+/// thing and a bare `+` does another.
+pub(crate) fn candidates() -> Vec<String> {
     #[cfg(windows)]
     {
         let mut list = Vec::new();
