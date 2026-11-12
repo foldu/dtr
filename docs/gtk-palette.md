@@ -486,7 +486,7 @@ cannot look alike in the log.
 Three things changed shape from the sketch this section used to carry:
 
 - **`describe` reads an origin, not a style.** `Skin` carries
-  `Origin::{Dtr, Windows, Adwaita}` set by its constructor. The old guess —
+  `Origin::{Dtr, Windows, Adwaita, Egui}` set by its constructor. The old guess —
   `style.mono` means dtr, else the palette's lightness — calls an Adwaita skin
   "dtr" (it borrows neither that style's fonts nor its metrics now) and would
   call any non-monospace light skin "windows".
