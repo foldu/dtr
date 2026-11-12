@@ -436,7 +436,12 @@ pub enum Menu {
 /// same place on both platforms — Windows puts an app menu next to its caption
 /// buttons, and Linux has no caption buttons in a client frame but the same
 /// right-hand end reads the same way.
-pub fn app_menu(ui: &mut Ui, rect: egui::Rect, skin: &dtr_widgets::Skin) -> Option<Menu> {
+pub fn app_menu(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    skin: &dtr_widgets::Skin,
+    keymap: &crate::keys::Keymap,
+) -> Option<Menu> {
     let palette = skin.palette;
     let response = ui.interact(rect, egui::Id::unique("dtr-menu"), egui::Sense::click());
     let hovered = response.hovered();
@@ -464,16 +469,36 @@ pub fn app_menu(ui: &mut Ui, rect: egui::Rect, skin: &dtr_widgets::Skin) -> Opti
     // strip's.
     egui::Popup::menu(&response).width(180.0).show(|ui| {
         ui.set_min_width(180.0);
-        for (label, item) in [
-            ("settings", Menu::Settings),
-            ("keyboard map", Menu::Keymap),
-            ("about", Menu::About),
-        ] {
-            if dtr_widgets::menu_row(ui, skin, label, false) {
+        // The chord is asked of the live map, so a rebinding shows the key a
+        // person actually has — and a switched-off binding shows none, which is
+        // the truth rather than the default's key.
+        let chord = |action: crate::keys::Action| keymap.bound(action).into_iter().next();
+        let mut entry = |ui: &mut Ui, label: &str, chord: Option<String>, item: Menu| {
+            let picked = match chord {
+                Some(chord) => dtr_widgets::menu_row_chord(ui, skin, label, &chord),
+                None => dtr_widgets::menu_row(ui, skin, label, false),
+            };
+            if picked {
                 chosen = Some(item);
                 ui.close();
             }
-        }
+        };
+        entry(
+            ui,
+            "settings",
+            chord(crate::keys::Action::Settings),
+            Menu::Settings,
+        );
+        entry(
+            ui,
+            "keyboard map",
+            chord(crate::keys::Action::Keymap),
+            Menu::Keymap,
+        );
+        // The two ways to configure the window, and then what it is: the same
+        // split a desktop application menu draws before its About.
+        dtr_widgets::menu_separator(ui, skin);
+        entry(ui, "about", None, Menu::About);
     });
     chosen
 }
@@ -717,7 +742,7 @@ pub fn tab_bar(
                         if group.is_empty() {
                             continue;
                         }
-                        ui.separator();
+                        dtr_widgets::menu_separator(ui, &skin);
                         for destination in group {
                             if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
                                 clicked = Some(TabHit::New(Some(destination.clone())));
@@ -1308,13 +1333,19 @@ mod kittest_tests {
     #[test]
     fn the_strip_menu_opens() {
         let look = Look::default();
+        let keymap = crate::keys::Keymap::new(&Default::default());
         let mut harness = Harness::new_ui(move |ui| {
             install_image_loaders(ui.ctx());
+            // The window installs the resolved skin on the context, and the
+            // popup's own frame is drawn from it: without this the card under
+            // the rows is egui's grey rather than the skin's.
+            let skin = look.skin();
+            skin.apply(ui.ctx());
             let rect = egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
                 egui::vec2(32.0, crate::ui::TAB_HEIGHT),
             );
-            let _ = app_menu(ui, rect, &look.skin());
+            let _ = app_menu(ui, rect, &skin, &keymap);
         });
         harness.run_steps(2);
         // A painted icon with no text needs the name it declares itself.
@@ -1324,6 +1355,36 @@ mod kittest_tests {
             harness.get_by_label(item);
         }
         harness.snapshot("app_menu");
+    }
+
+    /// The same menu in the look the style is measured from: Adwaita's popover,
+    /// with a 6-point inset, the chord column at the right and the rule before
+    /// About. A menu that borrowed the card's 24 × 20 margin and reserved a tick
+    /// column is the picture this one replaced.
+    #[test]
+    fn the_strip_menu_renders_in_the_adwaita_skin() {
+        let look = Look {
+            choice: dtr_widgets::Choice::new(dtr_widgets::Preset::Adwaita),
+            ..Look::default()
+        };
+        let keymap = crate::keys::Keymap::new(&Default::default());
+        let mut harness = Harness::new_ui(move |ui| {
+            install_image_loaders(ui.ctx());
+            // The window installs the resolved skin on the context, and the
+            // popup's own frame is drawn from it: without this the card under
+            // the rows is egui's grey rather than the skin's.
+            let skin = look.skin();
+            skin.apply(ui.ctx());
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(32.0, crate::ui::TAB_HEIGHT),
+            );
+            let _ = app_menu(ui, rect, &skin, &keymap);
+        });
+        harness.run_steps(2);
+        harness.get_by_label("menu").click();
+        harness.run_steps(3);
+        harness.snapshot("app_menu_adwaita");
     }
 
     /// Every embedded image has a decoder behind it.

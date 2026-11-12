@@ -223,6 +223,14 @@ pub struct Style {
     /// Border width in points; the platform's hairline is 1.
     pub border: f32,
     pub card_margin: Margin,
+    /// The inset of a menu's own frame, in points: a popover is not a card.
+    ///
+    /// libadwaita's `popover.menu > contents > stack > box { padding: 6px }`,
+    /// and egui's own `Spacing::default().menu_margin` is the same 6. Sharing
+    /// [`Style::card_margin`] with menus — a card insets by 24 × 20 in GNOME —
+    /// put a 20-point band above a menu's first row and pushed every label 18
+    /// points too far right, which read as a list of indented words.
+    pub menu_margin: Margin,
     pub title: Title,
     pub section: Section,
     pub footer: Footer,
@@ -250,6 +258,7 @@ impl Style {
             check_size: 16.0,
             border: 1.0,
             card_margin: Margin::symmetric(20, 18),
+            menu_margin: Margin::same(6),
             title: Title::Eyebrow,
             section: Section::Rule,
             footer: Footer::PrimaryLast,
@@ -287,6 +296,7 @@ impl Style {
             check_size: 20.0,
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
+            menu_margin: Margin::same(6),
             title: Title::Bar,
             section: Section::Bold,
             // A GNOME dialog's suggested action is the right-hand one.
@@ -326,6 +336,7 @@ impl Style {
             check_size: 20.0,
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
+            menu_margin: Margin::same(6),
             title: Title::Bar,
             section: Section::Bold,
             footer: Footer::PrimaryFirst,
@@ -370,6 +381,7 @@ impl Style {
             check_size: 14.0,
             border: 1.0,
             card_margin: Margin::same(12),
+            menu_margin: Margin::same(6),
             // A title with the cross on its row, a rule between groups, the
             // primary answer last, and no focus ring: all four are what egui's
             // own windows and menus do.
@@ -489,6 +501,9 @@ mod tests {
         // `border-radius: 9px` on the same rule; `.card { border-radius: 12px }`.
         assert_eq!(adwaita.control_radius, 9);
         assert_eq!(adwaita.card_radius, 12);
+        // `popover.menu > contents > stack > box { padding: 6px }`: a menu is a
+        // popover, and it insets like one rather than like a card.
+        assert_eq!(adwaita.menu_margin, Margin::same(6));
         // GNOME's UI text is proportional, its dialogs put the suggested action on
         // the right, and its sections are bold labels rather than rules.
         assert!(!adwaita.mono);

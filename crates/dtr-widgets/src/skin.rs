@@ -219,7 +219,8 @@ impl Skin {
         style.spacing.button_padding = s.padding;
         style.spacing.item_spacing = egui::vec2(s.gap, s.gap);
         style.spacing.window_margin = s.card_margin;
-        style.spacing.menu_margin = s.card_margin;
+        // A popover is not a card: see `Style::menu_margin`.
+        style.spacing.menu_margin = s.menu_margin;
 
         style
             .text_styles

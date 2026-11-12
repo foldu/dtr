@@ -6022,7 +6022,9 @@ impl Gpu {
                             egui::pos2(menu_edge - 4.0, strip.bottom()),
                         );
                         let skin = look.skin();
-                        if let Some(chosen) = crate::ui::app_menu(ui, menu_rect, &skin) {
+                        if let Some(chosen) =
+                            crate::ui::app_menu(ui, menu_rect, &skin, keymap_bindings)
+                        {
                             *tab_click = Some(crate::ui::TabHit::Menu(chosen));
                         }
                         // The rest of the row is the title bar. In `native` mode

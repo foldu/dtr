@@ -35,7 +35,9 @@ So the crate holds one vocabulary, and a surface asks it for a *skin*.
   four radii — `control`, `card`, `chip` and `check`, the last two separate
   because Adwaita rounds a 20-point box by 6 while a tab is a pill, and one
   radius for both draws either a circle that is not a checkbox or a chip that
-  does not look like one — the hairline width, the fonts, and the few
+  does not look like one — the hairline width, the fonts, two insets — a card's
+  and a popover's, because a menu that borrowed the card's 24 × 20 put a
+  20-point band above its first row and pushed every label right — and the few
   *behavioural* choices a dialog makes — `Title::{Eyebrow,Bar}`,
   `Section::{Rule,Bold}`, `Footer::{PrimaryLast,PrimaryFirst}`,
   `Focus::{None,Ring}`, plus an optional card shadow. Each of those is a token
@@ -224,8 +226,14 @@ what makes them testable and what lets a caller `--send` into them.
   in a row pinned to the right edge used to draw its options backwards, because
   `ui.horizontal` inherits the parent's direction; both widgets now ask for
   left-to-right themselves, so the order a caller passes is the order on screen.
-- `menu_row` — a full-width list entry, with the tick marking the value already
-  in the field.
+- `menu_row` — a full-width list entry, a tick on the right marking the value
+  already in the field, because that is where a dropdown puts its check; a left
+  column rested on every row of every menu for a mark that mostly never came,
+  and pushed the labels in. `menu_row_chord` is the same row with the chord
+  that does it from the keyboard, right-aligned and dim — libadwaita's
+  `popover.menu accelerator`. `menu_separator` is the rule between groups, as
+  wide as a row: `ui.separator()` takes the popup's width, not the content's,
+  and drew across the menu's rounded corners.
 - `cross`, `cross_at`, `plus` — the icon buttons, drawn from two strokes and
   sized by their target rather than their glyph; `cross_at` takes a rect the tab
   strip has already reserved, which is how a chip gets a close target that does
@@ -301,12 +309,22 @@ is there". It also meant a link under the pointer never lit its hand or raised a
 with the real popup.
 
 **The strip's own menu is a burger at the right-hand end, next to the caption buttons**, on
-both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
-`menu_row`s — settings, keyboard map, about. The right end because the left is where tabs
-start and a button there would move every tab; the *same* place on Linux, where a client
-frame draws the same caption buttons. Its rect is part of the caption's obstacle list, not
-just painted over it: the drag region stops at the menu's left edge (`chrome::drag_area`),
-or a press on the menu starts a window drag.
+both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of rows —
+settings and keyboard map with their live chords, a rule, about. The right end because the
+left is where tabs start and a button there would move every tab; the *same* place on
+Linux, where a client frame draws the same caption buttons. Its rect is part of the
+caption's obstacle list, not just painted over it: the drag region stops at the menu's
+left edge (`chrome::drag_area`), or a press on the menu starts a window drag.
+
+**A menu is a popover, and it looks like one.** The rows use `Style::menu_margin` — six
+points on every side, libadwaita's `popover.menu > contents > stack > box { padding: 6px }`
+and egui's own `menu_margin` — rather than the card's 24 × 20, which is what had put a
+20-point band above the first row and pushed the labels 18 points in; with `menu_row_chord`
+the chord column fills the right-hand end the way an application menu does, and
+`menu_separator` draws the rule before About at the rows' width. The result is the Adwaita
+popover: a tight inset, a 9-point row radius, the pointer's row filled to the content edge —
+and `app_menu` is the same menu in the test's own look. None of it is `App`'s to draw: the
+widget and the tokens are `dtr-widgets`'.
 
 **About is a card, not a dialog** (`crates/dtr/src/about.rs`): every fact on it is a
 compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot disagree with the binary,
