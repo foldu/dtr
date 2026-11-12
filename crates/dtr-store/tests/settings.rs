@@ -27,7 +27,7 @@ fn settings_round_trip() {
     assert_eq!(store.serial("/dev/ttyUSB0").expect("read"), Some(settings));
 }
 
-/// Every field makes the trip, not just the two the settings menu can edit.
+/// Every field makes the trip, not just the two the preferences card can edit.
 #[test]
 fn every_framing_field_round_trips() {
     let (_dir, store) = store();

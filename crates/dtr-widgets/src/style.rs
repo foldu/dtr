@@ -73,7 +73,7 @@ impl Preset {
         }
     }
 
-    /// Every preset, in the order the settings menu offers them.
+    /// Every preset, in the order the preferences card offers them.
     pub const ALL: [Preset; 4] = [
         Preset::Native,
         Preset::Adwaita,
@@ -441,7 +441,7 @@ mod tests {
             .filter(|preset| preset.owns_its_colours())
             .collect();
         assert_eq!(owning, vec![Preset::Adwaita, Preset::Windows, Preset::Egui]);
-        // The settings menu offers every preset, so the list is the menu's order
+        // The preferences card offers every preset, so the list is the card's order
         // and it has to name each one. `dtr` is not one of them: it is an old
         // spelling of `egui`, and reads as it.
         let names: Vec<&str> = Preset::ALL.iter().map(|preset| preset.as_str()).collect();

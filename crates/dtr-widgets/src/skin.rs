@@ -276,7 +276,7 @@ pub struct Choice {
     pub preset: Preset,
     pub scheme: Scheme,
     /// `None` keeps the preset's own default, so a window that never opened the
-    /// settings menu keeps following a future default rather than the value of
+    /// preferences card keeps following a future default rather than the value of
     /// the day it was first saved.
     pub accent: Option<Color32>,
 }

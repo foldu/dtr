@@ -113,6 +113,11 @@ const COMMANDS: &[Command] = &[
         argument: Argument::Themes,
     },
     Command {
+        name: "preferences",
+        summary: "change the look and what a session does",
+        argument: Argument::None,
+    },
+    Command {
         name: "about",
         summary: "version and what this is",
         argument: Argument::None,

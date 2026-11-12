@@ -1,6 +1,6 @@
 //! The modal card: one centered sheet over a dimmed window.
 //!
-//! Four surfaces — about, the keyboard map, the settings menu and the serial
+//! Four surfaces — about, the keyboard map, the preferences card and the serial
 //! sheet — were each spelling the same shell: clamp a size to the screen, center
 //! it, prime the area so the first frame is not in the corner, paint the scrim,
 //! create the `Area`, install the skin, draw the frame, put a title and a cross
@@ -16,7 +16,7 @@
 //! - the **cross**, named for accessibility.
 //!
 //! **The body scrolls**, because a card is clamped to the window and a form is
-//! not: a settings menu on a short window, a keyboard map beside a small
+//! not: a preferences card on a short window, a keyboard map beside a small
 //! terminal or a serial sheet with a long detail line would otherwise draw past
 //! the sheet's own edge. The scroll area is the card's, so no screen has to
 //! remember it, and its bar is solid — the floating bar egui defaults to paints

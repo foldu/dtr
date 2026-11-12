@@ -661,7 +661,7 @@ fallback = ["Noto Sans Mono CJK SC", "0xProto Nerd Font Mono"]
 
 It is prepended to `fonts::FALLBACK`, so it can only ever *add* an opinion — a
 family that has been uninstalled degrades to the built-in list instead of
-failing. The settings menu does not write it: choosing a fallback is a decision
+failing. The preferences menu does not write it: choosing a fallback is a decision
 about *this* machine's fonts, not a control worth a drag value.
 
 Still not implemented, and still worth naming after Ghostty when it is:

@@ -25,6 +25,9 @@ pub enum Action {
     /// Show the keyboard map: the palette's own answer for somebody who does not
     /// know the chord yet.
     Keys,
+    /// The preferences card, for the same reason `Keys` is here: a person who
+    /// does not know `ctrl+,` should not have to find a menu button either.
+    Preferences,
     /// The same page the strip's menu opens.
     About,
 }
@@ -320,7 +323,7 @@ impl Palette {
                     RichText::new(
                         "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
                          ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
-                         ctrl+, settings    ctrl+? keys",
+                         ctrl+, preferences    ctrl+? keys",
                     )
                     .font(egui::FontId::new(
                         style.label_font.size - 1.5,
@@ -397,6 +400,7 @@ fn action_for(line: &str) -> Option<Action> {
         "demo" => Some(Action::Demo),
         "quit" => Some(Action::Quit),
         "keys" => Some(Action::Keys),
+        "preferences" => Some(Action::Preferences),
         "about" => Some(Action::About),
         _ => None,
     }
@@ -446,6 +450,16 @@ mod tests {
     }
 
     #[test]
+    fn preferences_opens_the_card_from_the_palette() {
+        // Named `preferences` and not `settings` because the first letter is the
+        // accelerator and `s` is ssh's: the command is the card's own name.
+        assert!(matches!(
+            action_for("preferences"),
+            Some(Action::Preferences)
+        ));
+    }
+
+    #[test]
     fn unknown_lines_do_nothing() {
         assert!(action_for("nonsense").is_none());
         assert!(action_for("connect").is_none());
@@ -485,6 +499,36 @@ mod kittest_tests {
         assert!(
             matches!(taken, Some(Action::Shell(_))),
             "expected a shell action, got something else"
+        );
+    }
+
+    /// The card is reachable by name from the palette, so somebody who does not
+    /// know `ctrl+,` (or where the burger is) can still find it: the same loop as
+    /// the shell command above, through the field and the list.
+    #[test]
+    fn the_palette_opens_the_preferences_card_by_name() {
+        let mut palette = Palette::new(false);
+        palette.toggle();
+        let look = Look::default();
+        let action = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = action.clone();
+        let mut harness = Harness::new_ui(move |ui| {
+            if let Some(action) = palette.ui(ui, &look) {
+                *sink.borrow_mut() = Some(action);
+            }
+        });
+        harness.run();
+
+        harness
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("preferences");
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+
+        assert!(
+            matches!(action.borrow_mut().take(), Some(Action::Preferences)),
+            "typing the command should open the card"
         );
     }
 

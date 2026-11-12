@@ -1,4 +1,10 @@
-//! The settings menu: every field in the config file, editable in the window.
+//! The preferences card: every field in the config file, editable in the window.
+//!
+//! It is called *preferences* because that is what it is to the person opening
+//! it; its type is [`Settings`] because that is what it edits — the values the
+//! config file holds, of which a serial port's defaults and the look are two
+//! kinds. `[keys] preferences` and the palette's `preferences` command both open
+//! this card.
 //!
 //! Rows are derived from [`dtr_config::Config`] rather than hand-written, so a
 //! key added to the file has one obvious place to appear here. Edits are kept in
@@ -309,7 +315,7 @@ impl Settings {
             elapsed_us = started.elapsed().as_micros() as u64,
             families = self.families.len(),
             themes = self.themes.len(),
-            "settings populated"
+            "preferences warmed"
         );
     }
 
@@ -552,12 +558,12 @@ impl Settings {
             .iter()
             .map(|panel| (*panel, panel.label()))
             .collect();
-        let out = dtr_widgets::Card::new(egui::Id::new("dtr-settings"), "settings")
+        let out = dtr_widgets::Card::new(egui::Id::new("dtr-preferences"), "preferences")
             .size(420.0, height)
-            .close("close settings")
+            .close("close preferences")
             .tabs(|ui| {
                 if let Some(panel) =
-                    dtr_widgets::tabs(ui, &skin, "settings panel", self.panel, &options)
+                    dtr_widgets::tabs(ui, &skin, "preferences panel", self.panel, &options)
                 {
                     *switched.borrow_mut() = Some(panel);
                 }
@@ -973,9 +979,9 @@ mod tests {
     /// Opening the menu takes the list the probe found; it does not walk the
     /// machine's fonts itself.
     ///
-    /// `show` runs in the click that opens the menu, and the probe is a
+    /// `show` runs in the click that opens the card, and the probe is a
     /// fontconfig walk that parses a face per family — 300 ms of frozen window,
-    /// which is what "the settings take a while to open" was. `main` warms it and
+    /// which is what "the preferences take a while to open" was. `main` warms it and
     /// `refresh_families` fills the list in when a run got here first.
     #[test]
     fn the_menu_takes_the_family_list_the_probe_found() {
@@ -1349,7 +1355,7 @@ mod kittest_tests {
         harness.run();
         assert_eq!(answers.borrow().last(), Some(&Reply::Cancel));
 
-        harness.get_by_label("close settings").click();
+        harness.get_by_label("close preferences").click();
         harness.run();
         assert_eq!(answers.borrow().last(), Some(&Reply::Cancel));
     }
@@ -1366,7 +1372,7 @@ mod kittest_tests {
             settings.ui(ui, &look);
         });
         harness.run();
-        harness.snapshot("settings_menu");
+        harness.snapshot("preferences_menu");
     }
 
     /// The appearance panel, with a look that owns its colours: two more rows and
@@ -1387,7 +1393,7 @@ mod kittest_tests {
         // The rows exist, which is what the snapshot is for; the controls are
         // addressed by name, which is what a screen reader sees.
         harness.get_by_label("ui.accent value");
-        harness.snapshot("settings_appearance");
+        harness.snapshot("preferences_appearance");
     }
 
     /// A port's panel on its own, with the port rows: the sheet a person with a
@@ -1410,7 +1416,7 @@ mod kittest_tests {
         });
         harness.run();
         harness.get_by_label("serial.baud value");
-        harness.snapshot("settings_general");
+        harness.snapshot("preferences_general");
     }
 
     /// The tabs are tabs: a press on the other one asks for its panel, and the
@@ -1428,7 +1434,7 @@ mod kittest_tests {
             }
         });
         harness.run();
-        harness.get_by_label("settings panel appearance").click();
+        harness.get_by_label("preferences panel appearance").click();
         harness.run();
         assert_eq!(
             *asked.borrow(),

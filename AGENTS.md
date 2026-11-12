@@ -98,8 +98,7 @@ tag mirroring on.
 - **The real window runs on Linux without a display, and at any scale**: `--capture` needs
   a `Window` and a surface, Xvfb provides both, and `WINIT_X11_SCALE_FACTOR` forces a
   factor the machine does not have — the only way to see a DPI bug without a HiDPI screen
-  (`docs/windows.md` §2.1). This is the ordinary X11 path; nothing in dtr knows Xvfb
-  exists:
+  (`docs/windows.md` §2.1):
 
   ```sh
   nix build nixpkgs#xvfb --no-link --print-out-paths   # Xvfb is not on PATH
@@ -591,12 +590,10 @@ account behind each of these.
   and `Skin` (the pair), plus `Skin::egui_style`, which derives an `egui::Style` so stock
   egui widgets inherit the same look. `Preset::{Native, Adwaita, Windows, Egui}`;
   `[ui] widgets` (or `--widgets`) says which, and `native` is the default. **A preset is a
-  request**: `Choice::skin` takes the platform's skin as an argument and falls back to the
-  terminal's own, because reading the system palette is platform code in
-  `crates/dtr/src/system.rs`, where both platforms are written to one trait.
+  request**: `Choice::skin` takes the platform's skin and falls back to the terminal's own.
   **The scheme and the accent ride with the look**: `[ui] scheme` (`system` by default) and
   `[ui] accent` mean something only to the three looks painted here — `native` takes both
-  from the desktop — so `Preset::owns_its_colours` is what decides whether the settings
+  from the desktop — so `Preset::owns_its_colours` is what decides whether the preferences
   menu shows those rows at all. **It is live**: the answer sits in a cell a frame
   reads, and a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE`,
   `WM_DWMCOLORIZATIONCOLORCHANGED` or `WM_THEMECHANGED` through the window procedure that
@@ -611,7 +608,7 @@ account behind each of these.
   a card is clamped to the window and a form is not — the serial sheet overran the
   window with its connect button half off screen — and the footer and the tab row are drawn
   *outside* that viewport, because a way out and a way to the other panel are not there if
-  they scroll (`docs/ui.md` §The card). About, the keyboard map, settings and the serial sheet
+  they scroll (`docs/ui.md` §The card). About, the keyboard map, preferences and the serial sheet
   each had a copy of the shell before it existed, which is how their scrims and
   margins could disagree.
 - **Painted controls belong in `crates/dtr-widgets/src/widgets/`**: `Editable` (a text
@@ -648,14 +645,14 @@ account behind each of these.
 - **A row's height is the row's, not the context style's**: `ui.horizontal` gives its child
   `interact_size.y`, and a dialog installs its *skin's* row on the context (`Skin::apply`)
   because the stock widgets in its popups read the context style — so one visit to the
-  settings menu left the strip's chips centred in a 34-point Adwaita row inside a 30-point
+  preferences menu left the strip's chips centred in a 34-point Adwaita row inside a 30-point
   panel, seven points lower than the box they were given, with their bottoms cut off.
   `tab_bar` and `status_bar` set `interact_size.y` themselves (a chip is
   `TAB_CHIP_HEIGHT`, the bar is the bar), and `Gpu::render` installs the resolved skin
   whenever it changes, so the window is the authority and every dialog a guest.
 - **The strip's own menu is a burger at the right-hand end, next to the caption buttons**,
   on both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
-  `menu_row`s — settings, keyboard map, about. The right end because the left is where tabs
+  `menu_row`s — preferences, keyboard map, about. The right end because the left is where tabs
   start and a button there would move every tab; the *same* place on Linux, where a client
   frame draws the same caption buttons. Its rect is part of the caption's obstacle list,
   not just painted over it: the drag region stops at the menu's left edge
@@ -673,7 +670,7 @@ account behind each of these.
   the text** — the palette's selected row was invisible until the highlight was drawn first
   — and **a solid quad that samples the atlas can vanish silently**: solids carry a negative
   uv, take their colour from the instance, and the shader branches.
-- **The settings menu is mouse only, and it has two tabs**, and `Settings::ui` takes `&self`
+- **The preferences menu is mouse only, and it has two tabs**, and `Settings::ui` takes `&self`
   (the renderer holds a borrow), so a control *reports* its edit as a `Change` and
   `Settings::apply` writes the draft. **No keys, no cursor, no highlight**: the sheet walks
   no rows, so there is nothing to select, draw or clamp, and `App::on_key` swallows keys
@@ -681,7 +678,7 @@ account behind each of these.
   the row name, because the row's label already carries the bare name and two nodes with
   one name cannot be addressed from a test. **A row is the key over its description**: measure the two fonts for the
   card's height and give the control its width first, or the description
-  wraps into it (`docs/ui.md` §The settings menu). **A closed list is a dropdown, not a row
+  wraps into it (`docs/ui.md` §The preferences menu). **A closed list is a dropdown, not a row
   of chips**: chips spend the width values need. **General comes first and
   the sheet opens on it**, so where the rows are never moves between openings; **a row
   belongs to exactly one tab** (`Row::panel`), and which rows a tab shows right now is a
@@ -695,7 +692,7 @@ account behind each of these.
   colour a save would keep is the thing being decided. **A list that needs a slow probe is
   filled in later, not on the click**: `usable_families` is a fontconfig walk cached in a
   `OnceLock` and warmed before the window, and the theme list is read once in `show` — a
-  control that rescans per frame is a scan per frame (`docs/ui.md` §The settings menu).
+  control that rescans per frame is a scan per frame (`docs/ui.md` §The preferences menu).
 - **The config file is live, and it is the other writer of the same settings**: `watch.rs`
   `stat`s it on a deadline, a burst settles into one `App::reload_config`, and a reload
   adopts the file through the same `adopt_config` a save uses — so **a new key is a key a
@@ -718,7 +715,7 @@ account behind each of these.
   `C-p` are consumed like the arrows**, taken from `input_mut` before the text field sees
   them; **reopening the palette starts a fresh sentence**; and **a modal must ignore key
   releases** — the release of the keystroke that opened it arrives while it is open, which
-  made the settings menu flash and vanish — so overlays check `ElementState::Pressed` first.
+  made the preferences menu flash and vanish — so overlays check `ElementState::Pressed` first.
   **`Ctrl+Shift+T` opens a tab**; `Ctrl+Tab` only cycles ones that exist.
 - **A binding nobody can find is a binding nobody has**: `ctrl-?` opens the keyboard map
   ([keymap.rs](crates/dtr/src/keymap.rs)), and `keys` in the palette opens it too. It is
@@ -819,7 +816,7 @@ window means nothing, and what the two payloads that are ours are for.
 - `docs/gtk-palette.md` — how `native` reads the GTK4/libadwaita palette without linking
   GLib: the portal, libadwaita's constants, and the live signal.
 - `docs/ui.md` — the chrome: why it has a skin at all, what a token is, what `native` means
-  on each platform, and the rules the tab strip, the settings menu, the palette and the
+  on each platform, and the rules the tab strip, the preferences menu, the palette and the
   keyboard map obey.
 - `docs/sessions.md` — a shell, an ssh host, a serial port: how a session ends, what a drop
   looks like, the reconnect command, and the terminfo copy.

@@ -299,7 +299,7 @@ property of the machine at the other end, not of anything dtr does here: a mux s
 network drop.
 
 So the durability is delegated, to the thing that is already installed. `[tmux] enabled` —
-the `tmux.enabled` row in the settings menu, off by default — puts every ssh tab inside a
+the `tmux.enabled` row in the preferences menu, off by default — puts every ssh tab inside a
 tmux session on the far end. Off because it changes what the *other* machine does with a
 connection and it needs tmux there, which is not a thing to assume on someone's behalf; the
 row is a toggle like every other setting, and a save applies it to the next tab.

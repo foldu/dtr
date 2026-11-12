@@ -39,7 +39,7 @@ keeping. Note 9 (§4.2) was fixed too, and was not a rendering bug at all.
 ### 2.1 The contract that is being broken
 
 `dtr-config` documents the grid font size in **points** — "Grid font size in points"
-(`crates/dtr-config/src/lib.rs:42`) — and the settings menu presents it as a font size. The
+(`crates/dtr-config/src/lib.rs:42`) — and the preferences menu presents it as a font size. The
 renderer used that number as **physical pixels**, and nothing multiplied by the window's
 scale factor. So on Windows at 150 % the terminal drew 14 physical pixels where 21 were
 asked for, and because the cell was smaller it fitted ~1.5× too many columns while the egui
@@ -56,7 +56,7 @@ reset to `base` between the runs so only the scale differed):
 | 125 % | after | 1125 × 775 | 11 × 22 | **102 × 34** |
 
 `winit` honours the requested `LogicalSize(900, 620)`, so the window — and with it the tab
-strip, the settings menu and every inset — grows by the factor. Before the fix the grid did
+strip, the preferences menu and every inset — grows by the factor. Before the fix the grid did
 not: the same 14 pt was still 14 physical pixels, so the cell stayed 9 × 17 and the pane
 *gained* 25 columns and 9 rows in the same window. In one line: at 125 % a five-letter word
 was the same 39 px wide as at 100 %, while the tab above it was 25 % taller.

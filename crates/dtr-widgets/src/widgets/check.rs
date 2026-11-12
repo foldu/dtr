@@ -29,7 +29,7 @@ pub fn check(ui: &mut Ui, skin: &Skin, on: bool, label: &str) -> Option<bool> {
 /// A checkbox with no visible label: the row it sits in already says what it is,
 /// and the name is only for the accessibility node.
 ///
-/// The settings menu is the shape this exists for — a label on the left, the
+/// The preferences card is the shape this exists for — a label on the left, the
 /// control on the right — and a checkbox that repeated the row's name there
 /// would be the second node with that name.
 pub fn check_box(ui: &mut Ui, skin: &Skin, on: bool, name: &str) -> Option<bool> {

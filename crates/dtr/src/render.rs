@@ -1990,7 +1990,7 @@ impl Fonts {
         value * self.size / units
     }
 
-    /// Is this family monospaced, by the same probe the settings menu uses?
+    /// Is this family monospaced, by the same probe the preferences card uses?
     fn monospaced(&mut self, id: fontique::FamilyId, face: usize) -> bool {
         if let Some(known) = self.monospaced.get(&id) {
             return *known;

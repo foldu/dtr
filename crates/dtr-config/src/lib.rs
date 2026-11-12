@@ -71,7 +71,7 @@ pub struct Tmux {
     ///
     /// Off by default. It changes what the far end does with a connection and it
     /// needs tmux there, which is a surprise to spring on someone who only asked
-    /// for a terminal; the switch is a row in the settings menu as well as this
+    /// for a terminal; the switch is a row in the preferences card as well as this
     /// key. What the host has is asked either way, so turning it on where there
     /// is no tmux costs a toast and nothing else.
     pub enabled: bool,
@@ -127,7 +127,7 @@ pub struct Font {
     /// first usable family the probe likes.
     pub family: Option<String>,
     /// A font file to load instead of any installed family. `.ttf`/`.otf`; the
-    /// first face in the file is used. Hand-edited only: the settings menu
+    /// first face in the file is used. Hand-edited only: the preferences card
     /// offers families, because a path you cannot verify is a broken terminal.
     pub path: Option<PathBuf>,
     /// Families to try, in order, when the grid face has no glyph for a
@@ -440,7 +440,7 @@ impl Config {
                 let text = accent
                     .as_str()
                     .ok_or_else(|| Error::Value("ui.accent must be a string".into()))?;
-                // The settings menu writes an empty string to mean "the preset's
+                // The preferences card writes an empty string to mean "the preset's
                 // own", the same way it writes "no theme".
                 config.ui.accent = if text.is_empty() {
                     None
@@ -458,7 +458,7 @@ impl Config {
             let name = theme
                 .as_str()
                 .ok_or_else(|| Error::Value("theme must be a string".into()))?;
-            // The settings menu writes an empty string to mean "no theme";
+            // The preferences card writes an empty string to mean "no theme";
             // reading it back must not produce a theme called "".
             config.theme = (!name.is_empty()).then(|| name.to_owned());
         }
@@ -538,7 +538,7 @@ impl Config {
                     let name = item.as_str().ok_or_else(|| {
                         Error::Value("font.fallback must be an array of family names".into())
                     })?;
-                    // An empty string is how the settings menu would write
+                    // An empty string is how the preferences card would write
                     // "none"; a family called "" matches nothing, so drop it
                     // rather than carry a lookup that can never succeed.
                     if !name.trim().is_empty() {
@@ -688,7 +688,7 @@ pub const TEMPLATE: &str = r##"# dtr configuration.
 auto_reconnect = true
 #
 # Baud rate and CR translation are not here: they describe the board on the
-# other end of the cable, so dtr remembers them per port and the settings menu
+# other end of the cable, so dtr remembers them per port and the preferences card
 # edits them while a port is open.
 
 # Name of a theme file to apply; see `dtr --themes`.
@@ -880,7 +880,7 @@ path = "/tmp/mono.ttf"
 
     /// `[font] fallback` is the only way to say "draw CJK with *this* face"
     /// without replacing the grid face, so it has to survive a round trip
-    /// through the settings menu's writer as well as a hand-written file.
+    /// through the preferences card's writer as well as a hand-written file.
     #[test]
     fn the_fallback_list_is_read_in_order() {
         let config = Config::parse(

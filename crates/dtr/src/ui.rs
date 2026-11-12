@@ -104,7 +104,7 @@ impl Look {
     /// The look a config file describes.
     ///
     /// One place, because "which keys make the window" has three readers — the
-    /// window at startup, the settings sheet's preview and its save — and two of
+    /// window at startup, the preferences card's preview and its save — and two of
     /// them disagreeing is a save that lands somewhere the sheet never showed.
     pub fn from_config(config: &dtr_config::Config, theme: Option<&crate::theme::Theme>) -> Self {
         let mut look = Self::themed(
@@ -424,7 +424,7 @@ pub enum TabHit {
 /// The window's own commands, the ones a menu can hold without a document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
-    Settings,
+    Preferences,
     Keymap,
     About,
 }
@@ -493,9 +493,9 @@ pub fn app_menu(
         };
         entry(
             ui,
-            "settings",
-            chord(crate::keys::Action::Settings),
-            Menu::Settings,
+            "preferences",
+            chord(crate::keys::Action::Preferences),
+            Menu::Preferences,
         );
         entry(
             ui,
@@ -641,7 +641,7 @@ pub fn tab_bar(
     // skin's row is 34 points for Adwaita and 23 for dtr's own, so the row
     // became taller than the chip box it sits in and `Align::Center` pushed
     // the chips down past the strip's clip rect: their bottoms were cut off
-    // after the settings menu had been opened once. A chip is
+    // after the preferences menu had been opened once. A chip is
     // `chip_height` tall whoever asks, and the strip measures its own row.
     ui.spacing_mut().interact_size.y = chip_height;
     ui.horizontal(|ui| {
@@ -1050,7 +1050,7 @@ mod kittest_tests {
 
     /// A config file becomes a skin: the look, its scheme and its accent, in one
     /// place. The two that ask a source ignore the other two, which is the rule
-    /// the settings menu's rows are built from.
+    /// the preferences menu's rows are built from.
     #[test]
     fn a_config_file_asks_for_a_skin() {
         let mut config = dtr_config::Config::default();
@@ -1095,8 +1095,8 @@ mod kittest_tests {
 
     /// Every key that makes a look, in one place.
     ///
-    /// The three readers of those keys are the window at startup, the settings
-    /// sheet's preview and its save; a key one of them forgot is a window that
+    /// The three readers of those keys are the window at startup, the preferences
+    /// card's preview and its save; a key one of them forgot is a window that
     /// changes when Save is pressed and not when the row was dragged, which is
     /// the whole bug this function exists to make impossible.
     #[test]
@@ -1588,7 +1588,7 @@ mod kittest_tests {
     /// `ui.horizontal` gives its child `interact_size.y`, and a skin's row is
     /// 34 points for Adwaita and 23 for dtr's own — numbers that belong to a
     /// dialog's controls, not to a chip. This is the reported bug: open the
-    /// settings menu once (which installs the skin on the context, for the stock
+    /// preferences menu once (which installs the skin on the context, for the stock
     /// widgets in its popups) and every later frame drew the chips centred in a
     /// 34-point row, 7 points lower than the 20-point box they were given, with
     /// their bottoms cut off by the strip.
@@ -1636,7 +1636,7 @@ mod kittest_tests {
         // A painted icon with no text needs the name it declares itself.
         harness.get_by_label("menu").click();
         harness.run_steps(3);
-        for item in ["settings", "keyboard map", "about"] {
+        for item in ["preferences", "keyboard map", "about"] {
             harness.get_by_label(item);
         }
         harness.snapshot("app_menu");

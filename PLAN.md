@@ -555,7 +555,7 @@ a burst of events settles into one reload 150 ms after the last one, and the rel
 the `[keys]` map all move together and a key added to the file tomorrow is one a reload applies.
 A file that does not parse is not a window that closes: the running config stays, `-v` carries the
 parser's line and column, and a toast says the file did not take. A change that arrives while the
-settings sheet is open waits for it to close, because the sheet owns the window's look until then;
+preferences card is open waits for it to close, because the sheet owns the window's look until then;
 a save wins over a deferred change, since it just wrote over it.
 
 `font.size` and `font.path` are honoured: a `.ttf`/`.otf` is loaded into egui's monospace family at
@@ -590,16 +590,16 @@ none of those still looks like *something* rather than like egui's defaults. `na
 because a terminal that matches every other window is the one that does not look pasted on. `[ui]
 scheme` is `system` (the default), `light` or `dark`, and `[ui] accent` is `#RRGGBB` or nothing;
 **both mean something only to the three looks painted here**, because `native` takes its scheme and
-its accent from the desktop — which is what `Preset::owns_its_colours` gates the settings menu on,
+its accent from the desktop — which is what `Preset::owns_its_colours` gates the preferences menu on,
 so a `native` window does not offer a row that would read nothing. `dtr` was a fourth painted look
 and turned out to be `egui` twice, so it is a spelling the config still accepts and the menu no
 longer offers. Everything is **live**: the look is a value the frame reads, so saving the settings
 menu repaints the window in the new chrome without a restart, and the `native` answer is watched
 (`WM_SETTINGCHANGE`, the XDG portal's `SettingChanged`) so the chrome follows the desktop at sunset.
-The settings sheet is a tabbed card — General first, Appearance second — because one column of
+The preferences card is a tabbed card — General first, Appearance second — because one column of
 rows outgrew the window, and every row is the TOML key with a line under it saying what the key
 does. It is mouse only: its rows are labels, not a cursor, so save, cancel and the cross are the
-ways out (`docs/ui.md` §The settings menu).
+ways out (`docs/ui.md` §The preferences menu).
 
 Colours in the config file itself are deliberately not supported *for the terminal*: a theme is a
 document with a name, and pointing at one beats duplicating sixteen hex triplets inline. The chrome's

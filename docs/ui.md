@@ -2,14 +2,14 @@
 
 A decision memo for `dtr-widgets` and for every surface that draws with it: why the
 chrome has a style at all, what a token is, what "native" means on each platform, and the
-rules the moving parts in a tiled window obey — the tab strip, the settings menu, the
+rules the moving parts in a tiled window obey — the tab strip, the preferences menu, the
 palette, the keyboard map. Read it before adding a colour to a screen; the short version is
 in `AGENTS.md` §The UI, and that file carries the rules an edit must not break.
 
 ## What was wrong
 
 Every surface invented its own controls. The serial sheet hand-painted eleven of
-them, the settings menu used egui's stock widgets, the tab strip painted chips,
+them, the preferences menu used egui's stock widgets, the tab strip painted chips,
 and the palette, the file explorer and the link menu each had a fourth answer.
 
 The visible symptom was that the same control existed four times and looked
@@ -59,7 +59,7 @@ The four split one way: **`native` asks the machine**, and the other three are
 looks the window carries, so they can be seen and chosen on any platform. That
 split is why only three of them have a scheme and an accent to configure
 (`Preset::owns_its_colours`): `native` takes both from the desktop, along with
-the accent ladder Windows keeps for its own hover shades, and a settings row for
+the accent ladder Windows keeps for its own hover shades, and a preferences row for
 either would be a control nothing reads.
 
 - **`native` on Windows** is Windows 11's: Windows UI 3's palette (`#F3F3F3`
@@ -256,7 +256,7 @@ colour, radius or stroke width, and its row heights and gaps come from
 `Look::skin()`. `menu_row` and `cross` exist because the sheet was the second
 place to need them.
 
-**That conversion is finished.** The tab strip, the settings menu, the palette
+**That conversion is finished.** The tab strip, the preferences menu, the palette
 overlay, the file explorer, the link menu, the pager, the keymap card and the
 about card each take `look.skin()` and paint from `skin.palette`, so a `native`
 skin reaches all of them. (It was not, for a while: this paragraph used to list
@@ -322,7 +322,7 @@ with the real popup.
 
 **The strip's own menu is a burger at the right-hand end, next to the caption buttons**, on
 both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of rows —
-settings and keyboard map with their live chords, a rule, about. The right end because the
+preferences and keyboard map with their live chords, a rule, about. The right end because the
 left is where tabs start and a button there would move every tab; the *same* place on
 Linux, where a client frame draws the same caption buttons. Its rect is part of the
 caption's obstacle list, not just painted over it: the drag region stops at the menu's
@@ -365,7 +365,7 @@ and it is opened by the menu and by `about` in the palette.
 from `interact_size.y`, and that number is part of the *skin*: `Skin::apply` puts it on the
 context (34 points for Adwaita, 23 for dtr's own) because the stock widgets egui draws
 inside a dialog's popups read the context style rather than the dialog's. A dialog therefore
-leaves its row height behind, and the strip inherited it: after one visit to the settings
+leaves its row height behind, and the strip inherited it: after one visit to the preferences
 menu the chips were centred in a 34-point row inside a 30-point panel, seven points lower
 than the `TAB_CHIP_HEIGHT` box they had been given, and the strip's clip rect cut their
 bottoms off. That is the whole of "the tab strip has things cut off", arithmetic included —
@@ -392,7 +392,7 @@ disjoint rects, and `Image::paint_at` for anything that must not sense anything.
 screen-clamped and centered rectangle, the primed `Area` (so the first frame is
 not in the corner), the scrim, the frame, the skin installed on the context, and
 the header. Four surfaces had each spelled that shell out: about, the keyboard
-map, the settings menu and the serial sheet. Their bodies differ and stay their
+map, the preferences menu and the serial sheet. Their bodies differ and stay their
 own — two-column scrolling map, a form of rows, a list of prose — but the shell
 does not, and four copies of a scrim and a radius are four places for them to
 drift.
@@ -412,7 +412,7 @@ where a value, a key name or a `[keys]` spelling ends. A screen that wants an
 answer at the bottom supplies a **footer** closure, drawn *outside* that viewport
 in a band of one row plus a gap — save/cancel, connect/cancel, the keyboard map's
 hint. A button that scrolls out of reach is a button that is not there, and a
-settings menu whose Save you must hunt for is the bug this shape prevents.
+preferences menu whose Save you must hunt for is the bug this shape prevents.
 
 The requested `size` stays what it was: where the sheet is *centered* and how big
 it is meant to look, not a hard cap, because a card one line taller than its
@@ -433,9 +433,9 @@ the footer — the longest, because a card that grew when a tab was clicked woul
 move its own buttons under the pointer. Settings is the only tabbed card; the
 `tabs` primitive is in the crate so the next one does not invent a second.
 
-## The settings menu
+## The preferences menu
 
-The settings menu is **mouse only**: every closed list — the look, the scheme, the theme,
+The preferences menu is **mouse only**: every closed list — the look, the scheme, the theme,
 the family — is a combo box whose list is `menu_row`s, the accent is a hex field, toggles
 are checkboxes, and the font size is a drag value. The sheet has no cursor, takes no keys
 and marks no row: a label there is a label, and the control beside it is the only thing a
@@ -528,13 +528,13 @@ keys, because the sheet has none.
 and asking for `M`, `i`, `W` and a width ratio (the same `FcFontSort` cost that showed up in
 a profile at 16%). Measured on this desktop, where 47 families pass: 290 ms in a release
 build — inside the click that opens the menu, which is a third of a second of frozen window,
-and the whole of "settings take a while to open". The list is a `OnceLock` filled by the
+and the whole of "the preferences take a while to open". The list is a `OnceLock` filled by the
 `dtr-warm` thread `main` starts before the window exists, read by the menu through
 `ready_families`, which never blocks: a menu opened before the probe lands shows `default`
 alone and `Settings::refresh_families` fills it in on a later frame. The theme list is
 scanned once in `show` and kept — the controls used to call `theme::names()` (six
 `read_dir`s) and `usable_families` again on *every frame the menu was open*. `-v` logs
-`probed system fonts elapsed_ms=…` and `settings populated elapsed_us=…`; the second is the
+`probed system fonts elapsed_ms=…` and `preferences warmed elapsed_us=…`; the second is the
 click, and it reads single-digit microseconds once the warm has finished.
 
 ## The palette
@@ -584,7 +584,7 @@ offered and inert, and are gone.
 field sees them so navigating cannot land an `n` in the query. **Reopening the palette starts
 a fresh sentence**: `toggle` clears query, selection and completions. **A modal must ignore
 key releases** — the release of the keystroke that opened it arrives while it is open, which
-made the settings menu flash and vanish — so overlays check `ElementState::Pressed` first.
+made the preferences menu flash and vanish — so overlays check `ElementState::Pressed` first.
 **`Ctrl+Shift+T` opens a tab**; `Ctrl+Tab` only cycles ones that exist.
 
 ## The keyboard map
@@ -686,9 +686,9 @@ query a widget by accessible label, `.click()`, `harness.run()`, assert what it 
 `UPDATE_SNAPSHOTS=1 cargo test` writes a baseline PNG under `crates/dtr/tests/snapshots/` and
 the plain run compares, with one snapshot per state worth seeing — `tab_bar` and
 `tab_bar_hover` — because a hand-painted hover fill is invisible to every test where the
-pointer is elsewhere. The settings sheet has three, because it is the card with the most
-states: `settings_menu` (the first tab as it opens), `settings_appearance` (a look that owns
-its colours, so the scheme and accent rows are there) and `settings_general` (a port's rows).
+pointer is elsewhere. The preferences card has three, because it is the card with the most
+states: `preferences_menu` (the first tab as it opens), `preferences_appearance` (a look that owns
+its colours, so the scheme and accent rows are there) and `preferences_general` (a port's rows).
 `tabs` is the primitive's own gallery picture.
 
 These baselines follow the same LFS rule as the widget gallery — `.gitignore` ignores `*.png`
@@ -713,7 +713,7 @@ disagreeing.
   desktop today, which is what "native" means, but a person whose desktop turns
   over at sunset may want the chrome to stay put — the setting would be a fourth
   `scheme` value (`pin`) rather than a hidden override, so the row can say so.
-- Whether the settings menu's five `egui::ComboBox`es (look, scheme, family, theme, baud)
+- Whether the preferences menu's five `egui::ComboBox`es (look, scheme, family, theme, baud)
   should become a painted
   `Combo`: their open rows are `menu_row` already, but the closed control is
   still egui's, so it is the last place a `native` skin stops. `Editable` is

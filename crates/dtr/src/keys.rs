@@ -14,7 +14,8 @@ use dtr_config::keys::{Chord, Sequence};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Palette,
-    Settings,
+    /// The preferences card: the config file, editable in the window.
+    Preferences,
     NewTab,
     ClosePane,
     NextTab,
@@ -58,7 +59,7 @@ impl Action {
     pub fn name(self) -> &'static str {
         match self {
             Self::Palette => "palette",
-            Self::Settings => "settings",
+            Self::Preferences => "preferences",
             Self::NewTab => "new-tab",
             Self::ClosePane => "close-pane",
             Self::NextTab => "next-tab",
@@ -100,7 +101,7 @@ impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Self::Palette => "command palette",
-            Self::Settings => "settings",
+            Self::Preferences => "preferences",
             Self::NewTab => "new tab",
             Self::ClosePane => "close pane",
             Self::NextTab => "next tab",
@@ -150,7 +151,7 @@ impl Action {
             | Self::ResizeUp
             | Self::ResizeDown
             | Self::ZoomPane => Group::Panes,
-            Self::Palette | Self::Settings | Self::Keymap => Group::Overlays,
+            Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
             | Self::ScrollPageDown
@@ -208,7 +209,7 @@ impl Group {
 /// Every action, in the order the template lists them.
 pub const ALL: [Action; 31] = [
     Action::Palette,
-    Action::Settings,
+    Action::Preferences,
     Action::NewTab,
     Action::ClosePane,
     Action::NextTab,
@@ -246,7 +247,7 @@ pub const ALL: [Action; 31] = [
 /// defaults cannot drift: a binding documented there is a binding here.
 pub const DEFAULTS: &[(&str, &str)] = &[
     ("palette", "ctrl-shift-p"),
-    ("settings", "ctrl-,"),
+    ("preferences", "ctrl-,"),
     ("new-tab", "ctrl-shift-t"),
     ("close-pane", "ctrl-shift-w"),
     ("next-tab", "ctrl-tab"),

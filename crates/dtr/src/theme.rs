@@ -686,7 +686,7 @@ fn load_in(directories: &[PathBuf], name: &str) -> Result<Theme, Error> {
     Ok(theme)
 }
 
-/// Theme names available, for the palette and the settings menu: what the
+/// Theme names available, for the palette and the preferences card: what the
 /// search paths hold plus what is compiled in.
 pub fn names() -> Vec<String> {
     let mut names: Vec<String> = BUNDLED.iter().map(|(name, _)| (*name).to_owned()).collect();

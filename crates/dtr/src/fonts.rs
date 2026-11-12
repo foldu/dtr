@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 /// Families that pass the probe, sorted case-insensitively.
 ///
 /// Probing parses a font per family, so the answer is cached: opening the
-/// settings menu twice must not cost two full font scans. The names of a
+/// preferences card twice must not cost two full font scans. The names of a
 /// machine's fonts do not change while the terminal runs in any way worth
 /// noticing.
 pub fn usable_families() -> Vec<String> {
@@ -22,7 +22,7 @@ pub fn usable_families() -> Vec<String> {
 ///
 /// `usable_families` blocks on a fontconfig walk that costs about 300 ms, which
 /// is a third of a second of a frozen window if it happens inside the click
-/// that opens the settings menu. So the menu takes this instead: empty until the
+/// that opens the preferences card. So the card takes this instead: empty until the
 /// probe lands, filled on the next frame after it does.
 pub fn ready_families() -> Option<Vec<String>> {
     FAMILIES.get().cloned()
@@ -31,8 +31,8 @@ pub fn ready_families() -> Option<Vec<String>> {
 /// Start the probe on a thread of its own, once per process.
 ///
 /// `main` calls this before the window exists, so the click that opens the
-/// settings menu is normally a cache hit. Idempotent, and cheap when the list is
-/// already there — the menu calls it too, because a run that opened the menu
+/// preferences card is normally a cache hit. Idempotent, and cheap when the list is
+/// already there — the card calls it too, because a run that opened the card
 /// before the startup thread finished would otherwise never fill the list in.
 pub fn warm() {
     static STARTED: std::sync::Once = std::sync::Once::new();
@@ -319,7 +319,7 @@ pub fn caption_icons() -> Option<(String, Vec<u8>)> {
 /// The family to use when nothing is configured: the first preferred one that
 /// is installed, else the first usable family at all.
 ///
-/// Test-only since the settings menu became a combo box: the menu lists every
+/// Test-only since the preferences card became a combo box: the card lists every
 /// usable family, so nothing has to choose one on the user's behalf.
 #[cfg(test)]
 pub fn default_family(usable: &[String]) -> Option<String> {
@@ -334,7 +334,7 @@ pub fn default_family(usable: &[String]) -> Option<String> {
 mod tests {
     use super::usable_families;
 
-    /// The settings menu asks for this list when it opens, and the first call
+    /// The preferences card asks for this list when it opens, and the first call
     /// builds a fontconfig collection and probes every family. That cost is why
     /// the app warms it on a worker thread at startup; if the cache is ever
     /// removed, the first `Ctrl+,` becomes a stall again - and this test says so.
@@ -355,11 +355,11 @@ mod tests {
 
     use super::*;
 
-    /// The settings menu reads the list without waiting for it, so the warm
+    /// The preferences card reads the list without waiting for it, so the warm
     /// thread is what makes the list appear at all: `ready_families` answers
     /// `None` until the probe lands, and the same list once it has.
     ///
-    /// `settings::Settings::show` calls `warm` too, so a run that opened the menu
+    /// `settings::Settings::show` calls `warm` too, so a run that opened the card
     /// before `main` got this far still fills the combo in.
     #[test]
     fn warming_the_families_makes_them_ready() {

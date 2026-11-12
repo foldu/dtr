@@ -147,7 +147,7 @@ one look identical. Strikethrough is the same bug with a smaller blast radius.
 | split verbs | equalize, swap, move between tabs/windows, divider colour, preserve zoom | split, focus, resize, zoom (`docs/panes.md`) | S–M |
 | padding | `window-padding-x/y`, balanced, coloured | a fixed four-point gap (`ui.rs` `GRID_GAP`), not configurable | S |
 | cursor | a block **inverts its cell** and draws the glyph in `cursor-text`; plus opacity, blink and click-to-move | **fixed**: a block is painted with the backgrounds and its glyph in the theme's `cursor-text` (its background when the theme has none) — measured, `ABC` with the cursor moved left shows the `C` in the background colour on the cursor block, and `啊` inverts across both cells. What is left is the options: no blink, no opacity, no click-to-move | S |
-| font size at runtime | four actions, plus a per-window size | a row in the settings menu | S |
+| font size at runtime | four actions, plus a per-window size | a row in the preferences menu | S |
 | selection policy | clear-on-typing, clear-on-copy, word characters, `select_all` | copy-on-select **is** done (`app.rs:2487`), unconditionally; the selection survives typing, the word set is the core's default, and there is no select-all (`Terminal::select_all` is in the binding) | S each |
 | clipboard policy | paste protection (a 100-line paste asks), trim trailing spaces, codepoint map, read/write policy | bracketed paste only; no protection, no trim knobs | S–M |
 | mouse | hide-while-typing, scroll multiplier, right/middle-click actions | shift hands the mouse back and the wheel is one notch per event; no multiplier, no right/middle-click policy outside links | S |
@@ -186,7 +186,7 @@ Named so that this list is not read as "we are 40 features behind":
 
 - **A small config file is the point.** dtr's config is a handful of things a
   person changes; Ghostty's is a compatibility surface with every other
-  terminal's spelling. Growing it past its use is how a settings menu becomes a
+  terminal's spelling. Growing it past its use is how a preferences menu becomes a
   form (`docs/ui.md`).
 - **One window, many tabs.** dtr's `+` and its tab strip are the window model;
   a second window is a feature of a desktop terminal, not of a serial console.

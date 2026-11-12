@@ -84,9 +84,9 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Open the settings menu on start (also how it gets into screenshots)
+    /// Open the preferences card on start (also how it gets into screenshots)
     #[arg(long)]
-    settings: bool,
+    preferences: bool,
 
     /// Open the keyboard map on start: every binding, on one card
     #[arg(long)]
@@ -494,10 +494,10 @@ fn main() -> anyhow::Result<()> {
             dtr_config::Config::default()
         }
     };
-    // The settings menu offers the fonts that can be a terminal grid, and
+    // The preferences card offers the fonts that can be a terminal grid, and
     // finding them is a fontconfig walk that parses a face per family — a third
     // of a second, which is a frozen window if it happens inside the click that
-    // opens the menu. Start it here, on its own thread, so the click is normally
+    // opens the card. Start it here, on its own thread, so the click is normally
     // a cache hit.
     crate::fonts::warm();
     // A key table with a typo in it is silent otherwise: the binding simply
@@ -776,7 +776,7 @@ fn main() -> anyhow::Result<()> {
             drag: args.drag.clone(),
             click: args.click.clone(),
             gpu: gpu.clone(),
-            settings: args.settings,
+            preferences: args.preferences,
             keymap: args.keymap,
             serial_dialog: args.serial_dialog.as_deref().map(|port| {
                 crate::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())
@@ -819,7 +819,7 @@ fn main() -> anyhow::Result<()> {
         drag: args.drag.clone(),
         click: args.click.clone(),
         gpu,
-        settings: args.settings,
+        preferences: args.preferences,
         keymap: args.keymap,
         serial_dialog: args
             .serial_dialog

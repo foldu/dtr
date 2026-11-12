@@ -298,8 +298,8 @@ pub struct Startup {
     pub select: Option<(usize, usize)>,
     /// Lines to scroll into the scrollback before capturing (screenshots).
     pub scroll: i64,
-    /// Open the settings menu on start (also how it gets into screenshots).
-    pub settings: bool,
+    /// Open the preferences card on start (also how it gets into screenshots).
+    pub preferences: bool,
     /// Open the keyboard map on start, the same way.
     pub keymap: bool,
     /// The serial connection sheet to show over the session, for reviewing the
@@ -408,7 +408,7 @@ pub fn capture_headless(
         .as_ref()
         .map(|path| Explorer::new(Some(path.clone())));
 
-    let settings = startup.settings.then(|| {
+    let settings = startup.preferences.then(|| {
         let mut settings = crate::settings::Settings::new();
         settings.show(&startup.config);
         settings
@@ -621,7 +621,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         gpu_hint: startup.gpu.clone(),
         settings: {
             let mut settings = crate::settings::Settings::new();
-            if startup.settings {
+            if startup.preferences {
                 settings.show(&startup.config);
             }
             settings
@@ -1174,7 +1174,7 @@ struct App {
     config_watch: crate::watch::ConfigWatch,
     /// The file is written in bursts, so a change only starts a clock.
     config_settle: crate::watch::Settle,
-    /// A reload that arrived while the settings sheet was open, waiting for it
+    /// A reload that arrived while the preferences card was open, waiting for it
     /// to close: the sheet owns the window's look until then, and re-reading
     /// the file under a half-finished draft would take the preview away.
     config_deferred: bool,
@@ -1247,7 +1247,7 @@ struct App {
     /// Adapter name to prefer, from `--gpu` or `DTR_GPU`.
     gpu_hint: Option<String>,
     /// Set when the grid must be rebuilt against a new face; the redraw has the
-    /// device, and the settings menu does not.
+    /// device, and the preferences menu does not.
     fonts_dirty: bool,
     /// What the config file says each chord means.
     keymap: crate::keys::Keymap,
@@ -1300,7 +1300,7 @@ struct App {
     last_press: Option<(std::time::Instant, (f64, f64))>,
     clicks: u8,
     held: Option<winit::keyboard::Key>,
-    /// The settings menu, and the config it edits.
+    /// The preferences card, and the config it edits.
     settings: crate::settings::Settings,
     /// The about card: a page with no state, so a flag.
     about_open: bool,
@@ -1620,7 +1620,7 @@ impl App {
 
         // The menu owns the keyboard while it is open. Releases only
         // clear the held key; duplicates are compositor noise.
-        // The settings card is mouse only: it has no keys of its own, and a
+        // The preferences card is mouse only: it has no keys of its own, and a
         // keystroke must not reach the shell behind it either. Save, cancel and
         // the cross are the way out, and they are all buttons.
         if self.settings.open {
@@ -2784,8 +2784,8 @@ impl App {
                 self.repaint("keymap");
                 true
             }
-            Action::Settings => {
-                // Opening only: the chord is a way in, not a way out. The sheet
+            Action::Preferences => {
+                // Opening only: the chord is a way in, not a way out. The card
                 // takes no keys once it is up, so this cannot run while it is
                 // open — save, cancel and the cross are the ways out.
                 let config = self.config.clone();
@@ -2799,7 +2799,7 @@ impl App {
                         .and_then(|store| store.serial(port).ok().flatten())
                 });
                 self.settings.show_port(&config, port, record);
-                self.repaint("settings");
+                self.repaint("preferences");
                 true
             }
             Action::NewTab => {
@@ -3096,7 +3096,7 @@ impl App {
         // was open was overwritten by this one, so there is nothing left to
         // reload.
         self.config_deferred = false;
-        self.repaint("settings applied");
+        self.repaint("preferences applied");
     }
 
     /// Take `config` as the truth: it is the file's now, and the keys follow it.
@@ -3174,7 +3174,7 @@ impl App {
     fn preview_settings(&mut self, re_theme: bool) {
         let draft = self.settings.draft().clone();
         self.show_look(&draft, re_theme);
-        self.repaint("settings previewed");
+        self.repaint("preferences previewed");
     }
 
     /// Make `config` the window's look.
@@ -4250,6 +4250,11 @@ impl App {
                 self.open_ssh(host);
             }
             Action::Keys => self.keymap_card.open = true,
+            // The card's own way in, so the palette is a second way into the
+            // same surface and never a second implementation of it.
+            Action::Preferences => {
+                self.dispatch(crate::keys::Action::Preferences);
+            }
             Action::About => {
                 self.about_open = true;
                 self.repaint("about");
@@ -4618,7 +4623,7 @@ impl ApplicationHandler<UserEvent> for App {
         sooner(self.config_due, &mut deadline);
 
         // The config file, once it has been quiet for a moment. A change that
-        // arrives while the settings sheet is open waits for it: the sheet owns
+        // arrives while the preferences card is open waits for it: the sheet owns
         // the window's look, and re-reading the file under a half-finished draft
         // would take the preview away from under the pointer. A save wins over
         // the deferred change — the draft was written over it.
@@ -5429,7 +5434,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 // restores it — and so is the window: a preview
                                 // is not a change until Save.
                                 self.preview_settings(true);
-                                self.repaint("settings closed");
+                                self.repaint("preferences closed");
                             }
                         }
                     }
@@ -5445,8 +5450,8 @@ impl ApplicationHandler<UserEvent> for App {
                         // its chord does, so the menu is a second way in, never a
                         // second implementation.
                         Some(crate::ui::TabHit::Menu(menu)) => match menu {
-                            crate::ui::Menu::Settings => {
-                                self.dispatch(crate::keys::Action::Settings);
+                            crate::ui::Menu::Preferences => {
+                                self.dispatch(crate::keys::Action::Preferences);
                             }
                             crate::ui::Menu::Keymap => {
                                 self.dispatch(crate::keys::Action::Keymap);
@@ -5685,7 +5690,7 @@ impl Gpu {
         Ok(())
     }
 
-    /// Rebuild the grid for a new face or size. Cheap enough to do on a settings
+    /// Rebuild the grid for a new face or size. Cheap enough to do on a preferences
     /// change: it is a fresh atlas, not a reload of the whole renderer.
     fn rebuild_grid(&mut self, look: &Look) {
         let scale = self.scale();
@@ -5965,8 +5970,8 @@ impl Gpu {
         // not in a dialog. A dialog has to put its skin on the *context*,
         // because the stock widgets egui draws inside a popup read the context
         // style rather than the one the dialog was given, and that install
-        // outlives the frame that made it: closing the settings menu used to
-        // leave the window with the menu's row height, and the tab strip's
+        // outlives the frame that made it: closing the preferences card used to
+        // leave the window with the card's row height, and the tab strip's
         // chips under it were centred in a 34-point row and clipped by the
         // panel. Installing the resolved skin first makes the window the
         // authority and every dialog a guest.
