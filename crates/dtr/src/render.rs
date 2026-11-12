@@ -955,6 +955,17 @@ impl GridRenderer {
             (index / cols) < rows_fit && (index % cols) < cols_fit
         };
 
+        // The pane's own background, before anything else. The window clears to
+        // *one* colour and a split can have a different one, and a program that
+        // sets its own with `OSC 11` has to be able to say so — cells paint only
+        // the backgrounds they carry, so without this the set colour never
+        // reached the screen.
+        self.instances.push(Instance::solid(
+            [origin_x, origin_y, pane.rect.width, pane.rect.height],
+            frame.default_bg,
+            1.0,
+        ));
+
         // A block cursor is a cell *inverted*, not a rectangle laid over the
         // glyph: the cursor colour goes down with the backgrounds and the glyph
         // is drawn in `cursor-text` above it. Painted afterwards it hid the

@@ -2431,19 +2431,31 @@ fn publish(
     // A title is the same shape of fact: `nvim file` sets one without drawing
     // anything, so a strip that only heard about it on the next keystroke would
     // name the tab after the wrong program.
+    //
+    // And so are the default colours: `OSC 11` sets the background without
+    // touching a cell, which is why the window never changed colour.
     let title = clean_title(term.title()?);
-    let changed = cursor != shown.cursor || title != shown.title;
+    // `Snapshot::colors()` reports the *defaults* and not the OSC 10/11
+    // overrides — the render state has no reason to carry them, because each
+    // cell's colours are already resolved — so a program that recolours the
+    // background changed nothing in it. The terminal knows both.
+    let colours = snapshot.colors()?;
+    let (default_fg, default_bg) = (
+        rgb(term.fg_color()?.unwrap_or(colours.foreground)),
+        rgb(term.bg_color()?.unwrap_or(colours.background)),
+    );
+    let changed =
+        cursor != shown.cursor || title != shown.title || (default_fg, default_bg) != shown.colours;
     // A clean frame means the UI already has the current contents.
     if !force && !changed && matches!(snapshot.dirty()?, Dirty::Clean) {
         return Ok(());
     }
 
-    let colors = snapshot.colors()?;
     let mut frame = Frame {
         cols: snapshot.cols()?,
         rows: snapshot.rows()?,
-        default_fg: rgb(colors.foreground),
-        default_bg: rgb(colors.background),
+        default_fg,
+        default_bg,
         cursor,
         selection: None,
         cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
@@ -2491,6 +2503,7 @@ fn publish(
     // failed publish is retried by the next one rather than remembered as drawn.
     shown.cursor = cursor;
     shown.title = title;
+    shown.colours = (default_fg, default_bg);
     match out.lock() {
         Ok(mut slot) => *slot = Some(frame),
         Err(err) => tracing::error!("frame slot poisoned: {err}"),
@@ -3758,13 +3771,17 @@ mod ending_tests {
 
 /// What the last published frame showed that is not a cell.
 ///
-/// Two things ride here — the cursor and the program's title — because a change
-/// to either belongs on screen and neither dirties the grid, so both are
-/// compared against what was actually published rather than against `Dirty`.
+/// Three things ride here — the cursor, the program's title and the default
+/// colours — because a change to any of them belongs on screen and none of them
+/// dirties the grid, so all three are compared against what was actually
+/// published rather than against `Dirty`. `OSC 11` is the colour one: setting a
+/// background touches no cell, which is why the window never changed colour.
 #[derive(Default)]
 struct Displayed {
     cursor: Option<Cursor>,
     title: String,
+    /// `(default_fg, default_bg)`, the two colours a frame paints itself with.
+    colours: ([u8; 3], [u8; 3]),
 }
 
 /// A shell pane with a real pty behind it: the only way to see a reconnection,
@@ -4473,6 +4490,31 @@ mod session_tests {
             after.contains("halfway"),
             "the held text never arrived: {after:?}"
         );
+    }
+
+    /// `OSC 11` sets the default background and touches no cell. A frame is only
+    /// republished when something it shows changed, so the colours are part of
+    /// that comparison: without them the set arrives, nothing dirties the grid,
+    /// and the window keeps its old colour until the program prints.
+    #[test]
+    fn a_program_can_recolour_the_background() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("bg");
+        let script = reader(r"printf '\033]11;#102030\033\\'; sleep 5; ", &out);
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(frame) = pane.take_frame() {
+                if frame.default_bg == [0x10, 0x20, 0x30] {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the background never reached a frame"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// A bell is a signal, not a sound: dtr never writes `\a` to the pty or the
