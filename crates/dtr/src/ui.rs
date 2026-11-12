@@ -91,6 +91,23 @@ impl Look {
         look
     }
 
+    /// The look a config file describes.
+    ///
+    /// One place, because "which keys make the window" has three readers — the
+    /// window at startup, the settings sheet's preview and its save — and two of
+    /// them disagreeing is a save that lands somewhere the sheet never showed.
+    pub fn from_config(config: &dtr_config::Config, theme: Option<&crate::theme::Theme>) -> Self {
+        let mut look = Self::themed(
+            config.font.size,
+            config.font.family.clone(),
+            config.font.path.clone(),
+            theme,
+            Self::choice_of(config),
+        );
+        look.fallback = config.font.fallback.clone();
+        look
+    }
+
     /// The chrome's skin, derived from these colours on demand.
     ///
     /// Derived rather than stored because the colours are the theme's: a stored
@@ -807,6 +824,48 @@ mod kittest_tests {
             config.ui.widgets = widgets;
             assert_eq!(Look::choice_of(&config).preset, preset);
         }
+    }
+
+    /// Every key that makes a look, in one place.
+    ///
+    /// The three readers of those keys are the window at startup, the settings
+    /// sheet's preview and its save; a key one of them forgot is a window that
+    /// changes when Save is pressed and not when the row was dragged, which is
+    /// the whole bug this function exists to make impossible.
+    #[test]
+    fn a_config_file_becomes_a_whole_look() {
+        let mut config = dtr_config::Config::default();
+        config.font.size = 17.5;
+        config.font.family = Some("JetBrains Mono".to_owned());
+        config.font.fallback = vec!["Sarasa Mono".to_owned(), "Noto Sans CJK".to_owned()];
+        config.font.path = Some(std::path::PathBuf::from("/tmp/demo.ttf"));
+        config.ui.widgets = dtr_config::Widgets::Egui;
+        config.ui.scheme = dtr_config::Scheme::Dark;
+
+        let look = Look::from_config(&config, None);
+        assert_eq!(look.size, 17.5);
+        assert_eq!(look.family.as_deref(), Some("JetBrains Mono"));
+        assert_eq!(
+            look.fallback,
+            ["Sarasa Mono", "Noto Sans CJK"],
+            "the grid's fallback list is part of the look, not a second field"
+        );
+        assert_eq!(
+            look.path.as_deref(),
+            Some(std::path::Path::new("/tmp/demo.ttf"))
+        );
+        assert_eq!(look.choice.preset, Preset::Egui);
+        assert_eq!(look.choice.scheme, dtr_widgets::Scheme::Dark);
+
+        // A theme is the colours the look is built from, and the chrome's
+        // surface and dim text are derived from them rather than stored.
+        let theme =
+            crate::theme::Theme::parse("demo", "background = #101010\nforeground = #e0e0e0\n")
+                .expect("a two-line theme");
+        let look = Look::from_config(&config, Some(&theme));
+        assert_eq!(look.background, [0x10, 0x10, 0x10]);
+        assert_eq!(look.foreground, [0xE0, 0xE0, 0xE0]);
+        assert_ne!(look.dim, look.foreground, "dim is mixed, not copied");
     }
 
     /// The new-tab button offers the destinations a terminal has, each kind

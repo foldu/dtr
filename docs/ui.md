@@ -378,6 +378,23 @@ values need: on Windows' 32-point metrics the look row was the one that made the
 scroll. The look was chips first, `native adwaita windows egui` across a 300-point body,
 and the last of them sat under the card's edge.
 
+**Every row is on the window before Save is pressed.** The card is drawn in the skin, and the
+skin is derived per frame from `Look`, so the sheet can only be honest about what a value
+means if the same `Look` the card is drawn in is the draft's: `App::preview_settings` applies
+the report to the draft and calls `show_look`, which re-derives the window from
+`Look::from_config` — the same function startup and the save use, so a previewed window and a
+saved one cannot disagree. A font change rides the same path and sets `fonts_dirty`, which
+rebuilds the grid on the next frame and lets `fit_panes` resize the pty; a theme change also
+sends `SetTheme`, because a window whose chrome moved and whose text did not is half a
+preview. Cancel restores the draft (`Settings::cancel`) and re-derives from it, which is why
+"closed without saving" and "never opened" look the same.
+
+The one thing that cannot preview is a serial row: a baud rate is not applied to an open port
+in place — the pane reconnects, keeps its scrollback and comes back talking at the new rate —
+so those rows land on Save, and the sheet says nothing about them until then. Everything else
+is immediate, which is why the accent field, the scheme dropdown and the theme row are worth
+dragging: the window behind the card is the answer.
+
 Every control declares an accessible name of the form `<row> value`, not the row name,
 because the row's label already carries the bare name and two nodes with one name cannot be
 addressed from a test. Which rows are shown is a filter rather than a layout: port rows exist

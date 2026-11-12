@@ -1535,13 +1535,22 @@ impl App {
                     )
                 });
             if closes {
-                self.settings.open = false;
+                // Closing the way it was opened is a cancel, not a save: the
+                // draft goes back to the file's and the window with it, or a
+                // preview would outlive the card that made it.
+                self.settings.cancel();
+                self.preview_settings(true);
                 self.repaint("settings closed");
                 return;
             }
             match self.settings.handle(&stroke.key, stroke.mods) {
                 Some(crate::settings::Effect::Apply) => self.apply_settings(),
-                Some(crate::settings::Effect::Cancel) => self.repaint("settings closed"),
+                Some(crate::settings::Effect::Cancel) => {
+                    // `handle` has already restored the draft; this puts the
+                    // restored draft back on the window.
+                    self.preview_settings(true);
+                    self.repaint("settings closed");
+                }
                 Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
                 None => {}
             }
@@ -2862,9 +2871,11 @@ impl App {
 
     /// Write the menu's draft to the config file and make it live.
     ///
-    /// Serial settings reach the pane as a command because a baud rate cannot
-    /// be applied to an open port in place: the pane reconnects, keeps its
-    /// scrollback, and comes back talking at the new rate.
+    /// The draft is already on the window — every edit previews — so this writes
+    /// it, keeps it, and lets the serial rows through, which is the half that
+    /// cannot be a preview: a baud rate cannot be applied to an open port in
+    /// place, so the pane reconnects, keeps its scrollback, and comes back
+    /// talking at the new rate.
     fn apply_settings(&mut self) {
         let draft = self.settings.draft().clone();
         for (key, value) in self.settings.writes() {
@@ -2873,44 +2884,14 @@ impl App {
             }
         }
 
-        let font_changed = draft.font.size != self.config.font.size
-            || draft.font.family != self.config.font.family
-            || draft.font.fallback != self.config.font.fallback;
-        let theme_changed = draft.theme != self.config.theme;
         let serial_changed = draft.serial != self.config.serial;
 
         self.config = draft;
-        self.look.size = self.config.font.size;
-        self.look.family = self.config.font.family.clone();
-        self.look.fallback = self.config.font.fallback.clone();
-        // The look, its scheme and its accent are the draft's now: the skin is
-        // derived per frame from these, so the next frame is the new chrome.
-        self.look.choice = crate::ui::Look::choice_of(&self.config);
-
-        if theme_changed {
-            let theme = self
-                .config
-                .theme
-                .as_deref()
-                .and_then(|name| crate::theme::load(name).ok());
-            self.look = crate::ui::Look::themed(
-                self.look.size,
-                self.look.family.clone(),
-                self.look.path.clone(),
-                theme.as_ref(),
-                self.look.choice,
-            );
-            self.theme = theme.clone();
-            for tab in &mut self.tabs {
-                for pane in tab.leaves.values_mut() {
-                    if let Pane::Terminal(session) = pane {
-                        session
-                            .pane
-                            .send(crate::pane::Command::SetTheme(theme.clone()));
-                    }
-                }
-            }
-        }
+        // The theme was resolved when the row moved, not now: a palette command
+        // switches the theme without touching the file, and a save must not
+        // quietly undo it.
+        let config = self.config.clone();
+        self.show_look(&config, false);
 
         // The port's rate and CR translation are remembered per device, so they
         // go to the store and straight to the open session; `auto_reconnect` is
@@ -2984,12 +2965,77 @@ impl App {
         }
 
         self.settings.open = false;
+        self.repaint("settings applied");
+    }
+
+    /// Put the sheet's draft on the window, now.
+    ///
+    /// The menu's rows are the window's controls, not a form to be submitted: a
+    /// draft that took effect only on save would make every row a promise about
+    /// what the window will look like afterwards, and the thing being chosen is
+    /// usually the window behind the card. `re_theme` is the theme row's: only it
+    /// re-resolves `theme`, because a palette command changes the terminals'
+    /// colours without touching the file and every other row must leave that
+    /// alone.
+    fn preview_settings(&mut self, re_theme: bool) {
+        let draft = self.settings.draft().clone();
+        self.show_look(&draft, re_theme);
+        self.repaint("settings previewed");
+    }
+
+    /// Make `config` the window's look.
+    ///
+    /// The three readers — startup, a preview, a save — all land here and in
+    /// `Look::from_config`, so a saved window cannot look different from the one
+    /// that was dragged there.
+    fn show_look(&mut self, config: &dtr_config::Config, re_theme: bool) {
+        if re_theme {
+            self.switch_theme(config.theme.as_deref());
+        }
+        // The grid is rebuilt against a new face on the next frame, which is
+        // where `Gpu` is; `fit_panes` then re-fits the pty from the new metrics.
+        let font_changed = config.font.size != self.look.size
+            || config.font.family != self.look.family
+            || config.font.fallback != self.look.fallback;
+        self.look = crate::ui::Look::from_config(config, self.theme.as_ref());
         if font_changed {
-            // The grid must be rebuilt against the new face, which needs the
-            // device; the next redraw has it.
             self.fonts_dirty = true;
         }
-        self.repaint("settings applied");
+    }
+
+    /// Give every terminal, and the chrome, the theme `name` asks for.
+    ///
+    /// The chrome and the terminals have to move together, or the window shows
+    /// one theme's text on another theme's surface — so this is the only place
+    /// that sends `SetTheme`, and it sends it to every pane in every tab. A name
+    /// that does not load keeps the colours the window has, because a terminal
+    /// that went blank over a typo is worse than one that stayed put.
+    fn switch_theme(&mut self, name: Option<&str>) {
+        let theme = match name {
+            None => None,
+            Some(name) => match crate::theme::load(name) {
+                Ok(theme) => Some(theme),
+                Err(err) => {
+                    tracing::warn!(%err, name, "theme");
+                    return;
+                }
+            },
+        };
+        let same = theme.as_ref().map(|theme| theme.name.as_str())
+            == self.theme.as_ref().map(|theme| theme.name.as_str());
+        if same {
+            return;
+        }
+        self.theme = theme.clone();
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                if let Pane::Terminal(session) = pane {
+                    session
+                        .pane
+                        .send(crate::pane::Command::SetTheme(theme.clone()));
+                }
+            }
+        }
     }
 
     /// Ask for a frame, and say why: a terminal that redraws continuously while
@@ -3781,30 +3827,14 @@ impl App {
     fn apply(&mut self, action: Action) {
         match action {
             Action::Connect(port) => self.open_serial_sheet(port),
-            Action::Theme(name) => match crate::theme::load(&name) {
-                Ok(theme) => {
-                    // The chrome and the terminals have to move together, or
-                    // the window shows one theme's text on another theme's
-                    // surface. Every terminal in the tab gets it, including the
-                    // ones a file pane pushed out of focus.
-                    self.look = crate::ui::Look::themed(
-                        self.look.size,
-                        self.look.family.clone(),
-                        self.look.path.clone(),
-                        Some(&theme),
-                        self.look.choice,
-                    );
-                    let tab = &mut self.tabs[self.active];
-                    for pane in tab.leaves.values_mut() {
-                        if let Pane::Terminal(session) = pane {
-                            session
-                                .pane
-                                .send(crate::pane::Command::SetTheme(Some(theme.clone())));
-                        }
-                    }
-                }
-                Err(err) => tracing::warn!(%err, "theme"),
-            },
+            Action::Theme(name) => {
+                // The palette's view switch: the terminals' colours and the
+                // chrome's together, through the one function that sends
+                // `SetTheme`, and without writing `theme` to the file.
+                self.switch_theme(Some(&name));
+                let config = self.config.clone();
+                self.show_look(&config, false);
+            }
             Action::Files(path) => {
                 if let Some(alias) = self.session().and_then(|session| session.alias.clone()) {
                     // Another machine: its own files, over SFTP. A local browser
@@ -4821,18 +4851,27 @@ impl ApplicationHandler<UserEvent> for App {
                         self.link_menu_choice(choice);
                     }
                     if let Some(reply) = settings_reply {
-                        // A mouse edit updates the draft, and the file is written
-                        // when the menu is saved — same as a keyboard edit. The
-                        // card's own buttons are the keyboard's Enter and Esc, so
-                        // the mouse and the keyboard leave through one door.
+                        // A mouse edit updates the draft *and* the window: every
+                        // row previews, and the file is written when the menu is
+                        // saved — same as a keyboard edit. The card's own buttons
+                        // are the keyboard's Enter and Esc, so the mouse and the
+                        // keyboard leave through one door.
                         match reply {
                             crate::settings::Reply::Change(change) => {
+                                // The theme is the one row that has to re-resolve
+                                // the terminals' colours; everything else leaves
+                                // them alone.
+                                let themed = matches!(change, crate::settings::Change::Theme(_));
                                 self.settings.apply(change);
-                                self.repaint("settings changed");
+                                self.preview_settings(themed);
                             }
                             crate::settings::Reply::Apply => self.apply_settings(),
                             crate::settings::Reply::Cancel => {
                                 self.settings.cancel();
+                                // The draft is the file's again — `cancel`
+                                // restores it — and so is the window: a preview
+                                // is not a change until Save.
+                                self.preview_settings(true);
                                 self.repaint("settings closed");
                             }
                         }

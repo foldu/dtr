@@ -546,10 +546,11 @@ fn main() -> anyhow::Result<()> {
     // `--widgets` names the same four looks the config's `[ui] widgets` does — and
     // the old `dtr` spelling, because the parser is the crate's, so the flag and the
     // file cannot disagree about what a look is called. The scheme and the accent
-    // still come from the file: the flag chooses a look, it does not reset it.
-    let mut choice = ui::Look::choice_of(&config);
+    // still come from the file: the flag chooses a look, it does not reset it, so
+    // it is applied *over* the look the file describes rather than instead of it.
+    let mut look = ui::Look::from_config(&config, theme.as_ref());
     if let Some(name) = args.widgets.as_deref() {
-        choice.preset = dtr_widgets::Preset::parse(name).ok_or_else(|| {
+        look.choice.preset = dtr_widgets::Preset::parse(name).ok_or_else(|| {
             let names: Vec<&str> = dtr_widgets::Preset::ALL
                 .iter()
                 .map(|preset| preset.as_str())
@@ -560,13 +561,6 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
     }
-    let mut look = ui::Look::themed(
-        config.font.size,
-        config.font.family.clone(),
-        config.font.path.clone(),
-        theme.as_ref(),
-        choice,
-    );
     let skin = look.skin();
     // Where the platform's answer came from, and why there is none where there is
     // none: "asked for native and got dtr" with no cause is the log line this pair

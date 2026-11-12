@@ -1628,4 +1628,87 @@ mod kittest_tests {
             Some(Reply::Change(Change::Widgets(dtr_config::Widgets::Windows)))
         );
     }
+
+    /// A row is the window's control, not a question to be submitted: the draft
+    /// is on the window before Save is pressed, and Cancel puts the file's back.
+    ///
+    /// The loop here is `App`'s — a report is applied to the draft and the look
+    /// is re-derived from it — and the assertion is the pixels, because "the
+    /// window reloads" is a claim about the picture, not about a field.
+    ///
+    /// The change is made through the model rather than by clicking, on purpose:
+    /// a click leaves the pointer over the row it pressed and the focus on it,
+    /// and a picture that differs by a hover fill would prove nothing. That a
+    /// click *reaches* the model is `picking_a_look_reports_it`'s job.
+    #[test]
+    fn an_edit_repaints_the_sheet_before_it_is_saved() {
+        // `adwaita` to begin with, so the edit is a change of *look* rather than
+        // of one accent: the sheet is drawn in the skin, and the skin is what a
+        // look changes.
+        let mut config = Config::default();
+        config.ui.widgets = dtr_config::Widgets::Adwaita;
+        let mut settings = Settings::new();
+        settings.show(&config);
+        settings.apply(Change::Panel(Panel::Appearance));
+
+        let state = std::rc::Rc::new(std::cell::RefCell::new((
+            settings,
+            crate::ui::Look::from_config(&config, None),
+        )));
+        let drawing = state.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            let (settings, look) = &mut *drawing.borrow_mut();
+            let reply = settings.ui(ui, look);
+            match reply {
+                // Save writes the file; the window already has the draft, which
+                // is the point of previewing.
+                Some(Reply::Apply) => {}
+                Some(Reply::Change(change)) => {
+                    settings.apply(change);
+                    *look = crate::ui::Look::from_config(settings.draft(), None);
+                }
+                // `cancel` restores the draft; the loop re-derives the window
+                // from it, which is how a preview is taken back.
+                Some(Reply::Cancel) => {
+                    settings.cancel();
+                    *look = crate::ui::Look::from_config(settings.draft(), None);
+                }
+                None => {}
+            }
+        });
+        harness.run();
+        let adwaita = harness.render().expect("the harness renders offscreen");
+
+        {
+            let (settings, look) = &mut *state.borrow_mut();
+            settings.apply(Change::Widgets(dtr_config::Widgets::Windows));
+            *look = crate::ui::Look::from_config(settings.draft(), None);
+        }
+        harness.run();
+        let windows = harness.render().expect("the harness renders offscreen");
+        assert!(
+            adwaita.as_raw() != windows.as_raw(),
+            "the look changed and the sheet drew the same pixels"
+        );
+        assert_eq!(state.borrow().1.choice.preset, dtr_widgets::Preset::Windows);
+
+        // Cancel is a revert: the file's look is back on the window, and the
+        // picture with it. The bytes are not compared to the first render,
+        // because a harness that has run two dozen frames of one skin and then
+        // another keeps a little of each in egui's own style state — what the
+        // revert has to show is that the *preview* is gone, which is the skin
+        // and the pixels both.
+        {
+            let (settings, look) = &mut *state.borrow_mut();
+            settings.cancel();
+            *look = crate::ui::Look::from_config(settings.draft(), None);
+        }
+        harness.run();
+        assert_eq!(state.borrow().1.choice.preset, dtr_widgets::Preset::Adwaita);
+        let reverted = harness.render().expect("the harness renders offscreen");
+        assert!(
+            windows.as_raw() != reverted.as_raw(),
+            "cancel left the previewed look on the window"
+        );
+    }
 }

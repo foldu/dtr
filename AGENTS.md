@@ -679,16 +679,16 @@ account behind each of these.
   filter — port rows when a port is focused, the look's scheme and accent only when
   `owns_its_colours`. **`ctrl+tab` moves between the tabs** (`ctrl+shift+tab` back, plain tab
   is the rows'): a tab that only a pointer can reach is a window whose look a keyboard cannot
-  change. The card is as tall as the *longest* tab, or switching tabs would
+  change. **A row is on the window before Save is pressed**: an edit re-derives the look from
+  the draft (`App::preview_settings`, the same path as startup and the save) and repaints, and
+  Cancel puts both back; the only Save-only rows are the serial ones, which reconnect. The
+  card is as tall as the *longest* tab, or switching tabs would
   move the buttons under the pointer. **A field with an "unset" state shows the value it
   would use** rather than nothing — an empty accent box reads as a broken control, and the
-  colour a save would keep is the thing being decided. **A menu that opens slowly the first time is doing its
-  work in the frame**: `usable_families` is a fontconfig walk that parses a face per family
-  — 300 ms on a desktop with 47 families — so it is cached in a `OnceLock`, warmed by the
-  `dtr-warm` thread `main` starts before the window, and read by the menu through
-  `ready_families`; a menu opened before the probe lands fills its list in on a later frame
-  (`refresh_families`) instead of freezing the click. The theme list is taken once in
-  `show` for the same reason: a control that rescans per frame is a scan per frame.
+  colour a save would keep is the thing being decided. **A list that needs a slow probe is
+  filled in later, not on the click**: `usable_families` is a fontconfig walk cached in a
+  `OnceLock` and warmed before the window, and the theme list is read once in `show` — a
+  control that rescans per frame is a scan per frame (`docs/ui.md` §The settings menu).
 - **One theme is compiled in, and a file of the same name beats it**: `theme::load` asks the
   search paths first (exact name, then ignoring case) and falls back to the `include_str!`-ed
   `Kanagawa Wave`, because Ghostty's themes on NixOS are a store path and the one-file
