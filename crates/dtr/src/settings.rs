@@ -68,10 +68,11 @@ pub enum Row {
     Baud,
     CrToCrlf,
     AutoReconnect,
+    Tmux,
 }
 
 impl Row {
-    const ALL: [Row; 9] = [
+    const ALL: [Row; 10] = [
         Row::Widgets,
         Row::Scheme,
         Row::Accent,
@@ -81,6 +82,7 @@ impl Row {
         Row::Baud,
         Row::CrToCrlf,
         Row::AutoReconnect,
+        Row::Tmux,
     ];
 
     fn panel(self) -> Panel {
@@ -91,7 +93,7 @@ impl Row {
             | Row::Theme
             | Row::FontSize
             | Row::FontFamily => Panel::Appearance,
-            Row::Baud | Row::CrToCrlf | Row::AutoReconnect => Panel::General,
+            Row::Baud | Row::CrToCrlf | Row::AutoReconnect | Row::Tmux => Panel::General,
         }
     }
 
@@ -118,6 +120,7 @@ impl Row {
             Row::Baud => "baud",
             Row::CrToCrlf => "cr_to_crlf",
             Row::AutoReconnect => "auto_reconnect",
+            Row::Tmux => "enabled",
         }
     }
 
@@ -127,6 +130,7 @@ impl Row {
             Row::Theme => "",
             Row::FontSize | Row::FontFamily => "font",
             Row::Baud | Row::CrToCrlf | Row::AutoReconnect => "serial",
+            Row::Tmux => "tmux",
         }
     }
 
@@ -186,6 +190,8 @@ pub enum Change {
     Family(Option<String>),
     Theme(Option<String>),
     AutoReconnect(bool),
+    /// Keep every ssh tab inside a tmux session on the far end.
+    Tmux(bool),
     Baud(u32),
     CrToCrlf(bool),
 }
@@ -376,6 +382,7 @@ impl Settings {
             Change::Family(family) => self.draft.font.family = family,
             Change::Theme(theme) => self.draft.theme = theme,
             Change::AutoReconnect(on) => self.draft.serial.auto_reconnect = on,
+            Change::Tmux(on) => self.draft.tmux.enabled = on,
             Change::Baud(baud) => {
                 if let Some(serial) = self.serial.as_mut() {
                     serial.baud = baud;
@@ -518,6 +525,7 @@ impl Settings {
             Row::AutoReconnect => {
                 self.draft.serial.auto_reconnect = !self.draft.serial.auto_reconnect;
             }
+            Row::Tmux => self.draft.tmux.enabled = !self.draft.tmux.enabled,
         }
     }
 
@@ -590,6 +598,7 @@ impl Settings {
                 None => "no port".to_owned(),
             },
             Row::AutoReconnect => on_off(self.draft.serial.auto_reconnect),
+            Row::Tmux => on_off(self.draft.tmux.enabled),
         }
     }
 
@@ -617,6 +626,10 @@ impl Settings {
         ));
         // The chrome: which look, which scheme, and the accent as `#RRGGBB` or
         // empty for the look's own.
+        writes.push((
+            "tmux.enabled".to_owned(),
+            self.draft.tmux.enabled.to_string(),
+        ));
         writes.push(("ui.widgets".to_owned(), self.draft.ui.widgets.to_string()));
         writes.push(("ui.scheme".to_owned(), self.draft.ui.scheme.to_string()));
         writes.push((
@@ -939,6 +952,10 @@ impl Settings {
                 let on = self.draft.serial.auto_reconnect;
                 dtr_widgets::check_box(ui, skin, on, &name).map(Change::AutoReconnect)
             }
+            Row::Tmux => {
+                let on = self.draft.tmux.enabled;
+                dtr_widgets::check_box(ui, skin, on, &name).map(Change::Tmux)
+            }
             Row::Baud => {
                 let Some(serial) = self.serial.as_ref() else {
                     ui.label(
@@ -1173,6 +1190,7 @@ mod tests {
         assert!(keys.contains(&"font.family"));
         assert!(keys.contains(&"theme"));
         assert!(keys.contains(&"serial.auto_reconnect"));
+        assert!(keys.contains(&"tmux.enabled"));
         assert!(keys.contains(&"ui.widgets"));
         assert!(keys.contains(&"ui.scheme"));
         assert!(keys.contains(&"ui.accent"));
@@ -1213,7 +1231,7 @@ mod tests {
         assert_eq!(settings.panel(), Panel::General);
         assert_eq!(
             settings.rows(),
-            vec![Row::AutoReconnect],
+            vec![Row::AutoReconnect, Row::Tmux],
             "a shell has no port to describe"
         );
 
@@ -1225,7 +1243,7 @@ mod tests {
         assert_eq!(settings.panel(), Panel::General);
         assert_eq!(
             settings.rows(),
-            vec![Row::Baud, Row::CrToCrlf, Row::AutoReconnect]
+            vec![Row::Baud, Row::CrToCrlf, Row::AutoReconnect, Row::Tmux]
         );
 
         // Appearance is where the window is, and it never has a port row.
@@ -1235,6 +1253,35 @@ mod tests {
             vec![Row::Widgets, Row::Theme, Row::FontSize, Row::FontFamily],
             "a native shell has no scheme or accent of its own"
         );
+    }
+
+    /// The tmux row is the file's key and the settings' own switch: the pointer
+    /// writes the draft, the keyboard's toggle lands in the same field, and a
+    /// save writes `tmux.enabled`.
+    #[test]
+    fn the_tmux_toggle_is_one_row_and_one_key() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(settings.rows().last(), Some(&Row::Tmux));
+        assert!(
+            !settings.draft.tmux.enabled,
+            "the sheet opens on what the file says"
+        );
+
+        settings.apply(Change::Tmux(true));
+        assert!(settings.draft.tmux.enabled);
+        assert!(
+            settings
+                .writes()
+                .contains(&("tmux.enabled".to_owned(), "true".to_owned())),
+            "the row and the file are one key"
+        );
+
+        // The keyboard's toggle, on the row the arrow keys can reach last.
+        settings.show(&Config::default());
+        settings.apply(Change::Select(settings.rows().len() - 1));
+        settings.nudge(1);
+        assert!(settings.draft.tmux.enabled, "space did not reach the row");
     }
 
     /// The port's rows are the port's panel, whatever else is showing: a baud rate
@@ -1403,7 +1450,7 @@ mod kittest_tests {
     fn a_shell_menu_has_no_port_rows() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        assert_eq!(settings.rows(), vec![Row::AutoReconnect]);
+        assert_eq!(settings.rows(), vec![Row::AutoReconnect, Row::Tmux]);
         settings.apply(Change::Panel(Panel::Appearance));
         assert_eq!(
             settings.rows(),

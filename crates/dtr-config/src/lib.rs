@@ -69,17 +69,17 @@ impl Default for Notifications {
 pub struct Tmux {
     /// Run every ssh session inside a tmux session on the far end.
     ///
-    /// On by default, because `ssh` is a transport and the failure this
-    /// prevents — a dropped connection taking a running build with it — is the
-    /// one people lose work to. It is not a promise: a host with no tmux gets a
-    /// plain login shell and a word about it, and the tab that would have been
-    /// durable says so. What the far end has is asked, not assumed.
+    /// Off by default. It changes what the far end does with a connection and it
+    /// needs tmux there, which is a surprise to spring on someone who only asked
+    /// for a terminal; the switch is a row in the settings menu as well as this
+    /// key. What the host has is asked either way, so turning it on where there
+    /// is no tmux costs a toast and nothing else.
     pub enabled: bool,
 }
 
 impl Default for Tmux {
     fn default() -> Self {
-        Self { enabled: true }
+        Self { enabled: false }
     }
 }
 
@@ -818,15 +818,13 @@ mod tests {
         assert!(format!("{error}").contains("notifications.os"), "{error}");
     }
 
-    /// An ssh tab is put inside a tmux session unless told otherwise: the
-    /// failure it prevents — a dropped connection taking a running build with it
-    /// — is not something to opt into, and a host with no tmux falls back to a
-    /// plain shell anyway, so the default cannot strand anyone.
+    /// Keeping a session on the far end is asked for, not assumed: it changes
+    /// what the other machine does with a connection and it needs tmux there.
     #[test]
-    fn an_ssh_session_is_kept_in_tmux_by_default() {
-        assert!(Config::parse("").unwrap().tmux.enabled);
+    fn tmux_is_a_choice_and_it_starts_off() {
+        assert!(!Config::parse("").unwrap().tmux.enabled);
         assert!(
-            !Config::parse("[tmux]\nenabled = false\n")
+            Config::parse("[tmux]\nenabled = true\n")
                 .unwrap()
                 .tmux
                 .enabled
