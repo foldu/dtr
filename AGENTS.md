@@ -180,11 +180,9 @@ tag mirroring on.
   And `ssh` sends *this* tty's modes in its `pty-req`, so a raw local pty is a raw
   **remote** one — no `ONLCR` and no `ECHO`, so a fresh ssh session shows a garbled screen
   and does not echo the typing, until `reset` runs `tcsetattr(sane)` at the other end
-  (which is why the fix looks like it did nothing). This was the other way round until
-  2026-11-08, on the argument that the VT core *is* the line discipline; it is not, and
-  `docs/windows.md` §4.2 records the staircase that argument produced. The cost is real
-  and paid on purpose: `n_tty` rewrites each newline, 3.9 s against 37 ms on a 32 MiB
-  flood of two-byte lines.
+  (which is why the fix looks like it did nothing). The cost is real and paid on purpose:
+  `n_tty` rewrites each newline, 3.9 s against 37 ms on a 32 MiB flood of two-byte lines
+  (`docs/windows.md` §4.2).
 - **`publish` gates on change, not on arrival**: it skips `Dirty::Clean`, so the first
   publish after a session starts is forced. **A cursor is not a dirty cell** — hiding or
   restyling it changes no cell, so `publish` compares the `Cursor` (position plus DECSCUSR
@@ -491,6 +489,11 @@ second connection, and what each of these failures looked like.
   so a disconnect arrives on `closed_rx`. **`reconnecting…` on a transport that cannot
   disconnect** means `Stats::connected` was left at its `Default` — only the serial reader
   turns it false.
+- **A serial read ends when the driver says so, and the size asked for is a latency
+  floor**: on Windows `ReadFile` completes at the requested count or a timeout, and a
+  flood leaves no gap for an inter-byte timeout to notice — 8 KB was 355 ms of silence at
+  115200. The port is blocking with `IDLE_FLUSH` as its timeout and the reader is a
+  thread; `TimedOut` is "nothing yet" (`docs/sessions.md` §11).
 
 ## Files, links, and panes
 
@@ -763,11 +766,7 @@ the adapter and every adapter seen.
 `./scripts/bench.sh` runs vtebench against dtr and prints the delta from the previous run.
 **`docs/bench.md` is how to read it** — what a sample is bounded by, why a delta across a
 different window means nothing, what each `.dat`, `.dat.size` and `.dat.meta` holds, and
-the two payloads that are ours. Three things bite without it: the numbers only compare on
-one machine against itself with the same window; a run writes `<dat>.meta` (rev, adapter,
-window, pane cells, sample size) so a table can be identified afterwards, and
-`--meta DAT [LOG]` rebuilds one; and a column that stops partway is usually an OOM kill,
-not a slow terminal.
+the two payloads that are ours.
 
 ## Gotchas that are real
 

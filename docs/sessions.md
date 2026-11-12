@@ -205,3 +205,63 @@ byte sender alive for reconnects, so `bytes_rx.recv()` never returns `None` and 
 arrives on `closed_rx` instead. And a serial port renders `reconnecting…` when it cannot
 disconnect, which means `Stats::connected` was left at its `Default` — only the serial
 reader ever turns it false.
+
+## 11. A serial read ends when the driver says so
+
+A u-boot `#####` flood crawled on Windows: the screen jumped by fifty lines about three
+times a second while the line was delivering four thousand characters a second. The pane's
+log said why, and it said it in one line per jump:
+
+```
+burst parsed chunks=1 bytes=4096
+frame published cells=3200 elapsed_us=77
+```
+
+Every read came back with **exactly 4096 bytes**, and the publish that followed cost 77 µs —
+so the terminal was not busy, it was *waiting*. At 115200 those 4096 bytes are 355 ms.
+
+The size was not dtr's: it asked for 8192, and asked through `tokio-serial`. Three
+measurements on the guest (COM1 fed through libvirt's console pty at 11.4 KB/s) found the
+cause, and none of them is in dtr:
+
+| what was measured | result |
+| --- | --- |
+| `COMMTIMEOUTS` on the handle `mio-serial` opened | `interval=1 ms, multiplier=0, constant=0` |
+| `ReadFile` of 256 bytes, those timeouts | 256 bytes, every 21 ms |
+| `ReadFile` of 8192 bytes, those timeouts | 8192 bytes, every 710 ms |
+| `ReadFile`, `interval=MAXDWORD, totals=0` | whatever is buffered, immediately — 512, 64, 64, **0**, 64 … |
+
+On Windows a read completes when **the requested number of bytes has arrived** or a timeout
+elapses, and the 1 ms `ReadIntervalTimeout` only ends a read when the *stream gaps* — which
+a flood never does. So the request size is a latency floor of `size / baud`, and the request
+size was a whole 8 KB. (The 4096 rather than 8192 is the overlapped path's staging: a
+*synchronous* `ReadFile` of 8192 returns all 8192; the same request through tokio's
+named-pipe wrapper, which is how tokio-serial reaches a COM handle, comes back at 4 KB.)
+
+On Unix none of this exists: `read()` returns whatever is there, so the same code read
+megabytes per chunk and looked fine. That is why this survived until someone ran a
+bootloader's progress dots on Windows.
+
+**The fix is a blocking port and a thread.** `serial::Port` is `serialport`'s own handle with
+`IDLE_FLUSH` as its read timeout; `pane::spawn_serial_reader` gives one duplicate to a
+`dtr-serial` thread and the writer keeps the other. A read now blocks for at most 25 ms and
+returns what arrived, so the timeout is the *only* latency knob and it is the same number
+that paces the CR flusher. Measured after, on the same two machines:
+
+| | before | after |
+| --- | --- | --- |
+| Windows, 115200, `#` flood | 3 publishes/s, 4096 B each | ~91 publishes/s, 64 B each (the sender's chunk) |
+| Linux, drain rate | 297 MB/s | 568 MB/s |
+| Linux, publishes | ~110/s | ~126/s |
+
+The drain rate doubling is the second surprise: a blocking read has no future to build and
+no readiness registration per chunk, so the thread that used to be the slow path is the fast
+one. `tokio-serial` left the tree with it — 41 lines of `Cargo.lock`, and one fewer place
+where "the driver's completion rule" is decided by a wrapper.
+
+Two traps, both now encoded in `serial.rs`'s tests: **`Ok(0)` is not a timeout** — on Unix
+it is the line closing, and on Windows `serialport` never reports one, mapping a 0-byte
+read to `TimedOut` — so the CR flusher and the disconnect teller read different returns;
+and **a settings change still reconnects by stopping the reader**, which is now a flag the
+thread polls between reads rather than a cancelled task.
+

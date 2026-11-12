@@ -24,7 +24,6 @@ use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
 use portable_pty::MasterPty;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use crate::keys::KeyStroke;
 use crate::pty;
@@ -427,14 +426,14 @@ impl Transport {
 
 /// Where bytes typed in the UI go.
 enum Sink {
-    Serial(WriteHalf<tokio_serial::SerialStream>),
+    Serial(serial::Port),
     Pty(Box<dyn std::io::Write + Send>),
 }
 
 impl Sink {
     async fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self {
-            Sink::Serial(write) => write.write_all(bytes).await,
+            Sink::Serial(write) => write.write_all(bytes),
             Sink::Pty(write) => write.write_all(bytes),
         }
     }
@@ -967,8 +966,7 @@ async fn run(
         matches!(transport, Transport::Serial(_)).then(|| std::time::Duration::from_millis(20));
     let mut paste: Vec<u8> = Vec::new();
     let mut paste_at: Option<tokio::time::Instant> = None;
-    let (reconnect_tx, mut reconnect_rx) =
-        tokio::sync::mpsc::unbounded_channel::<tokio_serial::SerialStream>();
+    let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<serial::Port>();
     // Dropping the master closes the pty, which is what ends the child.
     let mut pty_keep: Option<Box<dyn MasterPty + Send>> = None;
     // A shell — local or ssh — is opened by one path, used at startup and after
@@ -1046,30 +1044,29 @@ async fn run(
 
     match transport {
         Transport::Serial(cfg) => {
-            let stream = cfg.open()?;
+            let port = cfg.open()?;
             tracing::info!(port = %cfg.port, baud = cfg.baud, "serial open");
-            // Before splitting: the duplicate has to come from the stream while
+            // Before splitting: the duplicate has to come from the port while
             // it is still one object.
-            modem = crate::modem::Modem::new(&stream);
+            modem = crate::modem::Modem::new(&port);
             if modem.is_some() {
                 // `open_at` applied the requested levels; the status strip
                 // should show what was asked for, not the open-time default.
                 stats.set_dtr(cfg.dtr);
                 stats.set_rts(cfg.rts);
             }
-            let (read_half, write_half) = tokio::io::split(stream);
-            sink = Some(Sink::Serial(write_half));
-            let mapper = cfg.cr_to_crlf.then(CrToCrlf::default);
+            let reader = port.try_clone()?;
+            sink = Some(Sink::Serial(port));
             source_alive = true;
             stats.set_connected(true);
-            let closed = closed_tx.clone();
-            let tx = bytes_tx.clone();
-            let reader_log = log.clone();
-            let stop = Arc::clone(&serial_stop);
-            tokio::task::spawn_local(async move {
-                read_loop(read_half, mapper, tx, reader_log, stop).await;
-                let _ = closed.send(());
-            });
+            spawn_serial_reader(
+                reader,
+                cfg.cr_to_crlf,
+                bytes_tx.clone(),
+                log.clone(),
+                Arc::clone(&serial_stop),
+                closed_tx.clone(),
+            );
             if cfg.auto_reconnect {
                 let identity = serial::identity(&cfg.port);
                 if identity.is_some() {
@@ -1425,26 +1422,29 @@ async fn run(
                 };
             }
             stream = reconnect_rx.recv(), if !source_alive && reconnect.is_some() => {
-                if let Some(stream) = stream {
-                    let (read_half, write_half) = tokio::io::split(stream);
-                    sink = Some(Sink::Serial(write_half));
-                    let mapper = reconnect
-                        .as_ref()
-                        .map(|(cfg, _)| cfg.cr_to_crlf)
-                        .unwrap_or(false)
-                        .then(CrToCrlf::default);
-                    source_alive = true;
-                    stats.set_connected(true);
-                    let closed = closed_tx.clone();
-                    let tx = bytes_tx.clone();
-                    let reader_log = log.clone();
-                    // A fresh flag per connection: the old one is spent.
-                    serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let stop = Arc::clone(&serial_stop);
-                    tokio::task::spawn_local(async move {
-                        read_loop(read_half, mapper, tx, reader_log, stop).await;
-                        let _ = closed.send(());
-                    });
+                if let Some(port) = stream {
+                    match port.try_clone() {
+                        Ok(reader) => {
+                            let cr_to_crlf = reconnect
+                                .as_ref()
+                                .map(|(cfg, _)| cfg.cr_to_crlf)
+                                .unwrap_or(false);
+                            sink = Some(Sink::Serial(port));
+                            source_alive = true;
+                            stats.set_connected(true);
+                            // A fresh flag per connection: the old one is spent.
+                            serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            spawn_serial_reader(
+                                reader,
+                                cr_to_crlf,
+                                bytes_tx.clone(),
+                                log.clone(),
+                                Arc::clone(&serial_stop),
+                                closed_tx.clone(),
+                            );
+                        }
+                        Err(err) => tracing::warn!(%err, "could not duplicate the reopened port"),
+                    }
                 }
             }
             cmd = rx.recv() => {
@@ -2124,9 +2124,43 @@ async fn flush_replies(replies: &RefCell<Vec<u8>>, sink: &mut Option<Sink>) {
     }
 }
 
+/// Start this connection's reader thread, saying `closed` when it ends.
+///
+/// A thread and not a task: the port's read timeout is what separates "no byte
+/// yet" from "the device is gone", and a runtime's readiness wrapper decides
+/// that for us — twice over on Windows. See `serial::Port`.
+fn spawn_serial_reader(
+    port: serial::Port,
+    cr_to_crlf: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    log: Option<Arc<LogWriter>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    closed: tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("dtr-serial".into())
+        .spawn({
+            let closed = closed.clone();
+            move || {
+                read_serial(port, cr_to_crlf.then(CrToCrlf::default), tx, log, stop);
+                // The pane keeps the byte channel alive for reconnects, so this
+                // is the only way it learns the reader is gone.
+                let _ = closed.send(());
+            }
+        });
+    if let Err(err) = spawned {
+        tracing::error!(%err, "serial reader");
+        let _ = closed.send(());
+    }
+}
+
 /// Read the port until it fails or closes, mapping bytes on the way through.
-async fn read_loop(
-    mut reader: ReadHalf<tokio_serial::SerialStream>,
+///
+/// Runs on its own thread with a blocking read whose timeout is
+/// [`serial::IDLE_FLUSH`]: every read returns what has arrived, so a flood is
+/// parsed as it lands instead of in driver-sized lumps.
+fn read_serial(
+    mut port: serial::Port,
     mut mapper: Option<CrToCrlf>,
     tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     log: Option<Arc<LogWriter>>,
@@ -2143,27 +2177,28 @@ async fn read_loop(
             break;
         }
         // A timeout is how a pending CR gets flushed: nothing else can tell us
-        // the device has stopped mid-line.
-        let read = tokio::time::timeout(serial::IDLE_FLUSH, reader.read(&mut buf)).await;
-        let n = match read {
-            Ok(Ok(0)) => break,
-            Ok(Ok(n)) => n,
-            Ok(Err(err)) => {
+        // the device has stopped mid-line. It is not a failure, and it is not
+        // end of file — `Ok(0)` is the port saying the line closed.
+        let read = match port.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => Some(n),
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => None,
+            Err(err) => {
                 tracing::warn!(%err, "serial read");
                 break;
             }
-            Err(_idle) => 0,
         };
 
-        if n > 0 {
+        if let Some(n) = read {
             log_chunk(&log, &buf[..n]);
         }
 
         out.clear();
-        match mapper.as_mut() {
-            Some(m) if n > 0 => m.feed(&buf[..n], &mut out),
-            Some(m) => m.flush(&mut out),
-            None => out.extend_from_slice(&buf[..n]),
+        match (mapper.as_mut(), read) {
+            (Some(m), Some(n)) => m.feed(&buf[..n], &mut out),
+            (Some(m), None) => m.flush(&mut out),
+            (None, Some(n)) => out.extend_from_slice(&buf[..n]),
+            (None, None) => {}
         }
         if !out.is_empty() && tx.send(out.clone()).is_err() {
             break;

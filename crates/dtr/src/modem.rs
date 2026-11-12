@@ -1,11 +1,10 @@
 //! Modem control lines: DTR, RTS and break.
 //!
 //! These are ioctls on the tty rather than data, and they need the file
-//! descriptor — which `tokio_serial::SerialStream` will not hand out twice
-//! (`try_clone` refuses). So the descriptor is duplicated here: a `dup` refers
-//! to the same tty *without reopening it*, and that distinction is the whole
-//! point. Opening a serial device asserts DTR, which resets the board you were
-//! about to talk to.
+//! descriptor — which the port hands out once, to the reader. So the descriptor
+//! is duplicated here: a `dup` refers to the same tty *without reopening it*, and
+//! that distinction is the whole point. Opening a serial device asserts DTR,
+//! which resets the board you were about to talk to.
 
 use std::time::Duration;
 
@@ -20,11 +19,11 @@ pub struct Modem {
 
 #[cfg(unix)]
 impl Modem {
-    pub fn new(stream: &tokio_serial::SerialStream) -> Option<Self> {
+    pub fn new(port: &crate::serial::Port) -> Option<Self> {
         use std::os::unix::io::AsRawFd;
         // SAFETY: `dup` on a descriptor the caller still owns; the duplicate is
         // owned by this struct and closed on drop.
-        let fd = unsafe { libc::dup(stream.as_raw_fd()) };
+        let fd = unsafe { libc::dup(port.as_raw_fd()) };
         if fd < 0 {
             tracing::warn!(error = %std::io::Error::last_os_error(), "cannot duplicate the port descriptor");
             return None;
@@ -86,7 +85,7 @@ pub struct Modem;
 
 #[cfg(not(unix))]
 impl Modem {
-    pub fn new(_stream: &tokio_serial::SerialStream) -> Option<Self> {
+    pub fn new(_port: &crate::serial::Port) -> Option<Self> {
         tracing::warn!("modem control is not implemented on this platform yet");
         None
     }

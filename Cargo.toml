@@ -94,7 +94,9 @@ shlex = "2"
 fontique = "0.12"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "io-util", "macros"] }
-tokio-serial = "5"
+# The serial port is `serialport`'s own, read on a thread of its own: a runtime's
+# readiness wrapper has to decide when a read is finished, and on Windows the
+# driver decides that by byte count — see `crates/dtr/src/serial.rs`.
 # Reading the desktop's own colours on Linux: the XDG settings portal is one
 # D-Bus call, and zbus is a pure-Rust client for it. The `tokio` transport is the
 # point — dtr already runs two tokio runtimes, so this reuses them instead of
