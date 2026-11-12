@@ -135,8 +135,11 @@ The strip is the title bar:
   what the eye reads as native. Their *colours* come from the strip's own palette, so a
   dark theme never gets light-mode greys glued to it — with the Windows close-hover red as
   the one fixed colour.
-- **The icon** is Windows-only in the caption (Windows has one; GNOME header bars do not),
-  and clicking it shows the system menu.
+- **The mark** is the application's, in both frames. Windows puts it 8 points in, in a
+  16-point square, where its caption icon goes and where the system menu is, and a click
+  opens that menu. A GNOME header bar puts it beside the first tab at 20 points, and there
+  it is not a button: no pointer, no focus, no accessible name. `chips_left()` reserves 8
+  points either side of it, so a chip never starts on top of the mark.
 - **Drag** lives only in the rectangle no chip and no button claimed. Double-click toggles
   maximise; Alt+F4 still closes.
 - **`top_inset` and `fit_panes` do not change.** The reservation is still one row; that the
@@ -152,7 +155,7 @@ Three independent levers.
 |---|---|---|
 | button | 46×32 pt, butted together, full strip height | 24×24 pt circles, ~6 pt gaps, centred |
 | glyph | 10 pt | 16 pt |
-| caption icon | 16 pt, ~10 pt in from the edge | none |
+| caption icon | 16 pt, 8 pt in, opens the system menu | 20 pt, 8 pt in, a mark |
 | strip height | Windows' own caption band, queried | 46 pt (libadwaita) |
 | hover | flat fill per button | circle behind the glyph |
 | close | `#C42B1C` fill, white glyph | the same grey as the others |
@@ -207,6 +210,16 @@ title bar, and stays 30 points.
   1.5 pt round-cap stroke. Lucide's can be tinted to the right colour and are the right
   *kind* of shape, but their 2-in-24 geometry and square caps are a different drawing, and
   at 16 pt that difference is the whole glyph.
+
+**A GNOME header bar does have the application's mark**, which this memo said it did not,
+so the caption drew nothing there and `chips_left()` gave the chips the strip's own 6
+points. Adwaita's own header bars put the window's icon where the same bar puts its title;
+a libadwaita window that sets no icon shows nothing, which is why the claim survived — dtr
+*sets* one, so it shows it. The mark is drawn from `assets/logo/dtr-icon.svg` rather than
+the 32-pixel PNG the Windows caption uses: 20 points is 40 pixels at 2x, and the raster is
+soft at exactly the scale this bar is measured in. It is painted, not added as a widget —
+a mark that takes a press and does nothing with it is worse than one that cannot be
+pressed, and the tab chips behind it are the things a pointer should find.
 
 **The window icon** is three separate things, and only one of them is about a window. The
 running window's icon is set at creation — `with_window_icon(window_icon())` in

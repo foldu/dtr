@@ -1348,6 +1348,7 @@ mod kittest_tests {
         };
         for source in [
             egui::include_image!("../../../assets/logo/dtr-icon-32.png"),
+            egui::include_image!("../../../assets/logo/dtr-icon.svg"),
             egui::include_image!("../assets/icons/minus.svg"),
         ] {
             let uri = source.uri().expect("embedded, so it has a uri").to_owned();

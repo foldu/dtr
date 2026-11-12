@@ -423,36 +423,49 @@ fn paint_adwaita(ui: &Ui, box_: Rect, action: Hit, maximized: bool, colour: Colo
     }
 }
 
-/// The app icon at the far left of a Windows caption.
+/// The application's mark at the far left of a client-side strip.
 ///
-/// It sits where the OS puts it, and it does what the OS does with it: a click
-/// opens the window's system menu. GNOME header bars have no app icon, so on
-/// anything but Windows this draws nothing and takes no space.
+/// Both platforms put it where their own header bar does: Windows 8 points in,
+/// in a 16-point square, where its caption icon goes and where the window's
+/// system menu sits; a GNOME header bar beside the first tab, a size up at 20,
+/// as the mark rather than a button.
 pub fn caption_icon_rect(strip: Rect) -> Option<Rect> {
-    (kind() == Kind::Windows).then(|| {
-        Rect::from_center_size(
-            egui::pos2(strip.left() + 8.0 + 8.0, strip.center().y),
-            Vec2::splat(16.0),
-        )
-    })
+    let (inset, side) = match kind() {
+        Kind::Windows => (8.0, 16.0),
+        Kind::Adwaita => (8.0, 20.0),
+    };
+    Some(Rect::from_center_size(
+        egui::pos2(strip.left() + inset + side / 2.0, strip.center().y),
+        Vec2::splat(side),
+    ))
 }
 
 /// How far the chips start from the left edge.
 ///
-/// Windows reserves the icon's square first; everyone else gives the chips the
-/// same 6 points the strip always had.
+/// A kind that shows the mark reserves 8 points either side of it first; the
+/// strip's own 6 points are what is left when it does not.
 pub fn chips_left() -> f32 {
-    if kind() == Kind::Windows {
-        // 8 points in, the 16-point icon, 8 points out.
-        32.0
-    } else {
-        6.0
+    match kind() {
+        // 8 points in, the icon's square, 8 points out.
+        Kind::Windows => 32.0,
+        Kind::Adwaita => 36.0,
     }
 }
 
-/// Draw the caption icon and report where it was clicked, in points.
+/// Draw the mark, and on Windows report where it was clicked, in points.
 pub fn caption_icon(ui: &mut Ui, strip: Rect, look: &Look) -> Option<egui::Pos2> {
     let rect = caption_icon_rect(strip)?;
+    if kind() == Kind::Adwaita {
+        // A header bar's mark is not a button: it takes no pointer, no focus and
+        // no accessible name, and says what the window is the way a title does.
+        // The SVG rather than the PNG the Windows caption uses, because 20 points
+        // is 40 pixels at 2x and a 32-pixel raster would be soft there — and this
+        // is the caption that is measured in points at every scale.
+        egui::Image::new(egui::include_image!("../../../assets/logo/dtr-icon.svg"))
+            .fit_to_exact_size(rect.size())
+            .paint_at(ui, rect);
+        return None;
+    }
     let response = ui.interact(rect, Id::unique("dtr-caption-icon"), Sense::click());
     if response.has_focus() {
         response.surrender_focus();
@@ -675,6 +688,28 @@ mod tests {
             assert_eq!(all.left(), boxes[0].1.left());
             assert!(all.contains_rect(boxes[2].1));
         }
+    }
+
+    /// The mark sits between the edge and the chips, not under them: a chip that
+    /// starts on top of the icon is "sometimes unresponsive" with a picture on
+    /// it, and the two are laid out by two functions that must agree.
+    #[test]
+    fn the_app_mark_is_clear_of_the_first_chip() {
+        let strip = strip();
+        let mark = caption_icon_rect(strip).expect("a client frame shows the mark");
+        assert!(
+            mark.left() >= strip.left() + 6.0,
+            "the mark touches the edge: {mark:?}"
+        );
+        assert!(
+            mark.right() + 8.0 <= chips_left(),
+            "the chips start on top of the mark: {mark:?} against {}",
+            chips_left()
+        );
+        assert!(
+            mark.top() >= strip.top() && mark.bottom() <= strip.bottom(),
+            "the mark is outside the strip: {mark:?}"
+        );
     }
 
     #[test]
