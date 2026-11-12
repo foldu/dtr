@@ -11,7 +11,7 @@ use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -510,6 +510,9 @@ pub struct Pane {
     ended: Arc<std::sync::atomic::AtomicBool>,
     /// The directory the session last reported with OSC 7.
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// How many `BEL`s the program has rung since the UI last asked. A bell is
+    /// a flash in the window, never a sound, so this count is the whole signal.
+    bells: Arc<AtomicU32>,
 }
 
 impl Pane {
@@ -541,6 +544,8 @@ impl Pane {
         let ended_flag = Arc::clone(&ended);
         let cwd = Arc::new(Mutex::new(None));
         let cwd_seen = Arc::clone(&cwd);
+        let bells = Arc::new(AtomicU32::new(0));
+        let rung = Arc::clone(&bells);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = async_channel::unbounded::<Command>();
 
@@ -568,6 +573,7 @@ impl Pane {
                     link_sink,
                     Arc::clone(&ended_flag),
                     Arc::clone(&cwd_seen),
+                    rung,
                     theme,
                     scrollback,
                     budget,
@@ -590,6 +596,7 @@ impl Pane {
             link,
             ended,
             cwd,
+            bells,
         })
     }
 
@@ -600,6 +607,15 @@ impl Pane {
 
     pub fn stats(&self) -> &Arc<Stats> {
         &self.stats
+    }
+
+    /// How many bells rang since the last ask.
+    ///
+    /// A count, not a flag: a program that rings three times in one frame rang
+    /// three times, and the UI clears them together — but it also cannot lose
+    /// one, which a boolean could.
+    pub fn take_bells(&self) -> u32 {
+        self.bells.swap(0, Ordering::Relaxed)
     }
 
     /// Text the pane copied, if it has produced any since the last call.
@@ -918,6 +934,7 @@ async fn run(
     link: Arc<Mutex<Option<LinkReply>>>,
     ended: Arc<std::sync::atomic::AtomicBool>,
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    bells: Arc<AtomicU32>,
     theme: Option<crate::theme::Theme>,
     scrollback: usize,
     budget: FrameBudget,
@@ -967,6 +984,30 @@ async fn run(
             ColorScheme::Light
         })
     })?;
+    // `CSI ? 2026 h` ("synchronized output"): the program is about to repaint
+    // and will say when the picture is complete. While the hold is on nothing
+    // publishes, so a slow transport cannot show half a redraw; the batch that
+    // carries the release publishes in the same iteration. Explicit things the
+    // user asked for — a scroll, a keystroke's echo — still paint, because
+    // showing live content matters more then.
+    let held: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    {
+        let hold = Rc::clone(&held);
+        term.on_render_hold(move |_term, hold_now| hold.set(hold_now))?;
+    }
+    // `BEL`. A terminal that beeps is a terminal people silence, so dtr never
+    // writes `\a` anywhere: the bell is a count the UI turns into a flash. It
+    // wakes the UI itself, because a bell changes no cell — without that the
+    // flash would wait for the next keystroke, and a quiet session is exactly
+    // when a bell matters.
+    {
+        let rung = Arc::clone(&bells);
+        let wake = Arc::clone(&wake);
+        term.on_bell(move |_term| {
+            rung.fetch_add(1, Ordering::Relaxed);
+            wake();
+        })?;
+    }
 
     // OSC 52: a program (tmux, vim, an agent over ssh) asks the terminal to put
     // something on the user's clipboard. The write arrives here; the UI does the
@@ -1303,7 +1344,12 @@ async fn run(
                             .await;
                         }
                         tracing::debug!(chunks, bytes = total, "burst parsed");
-                        if std::time::Instant::now() >= next_publish {
+                        if held.get() {
+                            // `?2026h`: the program is mid-redraw and will say
+                            // when the picture is complete. Nothing publishes,
+                            // and the release arrives in the batch that says so.
+                            publish_pending = true;
+                        } else if std::time::Instant::now() >= next_publish {
                             publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
                             next_publish = std::time::Instant::now() + gate;
                             publish_pending = false;
@@ -1318,7 +1364,7 @@ async fn run(
                     Err(_) => source_alive = false,
                 }
             }
-            _ = when(publish_pending, compio::time::sleep_until(next_publish)).fuse() => {
+            _ = when(publish_pending && !held.get(), compio::time::sleep_until(next_publish)).fuse() => {
                 publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
                 next_publish = std::time::Instant::now()
                     + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
@@ -4391,6 +4437,60 @@ mod session_tests {
             y,
             down: action != mouse::Action::Release,
         });
+    }
+
+    /// `?2026h` is "hold the picture until I say so". A full-screen redraw on a
+    /// slow transport is written over hundreds of milliseconds, and without the
+    /// hold the user watches it arrive half drawn; the release is what publishes.
+    #[test]
+    fn a_synchronized_output_hold_hides_the_half_drawn_frame() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("hold");
+        let script = reader(
+            r"printf 'before\r\n'; sleep 1; printf '\033[?2026h'; printf 'halfway'; sleep 2; \
+              printf '\033[?2026l'; printf 'after\r\n'; sleep 5; ",
+            &out,
+        );
+        let pane = pane(script, None, Vec::new());
+        wait_for(&pane, "before", Duration::from_secs(20));
+        // Past the hold's start (1 s) and well before its release (3 s): any
+        // frame published in this window would be the half-drawn one.
+        std::thread::sleep(Duration::from_millis(1200));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if let Some(frame) = pane.take_frame() {
+                let text = frame_text(&frame);
+                assert!(
+                    !text.contains("halfway"),
+                    "a frame was published during the hold: {text:?}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // And the release shows the whole thing, so nothing was lost.
+        let after = wait_for(&pane, "after", Duration::from_secs(20));
+        assert!(
+            after.contains("halfway"),
+            "the held text never arrived: {after:?}"
+        );
+    }
+
+    /// A bell is a signal, not a sound: dtr never writes `\a` to the pty or the
+    /// speaker, and the UI turns this count into a flash.
+    #[test]
+    fn a_bell_reaches_the_ui_without_a_sound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("bell");
+        let script = reader(r"printf '\a'; ", &out);
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pane.take_bells() == 0 {
+            assert!(Instant::now() < deadline, "the bell never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Once taken, it is taken: the UI flashes once per bell, not once per
+        // frame from a flag that stays set.
+        assert_eq!(pane.take_bells(), 0);
     }
 
     /// The size reports are how a program learns the cell: an image viewer, a

@@ -185,6 +185,7 @@ pub fn capture(
                 frame: if id == 1 { frame } else { None },
                 selection: if id == 1 { selection } else { None },
                 cursor: id == 1,
+                flash: None,
             })
             .collect();
         (panes, file_rect)
@@ -203,6 +204,7 @@ pub fn capture(
                             frame,
                             selection: if id == 1 { selection } else { None },
                             cursor: id == 1,
+                            flash: None,
                         })
                         .collect(),
                     None,
@@ -214,6 +216,7 @@ pub fn capture(
                     frame,
                     selection,
                     cursor: true,
+                    flash: None,
                 }],
                 None,
             ),

@@ -560,6 +560,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 counters,
                 echo: false,
                 meter: Meter::new(),
+                bell_at: None,
                 grid: (0, 0),
             }),
         )],
@@ -870,6 +871,29 @@ fn mouse_goes_to_program(captured: bool, shift: bool) -> bool {
     captured && !shift
 }
 
+/// How long a bell's flash lasts, and how strong it starts.
+///
+/// A bell is a flash in the window and nothing else: dtr never writes `\a` to
+/// the pty, never plays a sound and never rings a system beep, because the only
+/// terminal bell that is not turned off within a week is a visible one. Short
+/// enough not to be in the way of reading, strong enough to notice at the edge
+/// of vision.
+const BELL_FLASH: std::time::Duration = std::time::Duration::from_millis(140);
+const BELL_ALPHA: f32 = 0.12;
+
+/// The bell's wash as it fades: `None` when nothing is ringing.
+///
+/// A fade rather than a blink, because a blink at a fixed alpha leaves the last
+/// frame tinted if the window goes idle at the wrong moment.
+fn bell_alpha(at: Option<std::time::Instant>) -> Option<f32> {
+    let elapsed = at?.elapsed();
+    if elapsed >= BELL_FLASH {
+        return None;
+    }
+    let left = 1.0 - elapsed.as_secs_f32() / BELL_FLASH.as_secs_f32();
+    Some(BELL_ALPHA * left.clamp(0.0, 1.0))
+}
+
 fn closed(active: usize, count: usize) -> Option<usize> {
     if count <= 1 {
         return None;
@@ -973,6 +997,9 @@ struct Session {
     counters: bool,
     echo: bool,
     meter: Meter,
+    /// When this session last rang its bell. The flash is a fade, so what is
+    /// kept is the instant it started rather than a yes/no.
+    bell_at: Option<std::time::Instant>,
 }
 
 /// What a leaf contains. The layout only knows leaf ids; this is the map entry
@@ -3189,6 +3216,7 @@ impl App {
                     counters: !matches!(transport, Transport::Shell(_)),
                     echo: false,
                     meter: Meter::new(),
+                    bell_at: None,
                     grid: (0, 0),
                 };
                 let id = self.next_leaf;
@@ -3322,6 +3350,7 @@ impl App {
                 counters: !matches!(transport, Transport::Shell(_)),
                 echo: false,
                 meter: Meter::new(),
+                bell_at: None,
                 grid: (0, 0),
             }),
         );
@@ -3651,6 +3680,12 @@ impl App {
                     Some(Pane::Files(_)) => (None, None, false),
                     None => (None, None, false),
                 };
+                // The bell belongs to the pane that rang it, so a split flashes
+                // the half the program is in and not the whole window.
+                let flash = match tab.leaves.get(&id) {
+                    Some(Pane::Terminal(session)) => bell_alpha(session.bell_at),
+                    _ => None,
+                };
                 (
                     id,
                     crate::render::PaneView {
@@ -3658,6 +3693,7 @@ impl App {
                         frame,
                         selection,
                         cursor,
+                        flash,
                     },
                 )
             })
@@ -4187,6 +4223,26 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // The bell is a fade, so it needs frames while it runs: a tint painted
+        // once would sit at its first alpha until something else redrew, and the
+        // window would look stained rather than rung.
+        let ringing = self.tabs.iter().any(|tab| {
+            tab.leaves.values().any(|pane| match pane {
+                Pane::Terminal(session) => bell_alpha(session.bell_at).is_some(),
+                Pane::Files(_) => false,
+            })
+        });
+        if ringing {
+            self.repaint("bell fading");
+            sooner(
+                std::time::Instant::now() + std::time::Duration::from_millis(16),
+                &mut deadline,
+            );
+            if let Some(gpu) = &self.gpu {
+                gpu.window.request_redraw();
+            }
+        }
+
         // A scan is cheap to *ask* for and expensive to *do*, so asking never
         // blocks the frame: the work goes to the worker runtime and comes back
         // as an event.
@@ -4390,9 +4446,20 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         // file pane can have focus while the terminal beside it is still live.
-        for tab in &mut self.tabs {
+        let mut bell_rang = false;
+        let mut bell_behind = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
             for pane in tab.leaves.values_mut() {
                 if let Pane::Terminal(session) = pane {
+                    let rung = session.pane.take_bells();
+                    if rung > 0 {
+                        session.bell_at = Some(std::time::Instant::now());
+                        bell_rang = true;
+                        tracing::trace!(bells = rung, "bell");
+                        // A flash in a tab nobody is looking at is not a bell:
+                        // it is invisible, which is the same as silence.
+                        bell_behind |= index != self.active;
+                    }
                     if let Some(frame) = session.pane.take_frame() {
                         if frame.title != session.program_title {
                             tracing::debug!(
@@ -4405,6 +4472,17 @@ impl ApplicationHandler<UserEvent> for App {
                         session.frame = Some(frame);
                     }
                 }
+            }
+        }
+        if bell_rang {
+            self.repaint("bell");
+        }
+        if bell_behind {
+            // The window, not the speaker: dtr never plays a sound, and a hint
+            // to the taskbar is the only thing a hidden tab can do.
+            if let Some(gpu) = &self.gpu {
+                gpu.window
+                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
             }
         }
         self.reap_ended();
@@ -5978,7 +6056,23 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell_of, closed, copy_to, cycled, mouse_goes_to_program, save_name, tab_name};
+    use super::{
+        BELL_FLASH, bell_alpha, cell_of, closed, copy_to, cycled, mouse_goes_to_program, save_name,
+        tab_name,
+    };
+
+    /// A bell is a flash that fades and then stops: `Some` while it rings, `None`
+    /// once it is over, and never a fixed alpha that the window could leave on
+    /// screen if it went idle at the wrong moment.
+    #[test]
+    fn a_bell_fades_and_then_stops() {
+        assert_eq!(bell_alpha(None), None, "nothing rang");
+        let just_now = Some(std::time::Instant::now());
+        let first = bell_alpha(just_now).expect("a fresh bell is visible");
+        assert!(first > 0.0 && first <= 0.12, "alpha {first}");
+        let over = Some(std::time::Instant::now() - BELL_FLASH);
+        assert_eq!(bell_alpha(over), None, "a finished bell must not tint");
+    }
 
     /// A point outside the pane is no cell at all.
     ///

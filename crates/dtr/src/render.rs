@@ -652,6 +652,10 @@ pub struct PaneView<'a> {
     pub selection: Option<(usize, usize)>,
     /// Only the focused pane draws a cursor.
     pub cursor: bool,
+    /// A bell's wash over the whole pane, already faded by the caller. Nothing
+    /// else in the grid pass covers a rectangle this large, which is why it is
+    /// drawn last: a bell has to be visible over the picture it interrupts.
+    pub flash: Option<f32>,
 }
 
 const ATLAS_SIZE: u32 = 1024;
@@ -1078,6 +1082,17 @@ impl GridRenderer {
                 [mark.x, mark.y, mark.width, mark.height],
                 look.accent,
                 1.0,
+            ));
+        }
+
+        // A bell, last so it is over everything the pane drew. The foreground is
+        // the right colour for the wash: it is the one colour guaranteed to
+        // contrast with the background, in both a light theme and a dark one.
+        if let Some(alpha) = pane.flash.filter(|alpha| *alpha > 0.0) {
+            self.instances.push(Instance::solid(
+                [pane.rect.x, pane.rect.y, pane.rect.width, pane.rect.height],
+                look.foreground,
+                alpha,
             ));
         }
     }
