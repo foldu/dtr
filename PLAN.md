@@ -561,8 +561,26 @@ they are **derived**: a surface lifted 10% from the background toward the foregr
 55% of the way along the same line, and the theme's cursor colour (or palette 3) as the accent. That
 keeps a theme a document about the *terminal* while the window still looks like one piece.
 
-Colours in the config file itself are deliberately not supported: a theme is a document with a name,
-and pointing at one beats duplicating sixteen hex triplets inline.
+**The chrome's own look is a setting, and it is a separate question from the terminal's theme.**
+`[ui] widgets` picks between `native` (the platform's own controls: the GTK4/libadwaita palette on
+Linux, the DWM accent and the light/dark flag on Windows), `adwaita`, `windows` and `egui` — the last
+three painted by `dtr-widgets` from the skin's palette, so a window on a machine whose desktop is
+none of those still looks like *something* rather than like egui's defaults. `native` is the default
+because a terminal that matches every other window is the one that does not look pasted on. `[ui]
+scheme` is `system` (the default), `light` or `dark`, and `[ui] accent` is `#RRGGBB` or nothing;
+**both mean something only to the three looks painted here**, because `native` takes its scheme and
+its accent from the desktop — which is what `Preset::owns_its_colours` gates the settings menu on,
+so a `native` window does not offer a row that would read nothing. `dtr` was a fourth painted look
+and turned out to be `egui` twice, so it is a spelling the config still accepts and the menu no
+longer offers. Everything is **live**: the look is a value the frame reads, so saving the settings
+menu repaints the window in the new chrome without a restart, and the `native` answer is watched
+(`WM_SETTINGCHANGE`, the XDG portal's `SettingChanged`) so the chrome follows the desktop at sunset.
+The settings sheet is a tabbed card — General first, Appearance second, `ctrl+tab` between them —
+because one column of rows outgrew the window.
+
+Colours in the config file itself are deliberately not supported *for the terminal*: a theme is a
+document with a name, and pointing at one beats duplicating sixteen hex triplets inline. The chrome's
+`accent` is the one exception, because no theme format carries a chrome to copy it from.
 
 One theme is compiled in — Ghostty's `Kanagawa Wave`, `include_str!`-ed from
 `crates/dtr/assets/themes/` — because the places dtr is installed do not have a theme directory to

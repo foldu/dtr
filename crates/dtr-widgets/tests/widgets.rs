@@ -344,3 +344,21 @@ fn the_adwaita_light_skin_renders() {
     harness.run();
     harness.snapshot("widgets_adwaita_light");
 }
+
+/// egui's own look, which is the fourth preset and the one that has to look
+/// deliberate without being a copy of a desktop: it reads `egui::Visuals` at run
+/// time, so this picture is also the check that the derivation follows whatever
+/// egui currently ships rather than a table frozen beside it.
+#[test]
+fn the_egui_dark_skin_renders() {
+    let mut harness = harness(Skin::egui_dark());
+    harness.run();
+    harness.snapshot("widgets_egui_dark");
+}
+
+#[test]
+fn the_egui_light_skin_renders() {
+    let mut harness = harness(Skin::egui_light());
+    harness.run();
+    harness.snapshot("widgets_egui_light");
+}

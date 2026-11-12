@@ -107,7 +107,10 @@ the skin the widget gallery and the older snapshots are drawn in.
 The Windows and Adwaita palettes are rendered and snapshot-tested **on Linux** on
 purpose. A look that can only be seen on Windows is a look that is only checked
 when somebody remembers to boot the VM; the same argument is why `--widgets` can
-ask for GNOME's chrome in the Windows guest.
+ask for GNOME's chrome in the Windows guest. Every preset is a picture over the
+same sheet — `widgets_dtr`, `widgets_adwaita_dark`/`_light`,
+`widgets_windows_dark`/`_light`, `widgets_egui_dark`/`_light` — so a palette or a
+row height that drifts is a diff before it is a dialog.
 
 ## Choosing one
 
