@@ -185,14 +185,15 @@ and the popup is given that width. And **a shell's row is its name**, `shell bas
 bash lives: one row per name means a path could not tell two rows apart, and fifty characters of
 store path is a menu nobody can read. The program is in `-v`'s `shell started program=…`.
 
-**A shell's row leads with the machine's own picture of that program.** `system::app_icon` reads
-the executable's icon through the shell on Windows and answers `None` on Linux, where a shell is
-in no icon theme and has no desktop entry — so nothing is embedded in the binary and the row says
-what *this* machine says the program is: on the guest, `powershell` is the blue PowerShell mark
-and `cmd` the console window. A program the system has no icon of its own for (a Windows App
-Execution Alias is one) gets whatever it does draw for it, and one with nothing keeps the plain
-row: `menu_width` is told which rows carry a mark, so the column never widens a menu that does
-not use it.
+**A shell's row leads with the machine's picture of that program, and with the shell's logo where
+the machine has none.** Windows answers with the executable's own icon (`system::app_icon`), the
+one Explorer shows: on the guest, `powershell` is the blue PowerShell mark and `cmd` the console
+window. Linux has no per-program icon to read — no shell is in the icon theme, and `gio info`
+says `application-x-executable` for bash and fish alike — so there the row leads with GNU Bash's,
+Zsh's, fish's or Nushell's own logo, and a shell with no logo (`sh`, `dash`, `ksh`) keeps the
+column and draws nothing, so the group's labels line up. A Windows executable with no icon of its
+own (an App Execution Alias is one) gets whatever Windows draws for it. `menu_width` is told which
+rows reserve the column, so it never widens a menu that has no marks in it.
 
 The answer is `TabHit::New(Option<Destination>)`, and it is a *typed* destination because the
 menu used to infer "serial" from a leading `/` while the app opened every entry as `ssh` — so

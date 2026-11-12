@@ -264,8 +264,8 @@ fn a_card_carries_its_header_and_its_body() {
     harness.snapshot("card");
 }
 
-/// The row a shell gets when the machine has a picture for it, in the shape the
-/// new-tab menu has: shells with their marks, a rule, then a port without one.
+/// The rows a shell group gets when the machine has a picture for only one of
+/// them, in the shape the new-tab menu has: two shells, a rule, then a port.
 /// The texture is made here rather than read out of the system, so every machine
 /// that runs the snapshot draws the same picture — what is pinned is the row's
 /// geometry: a 16-point mark, the skin's gap, and a label where an unmarked row
@@ -287,8 +287,16 @@ fn a_menu_row_can_lead_with_a_mark() {
                     egui::TextureOptions::LINEAR,
                 )
             });
-            let _ = menu_row_icon(ui, &skin, mark.id(), "shell bash", false);
-            let _ = menu_row_icon(ui, &skin, mark.id(), "shell sh", false);
+            let _ = menu_row_icon(
+                ui,
+                &skin,
+                dtr_widgets::Mark::from(mark.id()),
+                "shell bash",
+                false,
+            );
+            // A shell with no logo still reserves the column, so the group lines
+            // up: the label is where the marked row's label is.
+            let _ = menu_row_icon(ui, &skin, None, "shell sh", false);
             dtr_widgets::menu_separator(ui, &skin);
             let _ = menu_row(ui, &skin, "serial /dev/ttyUSB0", false);
         });

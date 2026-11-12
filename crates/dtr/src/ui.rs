@@ -517,20 +517,16 @@ pub fn app_menu(
     chosen
 }
 
-/// The system's picture of a shell, uploaded once per egui context.
+/// The platform's own picture of a shell's program, uploaded once per egui
+/// context.
 ///
 /// The pixels are cached by the platform, because a shell call is not a frame's
 /// work; the texture is cached here, because a texture belongs to a context and
-/// the window, a capture and a test harness each have their own. `None` — Linux,
-/// or a program the machine has no icon for — means the plain row, never an empty
-/// box where a mark would have been.
-fn shell_icon(ui: &Ui, destination: &crate::sources::Destination) -> Option<egui::TextureId> {
-    let crate::sources::Destination::Shell { program, .. } = destination else {
-        return None;
-    };
+/// the window, a capture and a test harness each have their own.
+fn system_icon(ui: &Ui, program: &str) -> Option<egui::TextureId> {
     // Globally unique rather than salted: the store is the whole context's, and
     // every row must find exactly the texture its own program uploaded.
-    let key = egui::Id::unique(("dtr-shell-icon", program.as_str()));
+    let key = egui::Id::unique(("dtr-shell-icon", program));
     if let Some(texture) = ui
         .ctx()
         .data(|data| data.get_temp::<egui::TextureHandle>(key))
@@ -547,6 +543,45 @@ fn shell_icon(ui: &Ui, destination: &crate::sources::Destination) -> Option<egui
     let id = texture.id();
     ui.ctx().data_mut(|data| data.insert_temp(key, texture));
     Some(id)
+}
+
+/// The logo a shell is known by, where the machine has no picture of its own.
+///
+/// These are the projects' own marks rather than glyphs drawn here — GNU Bash's
+/// official logo, Zsh's, fish's and Nushell's — which is the only honest answer on
+/// a system that has none: `application-x-executable` is the same picture for
+/// every program there, so a row would repeat one glyph down the menu. A shell
+/// with no logo of its own, `sh` or `dash` or `ksh`, has no picture rather than a
+/// borrowed one. `scripts/shell-icons.sh` records where each came from and what
+/// it is licensed under.
+fn shell_logo(name: &str) -> Option<egui::ImageSource<'static>> {
+    Some(match name {
+        "bash" => egui::include_image!("../assets/icons/bash.svg"),
+        "zsh" => egui::include_image!("../assets/icons/zsh.svg"),
+        "fish" => egui::include_image!("../assets/icons/fish.svg"),
+        "nu" | "nushell" => egui::include_image!("../assets/icons/nu.svg"),
+        _ => return None,
+    })
+}
+
+/// What a shell's row leads with: the machine's own icon of the program where it
+/// has one, and otherwise the shell's logo.
+///
+/// The order is the rule. Windows answers with the executable's icon — the
+/// picture Explorer shows, whatever the program is — and Linux answers `None` for
+/// every program, so there the logo is what a row has. `None` from both is a shell
+/// nobody has drawn a mark for, and its row is a plain one.
+fn shell_icon(
+    ui: &Ui,
+    destination: &crate::sources::Destination,
+) -> Option<dtr_widgets::Mark<'static>> {
+    let crate::sources::Destination::Shell { program, name } = destination else {
+        return None;
+    };
+    if let Some(icon) = system_icon(ui, program) {
+        return Some(dtr_widgets::Mark::Texture(icon));
+    }
+    shell_logo(name).map(dtr_widgets::Mark::Image)
 }
 
 /// What the strip drew, and how much of the row it took.
@@ -765,7 +800,10 @@ pub fn tab_bar(
             .zip(destinations)
             .map(|(label, destination)| dtr_widgets::RowSpec {
                 label: label.as_str(),
-                icon: shell_icon(ui, destination).is_some(),
+                // Every shell reserves the column, whether or not this machine has
+                // a picture for it: the shells of one machine do not all have a
+                // logo, and two starting points in one group read as a mistake.
+                icon: destination.is_shell(),
             })
             .collect();
         rows.push(dtr_widgets::RowSpec {
@@ -826,18 +864,18 @@ pub fn tab_bar(
                     }
                     for destination in shells {
                         // The mark is the machine's own picture of the program —
-                        // Windows reads it out of the executable — so two
-                        // machines with the same bash can show different
-                        // pictures, and a shell nobody has drawn a logo for is
-                        // simply a row without one.
+                        // Windows reads it out of the executable, and Linux has
+                        // none to read, so there it is the shell's logo — and a
+                        // shell with neither still gets the row, indented, with
+                        // nothing in the column.
                         let label = destination.label();
-                        let picked = match shell_icon(ui, destination) {
-                            Some(icon) => {
-                                dtr_widgets::menu_row_icon(ui, &skin, icon, &label, false)
-                            }
-                            None => dtr_widgets::menu_row(ui, &skin, &label, false),
-                        };
-                        if picked {
+                        if dtr_widgets::menu_row_icon(
+                            ui,
+                            &skin,
+                            shell_icon(ui, destination),
+                            &label,
+                            false,
+                        ) {
                             clicked = Some(TabHit::New(Some(destination.clone())));
                             ui.close();
                         }
@@ -1169,6 +1207,34 @@ mod kittest_tests {
             ),
             "an alias with a slash in it is still an ssh host, not a port"
         );
+    }
+
+    /// A shell's mark is the shell's own logo, and only for the shells that have
+    /// one: `sh` is not GNU Bash and `dash` is not fish, so borrowing a mark would
+    /// be the menu telling a lie about what it is about to start.
+    #[test]
+    fn the_shells_with_a_logo_are_the_four_that_have_one() {
+        let logo = |name: &str| shell_logo(name).and_then(|source| source.uri().map(str::to_owned));
+        let known: Vec<String> = ["bash", "zsh", "fish", "nu"]
+            .iter()
+            .map(|name| logo(name).unwrap_or_else(|| panic!("{name} has a logo")))
+            .collect();
+        assert_eq!(
+            logo("nushell"),
+            logo("nu"),
+            "two spellings of one shell are one picture"
+        );
+        let mut distinct = known.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            known.len(),
+            "four shells, four pictures: {known:?}"
+        );
+        for plain in ["sh", "dash", "ksh", "tcsh", "csh", "baash"] {
+            assert!(logo(plain).is_none(), "{plain} has no logo to draw");
+        }
     }
 
     /// A machine where no shell could be discovered — a stripped container —

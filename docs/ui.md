@@ -232,9 +232,11 @@ what makes them testable and what lets a caller `--send` into them.
   and pushed the labels in. `menu_row_chord` is the same row with the chord
   that does it from the keyboard, right-aligned and dim — libadwaita's
   `popover.menu accelerator`. `menu_row_icon` is the row that leads with a
-  program's picture, and `menu_width` takes a `RowSpec` per row rather than a
-  list of labels, so the column it reserves is only as wide as the rows that use
-  it. `menu_separator` is the rule between groups, as
+  program's picture (`Mark`: a texture the caller uploaded, or an embedded logo),
+  and `None` keeps the column and draws nothing in it, so a group of shells that
+  only some of have logos still lines up; `menu_width` takes a `RowSpec` per row
+  rather than a list of labels, so the column it reserves is only as wide as the
+  rows that use it. `menu_separator` is the rule between groups, as
   wide as a row: `ui.separator()` takes the popup's width, not the content's,
   and drew across the menu's rounded corners.
 - `cross`, `cross_at`, `plus` — the icon buttons, drawn from two strokes and
@@ -632,20 +634,32 @@ rewrites it to `#ffffff` and each file becomes a white mask the tint colours.
 because a kittest harness makes its own `Context` and would otherwise draw egui's
 missing-image glyph, a `⚠` egui's own fonts cannot render.
 
-**A shell's mark is the system's, not an asset.** The rows that name a program draw what the
-machine has for it: `system::app_icon` asks Windows for the executable's own icon
-(`SHGetFileInfo`'s large icon, converted to RGBA — the same picture Explorer and the taskbar
-show) and answers `None` on Linux, where a shell has neither an icon-theme entry nor a desktop
-file, so every program there is `application-x-executable` and a row would repeat one glyph five
-times. Nothing is embedded, which is the point: there is no brand asset to licence, redraw or let
-go stale, and a machine that installs a shell gets its picture with no change to the binary. Two
-consequences worth knowing. The mark is a **texture**, not an `ImageSource`, so `menu_row_icon`
-takes what the caller uploaded (`ui::shell_icon` caches one per context; a texture belongs to a
-context, the pixels to the platform) and the row is drawn from 32-pixel pixels into a 16-point
-box, which is exact at 2×. And the icon is **the system's answer, including its absence**: an
-executable Windows has no icon of its own for — an App Execution Alias is one, and the guest's
-`pwsh` is one — draws Windows' generic application icon, and a program with nothing at all gets
-the plain row rather than an empty box.
+**A shell's mark is the machine's where the machine has one, and the shell's own logo
+otherwise.** Windows answers with the executable's icon — `system::app_icon` takes
+`SHGetFileInfo`'s large icon, converts it to RGBA, and that is the picture Explorer and the
+taskbar show. Linux answers `None` for every program: a shell is in no icon theme and has no
+desktop entry, and `gio info` reports `application-x-executable` for bash and fish alike — one
+glyph for every executable, which is not a mark. So a Linux row leads with the project's own
+logo: GNU Bash's official one, Zsh's, fish's and Nushell's, fetched by
+`scripts/shell-icons.sh`, which records where each came from and under what licence (a logo is a
+trademark being used to name its shell, which is what a logo is for). `sh`, `dash` and `ksh` have
+no logo, so their rows reserve the column and leave it empty: the shells of one machine do not all
+have a picture, and two starting points in one group read as a formatting mistake rather than as
+two kinds of row.
+
+The collection is worth knowing about, because it looks like a system source and is not. **fish
+ships a `fish.desktop`** (3.6 through 4.0) with `Icon=fish` and `Terminal=true` — but it is
+written for the AppImage: fish's own `CMakeLists.txt` never mentions it, Debian's install
+manifests never install it, 4.9.3 has dropped the file, and no stock icon theme has a `fish` to
+resolve anyway. A desktop-file reader would find nothing on a normal Linux, which is why the
+system path is Windows' alone and the logos are embedded.
+
+The mark arrives as a `Mark`: pixels the platform handed back at run time, or an embedded
+`ImageSource` the loader decodes. `menu_row_icon` draws either into the same 16-point box,
+untinted — a brand mark keeps its colour, and so does a system icon — and `None` keeps the
+column. `ui::shell_icon` caches the texture per context (a texture belongs to a context; the
+pixels to the platform), and `menu_width` measures a `RowSpec` per row, so a 32-pixel system icon
+is exact at 2× and the column is reserved by the rows that use it, never by the menu.
 
 ## Driving the UI from a script
 

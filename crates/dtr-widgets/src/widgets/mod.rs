@@ -36,7 +36,7 @@ pub use check::{check, check_box};
 pub use combo::{Edit, Editable};
 pub use icons::{cross, cross_at, plus};
 pub use menu::{
-    RowSpec, menu_row, menu_row_chord, menu_row_icon, menu_separator, menu_tip, menu_width,
+    Mark, RowSpec, menu_row, menu_row_chord, menu_row_icon, menu_separator, menu_tip, menu_width,
     point_at,
 };
 pub use segmented::segmented;

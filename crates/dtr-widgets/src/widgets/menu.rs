@@ -26,24 +26,50 @@ use super::check::tick;
 
 /// Draw one menu row and report whether the pointer chose it.
 pub fn menu_row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool) -> bool {
-    row(ui, skin, label, selected, None, None)
+    row(ui, skin, label, selected, None, None, false)
 }
 
-/// The same row with the system's picture of what it leads to, before the label.
+/// The picture a row may lead with.
 ///
-/// The mark is a [`egui::TextureId`] rather than an [`egui::ImageSource`]: its
-/// pixels are the platform's, read at run time, so nothing is embedded in the
-/// binary and this crate has no business loading an asset. A program the platform
-/// has no picture for is a plain [`menu_row`] instead — there is no empty box, and
-/// the label starts where it always did.
-pub fn menu_row_icon(
+/// Two sources, because there are two: the platform's own picture of a program,
+/// which arrives as pixels the caller uploaded, and an embedded picture, which
+/// egui's loader decodes. Both are drawn as they are — a brand mark keeps its
+/// colour, and so does a system icon — so a row asks for no tint.
+pub enum Mark<'a> {
+    /// Pixels the caller uploaded: the platform's icon of a program.
+    Texture(egui::TextureId),
+    /// An embedded picture: a shell's own logo.
+    Image(egui::ImageSource<'a>),
+}
+
+impl<'a> From<egui::TextureId> for Mark<'a> {
+    fn from(texture: egui::TextureId) -> Self {
+        Self::Texture(texture)
+    }
+}
+
+impl<'a> From<egui::ImageSource<'a>> for Mark<'a> {
+    fn from(source: egui::ImageSource<'a>) -> Self {
+        Self::Image(source)
+    }
+}
+
+/// A row that leads with the picture of what it is, before the label.
+///
+/// The mark is a [`Mark`]: pixels the platform handed back at run time — so
+/// nothing is embedded — or an embedded picture the loader decodes. `None` keeps
+/// the column and draws nothing in it, which is the point: the shells of one
+/// machine do not all have a logo, and a group whose labels start at two different
+/// x positions reads as a formatting mistake rather than as two kinds of row. A
+/// group with no marks at all is [`menu_row`]s, and does not pay for the column.
+pub fn menu_row_icon<'a>(
     ui: &mut Ui,
     skin: &Skin,
-    icon: egui::TextureId,
+    mark: impl Into<Option<Mark<'a>>>,
     label: &str,
     selected: bool,
 ) -> bool {
-    row(ui, skin, label, selected, None, Some(icon))
+    row(ui, skin, label, selected, None, mark.into(), true)
 }
 
 /// The same row with the chord that does it without the menu, at its right.
@@ -53,25 +79,26 @@ pub fn menu_row_icon(
 /// than a second accent: it is the same sentence as the label, said more
 /// quietly.
 pub fn menu_row_chord(ui: &mut Ui, skin: &Skin, label: &str, chord: &str) -> bool {
-    row(ui, skin, label, false, Some(chord), None)
+    row(ui, skin, label, false, Some(chord), None, false)
 }
 
 /// The side of a row's mark, in points.
 ///
 /// The size of a menu icon on both desktops, and the largest that fits a dtr row
-/// (23 points) with air above and below it. The texture is drawn down into this
+/// (23 points) with air above and below it. The picture is drawn down into this
 /// box rather than the box grown to fit it: the shell answers with a 32-pixel
 /// icon, which is exactly this at 2×, so a HiDPI window draws it at full
-/// resolution.
+/// resolution, and an embedded logo has a viewBox rather than a size.
 const MARK: f32 = 16.0;
 
-fn row(
+fn row<'a>(
     ui: &mut Ui,
     skin: &Skin,
     label: &str,
     selected: bool,
     chord: Option<&str>,
-    icon: Option<egui::TextureId>,
+    mark: Option<Mark<'a>>,
+    lead: bool,
 ) -> bool {
     let palette = skin.palette;
     let style = &skin.style;
@@ -85,13 +112,11 @@ fn row(
     // What the row needs before the menu gives it a width: the label, the chord,
     // the mark a chosen value carries, and the picture a row may lead with.
     let tick_side = (style.row * 0.5).min(14.0);
-    let mark = if selected { tick_side + style.gap } else { 0.0 };
-    let leading = if icon.is_some() {
-        MARK + style.gap
-    } else {
-        0.0
-    };
-    let mut needed = galley.size().x + style.padding.x * 2.0 + mark + leading;
+    let tick_room = if selected { tick_side + style.gap } else { 0.0 };
+    // The column is reserved by `lead`, not by the picture: a shell with no logo
+    // keeps the indent, so a group of shells lines up.
+    let leading = if lead { MARK + style.gap } else { 0.0 };
+    let mut needed = galley.size().x + style.padding.x * 2.0 + tick_room + leading;
     if let Some(chord) = &chord {
         needed += chord.size().x + style.gap * 2.0;
     }
@@ -104,21 +129,32 @@ fn row(
     if response.hovered() {
         painter.rect_filled(rect, style.control_radius, palette.control_hover);
     }
-    if let Some(icon) = icon {
-        // Untinted: the system's icon is a picture in its own colours, and a tint
-        // would turn PowerShell's blue into a shade of the text. The quad is the
-        // row's, not the texture's, so a 32-pixel answer from the shell is drawn
-        // at 16 points.
+    if let Some(mark) = mark {
+        // Untinted, and the quad is the row's rather than the picture's: a brand
+        // mark keeps its colour, a 32-pixel answer from the shell is drawn at 16
+        // points, and neither is a shade of the text.
         let picture = egui::Rect::from_center_size(
             egui::pos2(rect.left() + style.padding.x + MARK / 2.0, rect.center().y),
             egui::vec2(MARK, MARK),
         );
-        painter.image(
-            icon,
-            picture,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
+        match mark {
+            Mark::Texture(texture) => {
+                painter.image(
+                    texture,
+                    picture,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            // `paint_at` rather than the painter's own `image`: an embedded
+            // picture may still be decoding, and egui draws it when it arrives and
+            // asks for the frame that will.
+            Mark::Image(source) => {
+                egui::Image::new(source)
+                    .fit_to_exact_size(picture.size())
+                    .paint_at(ui, picture);
+            }
+        }
     }
     // The label starts at the row's own padding. It used to start a column
     // further in, a tick gutter reserved on every row of every menu for a mark
@@ -135,7 +171,7 @@ fn row(
     if let Some(chord) = chord {
         painter.galley(
             egui::pos2(
-                rect.right() - style.padding.x - mark - chord.size().x,
+                rect.right() - style.padding.x - tick_room - chord.size().x,
                 rect.center().y - chord.size().y / 2.0,
             ),
             chord,
@@ -165,8 +201,8 @@ fn row(
     super::pointer_only(response).clicked()
 }
 
-/// One row as the width measure sees it: its label, and whether it leads with a
-/// mark.
+/// One row as the width measure sees it: its label, and whether it reserves the
+/// column a mark goes in.
 #[derive(Clone, Copy, Debug)]
 pub struct RowSpec<'a> {
     pub label: &'a str,
