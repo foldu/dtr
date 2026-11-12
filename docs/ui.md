@@ -574,7 +574,8 @@ disagreeing.
   desktop today, which is what "native" means, but a person whose desktop turns
   over at sunset may want the chrome to stay put — the setting would be a fourth
   `scheme` value (`pin`) rather than a hidden override, so the row can say so.
-- Whether the settings menu's four `egui::ComboBox`es should become a painted
+- Whether the settings menu's five `egui::ComboBox`es (look, scheme, family, theme, baud)
+  should become a painted
   `Combo`: their open rows are `menu_row` already, but the closed control is
   still egui's, so it is the last place a `native` skin stops. `Editable` is
   *not* the answer — it is a field that can be typed into, and it reports

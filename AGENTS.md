@@ -417,11 +417,10 @@ second connection, and what each of these failures looked like.
   three options, all **before the destination** — `ConnectTimeout=10`,
   `ServerAliveInterval=20`, `ServerAliveCountMax=3` (ssh's own default is no keepalive) —
   and they override `~/.ssh/config`. A test asserts every flag precedes the alias, because
-  an option after the destination becomes a command for the far end. **An ssh failure's
-  cause is its stderr**: piped and quoted with the exit status, because with
-  `Stdio::null()` every dead `ssh` reached the UI as `sender dropped`.
-  `examples/probe.rs` runs the same path from a shell; `DTR_SSH_CONFIG=/dev/null` gets past
-  a broken config and `DTR_SSH_BATCH=0` lets a prompt be seen.
+  an option after the destination becomes a command for the far end. **The pane's `ssh`
+  runs on the pty, so its refusal is drawn in the grid**, and the exit status is what the
+  pane acts on; the helpers nobody watches — `dtr-sftp`'s child and the terminfo copy — are
+  the ones that pipe stderr and quote it.
 - **dtr carries `xterm-ghostty` to the far end, because a host without it cannot
   `clear`**: a vanilla Ubuntu has no `ncurses-term` entry for Ghostty's name, so `tput`,
   `clear` and `reset` answer `unknown terminal type`. The entry is
@@ -463,9 +462,9 @@ second connection, and what each of these failures looked like.
   goes into the terminal, not the pty, because nothing at the other end would read it.
 - **A session knows its directory only because it says so**: `/proc` is Linux-only and an
   ssh session has no local process, so `CwdSniffer` watches for OSC 7
-  (`ESC ] 7 ; file://host/path`) before the VT core, keeping the tail across chunks —
-  holding the introducer back (prefix included, or flushed past `CARRY_MAX` so a bogus
-  introducer cannot stall the session). The **host** decides the machine: empty,
+  (`ESC ] 7 ; file://host/path`) before the VT core, holding an unterminated sequence from
+  its introducer with an 8 KiB cap, so a bogus introducer cannot stall the session. The
+  **host** decides the machine: empty,
   `localhost` or this machine's name is local, and anything else is another machine whose
   path must never be used as a local path, or "new tab here" tries to `cd` into a directory
   on the wrong machine. `Session::remote` records the ssh case too, and `+` → local shell
@@ -500,11 +499,11 @@ second connection, and what each of these failures looked like.
 like when it was wrong.
 
 - **Clicking a file is a VFS question, and the pane owns the answer**: `dtr-vfs` has
-  `Location { backend, path }`, a `Backend` trait (`stat`, `open`, `list`) and local,
+  `Location { backend, path }`, a `Backend` trait (`stat`, `fetch`, `list`) and local,
   in-memory and ssh implementations. **A `Location` comes from the pane, not from a URI**:
   `file:///etc/hosts` printed on `jupyter` means jupyter's file, and `BackendId::Ssh` is
-  only built from a session that *is* remote, with `Vfs::backend` refusing it rather than
-  falling back to local. **Listings are batches**, and dropping the receiver cancels the
+  only built from a session that *is* remote, with `Vfs::backend` never falling back to
+  local. **Listings are batches**, and dropping the receiver cancels the
   walk; **capabilities are declared** — no remote watch, no directory size — and the UI
   hides what is not there.
 - **The host part decides which machine, and `file://blah` usually has one**:

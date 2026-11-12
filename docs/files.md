@@ -10,11 +10,11 @@ path is on**, because a path arrives as text from a program that may be running 
 
 ## 1. A `Location` comes from the pane, not from a URI
 
-`dtr-vfs` has `Location { backend, path }`, a `Backend` trait with `stat`, `open` and `list`,
-and local, in-memory and ssh implementations. `BackendId::Ssh` is only ever built from a
-session that *is* remote, and `Vfs::backend` refuses one it does not have rather than falling
-back to local — the fallback would silently open a *different file of the same name* on this
-machine, which is worse than an error.
+`dtr-vfs` has `Location { backend, path }`, a `Backend` trait with `stat`, `fetch` and
+`list`, and local, in-memory and ssh implementations. `BackendId::Ssh` is only ever built
+for a session that *is* remote, and `Vfs::backend` answers an ssh alias by opening a backend
+for it — never by falling back to local, because that fallback would silently open a
+*different file of the same name* on this machine, which is worse than an error.
 
 `file:///etc/hosts` printed in a session on `jupyter` means jupyter's `/etc/hosts`. There is
 no such thing as resolving it locally.

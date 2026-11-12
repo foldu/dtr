@@ -16,8 +16,8 @@ manager, and `1 shell` is only the fallback (`tab_name`). The title is not trust
 bytes and not a dirty cell: it is compared with the last published title inside the same
 `Displayed` record that holds the cursor, so a program that renames itself and draws
 nothing at all still publishes a frame. `clean_title` decodes lossily, drops control
-characters and caps the result at 512 bytes, because the string arrives from a program and
-ends up in a window title.
+characters and caps the result at 512 characters, because the string arrives from a program
+and ends up in a window title.
 
 **A shell that exits closes its tab.** The pane cannot do it — the UI owns the tab — so the
 pty reader sets `Pane::ended` on EOF and `App::reap_ended` closes tabs, highest index
@@ -48,11 +48,14 @@ nobody has to have configured. `ssh_args` builds the list and a test asserts tha
 flag precedes the alias, because an option written after the destination stops being an
 option and becomes a command for the far end.
 
-**An ssh failure's cause is in its stderr.** With `Stdio::null()` a dead `ssh` reached the
-UI as `sender dropped` — true, useless, and indistinguishable from a bug in the pane. So
-stderr is piped, quoted, and shown with the exit status. `examples/probe.rs` runs the same
-path from a shell without the window; `DTR_SSH_CONFIG=/dev/null` gets past a broken config
-and `DTR_SSH_BATCH=0` lets a password prompt be seen rather than silently refused.
+**An ssh failure's cause is its stderr, and the pane shows it the only way it can.** The
+pane's `ssh` runs *on the pty*, so all three descriptors are the terminal: a refusal —
+`Permission denied`, `Could not resolve hostname` — is drawn in the grid, above the
+reconnect notice, where the person is already looking. What the pane acts on is the status
+(`pane::ending`: 255 or a signal is a drop, anything else an `exit`), which is why a message
+that has scrolled away still reconnects correctly. The connections *nobody* is watching are
+the ones that pipe stderr and quote its last line: `dtr-sftp`'s child
+(`crates/dtr-sftp/src/lib.rs`) and the terminfo copy in §4.
 
 ## 4. dtr carries `xterm-ghostty` to the far end
 
@@ -82,10 +85,14 @@ It is best effort by design, and every one of those words is a decision:
 
 - **its own thread** — the pane must not wait for it, and closing the tab must not wait
   either;
-- **15 s deadline**, then the child is killed and the last line of stderr is logged;
+- **15 s deadline**, after which the child is killed and the log line says `no answer in
+  15 s`; the last line of stderr is quoted only when ssh *exited* non-zero, because a
+  hang has no message;
 - **one log line** either way (`terminfo entry copied` / `could not copy …`), because a
   failure here is not the session's failure;
-- **once per host per run**, so a reconnect does not repeat it;
+- **once per host per run on success**, so a reconnect does not repeat it — a failure is
+  retried by the next tab, because a connection refused by a locked vault is worth
+  another try;
 - **`DTR_TERMINFO=0`** to switch it off.
 
 Two honest gaps. A host that wants a password for the extra connection never gets the
@@ -156,9 +163,10 @@ that does not exist yet is how the reconnect message used to disappear.
 
 `/proc` is Linux-only and an ssh session has no local process at all, so `CwdSniffer`
 watches for OSC 7 (`ESC ] 7 ; file://host/path`) *before* the VT core sees the bytes, and
-keeps the tail across chunk boundaries: the introducer is held back, prefix included,
-until it either completes or is flushed past `CARRY_MAX`, so a bogus introducer cannot stall
-a session forever.
+keeps the tail across chunk boundaries: an unterminated sequence is held from its
+introducer until it completes, with everything else dropped, so a bogus introducer cannot
+stall a session (the buffer is capped at 8 KiB; `CARRY_MAX` is `PromptMarks`' limit, a
+different scanner with a different job).
 
 The **host** decides which machine the path is on. Empty, `localhost` or this machine's name
 is local; anything else is another machine, whose path must never be used as a local path,

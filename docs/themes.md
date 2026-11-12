@@ -29,10 +29,11 @@ not three directories but six — `~/.config/dtr/themes`, `~/.config/ghostty/the
 `/usr/local/share/ghostty/themes` and `/usr/share/ghostty/themes`, in that order — because
 reading the themes the user already has is the point. The lookup is exact **and then**
 case-insensitive, because Ghostty capitalises its file names and people do not. And one
-entry is compiled into the binary, `Kanagawa Wave`, used when nothing on disk matches,
-because the places dtr runs have nothing to read: a Nix store path, or the one-file Windows
-exe with no `share/`. A file of that name beats the compiled-in copy, which is how it is
-intended to be changed.
+entry is compiled into the binary, `Kanagawa Wave`, used when the config asks for that name
+and no file carries it — not as a fallback for every other name, because a misspelt theme
+should say so rather than quietly become Kanagawa. That is what the places dtr runs have: a
+Nix store path, or the one-file Windows exe with no `share/`. A file of that name beats the
+compiled-in copy, which is how it is intended to be changed.
 
 ```toml
 # ~/.config/dtr/config.toml
@@ -40,10 +41,30 @@ theme = "kanagawa wave"
 ```
 
 The trade-off, named: **there is no per-colour override in the config.** Customising a theme means
-owning a copy of it — `dtr theme cp "kanagawa wave" mine`, then edit `~/.config/dtr/themes/mine`.
+owning a copy of it — copy the file into `~/.config/dtr/themes/<mine>` and edit it (there is
+no `theme cp`; the file *is* the theme, and `dtr theme import` is the one subcommand that
+makes a new one from an `.itermcolors`).
 That is Ghostty's model and it is right here: an override table would be a second place colours
-live, a second precedence rule to document, and a second thing to get wrong in `dtr config set`.
+live, a second precedence rule to document, and a second thing to get wrong in the config.
 The escape hatch costs one command and produces a file that is still a valid Ghostty theme.
+
+**As built on 2026-11-12 — where §7 and §8 differ from the code.** Those two sections are the
+design as it was written before the parser existed. `crates/dtr/src/theme.rs` is what
+shipped, and it differs in ways worth knowing before reading them as fact:
+
+- the lookup is exact first, then case-insensitive, and a case-insensitive hit is **used**,
+  not merely suggested; the not-found error lists the directories and offers no near matches;
+- there is no `builtin:default` and no `dtr theme list`: `--themes` prints names, and the
+  compiled-in entry is the `Kanagawa Wave` that `BUNDLED` names, selected by name;
+- the search paths are `dirs::config_dir()` and `dirs::data_dir()` for `dtr` and for
+  `ghostty`, plus `/usr/local/share` and `/usr/share` — no `$XDG_DATA_DIRS` walk, no
+  per-platform branch;
+- a theme that omits an ANSI slot is **not** rejected: the missing slots are logged and keep
+  the defaults, and palette indices above 15 are dropped;
+- unknown keys are ignored silently (there is no `bold-color` warning), `Theme::render` writes
+  only the fields that are `Some`, and the cursor is drawn in the theme's `cursor` colour;
+- there is no `[theme.overrides]` and no `bold` key in `dtr-config`; `theme = "<name>"` is the
+  only selector, and `--config-set` writes it.
 
 **Runner-up: inline colours in `config.toml`.** Switch only if the directory search proves fragile
 on Windows (§7.5) — it trades a file lookup for a config file nobody edits by hand that cannot
@@ -130,7 +151,8 @@ Three consequences that shape the design:
 - `Frame` needs **no new fields**: once the terminal has defaults, `default_fg`/`default_bg` and
   every cell's `fg`/`bg` are already themed.
 - `ui.rs` needs no change for fg/bg. The only places it wants the new slots are the cursor
-  (`default_fg.gamma_multiply(0.45)` today — a theme has a real `cursor` and `cursor_text`) and,
+  (`theme.cursor` becomes `Look::accent`, which is what the block is painted with — a theme
+  has a real `cursor` and `cursor_text`, and only the first is wired up) and,
   in M2, selection.
 - Apply the theme **on the pane thread**, after `Terminal::new(COLS, ROWS)` and before the first
   `vt_write`, because `Terminal` is `!Send`. `Theme` is plain `[u8; 3]`s and a `String`, so clone
@@ -683,6 +705,13 @@ is missing.
 
 ### 8.1 Keys
 
+**As built (2026-11-12), this table is the design, not the code.** The rows that differ:
+a missing `palette = N` is logged and the default kept, not a rejection naming the index;
+`palette = N` for N ≥ 16 is dropped, not stored as an override; "dtr writes" means the fields
+the theme set — the `.itermcolors` importer is what fills all 22; `cursor-text` is **not**
+honoured, because the block cursor is painted over the glyph (`docs/ghostty.md` §4); and
+`selection-*` are composited by the renderer rather than set on the core.
+
 A dtr theme file is a **Ghostty theme file**, and dtr writes a complete one — all 22 values — so
 that a file dtr writes is also a file Ghostty can use unchanged.
 
@@ -823,10 +852,10 @@ two places worth knowing before writing code:
 - `Config::parse` reads sections by name (`document.get("serial")`). A top-level string is
   `document.get("theme").and_then(Item::as_str)` — simpler, but it is a third access pattern, and
   `Config` needs a `theme: String` field with a default (empty = no theme, i.e. `builtin:default`).
-- `set_in_text` splits on the **first** `.` and requires a section, so `dtr config set theme …`
-  currently fails with *"… is not section.key"*. Setting a top-level scalar needs a small branch:
-  if the key has no `.`, insert `document[key] = value`. Do not discover this after documenting the
-  CLI.
+- `set_in_text` splits on the **first** `.` and requires a section, so `--config-set theme …`
+  used to fail with *"… is not section.key"*. A bare top-level key is supported now
+  (`set_in_text` inserts `document[key] = value` when there is no `.`), which is what makes
+  `--config-set theme "kanagawa wave"` work.
 
 `set_in_text` already replaces values in place while keeping comments, so `theme = "x"` is one
 line and one code path.

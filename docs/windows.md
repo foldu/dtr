@@ -146,8 +146,9 @@ the grid after a settings change. The next frame rasterises at the new factor an
 keeps its *physical* size across the move (Windows suggests a new rect via
 `WM_DPICHANGED`; winit does not adopt it for us), so a moved window keeps its pixel size and
 changes how many cells it holds, which is the behaviour a terminal should have. The refresh
-rate is still refreshed on `Moved` only, because that follows the monitor rather than the
-factor.
+rate is refreshed on `Moved` — which follows the monitor rather than the factor — and, since
+Wayland sends no `Moved` for a monitor change, also by a once-a-second check
+(`crates/dtr/src/app.rs`).
 
 ### 2.4 What the fix touched
 
@@ -174,24 +175,29 @@ those two now have a rasterised size that matches the display.
 
 ### 3.1 Where the baud rate lives now
 
-- Rates are a fixed eight-entry list, `9600 … 921600` (`crates/dtr/src/settings.rs:13`), in a
-  combo box that only appears when a serial session has focus
-  (`crates/dtr/src/settings.rs:37`, `crates/dtr/src/settings.rs:566`); otherwise the row says
-  "no port".
+**Corrected 2026-11-12:** the gap this section diagnosed — the rate was visible but not
+editable where it was visible — is closed. `crates/dtr/src/serial_dialog.rs` is a connection
+sheet that the `+` menu and the palette's `connect <port>` both open: fifteen rates
+(300 … 921600), a typeable field, and the store's per-port memory as the starting value;
+`--baud` still exists for a capture. The bullets below are what the build this report ran
+against did.
+
+- Rates were a fixed eight-entry list, `9600 … 921600` (`crates/dtr/src/settings.rs:13`), in
+  a combo box that only appeared when a serial session had focus
+  (`crates/dtr/src/settings.rs:37`, `crates/dtr/src/settings.rs:566`); otherwise the row said
+  "no port". The settings row still offers the eight, because it is where a *connected* port
+  is changed; the sheet is where a *new* connection is described.
 - Changing it does not reconfigure the port: the pane reconnects at the new rate, keeping its
   scrollback (`crates/dtr/src/pane.rs:1627`). That is deliberate — you cannot change an open
   port's rate in place with `serialport`.
 - The rate is *displayed* in the pane label, `COM3 115200 8N1` (`crates/dtr/src/pane.rs:365`),
-  which is what the tab title and the status bar show. So it is visible but not editable
-  where it is visible.
-- The connect paths never ask: the `+` menu and the palette's `connect <port>` take the
-  remembered rate from the store, or the default (`crates/dtr/src/app.rs:3096`); `--baud`
-  exists on the command line only.
+  which is what the tab title and the status bar show.
+- The connect paths used to take the remembered rate silently, with `--baud` on the command
+  line as the only way to say otherwise.
 
-The gap is therefore discoverability and range, not plumbing: expose the rate in the connect
-flow, allow a typed value (the list omits 300/600/1200/2400/4800/14400/28800/500000/1M/2M),
-and consider the status bar as the place to show *and* change it, since that is where the
-number already is.
+The gap was therefore discoverability and range, not plumbing: expose the rate in the connect
+flow and allow a typed value (the list omitted 300/600/1200/2400/4800/14400/28800/500000/1M/2M).
+The sheet is that; the status bar still only shows the number.
 
 ### 3.2 Autobaud
 
@@ -234,14 +240,24 @@ Structural reasons a glyph that *does* render can still look wrong:
 - **Fallback faces are placed by their own ascent**, which is right for the baseline and
   wrong if an icon font's metrics are unusual.
 
+**Corrected 2026-11-12:** all three are fixed, and the list is kept as the diagnosis it was.
+`render::Constraint` ports Ghostty's rules, so a symbol is fitted or centred into its cell
+instead of overflowing, `constraint_width` lets one borrow the next cell when it is blank, a
+uniform scale re-rasterises the outlines rather than the bitmap, every glyph is placed on the
+grid's baseline (`render.rs::placement`), and `Fonts::load` multiplies by the display scale
+(§2.1). What remains is the blank cell this section opened with: an icon nobody covers is
+still nothing, which is a font to install, not a measurement to fix — `--font-report` names
+the face that answered.
+
 Two things worth knowing before chasing this:
 
 - `dtr --fonts` is the command that answers "does dtr see my font". In the devShell used here
   it listed six families and no Nerd Font even though `fc-list` knows them — that is a
   sandbox fontconfig, not a Windows conclusion, but it is the first check on the target
   machine.
-- On a HiDPI display every glyph is currently rasterised at the unscaled size (§2.1), so
-  re-judge "bad icons" only after the DPI fix.
+- On a HiDPI display every glyph was rasterised at the unscaled size when this was written;
+  the DPI fix in §2 makes the rasteriser take the factor, so re-judge "bad icons" only on a
+  build with that fix (§2.1).
 
 ### 4.2 The trap: LF-only output on a raw pty staircases
 
@@ -375,12 +391,15 @@ was last in §7.
 ## 7. Order, and what each step unlocks
 
 1. **Debug counter (§5.2).** Small, and it is the instrument for 6 and 10.
-2. **DPI: grid size + status bar (§2).** One theme, largest visible payoff; re-judge 8 and 9
-   afterwards.
-3. **Glyph fitting (§4.1).** Decide the policy — clamp every glyph to its cell, and
-   re-rasterise wide/oversized glyphs at cell size instead of scaling a bitmap; add a
-   screenshot case with a Nerd Font.
-4. **Baud in the connect flow (§3.1).**
+2. **DPI: grid size + status bar (§2) — done.** `Fonts::load` takes the factor and the guest
+   measures 102 × 34 cells at 125 % (§2.1); 8 and 9 were re-judged afterwards.
+3. **Glyph fitting (§4.1) — done.** `render::Constraint` decides the policy (clamp every
+   glyph to its cell, `fit_cover1` for symbols, `stretch` only where the ink is the shape)
+   and re-rasterises wide/oversized glyphs at cell size instead of scaling a bitmap;
+   `constraint_width` covers the neighbour-cell rule. A screenshot case with a Nerd Font is
+   still worth adding to the guest run.
+4. **Baud in the connect flow (§3.1) — done.** The serial connection sheet asks, with fifteen
+   rates and a typeable field.
 5. **Autobaud (§3.2)** — after the safety decision in §9.
 6. **Resize (§5.3)** — after the counter says where the milliseconds are.
 7. **Tabs in the header (§6)** — implemented; [chrome.md](chrome.md) §11 is the record,
