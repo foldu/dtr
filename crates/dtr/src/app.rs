@@ -4556,6 +4556,20 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                         }
                     }
+                    // A program asked the person to see something: the window
+                    // says it, because dtr has no notification centre of its own
+                    // and a system one would arrive without the tab it came from.
+                    for notice in session.pane.take_notices() {
+                        let text = match (notice.title.is_empty(), notice.body.is_empty()) {
+                            (false, false) => format!("{}: {}", notice.title, notice.body),
+                            (false, true) => notice.title,
+                            (true, false) => notice.body,
+                            (true, true) => continue,
+                        };
+                        tracing::debug!(%text, "a program sent a notification");
+                        self.toast = Some((text, std::time::Instant::now()));
+                        bell_behind |= index != self.active;
+                    }
                     let rung = session.pane.take_bells();
                     if rung > 0 {
                         session.bell_at = Some(std::time::Instant::now());

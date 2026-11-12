@@ -496,6 +496,15 @@ pub struct LinkReply {
     pub uri: Option<String>,
 }
 
+/// Something a program asked the *person* to see: a desktop notification
+/// (`OSC 9`, `OSC 777`). The pane cannot show it — it has no window — so it is
+/// parked here for the UI, which shows it as a toast and asks for attention.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+}
+
 pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
     tx: async_channel::Sender<Command>,
@@ -524,6 +533,8 @@ pub struct Pane {
     /// UI. `None` is "nothing asked"; `(rows, cols)` keeps a missing dimension
     /// missing, because the program is allowed to want only one.
     resize_request: Arc<Mutex<Option<(Option<u16>, Option<u16>)>>>,
+    /// Notifications the program asked for, waiting for the UI.
+    notices: Arc<Mutex<Vec<Notice>>>,
 }
 
 impl Pane {
@@ -564,6 +575,8 @@ impl Pane {
         let shared_clipboard = Arc::clone(&clipboard);
         let resize_request = Arc::new(Mutex::new(None));
         let asked = Arc::clone(&resize_request);
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let notified = Arc::clone(&notices);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = async_channel::unbounded::<Command>();
 
@@ -594,6 +607,7 @@ impl Pane {
                     rung,
                     shared_clipboard,
                     asked,
+                    notified,
                     clipboard_read,
                     theme,
                     scrollback,
@@ -619,6 +633,7 @@ impl Pane {
             cwd,
             bells,
             resize_request,
+            notices,
         })
     }
 
@@ -647,6 +662,14 @@ impl Pane {
             .lock()
             .ok()
             .and_then(|mut slot| slot.take())
+    }
+
+    /// Notifications the program asked for since the last ask.
+    pub fn take_notices(&self) -> Vec<Notice> {
+        self.notices
+            .lock()
+            .map(|mut slot| std::mem::take(&mut *slot))
+            .unwrap_or_default()
     }
 
     /// Text the pane copied, if it has produced any since the last call.
@@ -968,6 +991,7 @@ async fn run(
     bells: Arc<AtomicU32>,
     clipboard: Arc<Mutex<Option<String>>>,
     resize_request: Arc<Mutex<Option<(Option<u16>, Option<u16>)>>>,
+    notices: Arc<Mutex<Vec<Notice>>>,
     clipboard_read: bool,
     theme: Option<crate::theme::Theme>,
     scrollback: usize,
@@ -1040,6 +1064,30 @@ async fn run(
         term.on_bell(move |_term| {
             rung.fetch_add(1, Ordering::Relaxed);
             wake();
+        })?;
+    }
+    // `OSC 9` and `OSC 777`: a program wants the person to see something — a
+    // build finished, a download failed. Parked for the UI, which is the only
+    // thing with a window, and woken for the same reason a bell is.
+    {
+        let parked = Arc::clone(&notices);
+        let wake = Arc::clone(&wake);
+        term.on_desktop_notification(move |_term, note| {
+            let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+            let notice = Notice {
+                title: text(note.title()),
+                body: text(note.body()),
+            };
+            if !notice.body.is_empty() || !notice.title.is_empty() {
+                if let Ok(mut slot) = parked.lock() {
+                    // A program in a loop must not grow this without bound; the
+                    // UI takes them every frame, so a handful is plenty.
+                    if slot.len() < 8 {
+                        slot.push(notice);
+                    }
+                }
+                wake();
+            }
         })?;
     }
     // `OSC 52 ; c ; ?`: a program asks for the clipboard. The reply must be
@@ -4673,6 +4721,32 @@ mod session_tests {
         assert!(
             refused.contains("\x1b]52;c;\x1b\\"),
             "a refused read should still answer, with nothing: {refused:?}"
+        );
+    }
+
+    /// `OSC 9` and `OSC 777` are a program asking the *person* to see something.
+    /// The pane has no window, so it parks the notification; both protocols
+    /// arrive at the same callback, normalized.
+    #[test]
+    fn a_desktop_notification_reaches_the_ui() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("notify");
+        let script = reader(
+            r"printf '\033]9;build finished\033\\'; printf '\033]777;notify;a title;a body\033\\'; ",
+            &out,
+        );
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            seen.extend(pane.take_notices());
+            assert!(Instant::now() < deadline, "the notifications never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(seen[0].body, "build finished");
+        assert_eq!(
+            (seen[1].title.as_str(), seen[1].body.as_str()),
+            ("a title", "a body")
         );
     }
 

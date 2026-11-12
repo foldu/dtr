@@ -59,12 +59,13 @@ a terminal that does not understand the question.
 | `CSI ? 996 n` — "is the terminal light or dark?" | answers from the theme | **answers** from the theme's background (Rec. 601 luma); no theme means dark | — | done |
 | `OSC 52 ; c ; ?` — clipboard **read** | mediated: `clipboard-read = ask/allow/deny` | **answers**, from the clipboard the UI last read, or **refuses** with an empty selection — `terminal.clipboard_read`, off by default, because dtr has no prompt to ask with | — | done |
 | `BEL` | `bell-features`: visual, window attention, audio | **flashes** the pane for 140 ms and never makes a sound; a bell in a tab nobody is looking at asks the window for attention instead | — | done (visual only) |
-| `OSC 9 ; …`, `OSC 777` — desktop notification | system notification | **dropped** | `on_desktop_notification` | M |
+| `OSC 9 ; …`, `OSC 777` — desktop notification | system notification | **shown** as dtr's own toast, and the window asks for attention if it was a background tab — the in-window notice, not the OS notification centre | — | done (in-window) |
 | `OSC 9 ; 4 ; …` — progress | tab/taskbar progress | **dropped** | `on_progress_report` | M |
 | `OSC 7501` — program status (working, done, waiting) | title/status integration, and the protocol's support query is answered | **dropped**, so the support query is unanswered too and programs see the protocol as unsupported | `on_program_status` | M |
 | `CSI ? 2026 h … l` — synchronized output | holds the frame and captures it at the start of the hold | **holds**: the burst publish and its gate timer are suppressed until the release, which publishes in the batch that carries it; a scroll or a keystroke still paints | — | done |
 | `OSC 11 ; …` — **set** the default background | repaints the window background | **repaints**: the pane paints its own default background first in the grid pass, the colours come from the terminal's *effective* `bg_color`/`fg_color`, and the frame gate compares them so a set with no cell change still publishes | — | done |
-| `CSI 8 ; rows ; cols t` — resize the window | may resize the surface (`vt-window-resize-allowed`) | parsed, effect ignored | `on_resize_window` + an opt-in config key | S |
+| `CSI 8 ; rows ; cols t` — resize the window | may resize the surface (`vt-window-resize-allowed`) | **honoured behind `terminal.window_resize`** (off by default): the UI resizes by the delta in cells, and keeps a request that arrives before the first frame has measured one | — | done |
+| `CSI ? 1004 h` — report focus | sends `CSI I`/`CSI O` | **answers** on `WindowEvent::Focused`, for the panes of the tab on screen, and only to a program that enabled the mode | — | done |
 | `OSC 22 ; …` — pointer shape | changes the mouse cursor (a text beam over text) | none, and **cannot** be wired yet: the bindings expose no pointer-shape callback | the binding, then the surface | S |
 | `CSI ? 2031 h`, `? 2033 h` — report scheme and visibility changes | tells the program when the theme flips or the window hides | `?2031` needs nothing while a pane's theme cannot change (it is applied once at spawn); `?2033` needs a `visible` setter the C surface does not expose, though the core would send the report itself | the binding, then a `Command` | S |
 | `OSC 133` — prompt marks | marks, jump-to-prompt, selection, click-to-move | **works**, but through dtr's own scanner in front of the core (`pane.rs:2522`), not the callback | — | — |
@@ -215,11 +216,11 @@ preview.
    cell in the same instance buffer, positions from `Metrics`. The largest
    visible gap per line of code in this document. **Not done**: still the
    biggest hole, and still the first thing to do.
-2. **The reply sweep** — *done 2026-11-12*, except focus reporting:
-   `set_terminfo_name("xterm-ghostty")`, `on_size` (14/16/18/19 t and mode
-   2048), `on_color_scheme` (`?996 n`), `on_xtversion` (`dtr <version>`) and
-   `on_clipboard_read`. `CSI I`/`CSI O` on `WindowEvent::Focused` is still
-   missing: the pane has no way to be told the window's focus yet.
+2. **The reply sweep** — *done 2026-11-12*: `set_terminfo_name("xterm-ghostty")`,
+   `on_size` (14/16/18/19 t and mode 2048), `on_color_scheme` (`?996 n`),
+   `on_xtversion` (`dtr <version>`), `on_clipboard_read`, focus reporting
+   (`CSI I`/`CSI O` on `WindowEvent::Focused`) and `on_resize_window` behind
+   `terminal.window_resize`.
 3. **The window background ignores the terminal's default** — *done*: the pane
    paints its own background and the colours are read from the terminal. The
    cursor half went with it (a block inverts its cell).
