@@ -39,6 +39,8 @@ pub struct Config {
     pub terminal: Terminal,
     /// Where a program's notification goes. `[notifications]`.
     pub notifications: Notifications,
+    /// Whether an ssh session is put inside a tmux session. `[tmux]`.
+    pub tmux: Tmux,
 }
 
 /// How a program's `OSC 9`/`OSC 777` reaches the person.
@@ -59,6 +61,25 @@ pub struct Notifications {
 impl Default for Notifications {
     fn default() -> Self {
         Self { os: true }
+    }
+}
+
+/// How an ssh session is made to outlive the connection that opened it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tmux {
+    /// Run every ssh session inside a tmux session on the far end.
+    ///
+    /// On by default, because `ssh` is a transport and the failure this
+    /// prevents — a dropped connection taking a running build with it — is the
+    /// one people lose work to. It is not a promise: a host with no tmux gets a
+    /// plain login shell and a word about it, and the tab that would have been
+    /// durable says so. What the far end has is asked, not assumed.
+    pub enabled: bool,
+}
+
+impl Default for Tmux {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -280,6 +301,7 @@ impl Default for Config {
             theme: None,
             terminal: Terminal::default(),
             notifications: Notifications::default(),
+            tmux: Tmux::default(),
         }
     }
 }
@@ -471,6 +493,14 @@ impl Config {
                 config.notifications.os = os
                     .as_bool()
                     .ok_or_else(|| Error::Value("notifications.os must be true or false".into()))?;
+            }
+        }
+
+        if let Some(section) = document.get("tmux").and_then(Item::as_table) {
+            if let Some(enabled) = section.get("enabled") {
+                config.tmux.enabled = enabled
+                    .as_bool()
+                    .ok_or_else(|| Error::Value("tmux.enabled must be true or false".into()))?;
             }
         }
 
@@ -786,6 +816,24 @@ mod tests {
         let error =
             Config::parse("[notifications]\nos = \"maybe\"\n").expect_err("a string is not a bool");
         assert!(format!("{error}").contains("notifications.os"), "{error}");
+    }
+
+    /// An ssh tab is put inside a tmux session unless told otherwise: the
+    /// failure it prevents — a dropped connection taking a running build with it
+    /// — is not something to opt into, and a host with no tmux falls back to a
+    /// plain shell anyway, so the default cannot strand anyone.
+    #[test]
+    fn an_ssh_session_is_kept_in_tmux_by_default() {
+        assert!(Config::parse("").unwrap().tmux.enabled);
+        assert!(
+            !Config::parse("[tmux]\nenabled = false\n")
+                .unwrap()
+                .tmux
+                .enabled
+        );
+        let error =
+            Config::parse("[tmux]\nenabled = \"maybe\"\n").expect_err("a string is not a bool");
+        assert!(format!("{error}").contains("tmux.enabled"), "{error}");
     }
 
     #[test]

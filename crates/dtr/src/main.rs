@@ -30,6 +30,7 @@ mod system;
 mod terminfo;
 mod theme;
 mod thumb;
+mod tmux;
 mod ui;
 mod uri;
 mod watch;

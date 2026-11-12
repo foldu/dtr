@@ -72,18 +72,9 @@ static DONE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Stri
 /// `dtr-sftp`: the interactive session beside this one *can* ask, and this one
 /// must not.
 pub fn ssh_args(alias: &str) -> Vec<String> {
-    let mut args: Vec<String> = pty::Config::ssh(alias)
-        .args
-        .iter()
-        .map(|arg| match arg.as_str() {
-            "-t" => "-T".to_owned(),
-            other => other.to_owned(),
-        })
-        .collect();
-    // The destination is the last of them; ssh reads everything after it as the
-    // remote command, so our option goes just before it.
-    let at = args.len() - 1;
-    args.splice(at..at, ["-o".to_owned(), "BatchMode=yes".to_owned()]);
+    // The shape — options, `-T`, `BatchMode=yes`, the alias last — is
+    // `pty::batch_args`, shared with the tmux listing for the same reason.
+    let mut args = pty::batch_args(alias);
     // Through `sh`, not straight at the login shell: fish and elvish cannot
     // parse `dir=${TERMINFO:-…}`, and `sshd` hands a command to the account's
     // shell, whatever it is.

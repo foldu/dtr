@@ -38,6 +38,31 @@ pub(crate) fn sh_command(script: &str) -> String {
     format!("sh -c '{}'", script.replace('\'', r"'\''"))
 }
 
+/// The arguments for a helper connection beside a session.
+///
+/// Derived from [`Config::ssh`] rather than written out again, because a helper
+/// has to reach the *same host* the session beside it reaches — the same
+/// `~/.ssh/config`, the same jump hosts, the same credentials. Two things
+/// change: `-t` becomes `-T`, because nothing here needs a terminal and a tty
+/// would want one to answer with; and `BatchMode=yes` is added, because a
+/// password prompt on a child with piped stdio is a wait that ends in nothing.
+///
+/// The alias is last and nothing may follow it: ssh reads the rest as a command
+/// for the far end, so a caller appends its own command and nothing else.
+pub(crate) fn batch_args(alias: &str) -> Vec<String> {
+    let mut args: Vec<String> = Config::ssh(alias)
+        .args
+        .iter()
+        .map(|arg| match arg.as_str() {
+            "-t" => "-T".to_owned(),
+            other => other.to_owned(),
+        })
+        .collect();
+    let at = args.len() - 1;
+    args.splice(at..at, ["-o".to_owned(), "BatchMode=yes".to_owned()]);
+    args
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     /// Shell to launch; `None` walks a platform default list.
@@ -62,6 +87,14 @@ pub struct Config {
     /// the tab holding it outlives the client. A local shell has no such thing —
     /// when it ends, the pane is over.
     pub remote: Option<String>,
+    /// The tmux session this connection runs, when it is one.
+    ///
+    /// Beside `remote` because it is the same kind of fact, and it is what makes
+    /// a reconnection "the same session" rather than "a new one": `ssh` is a
+    /// transport, and a transport that dies takes its shell with it unless
+    /// something on the far side is holding the work. `None` is a plain session
+    /// — the far end starts its login shell, as it always did.
+    pub tmux: Option<String>,
 }
 
 pub struct Shell {
@@ -134,11 +167,11 @@ impl Config {
     /// here — hence a string, not a `PathBuf`.
     ///
     /// `ssh` with a command runs that command through the remote login shell
-    /// instead of starting one, so the command starts one itself: a login shell,
-    /// `exec`ed so that it *is* the session rather than a child of a wrapper.
-    /// The `cd` comes first and is separated by `;`, not `&&`: a directory that
-    /// has been deleted since should still leave a usable shell, rather than an
-    /// ssh that exits with an error the pane would read as another drop.
+    /// instead of starting one, so the command starts one itself — or, when this
+    /// is a tmux session, attaches to it. The `cd` comes first and is separated
+    /// by `;`, not `&&`: a directory that has been deleted since should still
+    /// leave a usable session, rather than an ssh that exits with an error the
+    /// pane would read as another drop.
     ///
     /// The path is quoted by `shlex`, a POSIX shell printer checked against bash,
     /// zsh, dash, ash, mksh and fish. The one thing it refuses is NUL, which no
@@ -146,21 +179,94 @@ impl Config {
     /// back at `$HOME`, rather than quoted into something a different shell would
     /// split.
     pub fn reopened(&self, dir: Option<&str>) -> Self {
-        let mut next = self.clone();
-        let Some(dir) = dir
+        let dir = dir
             .map(str::trim)
-            .filter(|dir| dir.starts_with('/') && self.remote.is_some())
-        else {
-            return next;
+            .filter(|dir| dir.starts_with('/') && self.remote.is_some());
+        let quoted = dir.and_then(|dir| match shlex::try_quote(dir) {
+            Ok(dir) => Some(dir.into_owned()),
+            Err(_) => {
+                tracing::warn!("the directory cannot be a shell argument; reopening at home");
+                None
+            }
+        });
+        self.clone().wire(quoted.as_deref())
+    }
+
+    /// An `ssh` session that runs a tmux session on the far end.
+    ///
+    /// The session is created when it does not exist and attached to when it
+    /// does — `new-session -A`, one command for both, which is also what makes a
+    /// reconnection land back in the same session. That is the whole point of
+    /// the wrapping: the work lives in a server that the connection merely looks
+    /// at, so the connection dying is not the work dying.
+    pub fn ssh_tmux(alias: &str, session: &str) -> Self {
+        let mut config = Self::ssh(alias);
+        config.tmux = Some(session.to_owned());
+        config.wire(None)
+    }
+
+    /// Put this session's remote command on the arguments, replacing whatever
+    /// command they already carry.
+    ///
+    /// `dir` is already quoted for the remote shell; `None` means wherever the
+    /// far end starts, which is `$HOME` at login. Idempotent, because a
+    /// reconnection is built from a config that already has a command on it.
+    fn wire(mut self, dir: Option<&str>) -> Self {
+        let Some(alias) = self.remote.clone() else {
+            // A local shell has no command to wrap: its directory is its own,
+            // and appending an ssh command to `bash` would be nonsense.
+            return self;
         };
-        let Ok(dir) = shlex::try_quote(dir) else {
-            tracing::warn!("the directory cannot be a shell argument; reopening at home");
-            return next;
+        // Everything after the destination is the command, and the destination
+        // is the last argument that equals the alias — the command is one
+        // argument, so it cannot hide another copy of the alias.
+        if let Some(at) = self.args.iter().rposition(|arg| *arg == alias) {
+            self.args.truncate(at + 1);
+        }
+        let Some(script) = self.script(dir) else {
+            return self;
         };
-        next.args.push(sh_command(&format!(
-            "cd {dir} ; exec \"${{SHELL:-/bin/sh}}\" -l"
-        )));
-        next
+        self.args.push(sh_command(&script));
+        self
+    }
+
+    /// The remote command for this session, or `None` when it needs none.
+    fn script(&self, dir: Option<&str>) -> Option<String> {
+        match &self.tmux {
+            Some(session) => {
+                let session = shlex::try_quote(session)
+                    .map(|quoted| quoted.into_owned())
+                    .unwrap_or_else(|_| session.clone());
+                let mut script = String::new();
+                if let Some(dir) = dir {
+                    // `cd` on its own line and without an `&&`: a directory that
+                    // has been deleted since should leave the session where the
+                    // far end starts, which is what `$PWD` below then carries.
+                    script.push_str(&format!("cd {dir} 2>/dev/null\n"));
+                }
+                script.push_str(
+                    // A host with no tmux is a shell, not a failure: the tab has
+                    // to work on a machine nobody has set up, and an `exec` that
+                    // cannot find its program exits non-zero — which the pane
+                    // would read as `exit` and close the tab over.
+                    "command -v tmux >/dev/null 2>&1 || exec \"${SHELL:-/bin/sh}\" -l\n\
+                     infocmp xterm-ghostty >/dev/null 2>&1 || { TERM=xterm-256color; export TERM; }\n",
+                );
+                // `-A` is attach-or-create, so one command serves a new tab and
+                // a reconnection alike. `-c` is where the session starts, and
+                // tmux ignores it when it attaches. The `infocmp` line above is
+                // because tmux has to *draw* on this terminal: a host that has
+                // not got dtr's entry yet cannot be handed a name its ncurses
+                // does not know.
+                script.push_str(&format!(
+                    "exec tmux new-session -A -s {session} -c \"$PWD\""
+                ));
+                Some(script)
+            }
+            // A plain ssh session: a login shell, `exec`ed so that it *is* the
+            // session rather than a child of a wrapper.
+            None => dir.map(|dir| format!("cd {dir} ; exec \"${{SHELL:-/bin/sh}}\" -l")),
+        }
     }
 
     pub fn open(&self) -> anyhow::Result<Shell> {
@@ -590,5 +696,259 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(local.reopened(Some("/srv/app")).args, local.args);
+    }
+
+    /// A tmux session is a command from the *first* connection, not only from a
+    /// reopen: the tab is inside the session before anything has dropped, which
+    /// is the whole point of asking the host what it has before opening one.
+    #[test]
+    fn a_tmux_session_is_created_or_attached_from_the_first_connection() {
+        let config = Config::ssh_tmux("jupyter", "dtr-2");
+        assert_eq!(config.remote.as_deref(), Some("jupyter"));
+        assert_eq!(config.tmux.as_deref(), Some("dtr-2"));
+        let words = words(&config);
+        assert!(
+            words.windows(3).any(|w| w == ["tmux", "new-session", "-A"]),
+            "attach-or-create, or a new tab lands on someone else's session: {words:?}"
+        );
+        assert!(
+            words.windows(2).any(|w| w == ["-s", "dtr-2"]),
+            "the session is named: {words:?}"
+        );
+        // A host with no tmux gets the login shell this always started, because
+        // a tab that cannot find tmux is still a tab.
+        assert!(
+            words
+                .windows(3)
+                .any(|w| w == ["exec", "${SHELL:-/bin/sh}", "-l"]),
+            "{words:?}"
+        );
+    }
+
+    #[test]
+    fn a_tmux_reconnect_goes_back_to_the_same_session_in_the_same_directory() {
+        let next = Config::ssh_tmux("jupyter", "dtr-2").reopened(Some("/srv/app"));
+        assert_eq!(next.tmux.as_deref(), Some("dtr-2"));
+        let words = words(&next);
+        assert_eq!(words[..3], ["cd", "/srv/app", "2>/dev/null"], "{words:?}");
+        assert!(words.windows(2).any(|w| w == ["-s", "dtr-2"]), "{words:?}");
+        // Idempotent: a second reopen is the same command, not a second one.
+        assert_eq!(next.reopened(Some("/srv/app")).args, next.args);
+    }
+
+    /// The same quoting, on the path that also carries a session name.
+    #[test]
+    fn a_hostile_directory_is_still_one_word_inside_a_tmux_command() {
+        for dir in ["/tmp/it's here", "/tmp/a b", "/tmp/$(touch /tmp/pwned)"] {
+            let words = words(&Config::ssh_tmux("jupyter", "dtr-1").reopened(Some(dir)));
+            assert_eq!(words[1], dir, "while quoting {dir:?}: {words:?}");
+        }
+    }
+
+    /// The command a tmux tab runs, against a real tmux: the flags are accepted,
+    /// the session lands where it was asked to, and a second connection finds it
+    /// instead of making another.
+    ///
+    /// The argument vector is taken *from the script* rather than written out
+    /// again here, so the two cannot disagree about a flag; the directory is
+    /// substituted and `-d` is added, because a test has no terminal to attach
+    /// and killing a client to get out of one is a different experiment than
+    /// this one.
+    #[cfg(unix)]
+    #[test]
+    fn the_tmux_command_is_accepted_and_lands_where_it_was_asked() {
+        let Ok(version) = std::process::Command::new("tmux").arg("-V").output() else {
+            return;
+        };
+        if !version.status.success() {
+            return;
+        }
+        let sockets = tempfile::tempdir().expect("socket dir");
+        let dir = tempfile::tempdir().expect("start dir");
+        let start = dir.path().to_string_lossy().into_owned();
+
+        let config = Config::ssh_tmux("jupyter", "dtr-9").reopened(Some(&start));
+        let words = words(&config);
+        // The last one: the first is `command -v tmux`, which is the guard
+        // rather than the command.
+        let at = words
+            .iter()
+            .rposition(|word| word == "tmux")
+            .expect("the script runs tmux");
+        let mut argv: Vec<String> = words[at + 1..].to_vec();
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("new-session"),
+            "the test is reading something other than the session command: {argv:?}"
+        );
+        for word in &mut argv {
+            if *word == "$PWD" {
+                *word = start.clone();
+            }
+        }
+        argv.push("-d".to_owned());
+
+        // A socket of its own, so a test cannot see (or kill) a session the
+        // person running it actually has.
+        let tmux = |args: &[String]| {
+            std::process::Command::new("tmux")
+                .args(args)
+                .env("TMUX_TMPDIR", sockets.path())
+                .output()
+                .expect("tmux")
+        };
+        let list = || {
+            let out = tmux(&[
+                "list-sessions".to_owned(),
+                "-F".to_owned(),
+                "#{session_name} #{session_id} #{pane_current_path}".to_owned(),
+            ]);
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+
+        let first = tmux(&argv);
+        assert!(
+            first.status.success(),
+            "tmux refused {argv:?}: {}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        // Not "the only session": a person's `tmux.conf` runs when a server
+        // starts, and this machine's starts one of its own.
+        let created = list();
+        let ours = created
+            .lines()
+            .find(|line| line.starts_with("dtr-9 "))
+            .unwrap_or_else(|| panic!("no dtr-9 among {created:?}"));
+        let mut parts = ours.split(' ');
+        parts.next();
+        let id = parts.next().expect("a session id").to_owned();
+        assert_eq!(
+            parts.next().map(str::trim_end),
+            Some(start.as_str()),
+            "the session started where it was asked to: {ours:?}"
+        );
+
+        // The same command again. It cannot succeed here — the session exists,
+        // so `-A` goes down the *attach* path, and a test has no terminal to
+        // attach to — and that is the point: what has to be true is that it
+        // found the session rather than making another.
+        let second = tmux(&argv);
+        let complaint = String::from_utf8_lossy(&second.stderr).to_lowercase();
+        assert!(
+            !complaint.contains("duplicate"),
+            "a missing `-A` looks exactly like this, and the count alone cannot tell: {complaint}"
+        );
+        let again = list();
+        assert_eq!(
+            again
+                .lines()
+                .filter(|line| line.starts_with("dtr-9 "))
+                .count(),
+            1,
+            "attaching made a second session: {created:?} -> {again:?}"
+        );
+        assert!(
+            again.contains(&id),
+            "the session was replaced rather than found: {created:?} -> {again:?}"
+        );
+
+        let _ = tmux(&["kill-server".to_owned()]);
+    }
+
+    /// The script itself, run by a real `sh` with a `tmux` that only records:
+    /// what the far end sees just before a session starts, and what happens on a
+    /// host where `command -v tmux` finds nothing.
+    ///
+    /// The word lists above say what the script *is*; this says that it runs —
+    /// that `$PWD` is the directory the connection started in, that a path with
+    /// a space in it survives the `cd`, and that a host without tmux gets a login
+    /// shell rather than a tab that closes on exit 127.
+    #[cfg(unix)]
+    #[test]
+    fn the_script_runs_tmux_where_it_stands_or_falls_back_to_a_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("tempdir");
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let record = home.path().join("record");
+        let tool = |name: &str| {
+            let path = bin.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\0' \"$PWD\" \"$@\" >> {}\n",
+                    shlex::try_quote(&record.to_string_lossy()).expect("a temp path is quotable")
+                ),
+            )
+            .expect("write the stand-in");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            path
+        };
+        tool("tmux");
+        let shell = tool("shell");
+        let recorded = || -> Vec<String> {
+            let bytes = std::fs::read(&record).unwrap_or_default();
+            bytes
+                .split(|byte| *byte == 0)
+                .filter(|field| !field.is_empty())
+                .map(|field| String::from_utf8_lossy(field).into_owned())
+                .collect()
+        };
+        let start = home.path().join("it's here");
+        std::fs::create_dir(&start).expect("start dir");
+
+        // A new tab: no `cd`, so the directory is the one the connection is in.
+        let run = |config: &Config, path: &std::ffi::OsStr| {
+            // Absolute: `PATH` below is the stand-ins alone, and this is the
+            // one thing the test needs to find for real.
+            let _ = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script(config))
+                .current_dir(&start)
+                .env("PATH", path)
+                .env("SHELL", &shell)
+                .output();
+            recorded()
+        };
+        let with_tmux = run(&Config::ssh_tmux("jupyter", "dtr-1"), bin.as_os_str());
+        assert_eq!(
+            with_tmux,
+            [
+                start.to_string_lossy().into_owned(),
+                "new-session".to_owned(),
+                "-A".to_owned(),
+                "-s".to_owned(),
+                "dtr-1".to_owned(),
+                "-c".to_owned(),
+                start.to_string_lossy().into_owned(),
+            ],
+            "the session is created where the connection started"
+        );
+
+        // A reconnection: the same session, in the directory the far end
+        // reported — a path with a space and a quote in it.
+        let _ = std::fs::remove_file(&record);
+        let reconnected = run(
+            &Config::ssh_tmux("jupyter", "dtr-1").reopened(Some(&start.to_string_lossy())),
+            bin.as_os_str(),
+        );
+        let here = start.to_string_lossy().into_owned();
+        assert_eq!(reconnected[0], here, "{reconnected:?}");
+        assert_eq!(
+            reconnected[reconnected.len() - 2..],
+            ["-c".to_owned(), here.clone()],
+            "{reconnected:?}"
+        );
+
+        // And a host with no tmux: the login shell this tab always started.
+        let _ = std::fs::remove_file(&record);
+        let empty = home.path().join("empty");
+        std::fs::create_dir(&empty).expect("empty bin");
+        let plain = run(&Config::ssh_tmux("jupyter", "dtr-1"), empty.as_os_str());
+        assert_eq!(
+            plain,
+            [start.to_string_lossy().into_owned(), "-l".to_owned()],
+            "a host without tmux still gets a shell"
+        );
     }
 }

@@ -426,8 +426,7 @@ second connection, and what each of these failures looked like.
   pane acts on; the helpers nobody watches — `dtr-sftp`'s child and the terminfo copy — are
   the ones that pipe stderr and quote it.
 - **dtr carries `xterm-ghostty` to the far end, because a host without it cannot
-  `clear`**: a vanilla Ubuntu has no `ncurses-term` entry for Ghostty's name, so `tput`,
-  `clear` and `reset` answer `unknown terminal type`. The entry is
+  `clear`**: a vanilla Ubuntu's `tput` answers `unknown terminal type`. The entry is
   `crates/dtr/assets/terminfo/xterm-ghostty`, `tic` source dumped with `infocmp -x` from
   ghostty's own (`the_entry_compiles_back_into_ghostty` compiles it and reads it back), and
   when an ssh session opens `crate::terminfo` starts a second connection beside it —
@@ -438,10 +437,8 @@ second connection, and what each of these failures looked like.
   wrapper this and the reconnect command share. Best effort by design: its own thread (the
   pane must not wait, and closing the tab must not wait either), 15 s deadline, one log
   line (`terminfo entry copied` / `could not copy …`), once per host per run,
-  `DTR_TERMINFO=0` to switch it off. Two honest gaps: a host that wants a password for the
-  extra connection keeps failing `tput`, and a command typed in the ~200 ms while both
-  handshakes run can still see one `unknown terminal type` — a person cannot type that
-  fast, a `--send` script can.
+  `DTR_TERMINFO=0` to switch it off. Its two gaps — a password for the extra connection, and
+  `tput` in the milliseconds before both handshakes finish — are in the memo.
 - **Retries are bounded in rate, not in number**: waits go 1, 2, 4, 8, 16, 30, 30, …
   seconds, forever, because closing the tab is how a person gives up and a cap would turn
   a laptop shut for a day into "closed while you were not looking". The reset needs ten
@@ -458,6 +455,10 @@ second connection, and what each of these failures looked like.
   leaves a usable shell, and `exec`ed so the login shell *is* the session. Two tests cover
   it: `a_hostile_directory_is_still_one_word` and
   `a_quote_in_the_directory_survives_the_outer_shell`.
+- **A drop keeps the tab; tmux keeps the work**: `[tmux] enabled` puts every ssh tab in
+  `new-session -A -s dtr-N`, the name rides `Config.tmux` so a reopen asks for the *same*
+  session, and a host with no tmux — or one that would not answer `BatchMode` — gets a plain
+  shell and a toast, never a failed tab (`docs/sessions.md` §12).
 - **The modes outlive the program that set them**: a drop can happen while vim holds the
   alternate screen with mouse modes on, so `reset_modes` clears them through the core
   before the reopen — including the kitty stack (`CSI < 999 u`) and DECSCUSR's shape and
@@ -766,9 +767,8 @@ someone stares at: `--gpu <substring>` (or `DTR_GPU`) picks by adapter name, and
 the adapter and every adapter seen.
 
 `./scripts/bench.sh` runs vtebench against dtr and prints the delta from the previous run.
-**`docs/bench.md` is how to read it** — what a sample is bounded by, why a delta across a
-different window means nothing, what each `.dat`, `.dat.size` and `.dat.meta` holds, and
-the two payloads that are ours.
+**`docs/bench.md` is how to read it**: what bounds a sample, why a delta across a different
+window means nothing, and what the two payloads that are ours are for.
 
 ## Gotchas that are real
 

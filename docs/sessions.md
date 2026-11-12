@@ -144,6 +144,10 @@ login shell and fish or elvish cannot parse that line.
 `sh -c` for real — `/tmp/it's here` is the case that proves the nested quoting, because
 `shlex` alone says nothing about the outer wrapper.
 
+A session inside tmux is put back by the same `cd` and a different last word
+(`exec tmux new-session -A -s <name> -c "$PWD"`), because the directory is not the thing
+that was lost; §12 is that account.
+
 ## 7. The modes outlive the program that set them
 
 A drop can happen while vim holds the alternate screen with mouse modes on and the kitty
@@ -274,3 +278,97 @@ read to `TimedOut` — so the CR flusher and the disconnect teller read differen
 and **a settings change still reconnects by stopping the reader**, which is now a flag the
 thread polls between reads rather than a cancelled task.
 
+
+## 12. A drop keeps the tab; tmux keeps the work
+
+Everything above puts the *pane* back: the tab stays, the text stays, the modes are reset,
+the directory is restored. None of it puts the *work* back, and none of it can. The remote
+shell was a child of the ssh channel, so when the channel died the far end sent `SIGHUP` to
+the process group, and a build that was running is gone. Where the terminal state lives is a
+property of the machine at the other end, not of anything dtr does here: a mux server on
+*this* side keeps the `ssh` client alive for a window restart, and does nothing at all for a
+network drop.
+
+So the durability is delegated, to the thing that is already installed: `[tmux] enabled`
+(on by default) puts every ssh tab inside a tmux session on the far end.
+
+```
+command -v tmux >/dev/null 2>&1 || exec "${SHELL:-/bin/sh}" -l
+infocmp xterm-ghostty >/dev/null 2>&1 || { TERM=xterm-256color; export TERM; }
+exec tmux new-session -A -s <name> -c "$PWD"
+```
+
+- **One command for both jobs.** `-A` is attach-or-create, so a new tab and a reconnection
+  run the same thing; the *name* is the whole difference, and it is the only state the
+  reconnection needs. `pty::Config::tmux` carries it beside `remote`, for the same reason:
+  both are facts a reopen must not lose.
+- **The name is `dtr-N`, the first free one.** Not the tab's title, which belongs to the
+  program inside it and changes; not a random token, because the list is something a person
+  reads and picks from. `free_name` scans *every* session, not just ours, so a hand-made
+  `dtr-2` is not a gap to step into.
+- **`-c "$PWD"` and not `-c <dir>`.** The `cd` runs first and is allowed to fail, so the
+  directory passed to tmux is always one that exists — `cd` on a missing path leaves `$PWD`
+  where the connection started. It matters because a *new* session in a *running* server
+  starts at the server's directory, not the client's, which is how "new tab here" would
+  otherwise land in the last tab's directory.
+- **The `infocmp` line is not belt and braces.** tmux has to *draw* on dtr's terminal, and
+  `TERM=xterm-ghostty` is a name the far end may not know yet: the terminfo copy (§4) runs
+  beside the session, not before it, so the first tmux tab on a host can arrive before the
+  entry does. A name tmux cannot find is `open terminal failed: terminal does not support
+  clear` and a dead tab; one check, and the client falls back to a term tmux can draw.
+  Inside, panes get tmux's own `default-terminal`, so this only changes what tmux itself
+  looks like.
+
+### Choosing the session is a question, asked before the tab exists
+
+A drop that reattaches to a *new* session would be worse than useless, so the tab has to
+know which one it is on before it opens:
+
+- **`ssh -T -o BatchMode=yes`, one connection, 8 s.** The same shape as the terminfo copy
+  (`pty::batch_args`), and the same trade: a host that wants a password for the extra
+  connection, or whose host key is not known yet, does not answer.
+- **Markers, not "output is empty".** `tmux list-sessions` prints nothing and exits non-zero
+  when there is no server, which is indistinguishable from tmux not being installed, and a
+  banner on a command channel is indistinguishable from a listing. So the script says
+  `dtr-no-tmux`, or `dtr-listing` … `dtr-end`, and every name carries a `session ` prefix
+  so a session literally called `dtr-end` cannot end the listing early.
+- **A truncated listing is a failure, not a short list.** A connection that died mid-output
+  could hide the very name a new session would take; `-A` turns that into an attach to
+  someone else's session, which is the one outcome worth refusing. Silence and half an
+  answer both fall back to a plain shell.
+- **Three answers, three behaviours**: sessions → a card with `New session` first and the
+  names under it (`dtr::tmux::Chooser`); none → `dtr-1`, no card, because the session
+  someone would have picked is the one that did not exist; no tmux, or no answer → a plain
+  login shell and a toast that says the tab will not survive a drop. The toast is not
+  decoration: a silent fallback reads as the feature having worked.
+
+The first connection to a fresh host is the gap: `BatchMode` cannot accept a host key, so
+that tab is a plain shell — the tab it opens then *does* accept the key, and the next tab to
+that host gets its tmux. `--ssh` at startup is plain too: it has no window yet to hang a
+chooser on, and a startup that waits on a network round trip is a startup that hangs.
+
+### What it costs, and what it does not do
+
+Inside tmux, programs see `screen`/`tmux-256color`: the kitty keyboard protocol,
+synchronized output, undercurl and the image protocols are filtered by tmux's feature table
+before dtr's core ever sees them. That is the price of the durability, and it is the reason
+a native mux would exist — not because tmux cannot keep a session, but because it cannot
+keep *dtr's* VT.
+
+Two traps, both found the hard way:
+
+- **`-A` attaches, and `-d` does not veto it.** A second `new-session -A -s name -d` on an
+  existing session goes down the attach path and fails with `open terminal failed: not a
+  terminal` — so a test that wants "did it find it" cannot run the command twice headless
+  and check the exit status. It checks that there is still one session, under the same id,
+  and that the complaint is not `duplicate session` (which is what a missing `-A` looks
+  like, and leaves the count at one, so the count alone cannot tell).
+- **A person's `tmux.conf` runs when the server starts.** This machine's has
+  `new-session -A -s 0`, so *every* listing has at least one session in it, the chooser
+  always appears, and a test that assumes it is alone in the tmux server fails on the
+  machine it was written on.
+
+Not done, in the order they would be felt: clicking a session name in the strip is still a
+tab; `dtr --server` (a native mux, so the far end needs dtr installed and version-matched)
+is a different project with a different security story; and nothing here makes a *local*
+shell survive the window closing.

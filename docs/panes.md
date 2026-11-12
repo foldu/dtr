@@ -131,3 +131,10 @@ protocol, control mode, layout persistence across restarts, more than one window
 one client. Those are one design decision — where the terminal state lives — and it is not
 a pane question. Naming it here is so the list above is not read as "the mux is nearly
 done": it is the *pane* half that is nearly done.
+
+What dtr has instead is tmux on the far end (`docs/sessions.md` §12): an ssh tab is opened
+inside a session the host already holds, so a drop loses the connection and not the work.
+That buys durability and nothing else — the window, the tabs and the splits are still this
+process, and closing it still ends every local shell. A native mux would be worth having for
+the VT fidelity tmux costs and for a window that can be reopened onto its panes; it is not
+worth having for the thing tmux already does.

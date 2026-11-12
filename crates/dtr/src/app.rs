@@ -26,6 +26,12 @@ pub enum UserEvent {
     Frame,
     /// A background scan finished: the destinations to offer now.
     Destinations(Vec<crate::sources::Destination>),
+    /// A host answered what its tmux has. The tab opens on the answer, so the
+    /// question is asked before there is a session to put it in.
+    Tmux {
+        alias: String,
+        listing: crate::tmux::Listing,
+    },
     /// Something the SFTP worker finished.
     Sftp(SftpEvent),
     /// A link pointed at a directory, so the UI should show it — locally, or in a
@@ -663,6 +669,8 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         thumb_pending: None,
         link_menu: crate::linkmenu::LinkMenu::default(),
         link_menu_target: None,
+        tmux_pending: None,
+        tmux_chooser: crate::tmux::Chooser::default(),
         picking_save: false,
         cursor_icon: None,
         script: startup
@@ -1239,6 +1247,11 @@ struct App {
     /// The right-click menu for a link, and what it is about.
     link_menu: crate::linkmenu::LinkMenu,
     link_menu_target: Option<LinkMenuTarget>,
+    /// The host a tmux listing was asked of and has not answered yet. One at a
+    /// time: a second click on the same host is the same question.
+    tmux_pending: Option<String>,
+    /// Which tmux session to open, once a host has said what it has.
+    tmux_chooser: crate::tmux::Chooser,
     /// True while the desktop's save dialog is up. The dialog is the platform's
     /// and it keeps our window alive, so a second "Save as..." would open a
     /// second dialog on top of the first.
@@ -1392,6 +1405,7 @@ impl App {
             || self.about_open
             || self.pager.is_open()
             || self.link_menu.is_open()
+            || self.tmux_chooser.is_open()
             || self.serial_dialog.is_some()
     }
 
@@ -3241,6 +3255,92 @@ impl App {
         self.tabs[self.active].focused_explorer_mut()
     }
 
+    /// Open a tab to an ssh host, asking what its tmux has first when the
+    /// session is meant to outlive the connection.
+    ///
+    /// The question is a second connection and it costs a round trip, so it is
+    /// asked off this thread and the tab opens on the answer. A host with no
+    /// tmux, or one that would not answer, gets a plain login shell: a tab has to
+    /// work on a machine nobody has set up, and silence about the difference
+    /// would read as the feature having worked.
+    fn open_ssh(&mut self, alias: String) {
+        if !self.config.tmux.enabled {
+            self.open(Transport::Shell(crate::pty::Config::ssh(&alias)));
+            return;
+        }
+        if self.tmux_pending.as_deref() == Some(alias.as_str()) {
+            return;
+        }
+        self.tmux_pending = Some(alias.clone());
+        self.toast = Some((
+            format!("looking for tmux sessions on {alias}..."),
+            std::time::Instant::now(),
+        ));
+        crate::tmux::spawn_list(&alias, self.proxy.clone());
+        self.repaint("listing tmux sessions");
+    }
+
+    /// A host said what its tmux has: open the tab, or ask which session.
+    fn tmux_answered(&mut self, alias: String, listing: crate::tmux::Listing) {
+        if self.tmux_pending.as_deref() == Some(alias.as_str()) {
+            self.tmux_pending = None;
+        }
+        match listing {
+            // Nothing to choose between: the session a person would pick is the
+            // one that does not exist yet.
+            crate::tmux::Listing::Sessions(names) if names.is_empty() => {
+                let session = crate::tmux::free_name(&names);
+                self.toast = Some((
+                    format!("{alias}: tmux session {session}"),
+                    std::time::Instant::now(),
+                ));
+                self.open(Transport::Shell(crate::pty::Config::ssh_tmux(
+                    &alias, &session,
+                )));
+            }
+            crate::tmux::Listing::Sessions(names) => self.tmux_chooser.open(&alias, names),
+            crate::tmux::Listing::Absent => {
+                self.toast = Some((
+                    format!("no tmux on {alias}: this tab will not survive a drop"),
+                    std::time::Instant::now(),
+                ));
+                self.open(Transport::Shell(crate::pty::Config::ssh(&alias)));
+            }
+            crate::tmux::Listing::Failed(why) => {
+                // The reason is in the log because it is usually a first
+                // connection whose host key is not known yet: the tab it opens
+                // is the one that will ask, and the next tab to this host gets
+                // its tmux.
+                tracing::warn!(%alias, %why, "could not list tmux sessions");
+                self.toast = Some((
+                    format!("could not list sessions on {alias}: opening a shell"),
+                    std::time::Instant::now(),
+                ));
+                self.open(Transport::Shell(crate::pty::Config::ssh(&alias)));
+            }
+        }
+        self.repaint("tmux answer");
+    }
+
+    /// The session chosen out of the chooser, or the chooser dismissed.
+    fn tmux_pick(&mut self, pick: crate::tmux::Pick) {
+        match pick {
+            crate::tmux::Pick::Create(session) | crate::tmux::Pick::Attach(session) => {
+                let alias = self.tmux_chooser.alias().to_owned();
+                self.tmux_chooser.close();
+                tracing::info!(%alias, %session, "opening a tmux session");
+                self.open(Transport::Shell(crate::pty::Config::ssh_tmux(
+                    &alias, &session,
+                )));
+            }
+            crate::tmux::Pick::Close => {
+                self.tmux_chooser.close();
+                tracing::info!("tmux session list dismissed");
+            }
+        }
+        self.repaint("tmux session chosen");
+    }
+
     /// Open a session in a new tab and switch to it. The palette's actions all
     /// come here: a terminal that replaced its session every time you connected
     /// somewhere would lose the one you were looking at.
@@ -4092,8 +4192,10 @@ impl App {
                 // the config file, agent forwarding, jump hosts and known_hosts,
                 // and re-implementing those is a project, not a feature. The
                 // config also says that this is a connection, so the pane
-                // reopens it when it drops instead of closing the tab.
-                self.open(Transport::Shell(crate::pty::Config::ssh(&host)));
+                // reopens it when it drops instead of closing the tab — and the
+                // tab is put inside a tmux session where the host has one, so
+                // the work outlives the connection too.
+                self.open_ssh(host);
             }
             Action::Keys => self.keymap_card.open = true,
             Action::About => {
@@ -4530,6 +4632,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.scanning = false;
                 self.repaint("destinations");
             }
+            UserEvent::Tmux { alias, listing } => self.tmux_answered(alias, listing),
             UserEvent::Frame => {}
         }
         // Every terminal pane publishes frames, not only the focused one: a
@@ -4986,6 +5089,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // applied after the egui pass.
                     let serial_dialog = self.serial_dialog.take();
                     let mut serial_event = None;
+                    let mut tmux_pick = None;
                     // A window capture is due once, then never again.
                     // The active tab follows its focused session; the others keep
                     // the label they had, so a background session cannot rename
@@ -5157,6 +5261,8 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut about_close,
                         serial_dialog.as_ref(),
                         &mut serial_event,
+                        self.tmux_chooser.is_open().then_some(&self.tmux_chooser),
+                        &mut tmux_pick,
                         &tabs,
                         &activity,
                         self.active,
@@ -5179,6 +5285,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if about_close {
                         self.about_open = false;
                         self.repaint("about closed");
+                    }
+                    if let Some(picked) = tmux_pick {
+                        self.tmux_pick(picked);
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -5288,7 +5397,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.apply(Action::Connect(path))
                             }
                             Some(crate::sources::Destination::Ssh { alias, .. }) => {
-                                self.open(Transport::Shell(crate::pty::Config::ssh(&alias)))
+                                self.open_ssh(alias)
                             }
                             None => {
                                 let cwd = self
@@ -5751,6 +5860,8 @@ impl Gpu {
         about_close: &mut bool,
         serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
         serial_event: &mut Option<crate::serial_dialog::Event>,
+        tmux_chooser: Option<&crate::tmux::Chooser>,
+        tmux_pick: &mut Option<crate::tmux::Pick>,
         tabs: &[String],
         activity: &[crate::pane::Activity],
         active_tab: usize,
@@ -6052,6 +6163,15 @@ impl Gpu {
             if let Some(serial_dialog) = serial_dialog {
                 if let Some(asked) = serial_dialog.ui(ui, look) {
                     *serial_event = Some(asked);
+                }
+            }
+            // Which tmux session to open, when the host had more than one to
+            // offer. Above the sheet and the palette: it is the only surface
+            // that will *open* a tab, and a tab opened behind a card would be a
+            // card hiding its own consequence.
+            if let Some(chooser) = tmux_chooser {
+                if let Some(picked) = chooser.ui(ui, look) {
+                    *tmux_pick = Some(picked);
                 }
             }
             // Clipboard in and out. egui hands paste over as an event; the
