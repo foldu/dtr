@@ -26,7 +26,9 @@ use libghostty_vt::render::{
 };
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
-use libghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
+use libghostty_vt::terminal::{
+    ColorScheme, Mode, Point, PointCoordinate, PointSpace, SizeReportSize,
+};
 use portable_pty::MasterPty;
 
 use crate::keys::KeyStroke;
@@ -59,6 +61,42 @@ fn new_terminal(
 
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
+
+/// What `CSI > q` (XTVERSION) answers.
+///
+/// The core answers with the *library* it is built from, which is true and
+/// useless to a program that keeps a table of terminals; this is the app.
+const XTVERSION: &str = concat!("dtr ", env!("CARGO_PKG_VERSION"));
+
+/// The pane's geometry, in the units the size reports are asked for.
+///
+/// The core knows the grid — it counts the cells — but not the pixels, because
+/// only the surface knows how big a cell came out after the font and the display
+/// scale were applied. So `CSI 14/16/18/19 t` and mode 2048 ask *the embedder*,
+/// and this is what the pane answers from: the last `Command::Resize` it saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneSize {
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_width: u32,
+    pub cell_height: u32,
+}
+
+impl PaneSize {
+    /// A resize message's geometry, in cells.
+    ///
+    /// The pixel arguments are the *pane's*, so a cell is the pane divided by
+    /// the grid. Handing the core the pane's own size made every report 80× too
+    /// wide and put every click in the top-left cell.
+    pub fn of(cols: u16, rows: u16, width_px: u32, height_px: u32) -> Self {
+        Self {
+            cols,
+            rows,
+            cell_width: width_px / u32::from(cols).max(1),
+            cell_height: height_px / u32::from(rows).max(1),
+        }
+    }
+}
 
 /// When each pane may publish, in nanoseconds, shared with the UI.
 ///
@@ -911,6 +949,24 @@ async fn run(
     let reply_sink = Rc::clone(&replies);
 
     let mut term = new_terminal(COLS, ROWS, scrollback)?;
+    // What a program is told it is talking to. `XTGETTCAP TN` is refused unless
+    // the embedder names the entry — the core will not claim Ghostty's own — and
+    // dtr ships that entry (`assets/terminfo/xterm-ghostty`) and carries it to
+    // ssh hosts, so the name is the truth rather than a guess.
+    term.set_terminfo_name("xterm-ghostty")?;
+    term.on_xtversion(|_term| Some(XTVERSION))?;
+    // `CSI ? 996 n`: "is this terminal light or dark?" A program picks its own
+    // palette from the answer, so silence makes it guess and a wrong answer
+    // draws its light theme on a dark background. The pane's theme decides it,
+    // and with no theme the built-in background is dark.
+    let dark = theme.as_ref().map(|theme| theme.is_dark()).unwrap_or(true);
+    term.on_color_scheme(move |_term| {
+        Some(if dark {
+            ColorScheme::Dark
+        } else {
+            ColorScheme::Light
+        })
+    })?;
 
     // OSC 52: a program (tmux, vim, an agent over ssh) asks the terminal to put
     // something on the user's clipboard. The write arrives here; the UI does the
@@ -949,6 +1005,24 @@ async fn run(
     term.on_pty_write(move |_term, data| {
         reply_sink.borrow_mut().extend_from_slice(data);
     })?;
+    // `CSI 14/16/18/19 t` and mode 2048's in-band reports: the core counts the
+    // cells itself but asks the embedder for the *pixels*, because only the
+    // surface knows what a cell came out as once the font and the display scale
+    // were applied. Before the first `Command::Resize` nothing has measured a
+    // cell, so the pane answers nothing rather than reporting a zero-sized one.
+    // (`std::cell::Cell` is spelled out: this module's `Cell` is a grid cell.)
+    let measured: Rc<std::cell::Cell<Option<PaneSize>>> = Rc::new(std::cell::Cell::new(None));
+    {
+        let known = Rc::clone(&measured);
+        term.on_size(move |_term| {
+            known.get().map(|size| SizeReportSize {
+                rows: size.rows,
+                columns: size.cols,
+                cell_width: size.cell_width,
+                cell_height: size.cell_height,
+            })
+        })?;
+    }
     let mut state = RenderState::new()?;
     // Declared before the first publish: publishing is where a selection that
     // has scrolled out of the frame is dropped.
@@ -1641,12 +1715,19 @@ async fn run(
                         // pointer by it to reach a cell. Handing it the pane's own
                         // size made every report 80× too wide and put every click
                         // in the top-left cell — which is how this was found.
-                        let cell_width = width_px / u32::from(new_cols).max(1);
-                        let cell_height = height_px / u32::from(new_rows).max(1);
-                        if let Err(err) = term.resize(new_cols, new_rows, cell_width, cell_height)
+                        let size = PaneSize::of(new_cols, new_rows, width_px, height_px);
+                        // Before `resize`: the resize itself fires mode 2048's
+                        // report, and it has to carry the numbers just measured.
+                        measured.set(Some(size));
+                        if let Err(err) =
+                            term.resize(size.cols, size.rows, size.cell_width, size.cell_height)
                         {
                             tracing::warn!(%err, "resize the grid");
                         }
+                        // A command can make the terminal speak too: mode 2048's
+                        // in-band report is produced by `resize` itself, and the
+                        // batch path's flush only covers bytes from the session.
+                        flush_replies(&replies, &mut sink).await;
                         // The shell needs the size too, or it wraps for the old
                         // width and the terminal shows a staircase. The size is
                         // remembered even with no pty behind it: a connection
@@ -4310,6 +4391,98 @@ mod session_tests {
             y,
             down: action != mouse::Action::Release,
         });
+    }
+
+    /// The size reports are how a program learns the cell: an image viewer, a
+    /// TUI preview or a neovim image plugin that has to guess from the font size
+    /// guesses wrong on a HiDPI window and after every resize. `CSI 16 t` is the
+    /// one that matters, and the pane can only answer it because it remembers
+    /// the cell from the last resize — the core counts cells, not pixels.
+    #[test]
+    fn a_program_can_ask_how_big_the_cell_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("size");
+        // After the resize below: before it the pane has measured no cell, and
+        // reporting a zero-sized one would be worse than saying nothing. The
+        // trailing `;` matters — `reader` glues the prologue to `exec cat`.
+        let script = reader(r"sleep 0.6; printf '\033[14t\033[16t\033[18t'; ", &out);
+        let pane = pane(script, None, Vec::new());
+        pane.send(Command::Resize {
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        });
+        // 800 × 480 over 80 × 24 is a ten-by-twenty pixel cell.
+        wait_for_bytes(
+            &pane,
+            &out,
+            "\x1b[4;480;800t",
+            "CSI 14 t (text area in pixels)",
+        );
+        wait_for_bytes(
+            &pane,
+            &out,
+            "\x1b[6;20;10t",
+            "CSI 16 t (the cell in pixels)",
+        );
+        wait_for_bytes(
+            &pane,
+            &out,
+            "\x1b[8;24;80t",
+            "CSI 18 t (text area in cells)",
+        );
+    }
+
+    /// Mode 2048 is the in-band report: the resize is announced to the program as
+    /// an escape sequence on the pty, because a serial line has no other way to
+    /// say the window changed. It carries the *new* size, so it has to be written
+    /// after the measurement and not before it.
+    #[test]
+    fn an_in_band_resize_report_carries_the_new_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("inband");
+        let script = reader(r"printf '\033[?2048h'; printf 'ready\r\n'; sleep 1; ", &out);
+        let pane = pane(script, None, Vec::new());
+        wait_for(&pane, "ready", Duration::from_secs(20));
+        pane.send(Command::Resize {
+            cols: 100,
+            rows: 30,
+            width_px: 1000,
+            height_px: 600,
+        });
+        wait_for_bytes(&pane, &out, "\x1b[48;30;100;600;1000t", "mode 2048");
+    }
+
+    /// A program that asks what it is running under gets `dtr`, not the library
+    /// it links: `XTVERSION` drives feature tables in tmux and Neovim, and
+    /// `XTGETTCAP TN` is how a program finds the terminfo entry to load — the
+    /// core refuses to name an entry unless the embedder does.
+    #[test]
+    fn the_terminal_says_who_it_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("identity");
+        let script = reader(r"printf '\033[>0q'; printf '\033P+q544e\033\\'; ", &out);
+        let pane = pane(script, None, Vec::new());
+        wait_for_bytes(&pane, &out, "\x1bP>|dtr ", "XTVERSION");
+        // `TN` in hex, and the value in hex: `xterm-ghostty`.
+        let value: String = "xterm-ghostty"
+            .bytes()
+            .map(|byte| format!("{byte:02X}"))
+            .collect();
+        wait_for_bytes(&pane, &out, &format!("544E={value}"), "XTGETTCAP TN");
+    }
+
+    /// A program that asks whether the terminal is light or dark picks its own
+    /// palette from the answer. No theme here, so the built-in background — and
+    /// the pane has to say which it is rather than leave the program guessing.
+    #[test]
+    fn a_program_can_ask_whether_the_terminal_is_dark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("scheme");
+        let script = reader(r"printf '\033[?996n'; ", &out);
+        let pane = pane(script, None, Vec::new());
+        wait_for_bytes(&pane, &out, "\x1b[?997;1n", "CSI ? 996 n (dark)");
     }
 
     /// A click reaches the program in the form it asked for, at the cell it

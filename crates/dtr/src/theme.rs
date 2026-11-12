@@ -240,6 +240,27 @@ fn parse_colour(value: &str) -> Result<[u8; 3], String> {
     Ok([rgb.r, rgb.g, rgb.b])
 }
 
+/// The background a theme without one is shown on.
+///
+/// Two readers need it: the window, which has to clear to *something*, and the
+/// colour-scheme answer, which is decided by this colour.
+pub const DEFAULT_BACKGROUND: [u8; 3] = [0x0b, 0x0f, 0x0e];
+
+impl Theme {
+    /// Whether this is a dark theme, from its background.
+    ///
+    /// `CSI ? 996 n` asks exactly this and a program picks its own palette from
+    /// the answer, so guessing wrong is a program drawn in the wrong colours.
+    /// The background is the only colour that decides it — a light theme with a
+    /// dark cursor is still a light theme.
+    pub fn is_dark(&self) -> bool {
+        let [r, g, b] = self.background.unwrap_or(DEFAULT_BACKGROUND);
+        // Rec. 601 luma: the weights the eye uses, not the average of three
+        // numbers, which calls a pure blue `#0000ff` mid-grey.
+        (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000 < 128
+    }
+}
+
 /// A theme converted from an iTerm2 `.itermcolors` file, and anything about the
 /// file the user should hear about (today: alpha that had to be thrown away).
 #[derive(Debug)]
@@ -793,6 +814,37 @@ palette = 15=#dcd7ba
         )
         .unwrap();
         assert_eq!(theme.background, Some([0, 0, 0]));
+    }
+
+    /// `CSI ? 996 n` is answered from the background, so a program that asks is
+    /// told what this theme actually is. The weights matter: a plain average of
+    /// three channels calls a saturated blue mid-grey.
+    #[test]
+    fn a_theme_knows_whether_it_is_dark() {
+        assert!(
+            Theme::parse("x", "background = #1f1f28\n")
+                .unwrap()
+                .is_dark()
+        );
+        assert!(
+            !Theme::parse("x", "background = #ffffff\n")
+                .unwrap()
+                .is_dark()
+        );
+        assert!(
+            !Theme::parse("x", "background = #eeeeee\n")
+                .unwrap()
+                .is_dark()
+        );
+        // Pure blue is dark even though two of its three channels are zero.
+        assert!(
+            Theme::parse("x", "background = #0000ff\n")
+                .unwrap()
+                .is_dark()
+        );
+        // A theme without a background is shown on the built-in one, which is
+        // dark — so that is what a program has to be told.
+        assert!(Theme::parse("x", "").unwrap().is_dark());
     }
 
     #[test]
