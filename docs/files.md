@@ -192,8 +192,10 @@ window. Linux has no per-program icon to read — no shell is in the icon theme,
 says `application-x-executable` for bash and fish alike — so there the row leads with GNU Bash's,
 Zsh's, fish's or Nushell's own logo, and a shell with no logo (`sh`, `dash`, `ksh`) keeps the
 column and draws nothing, so the group's labels line up. A Windows executable with no icon of its
-own (an App Execution Alias is one) gets whatever Windows draws for it. `menu_width` is told which
-rows reserve the column, so it never widens a menu that has no marks in it.
+own (an App Execution Alias is one) gets whatever Windows draws for it. A serial port leads with
+a cable and a host with a rack — Lucide glyphs in the skin's text colour, because neither has a
+picture: no icon theme knows `/dev/ttyUSB0`, and an alias is a name in a config file. `menu_width`
+is told which rows reserve the column, so it never widens a menu that has no marks in it.
 
 The answer is `TabHit::New(Option<Destination>)`, and it is a *typed* destination because the
 menu used to infer "serial" from a leading `/` while the app opened every entry as `ssh` — so

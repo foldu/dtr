@@ -654,12 +654,19 @@ manifests never install it, 4.9.3 has dropped the file, and no stock icon theme 
 resolve anyway. A desktop-file reader would find nothing on a normal Linux, which is why the
 system path is Windows' alone and the logos are embedded.
 
-The mark arrives as a `Mark`: pixels the platform handed back at run time, or an embedded
-`ImageSource` the loader decodes. `menu_row_icon` draws either into the same 16-point box,
-untinted — a brand mark keeps its colour, and so does a system icon — and `None` keeps the
-column. `ui::shell_icon` caches the texture per context (a texture belongs to a context; the
-pixels to the platform), and `menu_width` measures a `RowSpec` per row, so a 32-pixel system icon
-is exact at 2× and the column is reserved by the rows that use it, never by the menu.
+The mark arrives as a `Mark`: pixels the platform handed back at run time, an embedded
+`ImageSource` drawn in the colours its project gave it (a shell's logo), or an embedded **mask**
+drawn in the skin's text colour. That last one is what a port and a host get — a cable and a rack
+from Lucide, the same white strokes as the rest of the chrome — because neither has a picture to
+find: no icon theme knows `/dev/ttyUSB0`, and an ssh alias is a name in a config file. So the
+port and host rows read as chrome, and the shell rows as brands, which is the truth about the
+three kinds of row.
+
+`ui::row_mark` decides which mark a row gets and `ui::system_icon` caches the texture per context
+(a texture belongs to a context; the pixels to the platform); `menu_row_icon` draws all three into
+the same 16-point box and leaves the column empty for `None`; and `menu_width` measures a
+`RowSpec` per row, so a 32-pixel system icon is exact at 2× and the column is reserved by the rows
+that use it, never by the menu.
 
 ## Driving the UI from a script
 

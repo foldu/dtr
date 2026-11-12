@@ -38,8 +38,21 @@ pub fn menu_row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool) -> bool {
 pub enum Mark<'a> {
     /// Pixels the caller uploaded: the platform's icon of a program.
     Texture(egui::TextureId),
-    /// An embedded picture: a shell's own logo.
+    /// An embedded picture: a shell's own logo, in the colour its project drew it.
     Image(egui::ImageSource<'a>),
+    /// An embedded mask, drawn in a colour from the skin: egui's chrome glyphs are
+    /// white strokes, and a wire or a server is one of those rather than a brand.
+    Mask {
+        source: egui::ImageSource<'a>,
+        colour: egui::Color32,
+    },
+}
+
+impl<'a> Mark<'a> {
+    /// A white glyph, drawn in `colour`.
+    pub fn mask(source: egui::ImageSource<'a>, colour: egui::Color32) -> Self {
+        Self::Mask { source, colour }
+    }
 }
 
 impl<'a> From<egui::TextureId> for Mark<'a> {
@@ -152,6 +165,15 @@ fn row<'a>(
             Mark::Image(source) => {
                 egui::Image::new(source)
                     .fit_to_exact_size(picture.size())
+                    .paint_at(ui, picture);
+            }
+            // A mask is a silhouette with no colour of its own, so it takes the
+            // row's — the same colour the label has, which is what makes a chrome
+            // glyph look drawn rather than pasted.
+            Mark::Mask { source, colour } => {
+                egui::Image::new(source)
+                    .fit_to_exact_size(picture.size())
+                    .tint(colour)
                     .paint_at(ui, picture);
             }
         }

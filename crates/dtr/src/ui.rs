@@ -564,24 +564,44 @@ fn shell_logo(name: &str) -> Option<egui::ImageSource<'static>> {
     })
 }
 
-/// What a shell's row leads with: the machine's own icon of the program where it
-/// has one, and otherwise the shell's logo.
+/// The wire a serial port leads with, and the machine a host sits on.
 ///
-/// The order is the rule. Windows answers with the executable's icon — the
-/// picture Explorer shows, whatever the program is — and Linux answers `None` for
-/// every program, so there the logo is what a row has. `None` from both is a shell
-/// nobody has drawn a mark for, and its row is a plain one.
-fn shell_icon(
+/// Lucide glyphs, drawn in the skin's text colour, because neither thing has a
+/// picture of its own: no icon theme knows `/dev/ttyUSB0`, and an ssh alias is a
+/// name in a config file. A cable and a rack are what the two rows are.
+fn port_glyph() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/cable.svg")
+}
+
+fn host_glyph() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/icons/server.svg")
+}
+
+/// What a destination's row leads with.
+///
+/// A shell is the machine's own icon of its program where the platform has one —
+/// Windows reads the executable — and otherwise the shell's own logo; a port and a
+/// host are glyphs, because there is nothing else to ask. `None` is a shell with
+/// neither, and its row keeps the column and draws nothing in it.
+fn row_mark(
     ui: &Ui,
+    skin: &dtr_widgets::Skin,
     destination: &crate::sources::Destination,
 ) -> Option<dtr_widgets::Mark<'static>> {
-    let crate::sources::Destination::Shell { program, name } = destination else {
-        return None;
-    };
-    if let Some(icon) = system_icon(ui, program) {
-        return Some(dtr_widgets::Mark::Texture(icon));
+    match destination {
+        crate::sources::Destination::Shell { program, name } => {
+            if let Some(icon) = system_icon(ui, program) {
+                return Some(dtr_widgets::Mark::Texture(icon));
+            }
+            shell_logo(name).map(dtr_widgets::Mark::Image)
+        }
+        crate::sources::Destination::Serial { .. } => {
+            Some(dtr_widgets::Mark::mask(port_glyph(), skin.palette.text))
+        }
+        crate::sources::Destination::Ssh { .. } => {
+            Some(dtr_widgets::Mark::mask(host_glyph(), skin.palette.text))
+        }
     }
-    shell_logo(name).map(dtr_widgets::Mark::Image)
 }
 
 /// What the strip drew, and how much of the row it took.
@@ -789,21 +809,19 @@ pub fn tab_bar(
         // the width it is offered, so a body left to decide for itself takes
         // everything from the `+` to the window's edge. Every row the menu can
         // draw is in the list, the fallback and the note included, and the
-        // widest of them is the width — a shell's mark counted with its row, so
-        // the column is only as wide as the rows that have one.
+        // widest of them is the width. Every destination reserves the mark column,
+        // a shell even where this machine has no picture for it: the shells of one
+        // machine do not all have a logo, and two starting points in one group read
+        // as a mistake rather than as two kinds of row.
         let labels: Vec<String> = destinations
             .iter()
             .map(crate::sources::Destination::label)
             .collect();
         let mut rows: Vec<dtr_widgets::RowSpec> = labels
             .iter()
-            .zip(destinations)
-            .map(|(label, destination)| dtr_widgets::RowSpec {
+            .map(|label| dtr_widgets::RowSpec {
                 label: label.as_str(),
-                // Every shell reserves the column, whether or not this machine has
-                // a picture for it: the shells of one machine do not all have a
-                // logo, and two starting points in one group read as a mistake.
-                icon: destination.is_shell(),
+                icon: true,
             })
             .collect();
         rows.push(dtr_widgets::RowSpec {
@@ -872,7 +890,7 @@ pub fn tab_bar(
                         if dtr_widgets::menu_row_icon(
                             ui,
                             &skin,
-                            shell_icon(ui, destination),
+                            row_mark(ui, &skin, destination),
                             &label,
                             false,
                         ) {
@@ -904,7 +922,14 @@ pub fn tab_bar(
                         }
                         dtr_widgets::menu_separator(ui, &skin);
                         for destination in group {
-                            if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
+                            let label = destination.label();
+                            if dtr_widgets::menu_row_icon(
+                                ui,
+                                &skin,
+                                row_mark(ui, &skin, destination),
+                                &label,
+                                false,
+                            ) {
                                 clicked = Some(TabHit::New(Some(destination.clone())));
                                 ui.close();
                             }
@@ -1234,6 +1259,25 @@ mod kittest_tests {
         );
         for plain in ["sh", "dash", "ksh", "tcsh", "csh", "baash"] {
             assert!(logo(plain).is_none(), "{plain} has no logo to draw");
+        }
+    }
+
+    /// A serial port and a host have no picture of their own — no icon theme knows
+    /// `/dev/ttyUSB0`, and an ssh alias is a name in a config file — so their rows
+    /// lead with a wire and a machine, and two glyphs, or the two groups would say
+    /// the same thing.
+    #[test]
+    fn a_port_and_a_host_have_their_own_marks() {
+        let uri = |source: egui::ImageSource<'static>| source.uri().map(str::to_owned);
+        let port = uri(port_glyph()).expect("the cable decodes");
+        let host = uri(host_glyph()).expect("the server decodes");
+        assert_ne!(port, host, "a port is not a host");
+        for shell in ["bash", "zsh", "fish", "nu"] {
+            assert_ne!(
+                Some(port.clone()),
+                shell_logo(shell).and_then(uri),
+                "a port is not {shell}"
+            );
         }
     }
 
