@@ -124,6 +124,24 @@ impl Row {
         }
     }
 
+    /// What the key does, in one line, because a key is a name and not an
+    /// explanation: `serial.auto_reconnect` is a thing a person has to recognise
+    /// from the file they wrote once.
+    fn description(self) -> &'static str {
+        match self {
+            Row::Widgets => "the look the chrome is painted in",
+            Row::Scheme => "light, dark, or the desktop's",
+            Row::Accent => "the colour of a selection",
+            Row::Theme => "the terminal's colour scheme",
+            Row::FontSize => "the grid's point size",
+            Row::FontFamily => "the face the grid is drawn in",
+            Row::Baud => "the rate the port opens at",
+            Row::CrToCrlf => "a lone CR becomes a new line",
+            Row::AutoReconnect => "reopen the port when it drops",
+            Row::Tmux => "run ssh tabs inside tmux on the host",
+        }
+    }
+
     fn section(self) -> &'static str {
         match self {
             Row::Widgets | Row::Scheme | Row::Accent => "ui",
@@ -178,8 +196,7 @@ fn accent_choices() -> Vec<String> {
 /// cannot lend it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
-    Select(usize),
-    /// The tab row: another panel, starting at its first row.
+    /// The tab row: another panel.
     Panel(Panel),
     Widgets(dtr_config::Widgets),
     Scheme(dtr_config::Scheme),
@@ -196,22 +213,11 @@ pub enum Change {
     CrToCrlf(bool),
 }
 
-/// What a key did to the menu.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Effect {
-    /// Nothing outside the menu needs to know.
-    Changed,
-    /// Enter: write the file and apply.
-    Apply,
-    /// Esc: throw the draft away.
-    Cancel,
-}
-
 /// What the card asked for.
 ///
-/// A mouse edit is a [`Reply::Change`] because the draft is only written when
-/// the card is saved; the save and cancel buttons report the same [`Effect`] the
-/// keyboard does, so the two ways out cannot disagree.
+/// An edit is a [`Reply::Change`] because the draft is only written when the card
+/// is saved; the save and cancel buttons are the two ways out, and they are
+/// buttons like every other control here — the sheet takes no keys at all.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Change(Change),
@@ -221,9 +227,8 @@ pub enum Reply {
 
 pub struct Settings {
     pub open: bool,
-    /// Which panel is showing, and the row the keyboard is on inside it.
+    /// Which panel is showing.
     panel: Panel,
-    row: usize,
     draft: Config,
     /// The focused port's remembered settings, when a serial session has focus.
     /// Baud and CR translation are per-device facts, so the menu edits the
@@ -245,7 +250,6 @@ impl Settings {
         Self {
             open: false,
             panel: Panel::Appearance,
-            row: 0,
             draft: Config::default(),
             serial: None,
             port: None,
@@ -278,7 +282,6 @@ impl Settings {
         self.serial = serial;
         self.open = true;
         self.panel = Panel::ALL[0];
-        self.row = 0;
         self.draft = config.clone();
         self.original = config.clone();
         // Empty means "the look's own accent", the same as an empty theme meaning
@@ -361,11 +364,7 @@ impl Settings {
     /// Apply one edit from the mouse to the draft.
     pub fn apply(&mut self, change: Change) {
         match change {
-            Change::Select(row) => self.row = row,
-            Change::Panel(panel) => {
-                self.panel = panel;
-                self.row = 0;
-            }
+            Change::Panel(panel) => self.panel = panel,
             Change::Widgets(widgets) => self.draft.ui.widgets = widgets,
             Change::Scheme(scheme) => self.draft.ui.scheme = scheme,
             Change::Accent(text) => {
@@ -394,15 +393,6 @@ impl Settings {
                 }
             }
         }
-        // A row list that just got shorter — `native` hides the scheme and the
-        // accent — must not leave the keyboard past its end.
-        let count = self.rows().len().max(1);
-        self.row = self.row.min(count - 1);
-    }
-
-    pub fn current_row(&self) -> Row {
-        let rows = self.rows();
-        rows[self.row.min(rows.len() - 1)]
     }
 
     /// Throw the draft away and close. Esc, the cross and the cancel button are
@@ -410,158 +400,6 @@ impl Settings {
     pub fn cancel(&mut self) {
         self.draft = self.original.clone();
         self.open = false;
-    }
-
-    /// What a key did to the sheet.
-    ///
-    /// `mods` is here for one chord: **ctrl+tab moves between the panels**, and
-    /// shift reverses it. The tabs are pointer targets like every other control in
-    /// this sheet, and a keyboard with no way to reach the second panel is a
-    /// keyboard that cannot change the window's look at all.
-    pub fn handle(
-        &mut self,
-        key: &winit::keyboard::Key,
-        mods: winit::keyboard::ModifiersState,
-    ) -> Option<Effect> {
-        use winit::keyboard::Key;
-        match key {
-            Key::Named(winit::keyboard::NamedKey::Escape) => {
-                self.cancel();
-                return Some(Effect::Cancel);
-            }
-            Key::Named(winit::keyboard::NamedKey::Enter) => return Some(Effect::Apply),
-            // Ctrl+tab is the panel's, and plain tab stays the rows'.
-            Key::Named(winit::keyboard::NamedKey::Tab) if mods.control_key() => {
-                let count = Panel::ALL.len() as i32;
-                let at = Panel::ALL
-                    .iter()
-                    .position(|panel| *panel == self.panel)
-                    .unwrap_or(0) as i32;
-                let step = if mods.shift_key() { -1 } else { 1 };
-                self.panel = Panel::ALL[(at + step).rem_euclid(count) as usize];
-                self.row = 0;
-                return Some(Effect::Changed);
-            }
-            Key::Named(winit::keyboard::NamedKey::ArrowDown)
-            | Key::Named(winit::keyboard::NamedKey::Tab) => {
-                let count = self.rows().len();
-                self.row = (self.row + 1) % count;
-                return Some(Effect::Changed);
-            }
-            Key::Named(winit::keyboard::NamedKey::ArrowUp)
-            | Key::Named(winit::keyboard::NamedKey::Backspace) => {
-                let count = self.rows().len();
-                self.row = (self.row + count - 1) % count;
-                return Some(Effect::Changed);
-            }
-            Key::Named(winit::keyboard::NamedKey::ArrowRight) => {
-                self.nudge(1);
-                return Some(Effect::Changed);
-            }
-            Key::Named(winit::keyboard::NamedKey::ArrowLeft) => {
-                self.nudge(-1);
-                return Some(Effect::Changed);
-            }
-            Key::Character(text) if text == " " || text == "j" || text == "k" => {
-                let step = if text == "k" { -1 } else { 1 };
-                self.nudge(step);
-                return Some(Effect::Changed);
-            }
-            _ => {}
-        }
-        None
-    }
-
-    /// Move the selected row by one step: +1 forward, -1 back.
-    fn nudge(&mut self, step: i32) {
-        match self.current_row() {
-            Row::Widgets => {
-                let all = dtr_config::Widgets::ALL;
-                let index = all
-                    .iter()
-                    .position(|widgets| *widgets == self.draft.ui.widgets)
-                    .unwrap_or(0) as i32;
-                let next = (index + step).rem_euclid(all.len() as i32) as usize;
-                self.draft.ui.widgets = all[next];
-            }
-            Row::Scheme => {
-                let all = [
-                    dtr_config::Scheme::System,
-                    dtr_config::Scheme::Light,
-                    dtr_config::Scheme::Dark,
-                ];
-                let index = all
-                    .iter()
-                    .position(|scheme| *scheme == self.draft.ui.scheme)
-                    .unwrap_or(0) as i32;
-                let next = (index + step).rem_euclid(all.len() as i32) as usize;
-                self.draft.ui.scheme = all[next];
-            }
-            // A colour is typed, not cycled: there is no order to step through.
-            Row::Accent => {}
-            Row::FontSize => {
-                let next = (self.draft.font.size + step as f32).clamp(6.0, 48.0);
-                self.draft.font.size = next;
-            }
-            Row::FontFamily => self.cycle_family(step),
-            Row::Theme => self.cycle_theme(step),
-            Row::Baud => {
-                let Some(serial) = self.serial.as_mut() else {
-                    return;
-                };
-                let index = BAUDS
-                    .iter()
-                    .position(|rate| *rate >= serial.baud)
-                    .unwrap_or(0) as i32;
-                let index = (index + step).clamp(0, BAUDS.len() as i32 - 1) as usize;
-                serial.baud = BAUDS[index];
-            }
-            Row::CrToCrlf => {
-                let Some(serial) = self.serial.as_mut() else {
-                    return;
-                };
-                serial.cr_to_crlf = !serial.cr_to_crlf;
-            }
-            Row::AutoReconnect => {
-                self.draft.serial.auto_reconnect = !self.draft.serial.auto_reconnect;
-            }
-            Row::Tmux => self.draft.tmux.enabled = !self.draft.tmux.enabled,
-        }
-    }
-
-    fn cycle_family(&mut self, step: i32) {
-        if self.families.is_empty() {
-            return;
-        }
-        let current = self.draft.font.family.clone().unwrap_or_default();
-        let index = self
-            .families
-            .iter()
-            .position(|name| name == &current)
-            .map(|index| index as i32)
-            .unwrap_or(-step);
-        let next = (index + step).rem_euclid(self.families.len() as i32) as usize;
-        self.draft.font.family = Some(self.families[next].clone());
-    }
-
-    fn cycle_theme(&mut self, step: i32) {
-        // One extra entry, before the files, for "no theme".
-        let count = self.themes.len() as i32 + 1;
-        let current = self.draft.theme.clone();
-        let index = match current {
-            None => 0,
-            Some(name) => self
-                .themes
-                .iter()
-                .position(|theme| theme == &name)
-                .map_or(0, |index| index as i32 + 1),
-        };
-        let next = (index + step).rem_euclid(count);
-        self.draft.theme = if next == 0 {
-            None
-        } else {
-            self.themes.get(next as usize - 1).cloned()
-        };
     }
 
     /// The value column, as it should read in the menu.
@@ -651,6 +489,29 @@ impl Settings {
     /// Draw the menu. Every control is a mouse control: a row is a click target
     /// for selection, and the values are a drag number, two combo boxes and two
     /// toggles. The keyboard still works, but nothing here needs it.
+    /// The height of one row: the key's line and the description's, or the
+    /// control's, whichever is taller.
+    ///
+    /// Measured from the fonts the rows draw with rather than from their point
+    /// sizes: egui's line height is its own number, and a formula that guesses it
+    /// is a few points short per row, which is the scrollbar this sheet must not
+    /// need.
+    fn row_height(ui: &egui::Ui, style: &dtr_widgets::Style) -> f32 {
+        let key = style.value_font.clone();
+        let (key_line, desc_line) = ui.fonts_mut(|fonts| {
+            (
+                fonts.row_height(&key),
+                fonts.row_height(&egui::FontId::new(
+                    style.label_font.size - 1.0,
+                    style.label_font.family.clone(),
+                )),
+            )
+        });
+        // Plus air: a description that sits tight under its key reads as part of
+        // the next row's name, and the sheet becomes a paragraph.
+        style.row.max(key_line + desc_line + 6.0)
+    }
+
     pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) -> Option<Reply> {
         let skin = look.skin();
         let palette = skin.palette;
@@ -672,7 +533,14 @@ impl Settings {
         // button under the pointer moves as it is pressed. The longest panel is
         // what it is sized for, so switching tabs moves nothing.
         let rows = self.roomiest_rows() as f32;
-        let height = 52.0 + (style.row + style.gap) + rows * (style.row + 1.0) + 58.0;
+        // A row is the key and its description, stacked. The control sets the
+        // floor — on Adwaita a 34-point control already holds both lines — and
+        // the two lines set it on a skin with 23-point rows. Measured from the
+        // fonts the rows use, not from their point sizes: egui's line height is
+        // its own number, and a formula that guesses it short changes the card by
+        // a few points a row, which is a scrollbar that need not be there.
+        let row = Self::row_height(ui, style);
+        let height = 52.0 + (style.row + style.gap) + rows * (row + style.gap) + 58.0;
         // The buttons are the card's footer, not the body's last row: the rows
         // above them scroll, and save and cancel must not scroll away with them.
         // A footer writes where its body does, which is why this is a cell.
@@ -695,18 +563,10 @@ impl Settings {
                 }
             })
             .footer(|ui| {
-                // The keyboard still works — Enter and Esc are handled by the
-                // event loop — so the hint names the keys; the buttons are the
-                // same two answers for the mouse.
+                // The two answers are buttons, and the sheet names no keys
+                // because it takes none: save and cancel are the only ways out
+                // besides the cross.
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("enter saves   ·   esc cancels")
-                            .font(egui::FontId::new(
-                                style.label_font.size - 1.0,
-                                style.label_font.family.clone(),
-                            ))
-                            .color(palette.dim),
-                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if dtr_widgets::Button::new("save")
                             .primary()
@@ -727,35 +587,58 @@ impl Settings {
             .show(ui, &skin, |ui, _inner| {
                 ui.add_space(8.0);
                 let mut reply = None;
-                for (index, row) in self.rows().iter().enumerate() {
-                    let selected = index == self.row;
+                for row in self.rows() {
                     let section = row.section();
                     let clicked = std::cell::Cell::new(None);
-                    ui.horizontal(|ui| {
-                        let name = if section.is_empty() {
-                            row.label().to_owned()
-                        } else {
-                            format!("{section}.{}", row.label())
-                        };
-                        // The label is the selection target, so clicking
-                        // a row does what the arrow keys do.
-                        let label = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(name)
-                                    .font(style.value_font.clone())
-                                    .color(if selected { palette.text } else { palette.dim }),
-                            )
-                            .sense(egui::Sense::click()),
-                        );
-                        if label.clicked() {
-                            clicked.set(Some(Change::Select(index)));
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(edit) = self.control(ui, *row, &skin, draft_dark) {
+                    let name = if section.is_empty() {
+                        row.label().to_owned()
+                    } else {
+                        format!("{section}.{}", row.label())
+                    };
+                    let height = Self::row_height(ui, style);
+                    // The row's own rect, and inside it the control first: the
+                    // text then wraps in what the control left, which is the whole
+                    // reason it is laid out this way round. The height is fixed so
+                    // the row does not claim the rest of the card — a `with_layout`
+                    // child takes every point it is offered, and the sheet drew one
+                    // row and a scrollbar when it was allowed to.
+                    let _ = ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if let Some(edit) = self.control(ui, row, &skin, draft_dark) {
                                 clicked.set(Some(edit));
                             }
-                        });
-                    });
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    // The key with its description under it, and the
+                                    // control beside both — the shape of an Adwaita
+                                    // action row. The description is dimmer than the
+                                    // key: the name is what a person comes back to,
+                                    // the sentence is read once. Neither line is a
+                                    // hit target and neither marks a row: there is no
+                                    // cursor here, because nothing here is driven by
+                                    // anything but the pointer under it.
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(name)
+                                                .font(style.value_font.clone())
+                                                .color(palette.text),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(row.description())
+                                                .font(egui::FontId::new(
+                                                    style.label_font.size - 1.0,
+                                                    style.label_font.family.clone(),
+                                                ))
+                                                .color(palette.disabled),
+                                        );
+                                    });
+                                },
+                            );
+                        },
+                    );
                     if reply.is_none() {
                         reply = clicked.into_inner().map(Reply::Change);
                     }
@@ -1047,27 +930,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enter_applies_and_escape_restores() {
+    fn cancelling_puts_the_draft_back() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
         settings.apply(Change::Panel(Panel::Appearance));
         let before = settings.draft().font.size;
-        settings.row = settings
-            .rows()
-            .iter()
-            .position(|row| *row == Row::FontSize)
-            .unwrap();
-        assert!(settings.nudge_test(1));
+        settings.apply(Change::FontSize(before + 2.0));
         assert!(settings.draft().font.size > before);
 
-        assert_eq!(
-            settings.handle(
-                &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
-                winit::keyboard::ModifiersState::empty()
-            ),
-            Some(Effect::Cancel)
-        );
+        settings.cancel();
         assert_eq!(settings.draft().font.size, before);
+        assert!(!settings.open, "cancelling closes the sheet");
     }
 
     #[test]
@@ -1082,14 +955,9 @@ mod tests {
                 ..dtr_store::SerialSettings::default()
             }),
         );
-        settings.row = settings
-            .rows()
-            .iter()
-            .position(|row| *row == Row::Baud)
-            .unwrap();
-        settings.nudge(1);
+        settings.apply(Change::Baud(230_400));
         assert_eq!(settings.serial().unwrap().baud, 230_400);
-        settings.nudge(-1);
+        settings.apply(Change::Baud(115_200));
         assert_eq!(settings.serial().unwrap().baud, 115_200);
     }
 
@@ -1097,8 +965,7 @@ mod tests {
     fn without_a_port_the_serial_rows_are_inert_and_say_so() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.row = 0;
-        settings.nudge(1);
+        settings.apply(Change::Baud(230_400));
         assert!(settings.serial_write().is_none());
         assert_eq!(settings.value(Row::Baud), "no port");
     }
@@ -1256,8 +1123,7 @@ mod tests {
     }
 
     /// The tmux row is the file's key and the settings' own switch: the pointer
-    /// writes the draft, the keyboard's toggle lands in the same field, and a
-    /// save writes `tmux.enabled`.
+    /// writes the draft and a save writes `tmux.enabled`.
     #[test]
     fn the_tmux_toggle_is_one_row_and_one_key() {
         let mut settings = Settings::new();
@@ -1276,12 +1142,6 @@ mod tests {
                 .contains(&("tmux.enabled".to_owned(), "true".to_owned())),
             "the row and the file are one key"
         );
-
-        // The keyboard's toggle, on the row the arrow keys can reach last.
-        settings.show(&Config::default());
-        settings.apply(Change::Select(settings.rows().len() - 1));
-        settings.nudge(1);
-        assert!(settings.draft.tmux.enabled, "space did not reach the row");
     }
 
     /// The port's rows are the port's panel, whatever else is showing: a baud rate
@@ -1297,15 +1157,9 @@ mod tests {
         assert!(!settings.rows().contains(&Row::FontSize));
         settings.apply(Change::Panel(Panel::Appearance));
         assert!(!settings.rows().contains(&Row::Baud));
-        assert_eq!(
-            settings.current_row(),
-            Row::Widgets,
-            "a panel starts at its first row"
-        );
     }
 
-    /// The scheme and the accent exist only for a look that owns them, and the
-    /// keyboard must not be left on a row that just disappeared.
+    /// The scheme and the accent exist only for a look that owns them.
     #[test]
     fn the_look_rows_follow_the_look_that_owns_them() {
         let mut settings = Settings::new();
@@ -1323,18 +1177,9 @@ mod tests {
                 Row::FontFamily
             ]
         );
-        // Stand on the accent, then ask for the look that has none.
-        settings.row = settings
-            .rows()
-            .iter()
-            .position(|row| *row == Row::Accent)
-            .unwrap();
+        // Ask for the look that has no accent.
         settings.apply(Change::Widgets(dtr_config::Widgets::Native));
         assert!(!settings.rows().contains(&Row::Accent));
-        assert!(
-            settings.row < settings.rows().len(),
-            "the row index outlived the row"
-        );
     }
 
     /// An accent is typed as a hex number, and a half-typed one must not be
@@ -1428,14 +1273,6 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), choices.len(), "a default is listed twice");
     }
-
-    impl Settings {
-        /// `nudge` returns nothing; the test only needs to know it ran.
-        fn nudge_test(&mut self, step: i32) -> bool {
-            self.nudge(step);
-            true
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1456,52 +1293,6 @@ mod kittest_tests {
             settings.rows(),
             vec![Row::Widgets, Row::Theme, Row::FontSize, Row::FontFamily]
         );
-    }
-
-    /// Escape leaves without writing anything, which is the whole point of a
-    /// draft: a menu you cannot back out of is worse than no menu.
-    #[test]
-    fn escape_cancels_without_writing() {
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
-        let mut settings = Settings::new();
-        settings.show(&Config::default());
-        settings.handle(&Key::Named(NamedKey::ArrowRight), ModifiersState::empty());
-        assert!(!settings.writes().is_empty(), "the change is in the draft");
-        assert_eq!(
-            settings.handle(&Key::Named(NamedKey::Escape), ModifiersState::empty()),
-            Some(Effect::Cancel)
-        );
-    }
-
-    /// **Ctrl+tab is the panels'**, and it is the only way a keyboard has to reach
-    /// the appearance panel: plain tab is the rows', so a chord has to be the
-    /// difference. Shift walks back, and both wrap.
-    #[test]
-    fn ctrl_tab_moves_between_the_panels() {
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
-        let mut settings = Settings::new();
-        settings.show(&Config::default());
-        assert_eq!(settings.panel(), Panel::General);
-
-        let ctrl = ModifiersState::CONTROL;
-        assert_eq!(
-            settings.handle(&Key::Named(NamedKey::Tab), ctrl),
-            Some(Effect::Changed)
-        );
-        assert_eq!(settings.panel(), Panel::Appearance);
-        assert_eq!(
-            settings.handle(&Key::Named(NamedKey::Tab), ctrl),
-            Some(Effect::Changed)
-        );
-        assert_eq!(settings.panel(), Panel::General, "the panels wrap");
-
-        let back = ctrl | ModifiersState::SHIFT;
-        settings.handle(&Key::Named(NamedKey::Tab), back);
-        assert_eq!(settings.panel(), Panel::Appearance, "shift walks back");
-
-        // Plain tab still moves the row, and does not touch the panel.
-        settings.handle(&Key::Named(NamedKey::Tab), ModifiersState::empty());
-        assert_eq!(settings.panel(), Panel::Appearance);
     }
 
     /// The theme is a combo box: click it, click a theme, get the edit. This is
@@ -1570,10 +1361,6 @@ mod kittest_tests {
     fn the_menu_renders() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        settings.handle(
-            &winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
-            winit::keyboard::ModifiersState::empty(),
-        );
         let look = crate::ui::Look::default();
         let mut harness = Harness::new_ui(|ui| {
             settings.ui(ui, &look);

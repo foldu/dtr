@@ -596,8 +596,10 @@ and turned out to be `egui` twice, so it is a spelling the config still accepts 
 longer offers. Everything is **live**: the look is a value the frame reads, so saving the settings
 menu repaints the window in the new chrome without a restart, and the `native` answer is watched
 (`WM_SETTINGCHANGE`, the XDG portal's `SettingChanged`) so the chrome follows the desktop at sunset.
-The settings sheet is a tabbed card — General first, Appearance second, `ctrl+tab` between them —
-because one column of rows outgrew the window.
+The settings sheet is a tabbed card — General first, Appearance second — because one column of
+rows outgrew the window, and every row is the TOML key with a line under it saying what the key
+does. It is mouse only: its rows are labels, not a cursor, so save, cancel and the cross are the
+ways out (`docs/ui.md` §The settings menu).
 
 Colours in the config file itself are deliberately not supported *for the terminal*: a theme is a
 document with a name, and pointing at one beats duplicating sixteen hex triplets inline. The chrome's

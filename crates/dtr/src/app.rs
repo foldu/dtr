@@ -1592,43 +1592,11 @@ impl App {
 
         // The menu owns the keyboard while it is open. Releases only
         // clear the held key; duplicates are compositor noise.
+        // The settings card is mouse only: it has no keys of its own, and a
+        // keystroke must not reach the shell behind it either. Save, cancel and
+        // the cross are the way out, and they are all buttons.
         if self.settings.open {
-            if !pressed {
-                self.held = None;
-                return;
-            }
-            if !stroke.repeat && self.held.as_ref() == Some(&stroke.key) {
-                tracing::debug!(key = ?stroke.key, "ignoring a duplicate press");
-                return;
-            }
-            self.held = Some(stroke.key.clone());
-            let closes =
-                crate::keys::chord_from_event(&stroke.key, stroke.mods).is_some_and(|chord| {
-                    matches!(
-                        self.keymap.resolve(&[], chord),
-                        crate::keys::Matched::Action(crate::keys::Action::Settings)
-                    )
-                });
-            if closes {
-                // Closing the way it was opened is a cancel, not a save: the
-                // draft goes back to the file's and the window with it, or a
-                // preview would outlive the card that made it.
-                self.settings.cancel();
-                self.preview_settings(true);
-                self.repaint("settings closed");
-                return;
-            }
-            match self.settings.handle(&stroke.key, stroke.mods) {
-                Some(crate::settings::Effect::Apply) => self.apply_settings(),
-                Some(crate::settings::Effect::Cancel) => {
-                    // `handle` has already restored the draft; this puts the
-                    // restored draft back on the window.
-                    self.preview_settings(true);
-                    self.repaint("settings closed");
-                }
-                Some(crate::settings::Effect::Changed) => self.repaint("settings changed"),
-                None => {}
-            }
+            self.held = None;
             return;
         }
 
@@ -2771,21 +2739,20 @@ impl App {
                 true
             }
             Action::Settings => {
-                if self.settings.open {
-                    self.settings.open = false;
-                } else {
-                    let config = self.config.clone();
-                    // The focused session's port, and what the store remembers
-                    // for it: baud and CR translation are facts about that
-                    // device, not about the terminal.
-                    let port = self.session().and_then(|session| session.port.clone());
-                    let record = port.as_ref().and_then(|port| {
-                        self.store
-                            .as_ref()
-                            .and_then(|store| store.serial(port).ok().flatten())
-                    });
-                    self.settings.show_port(&config, port, record);
-                }
+                // Opening only: the chord is a way in, not a way out. The sheet
+                // takes no keys once it is up, so this cannot run while it is
+                // open — save, cancel and the cross are the ways out.
+                let config = self.config.clone();
+                // The focused session's port, and what the store remembers for
+                // it: baud and CR translation are facts about that device, not
+                // about the terminal.
+                let port = self.session().and_then(|session| session.port.clone());
+                let record = port.as_ref().and_then(|port| {
+                    self.store
+                        .as_ref()
+                        .and_then(|store| store.serial(port).ok().flatten())
+                });
+                self.settings.show_port(&config, port, record);
                 self.repaint("settings");
                 true
             }

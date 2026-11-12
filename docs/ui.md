@@ -373,11 +373,37 @@ move its own buttons under the pointer. Settings is the only tabbed card; the
 
 ## The settings menu
 
-The settings menu is mouse-first: rows are click targets, font size is a drag value, and
-every closed list — the look, the scheme, the theme, the family — is a combo box whose list
-is `menu_row`s, the accent is a hex field, and toggles are checkboxes. `Settings::ui` takes
-`&self` — the renderer holds a borrow — so a control *reports* its edit as a `Change` and
-`Settings::apply` writes the draft.
+The settings menu is **mouse only**: every closed list — the look, the scheme, the theme,
+the family — is a combo box whose list is `menu_row`s, the accent is a hex field, toggles
+are checkboxes, and the font size is a drag value. The sheet has no cursor, takes no keys
+and marks no row: a label there is a label, and the control beside it is the only thing a
+press can find. `Settings::ui` takes `&self` — the renderer holds a borrow — so a control
+*reports* its edit as a `Change` and `Settings::apply` writes the draft.
+
+**It had a keyboard, and the keyboard was the expensive part.** Arrows walked the rows, tab
+and `j`/`k` nudged them, `ctrl+tab` changed panels, Enter saved and Esc cancelled — and
+every one of those needed a *cursor*: a selected row index, a highlight on its label, a
+clamp when the look hid the scheme and accent rows out from under it, and a `nudge` that
+duplicated what each control already did. The rows are now two lines tall and the sheet is
+short enough to see at once, which is exactly the case where a cursor costs more than it
+gives, so the state went with it. `App::on_key` swallows keys while the card is up — a
+keystroke that reached the shell behind it would run a command nobody typed — and save,
+cancel and the cross are the ways out. The chord that opens the sheet still opens it; it no
+longer closes it, because a chord is a way in, not a way out.
+
+**A row is the TOML key with its description under it**, and the control beside both: the
+key in the row's own colour, the sentence one step smaller in `disabled`, and the control
+centred against the pair. A key is a name, not an explanation — `serial.auto_reconnect` is
+something a person has to recognise from the file they wrote once — so the sheet says what
+each one does without asking them to look it up. Two traps came out of drawing it. **The
+card has to measure the two fonts** (`row_height`, via `fonts_mut`): a height guessed from
+the point sizes was a line short per row, and the appearance panel cut its last row and grew
+a scrollbar it did not need. **The control has to claim its width first**: a label in a
+left-to-right row is given the full row, so the description wrapped *under* the dropdown and
+ran off to a width that was not there. The row is laid out right-to-left with the control
+first and the text in a left-to-right child of what is left, and it is given its own rect —
+a `with_layout` child inside a vertical layout takes every point it is offered, and the
+first version drew one row and a scrollbar.
 
 A closed list is a dropdown rather than a row of chips because the chips spent the width the
 values need: on Windows' 32-point metrics the look row was the one that made the sheet
@@ -417,12 +443,8 @@ The look's list is four: `native`, `adwaita`, `windows`, `egui`. `dtr` was a fif
 was the same thing as `egui` twice — the chrome this program draws with egui's own widgets —
 so the config reads `dtr` as an old spelling of `egui` and the menu offers one entry.
 
-**The tabs are the mouse's, and ctrl+tab's.** A tab row is a pointer target like
-every other control here, and a keyboard with no way to reach the second panel is
-a keyboard that cannot change the window's look at all — so `ctrl+tab` moves
-between them and `ctrl+shift+tab` walks back, with plain tab left to the rows. The
-sheet opens on the first tab, always, so where the rows are never moves between
-openings.
+**The tabs are the mouse's**, like everything else on the card. The sheet opens on the
+first tab, always, so where the rows are never moves between openings.
 
 The accent is a **hex number, not a colour picker**: egui has no picker, and a terminal
 config file already speaks `#RRGGBB`. The field shows the colour a save would use — the
@@ -435,10 +457,9 @@ keeps what was typed, marks itself, and the draft keeps the last thing that pars
 **The card is the keyboard map's kind, with both ways out.** It has the same header (a
 title and a `cross`), the same centered dimmed card, and a footer with `save` (primary) and
 `cancel`; the X cancels, because an X that saved would be the one control on the card that
-does not say what it does. A mouse edit is reported as `Reply::Change`, and the buttons
-report the same `Effect::Apply`/`Effect::Cancel` the keyboard's Enter and Esc do, so the
-four ways out cannot disagree. It had neither a cross nor a button, which made the keyboard
-the only way to finish a menu a mouse can otherwise drive completely.
+does not say what it does. An edit is reported as `Reply::Change` and the buttons report
+`Reply::Apply`/`Reply::Cancel`, so the three ways out cannot disagree. The footer names no
+keys, because the sheet has none.
 
 **A menu that opens slowly the first time is doing its work in the frame**:
 `usable_families` builds a fontconfig collection and probes every family by loading a face

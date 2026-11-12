@@ -673,23 +673,24 @@ account behind each of these.
   the text** — the palette's selected row was invisible until the highlight was drawn first
   — and **a solid quad that samples the atlas can vanish silently**: solids carry a negative
   uv, take their colour from the instance, and the shader branches.
-- **The settings menu is mouse-first, and it has two tabs**, and `Settings::ui` takes `&self`
+- **The settings menu is mouse only, and it has two tabs**, and `Settings::ui` takes `&self`
   (the renderer holds a borrow), so a control *reports* its edit as a `Change` and
-  `Settings::apply` writes the draft. Every control declares an accessible name of the form
-  `<row> value`, not the row name, because the row's label already carries the bare name and
-  two nodes with one name cannot be addressed from a test. **A closed list is a dropdown,
-  not a row of chips**: chips spend the width the values themselves need, and on Windows'
-  32-point metrics the look row was the one that made the sheet scroll. **General comes
-  first and the sheet opens on it**, so where the rows are never moves between openings; **a
-  row belongs to exactly one tab** (`Row::panel`), and which rows a tab shows right now is a
+  `Settings::apply` writes the draft. **No keys, no cursor, no highlight**: the sheet walks
+  no rows, so there is nothing to select, draw or clamp, and `App::on_key` swallows keys
+  while it is up. Every control declares an accessible name of the form `<row> value`, not
+  the row name, because the row's label already carries the bare name and two nodes with
+  one name cannot be addressed from a test. **A row is the key over its description**: measure the two fonts for the
+  card's height and give the control its width first, or the description
+  wraps into it (`docs/ui.md` §The settings menu). **A closed list is a dropdown, not a row
+  of chips**: chips spend the width values need. **General comes first and
+  the sheet opens on it**, so where the rows are never moves between openings; **a row
+  belongs to exactly one tab** (`Row::panel`), and which rows a tab shows right now is a
   filter — port rows when a port is focused, the look's scheme and accent only when
-  `owns_its_colours`. **`ctrl+tab` moves between the tabs** (`ctrl+shift+tab` back, plain tab
-  is the rows'): a tab that only a pointer can reach is a window whose look a keyboard cannot
-  change. **A row is on the window before Save is pressed**: an edit re-derives the look from
-  the draft (`App::preview_settings`, the same path as startup and the save) and repaints, and
-  Cancel puts both back; the only Save-only rows are the serial ones, which reconnect. The
-  card is as tall as the *longest* tab, or switching tabs would
-  move the buttons under the pointer. **A field with an "unset" state shows the value it
+  `owns_its_colours`. **A row is on the window before Save is pressed**: an edit re-derives
+  the look from the draft (`App::preview_settings`, the same path as startup and the save)
+  and repaints, and Cancel puts both back; the only Save-only rows are the serial ones,
+  which reconnect. The card is as tall as the *longest* tab, or switching tabs would move
+  the buttons under the pointer. **A field with an "unset" state shows the value it
   would use** rather than nothing — an empty accent box reads as a broken control, and the
   colour a save would keep is the thing being decided. **A list that needs a slow probe is
   filled in later, not on the click**: `usable_families` is a fontconfig walk cached in a
