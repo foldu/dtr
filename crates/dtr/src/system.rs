@@ -290,6 +290,8 @@ fn preview_skin(value: Option<&str>) -> Option<Skin> {
         Some("windows-light") => Some(Skin::windows_light()),
         Some("adwaita-dark") => Some(Skin::adwaita(true, dtr_widgets::ADWAITA_ACCENT)),
         Some("adwaita-light") => Some(Skin::adwaita(false, dtr_widgets::ADWAITA_ACCENT)),
+        Some("egui-dark") => Some(Skin::egui_dark()),
+        Some("egui-light") => Some(Skin::egui_light()),
         _ => None,
     }
 }
@@ -308,6 +310,8 @@ pub fn describe(skin: &Skin) -> &'static str {
         (Origin::Windows, false) => "windows-light",
         (Origin::Adwaita, true) => "adwaita-dark",
         (Origin::Adwaita, false) => "adwaita-light",
+        (Origin::Egui, true) => "egui-dark",
+        (Origin::Egui, false) => "egui-light",
     }
 }
 
@@ -383,12 +387,14 @@ mod tests {
     /// The preview switch names a skin, and only a skin: no typo, no panic, and
     /// no way to ask for a `dtr` skin through the platform's door.
     #[test]
-    fn the_preview_switch_knows_four_skins() {
+    fn the_preview_switch_knows_six_skins() {
         for (value, expected) in [
             ("windows-dark", "windows-dark"),
             ("windows-light", "windows-light"),
             ("adwaita-dark", "adwaita-dark"),
             ("adwaita-light", "adwaita-light"),
+            ("egui-dark", "egui-dark"),
+            ("egui-light", "egui-light"),
         ] {
             assert_eq!(
                 preview_skin(Some(value)).map(|skin| describe(&skin)),

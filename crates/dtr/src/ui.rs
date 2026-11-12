@@ -32,8 +32,8 @@ pub struct Look {
     pub surface: [u8; 3],
     /// Secondary text.
     pub dim: [u8; 3],
-    /// Which chrome to draw: the terminal's own, or the platform's.
-    pub preset: Preset,
+    /// Which chrome to draw: the look, its scheme and its accent.
+    pub choice: dtr_widgets::Choice,
 }
 
 impl Default for Look {
@@ -48,7 +48,7 @@ impl Default for Look {
             accent: [0xff, 0xb0, 0x00],
             surface: [0x14, 0x18, 0x16],
             dim: [0x6b, 0x77, 0x72],
-            preset: Preset::Native,
+            choice: dtr_widgets::Choice::default(),
         }
     }
 }
@@ -64,13 +64,13 @@ impl Look {
         family: Option<String>,
         path: Option<PathBuf>,
         theme: Option<&crate::theme::Theme>,
-        preset: Preset,
+        choice: dtr_widgets::Choice,
     ) -> Self {
         let mut look = Self {
             size,
             family,
             path,
-            preset,
+            choice,
             ..Self::default()
         };
         let Some(theme) = theme else { return look };
@@ -102,11 +102,37 @@ impl Look {
     /// and to `dtr` everywhere else — see `crate::system`, which reads it once and
     /// then keeps it current when the desktop changes it.
     pub fn skin(&self) -> dtr_widgets::Skin {
-        dtr_widgets::Skin::resolve(
-            self.preset,
+        self.choice.skin(
             dtr_widgets::Palette::dtr(self.background, self.foreground, self.accent),
             crate::system::native_skin(),
         )
+    }
+
+    /// The choice a config file asks for.
+    ///
+    /// The config crate has no window library, so its `[ui]` enums are its own and
+    /// this is where they become the crate that paints. One place, because a
+    /// second mapping is a second set of answers to "what does `windows` mean".
+    pub fn choice_of(config: &dtr_config::Config) -> dtr_widgets::Choice {
+        use dtr_config::{Scheme, Widgets};
+        let preset = match config.ui.widgets {
+            Widgets::Native => Preset::Native,
+            Widgets::Adwaita => Preset::Adwaita,
+            Widgets::Windows => Preset::Windows,
+            Widgets::Egui => Preset::Egui,
+        };
+        dtr_widgets::Choice {
+            preset,
+            scheme: match config.ui.scheme {
+                Scheme::System => dtr_widgets::Scheme::System,
+                Scheme::Light => dtr_widgets::Scheme::Light,
+                Scheme::Dark => dtr_widgets::Scheme::Dark,
+            },
+            accent: config
+                .ui
+                .accent
+                .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)),
+        }
     }
 }
 
@@ -737,6 +763,51 @@ mod kittest_tests {
     use super::*;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+
+    /// A config file becomes a skin: the look, its scheme and its accent, in one
+    /// place. The two that ask a source ignore the other two, which is the rule
+    /// the settings menu's rows are built from.
+    #[test]
+    fn a_config_file_asks_for_a_skin() {
+        let mut config = dtr_config::Config::default();
+        config.ui.widgets = dtr_config::Widgets::Windows;
+        config.ui.scheme = dtr_config::Scheme::Light;
+        config.ui.accent = Some([0xED, 0x5B, 0x00]);
+        let choice = Look::choice_of(&config);
+        assert_eq!(choice.preset, Preset::Windows);
+        assert_eq!(choice.scheme, dtr_widgets::Scheme::Light);
+        assert_eq!(
+            choice.accent,
+            Some(egui::Color32::from_rgb(0xED, 0x5B, 0x00))
+        );
+
+        // The same choice, as the window would draw it: a light Windows chrome
+        // in the accent asked for. A test has no desktop to consult, so `native`
+        // falling back and `system` are both the terminal's own darkness.
+        let look = Look {
+            choice,
+            ..Look::default()
+        };
+        let skin = look.skin();
+        assert_eq!(skin.origin, dtr_widgets::Origin::Windows);
+        assert!(!skin.palette.is_dark());
+        assert_eq!(
+            skin.palette.accent,
+            egui::Color32::from_rgb(0xED, 0x5B, 0x00)
+        );
+
+        // Each of the four is one preset, and the old spelling is not a fifth.
+        for (widgets, preset) in [
+            (dtr_config::Widgets::Native, Preset::Native),
+            (dtr_config::Widgets::Adwaita, Preset::Adwaita),
+            (dtr_config::Widgets::Windows, Preset::Windows),
+            (dtr_config::Widgets::Egui, Preset::Egui),
+        ] {
+            let mut config = dtr_config::Config::default();
+            config.ui.widgets = widgets;
+            assert_eq!(Look::choice_of(&config).preset, preset);
+        }
+    }
 
     /// The new-tab button offers the destinations a terminal has, each kind
     /// behind its own separator: the local shell, the serial ports, the hosts.

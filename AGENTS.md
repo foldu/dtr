@@ -583,36 +583,44 @@ account behind each of these.
   `Palette` (semantic slots — `card`, `control`, `border`, `accent`, `dim` …), `Style`
   (row height, gaps, radii, fonts, and the `Title`/`Section`/`Footer`/`Focus` behaviours)
   and `Skin` (the pair), plus `Skin::egui_style`, which derives an `egui::Style` so stock
-  egui widgets inherit the same look. `Preset::{Dtr, Native}`; `[ui] widgets` (or
-  `--widgets`) says which, and `native` is the default. **A preset is a request**:
-  `Skin::resolve` takes the platform's skin as an argument and falls back to dtr, because
-  reading the system palette is platform code in `crates/dtr/src/system.rs`, where both
-  platforms are written to one trait. **It is live**: the answer sits in a cell a frame
+  egui widgets inherit the same look. `Preset::{Native, Adwaita, Windows, Egui}`;
+  `[ui] widgets` (or `--widgets`) says which, and `native` is the default. **A preset is a
+  request**: `Choice::skin` takes the platform's skin as an argument and falls back to the
+  terminal's own, because reading the system palette is platform code in
+  `crates/dtr/src/system.rs`, where both platforms are written to one trait.
+  **The scheme and the accent ride with the look**: `[ui] scheme` (`system` by default) and
+  `[ui] accent` mean something only to the three looks painted here — `native` takes both
+  from the desktop — so `Preset::owns_its_colours` is what decides whether the settings
+  menu shows those rows at all. **It is live**: the answer sits in a cell a frame
   reads, and a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE`,
   `WM_DWMCOLORIZATIONCOLORCHANGED` or `WM_THEMECHANGED` through the window procedure that
   already subclasses the window (winit forwards only the first, and only when light/dark
   differs), `SettingChanged` from the portal — then asks for a repaint. `-v` logs
-  `chrome skin=… requested=… accent=… source=…`, which is the difference between a
+  `chrome skin=… requested=… scheme=… accent=… source=…`, which is the difference between a
   preference and an outcome, and `source=` names the reader that answered.
 - **An overlay is a `Card` body, not its own window.** `dtr_widgets::Card` owns
   the modal shell (centered clamped rect, primed area, scrim, frame, skin), the
-  header convention, the **scrolling body** and the **footer band**; a screen
-  supplies only its body, and its footer when it has one. The body scrolls because
+  header convention, the optional **tab row**, the **scrolling body** and the **footer band**;
+  a screen supplies only its body, its tabs and its footer when it has them. The body scrolls because
   a card is clamped to the window and a form is not — the serial sheet overran the
-  window with its connect button half off screen — and the footer is drawn
-  *outside* that viewport, because a button that scrolls out of reach is not there
-  (`docs/ui.md` §The card). About, the keyboard map, settings and the serial sheet
+  window with its connect button half off screen — and the footer and the tab row are drawn
+  *outside* that viewport, because a way out and a way to the other panel are not there if
+  they scroll (`docs/ui.md` §The card). About, the keyboard map, settings and the serial sheet
   each had a copy of the shell before it existed, which is how their scrims and
   margins could disagree.
 - **Painted controls belong in `crates/dtr-widgets/src/widgets/`**: `Editable` (a text
   field with a dropdown arrow, reporting `Edit::Typed` and `Edit::Picked` as different
   answers), the layout primitives `label_cell`/`row`/`section`, and `check`, `Button`,
-  `segmented`, `menu_row`, `cross`. A surface that needs a control the crate does not have
-  waits for it there instead of growing a second copy — the serial sheet is drawn entirely
-  with them, so `serial_dialog.rs` contains no colour, radius or stroke width. **A new
-  primitive arrives with a gallery snapshot**, and **a tick is drawn, not lent**: `check`
-  and `menu_row` are strokes, because egui's faces have no check mark and an icon would
-  make every harness install an image loader first.
+  `segmented`, `tabs`, `menu_row`, `cross`. A surface that needs a control the crate does not
+  have waits for it there instead of growing a second copy — the serial sheet is drawn
+  entirely with them, so `serial_dialog.rs` contains no colour, radius or stroke width.
+  **A new primitive arrives with a gallery snapshot**, and **a tick is drawn, not lent**:
+  `check` and `menu_row` are strokes, because egui's faces have no check mark and an icon
+  would make every harness install an image loader first. **A segmented row and a tab row
+  are different controls**: one sets a value and fills the chosen chip with the accent, the
+  other changes which panel is on screen and underlines its label — and `ui.horizontal`
+  inherits a parent's direction, so a control pinned to a row's right edge draws its options
+  backwards unless the widget asks for left-to-right itself.
 - **A widget painted by hand has no accessibility node** unless `Response::widget_info`
   declares one, and the tab chips were invisible to the harness *and* to a screen reader.
   `Sense::click()` is **not pointer-only**: egui turns Enter into a click for any focused
@@ -659,12 +667,16 @@ account behind each of these.
   the text** — the palette's selected row was invisible until the highlight was drawn first
   — and **a solid quad that samples the atlas can vanish silently**: solids carry a negative
   uv, take their colour from the instance, and the shader branches.
-- **The settings menu is mouse-first**, and `Settings::ui` takes `&self` (the renderer holds
-  a borrow), so a control *reports* its edit as a `Change` and `Settings::apply` writes the
-  draft. Every control declares an accessible name of the form `<row> value`, not the row
-  name, because the row's label already carries the bare name and two nodes with one name
-  cannot be addressed from a test. Port rows exist only when a port is focused: baud and CR
-  translation belong to one device. **A menu that opens slowly the first time is doing its
+- **The settings menu is mouse-first, and it has two tabs**, and `Settings::ui` takes `&self`
+  (the renderer holds a borrow), so a control *reports* its edit as a `Change` and
+  `Settings::apply` writes the draft. Every control declares an accessible name of the form
+  `<row> value`, not the row name, because the row's label already carries the bare name and
+  two nodes with one name cannot be addressed from a test. **General comes first and the
+  sheet opens on it**, so where the rows are never moves between openings; **a row belongs
+  to exactly one tab** (`Row::panel`), and which rows a tab shows right now is a filter —
+  port rows when a port is focused, the look's scheme and accent only when
+  `owns_its_colours`. The card is as tall as the *longest* tab, or switching tabs would
+  move the buttons under the pointer. **A menu that opens slowly the first time is doing its
   work in the frame**: `usable_families` is a fontconfig walk that parses a face per family
   — 300 ms on a desktop with 47 families — so it is cached in a `OnceLock`, warmed by the
   `dtr-warm` thread `main` starts before the window, and read by the menu through

@@ -18,25 +18,35 @@
 //!   so the widgets that are still egui's own (`TextEdit`, `ScrollArea`, popup
 //!   frames) share the surface with the painted ones.
 //!
-//! Two presets, and one honest rule about them:
+//! Four presets, and one honest rule about them:
 //!
-//! - [`Preset::Dtr`] is the terminal's own chrome — monospace labels, a small
-//!   accent, tight rows.
 //! - [`Preset::Native`] is the platform's own chrome. It exists so that a window
 //!   with dtr's frame still has controls a Windows user recognises. On Windows it
-//!   takes its colours from the system (light/dark and the user's accent); on
-//!   Linux there is no portable system palette, so `native` resolves to the dtr
-//!   style — by decision, not by accident (`docs/ui.md`).
+//!   takes its colours from the system (light/dark and the user's accent); on a
+//!   GNOME desktop it is Adwaita's. Where a machine has no answer it resolves to
+//!   the terminal's own chrome — by decision, not by accident (`docs/ui.md`).
+//! - [`Preset::Adwaita`], [`Preset::Windows`] and [`Preset::Egui`] are looks the
+//!   window carries: a person can ask for GNOME's chrome on Windows, Windows' on
+//!   Linux, or egui's plain greys on either. They are the three with a [`Scheme`]
+//!   and an accent of their own ([`Choice`]).
+//!
+//! **The rule**: a preset is a request. Asking for a look this machine cannot
+//! read (`native` with no portal, no registry) gets the closest one it can paint
+//! and says so in `-v` — never a window that quietly ignored what it was asked
+//! for.
 
 mod palette;
 mod skin;
 mod style;
 mod widgets;
 
-pub use palette::{AccentLadder, Palette};
-pub use skin::{ADWAITA_ACCENT, Origin, Skin, WINDOWS_ACCENT_DARK, WINDOWS_ACCENT_LIGHT};
-pub use style::{Focus, Footer, Preset, Section, Style, Title};
+pub use palette::{AccentLadder, Palette, readable_on};
+pub use skin::{
+    ADWAITA_ACCENT, Choice, EGUI_ACCENT_DARK, EGUI_ACCENT_LIGHT, Origin, Skin, WINDOWS_ACCENT_DARK,
+    WINDOWS_ACCENT_LIGHT,
+};
+pub use style::{Focus, Footer, Preset, Scheme, Section, Style, Title};
 pub use widgets::{
     Button, Card, CardOutput, Edit, Editable, check, check_box, cross, cross_at, label_cell,
-    menu_row, plus, prime_area, row, section, segmented,
+    menu_row, plus, prime_area, row, section, segmented, tabs,
 };

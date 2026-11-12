@@ -23,6 +23,11 @@
 //! over the body's right edge, which is exactly where a card's values and key
 //! names end.
 //!
+//! A **tab row** belongs to the card too, between the header and the body. It is
+//! the same argument as the footer's: the way from one panel to another must not
+//! scroll away, so it is drawn outside the scroll area, and a card whose panels
+//! are different heights keeps one height so nothing moves under the pointer.
+//!
 //! The **footer** is a row the card reserves *below* the scroll area and draws
 //! outside it. Settings wants two buttons, the keyboard map a hint, the serial
 //! sheet both — and a footer is how one leaves a sheet, so a button that
@@ -67,6 +72,13 @@ pub struct Card<'a> {
     /// builder method generic over it, and a `Card<'a, F>` is a worse thing to
     /// read than one allocation per frame.
     footer: Option<Box<dyn FnOnce(&mut Ui) + 'a>>,
+    /// A row of tabs between the header and the scrolling body.
+    ///
+    /// Above the scroll area rather than in it, for the reason the footer is
+    /// below it: the way from one panel to another must not scroll out of reach,
+    /// and a tab row that scrolled would be a card whose second panel needs the
+    /// first panel's scrolling to find.
+    tabs: Option<Box<dyn FnOnce(&mut Ui) + 'a>>,
     /// The width the body may not shrink below, inside the card's margin.
     body_min: f32,
 }
@@ -90,6 +102,7 @@ impl<'a> Card<'a> {
             trailing: None,
             close: None,
             footer: None,
+            tabs: None,
             body_min: 0.0,
         }
     }
@@ -148,6 +161,17 @@ impl<'a> Card<'a> {
         self
     }
 
+    /// A row of tabs between the header and the body.
+    ///
+    /// The card draws it and gets out of the way: the row it costs is the row its
+    /// closure asks for, and the scrolling body starts below it. A card whose
+    /// panels differ in height keeps one height — see [`Self::size`] — so the way
+    /// between them does not move under the pointer.
+    pub fn tabs(mut self, tabs: impl FnOnce(&mut Ui) + 'a) -> Self {
+        self.tabs = Some(Box::new(tabs));
+        self
+    }
+
     /// The narrowest the sheet's content may be, inside the card's margin. The
     /// keyboard map and the serial sheet are forms, not prose: below this they
     /// would be unreadable rather than merely small. The body is handed this
@@ -180,6 +204,7 @@ impl<'a> Card<'a> {
         ui.painter().rect_filled(screen, 0.0, skin.palette.scrim);
 
         let footer = self.footer.take();
+        let tabs = self.tabs.take();
         let margin = skin.style.card_margin;
         let mut close = false;
         let mut result = None;
@@ -205,6 +230,10 @@ impl<'a> Card<'a> {
                         let inner = (width - margin.sum().x).max(self.body_min);
                         ui.set_width(inner);
                         close = self.header(ui, skin);
+                        if let Some(tabs) = tabs {
+                            ui.add_space(skin.style.gap);
+                            tabs(ui);
+                        }
 
                         // The room down to the window's edge — the margin the
                         // card was clamped by, the sheet's own margin and the
@@ -407,5 +436,48 @@ mod tests {
         harness.get_by_label("done").click();
         harness.run();
         assert!(pressed.get(), "the footer must be pressable");
+    }
+
+    /// The tab row is the card's, not the body's: a long body scrolls under it
+    /// and the way to the other panel stays where it was.
+    #[test]
+    fn a_tab_row_stays_above_a_long_body() {
+        let skin = skin();
+        let picked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let sink = picked.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(360.0, 300.0))
+            .build_ui(move |ui| {
+                let tab_skin = skin.clone();
+                let sink = sink.clone();
+                let _ = Card::new(egui::Id::unique("test-tabbed-card"), "tabbed")
+                    .size(420.0, 560.0)
+                    .min(300.0, 200.0)
+                    .tabs(move |ui| {
+                        if crate::tabs(
+                            ui,
+                            &tab_skin,
+                            "test",
+                            false,
+                            &[(false, "one"), (true, "two")],
+                        )
+                        .is_some()
+                        {
+                            sink.set(true);
+                        }
+                    })
+                    .show(ui, &skin, |ui, _inner| {
+                        for line in 0..40 {
+                            ui.label(format!("line {line}"));
+                        }
+                    });
+            });
+        harness.run();
+        // The row is inside the card's top edge and above the first body line.
+        let tab = harness.get_by_label("test two").rect();
+        assert!(tab.min.y < harness.get_by_label("line 0").rect().min.y);
+        harness.get_by_label("test two").click();
+        harness.run();
+        assert!(picked.get(), "a tab row in a card must answer");
     }
 }

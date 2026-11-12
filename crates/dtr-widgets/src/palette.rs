@@ -15,6 +15,11 @@
 //! the numbers are `controls/dev/CommonStyles/Common_themeresources_any.xaml` in
 //! `microsoft/microsoft-ui-xaml`, composited where the XAML leaves them partly
 //! transparent (a control fill is 6 % white in dark mode, not a colour).
+//!
+//! Two more are the same idea for a platform that may be nowhere near the
+//! machine: [`Palette::adwaita`] from libadwaita's stylesheet and [`Palette::egui`]
+//! from egui's own `Visuals`. The first two read the *platform*, and only
+//! `native` uses them; the last two belong to a look the window carries with it.
 
 use egui::Color32;
 
@@ -292,12 +297,93 @@ impl Palette {
         }
     }
 
+    /// egui's own palette, read out of the `Visuals` this build of egui ships.
+    ///
+    /// Asked rather than copied, so the preset cannot drift from the egui the
+    /// rest of the crate is compiled against. The mapping is one slot to one
+    /// field:
+    ///
+    /// - `window` is `panel_fill`, `card` is `window_fill`, `well` is
+    ///   `extreme_bg_color` (the colour egui gives a text edit, and the darkest
+    ///   surface it has);
+    /// - a control is a *weak* fill in egui — a button is `inactive.weak_bg_fill`,
+    ///   while `bg_fill` is the filled box of a checkbox — so the three control
+    ///   states come from `weak_bg_fill` and its hovered and active siblings;
+    /// - `border` is the grey egui draws separators and window edges in
+    ///   (`noninteractive.bg_stroke`), `border_strong` the one it hovers a widget
+    ///   with, and `control_strong` the white one it presses with. egui gives a
+    ///   resting control no stroke at all, and a checkbox whose edge is the fill
+    ///   behind it is one nobody can find;
+    /// - the text slots are `Visuals::text_color`, `weak_text_color` (60 % of it)
+    ///   and `Visuals::disable`;
+    /// - `selection` is egui's own selection, with the colour it writes on it.
+    ///
+    /// The accent is not egui's: egui has no accent, only a selection, so the
+    /// caller supplies one and [`readable_on`] picks the ink for it. `faint_bg_color`
+    /// is deliberately unused — it is `[5, 5, 5, 0]`, a translucent grey meant to
+    /// be *added* to whatever is behind it, and a palette slot has to be a colour.
+    pub fn egui(dark: bool, accent: Color32) -> Self {
+        let visuals = if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        let widgets = &visuals.widgets;
+        let text = visuals.text_color();
+        let card = visuals.window_fill;
+        Self {
+            window: visuals.panel_fill,
+            card,
+            well: visuals.extreme_bg_color,
+            control: widgets.inactive.weak_bg_fill,
+            control_hover: widgets.hovered.weak_bg_fill,
+            control_active: widgets.active.weak_bg_fill,
+            border: widgets.noninteractive.bg_stroke.color,
+            border_strong: widgets.hovered.bg_stroke.color,
+            control_strong: widgets.active.bg_stroke.color,
+            divider: widgets.noninteractive.bg_stroke.color,
+            text,
+            dim: visuals.weak_text_color(),
+            disabled: visuals.disable(text),
+            accent,
+            accent_hover: mix(accent, text, 0.10),
+            accent_active: mix(accent, text, 0.06),
+            on_accent: readable_on(accent),
+            selection: visuals.selection.bg_fill,
+            on_selection: visuals.selection.stroke.color,
+            scrim: Color32::from_black_alpha(140),
+            danger: visuals.error_fg_color,
+            on_danger: Color32::WHITE,
+            // egui has no focus ring (`Focus::None` in its style), so these two
+            // are the values a style that asked for one would use.
+            focus_outer: accent,
+            focus_inner: card,
+        }
+    }
+
     /// Whether the card is dark, which decides egui's `dark_mode` and the
     /// glyph tints that have to follow it.
     pub fn is_dark(&self) -> bool {
         let c = self.card;
         let luma = 0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b());
         luma < 128.0
+    }
+}
+
+/// Black or white, whichever can be read on `accent`.
+///
+/// Adwaita does not do this — libadwaita injects white on every accent, yellow
+/// included, and matching the desktop is the point there (see
+/// [`Palette::adwaita`]). A palette with no platform to match has no such licence,
+/// so the one thing it must not do is draw white on a light yellow.
+pub fn readable_on(accent: Color32) -> Color32 {
+    let luma = 0.299 * f32::from(accent.r())
+        + 0.587 * f32::from(accent.g())
+        + 0.114 * f32::from(accent.b());
+    if luma >= 128.0 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
     }
 }
 
@@ -446,6 +532,8 @@ mod tests {
             Palette::windows(false, Color32::from_rgb(0x00, 0x5F, 0xB8)),
             Palette::adwaita(true, Color32::from_rgb(0x35, 0x84, 0xE4)),
             Palette::adwaita(false, Color32::from_rgb(0x35, 0x84, 0xE4)),
+            Palette::egui(true, Color32::from_rgb(0x5A, 0xAA, 0xFF)),
+            Palette::egui(false, Color32::from_rgb(0x00, 0x9B, 0xFF)),
         ] {
             assert!(
                 distance(palette.control_strong, palette.card)
@@ -518,6 +606,53 @@ mod tests {
                 assert_eq!(Palette::adwaita(dark, accent).on_accent, Color32::WHITE);
             }
         }
+    }
+
+    /// The egui preset is egui's own numbers, asked of the egui that is compiled
+    /// in: a copy of them would be a palette that stops matching the widgets it
+    /// sits beside after a dependency bump.
+    #[test]
+    fn egui_surfaces_are_egui_s_own() {
+        let accent = Color32::from_rgb(0x5A, 0xAA, 0xFF);
+        for (dark, visuals) in [
+            (true, egui::Visuals::dark()),
+            (false, egui::Visuals::light()),
+        ] {
+            let palette = Palette::egui(dark, accent);
+            assert_eq!(palette.window, visuals.panel_fill);
+            assert_eq!(palette.card, visuals.window_fill);
+            assert_eq!(palette.well, visuals.extreme_bg_color);
+            // A button is a weak fill; the box of a checkbox is a strong one, and
+            // using that for every control would make the card a wall of boxes.
+            assert_eq!(palette.control, visuals.widgets.inactive.weak_bg_fill);
+            assert_eq!(palette.control_hover, visuals.widgets.hovered.weak_bg_fill);
+            assert_eq!(palette.text, visuals.text_color());
+            assert_eq!(palette.selection, visuals.selection.bg_fill);
+            assert_eq!(palette.accent, accent, "the caller's accent, not egui's");
+            assert_eq!(palette.is_dark(), dark);
+        }
+    }
+
+    /// The ink on an accent is chosen, not assumed: egui has no accent to have an
+    /// opinion about, and white on a pale yellow is unreadable.
+    #[test]
+    fn the_ink_on_an_accent_is_the_one_that_reads() {
+        // Adwaita's blue and Windows' are dark enough for white.
+        assert_eq!(
+            readable_on(Color32::from_rgb(0x35, 0x84, 0xE4)),
+            Color32::WHITE
+        );
+        assert_eq!(
+            readable_on(Color32::from_rgb(0x20, 0x28, 0x40)),
+            Color32::WHITE
+        );
+        // The pale ones are not.
+        assert_eq!(
+            readable_on(Color32::from_rgb(0xC8, 0x88, 0x00)),
+            Color32::BLACK
+        );
+        assert_eq!(readable_on(Color32::BLACK), Color32::WHITE);
+        assert_eq!(readable_on(Color32::WHITE), Color32::BLACK);
     }
 
     #[test]

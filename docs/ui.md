@@ -46,17 +46,20 @@ So the crate holds one vocabulary, and a surface asks it for a *skin*.
   frames) share the surface with the painted ones. Without that derivation the
   stock widgets keep egui's grey next to a hand-painted card.
 
-## Two presets, and what `native` means
+## Four presets, and what `native` means
 
-`Preset::{Dtr,Native}`; `Skin::resolve(preset, dtr_palette, native)` builds one,
-where the third argument is the platform's answer or `None`. `native` is the
-default — a terminal that has to look like a system window should do so unless
-asked otherwise.
+`Preset::{Native,Adwaita,Windows,Egui}`; `Choice { preset, scheme, accent }` and
+`Choice::skin(dtr_palette, native)` build one, where the second argument is the
+platform's answer or `None`. `native` is the default — a terminal that has to look
+like a system window should do so unless asked otherwise.
 
-- **`dtr`** is the terminal's own chrome: monospace, an 11.5-point label, a
-  23-point row, a 5-point gap, an 82-point label column, radius 4 for a control
-  and 10 for a card, no shadow, hover as the whole affordance. Its colours come
-  from the terminal theme, so the chrome changes when the theme does.
+The four split one way: **`native` asks the machine**, and the other three are
+looks the window carries, so they can be seen and chosen on any platform. That
+split is why only three of them have a scheme and an accent to configure
+(`Preset::owns_its_colours`): `native` takes both from the desktop, along with
+the accent ladder Windows keeps for its own hover shades, and a settings row for
+either would be a control nothing reads.
+
 - **`native` on Windows** is Windows 11's: Windows UI 3's palette (`#F3F3F3`
   window, `#FFFFFF` card, the user's accent), a 32-point control, an 8-point
   gap, a 110-point label column, radius 4 and 8, a shadow of `0 8 24`, and a
@@ -77,20 +80,57 @@ asked otherwise.
   second version would have to read. The portal half sits behind the `portal`
   feature, so a build that will not take zbus's tree falls back to the theme's
   name and never watches.
-- **`native` on macOS** has no reader, so it is the dtr skin for now:
-  `Skin::resolve` takes the platform's skin as an argument and a caller with no
+- **`native` on macOS** has no reader, so it is the terminal's own chrome for now:
+  `Choice::skin` takes the platform's skin as an argument and a caller with no
   answer passes `None`. The constructors are `dtr`, `adwaita`, `windows`,
-  `windows_light` and `windows_dark`; a guess at the macOS look would be worse
-  than saying there is none.
+  `egui`, and the `windows_light`/`windows_dark`/`egui_light`/`egui_dark`
+  shortcuts the preview switch and the tests use; a guess at the macOS look would
+  be worse than saying there is none.
+- **`adwaita` and `windows`** are those same two looks *by name*, painted on any
+  machine. Their palettes and metrics are the ones above — the same constants,
+  the same measurement — and they take the scheme and the accent from the config
+  instead of from a desktop.
+- **`egui`** is egui's own defaults, read out of `egui::Visuals` and
+  `egui::Spacing` at run time rather than copied, so the preset cannot drift from
+  the egui the crate is built against: a 20-point control, a 3-point gap, radius
+  6, the 13-point proportional face, egui's own window shadow. Its palette is
+  `panel_fill`/`window_fill`/`extreme_bg_color` for the three surfaces, the weak
+  fill of a button for a control, the separator grey for a hairline, and its
+  `selection` for a selection. It is also what `widgets = "dtr"` in an old config
+  means: the look the window had before there were four.
 
-The Windows palettes are rendered and snapshot-tested **on Linux** on purpose.
-A look that can only be seen on Windows is a look that is only checked when
-somebody remembers to boot the VM.
+`Skin::dtr` still exists — it is the terminal's own chrome, monospace over the
+theme's colours — but no preset selects it any more. It is what `native` falls
+back to on a machine that cannot say what its own chrome looks like, and it is
+the skin the widget gallery and the older snapshots are drawn in.
+
+The Windows and Adwaita palettes are rendered and snapshot-tested **on Linux** on
+purpose. A look that can only be seen on Windows is a look that is only checked
+when somebody remembers to boot the VM; the same argument is why `--widgets` can
+ask for GNOME's chrome in the Windows guest.
 
 ## Choosing one
 
-`[ui] widgets` in the config file, or `--widgets dtr|native` on the command line,
-which wins over the file. The default is `native`.
+`[ui] widgets` in the config file, or `--widgets native|adwaita|windows|egui` on
+the command line, which wins over the file (and leaves the scheme and the accent
+alone — the flag chooses a look, it does not reset it). The default is `native`,
+and `dtr` is read as an old spelling of `egui`.
+
+Two more keys ride with the look, and both mean something only to the three looks
+that own their colours:
+
+- `scheme = "system" | "light" | "dark"`, default `system`. `system` is the
+  desktop's own answer, which is the one that changes at sunset; the other two are
+  an instruction, for someone who would rather the chrome stayed put. With no
+  desktop answer — no portal, no registry — the terminal theme's own lightness
+  stands in, since a light theme on such a machine is the only hint there is; no
+  hint at all is dark, which is what the built-in theme is.
+- `accent = "#RRGGBB"`, or empty for the look's own. Adwaita's is
+  `--accent-blue` (#3584E4), Windows' is its default (#005FB8 light, #60CDFF
+  dark), egui's is its hyperlink colour (#009BFF / #5AAAFF). The ink drawn on it
+  is chosen by luminance for `egui` — white on anything darker than mid-grey —
+  while Adwaita keeps libadwaita's own white on *every* accent, yellow included,
+  because matching the desktop means matching it.
 
 The Windows read is `crates/dtr/src/system/windows.rs`: `AppsUseLightTheme` under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` for light
@@ -105,7 +145,7 @@ cell that holds whichever one answered. It is read once and kept current;
 `Look::skin()` builds the skin from the terminal theme's colours plus that
 answer, on every frame, because a palette is a few dozen mixes.
 
-`-v` logs a `chrome` event with `skin`, `requested`, `accent`, `hover` and
+`-v` logs a `chrome` event with `skin`, `requested`, `scheme`, `accent`, `hover` and
 `source` — `windows-registry`, `portal`, or `none` — and `reason` when there is
 no skin. That pair is the difference between a preference and an outcome: on a
 GNOME desktop the line now reads `source="portal" skin="adwaita-light"` (or
@@ -127,6 +167,16 @@ the console session, as `docs/windows.md` §2 did for `--capture`.
 That measurement found a bug the unit tests could not: `AccentColor` is under
 `HKCU\Software\Microsoft\Windows\DWM`, not under `...\CurrentVersion\DWM`, and
 a wrong key silently produced WinUI's default blue instead of an error.
+
+**Verified on Xvfb, 2026-11-12**, with `[ui] widgets = "adwaita"`,
+`scheme = "light"`, `accent = "#ED5B00"`:
+
+    chrome skin="adwaita-light" requested="adwaita" scheme="light"
+           accent="#ED5B00" hover="#DA5706" source="portal"
+
+— the two keys reached the skin, and the hover is the accent blended toward the
+text, not the desktop's accent ladder, because there is no system accent to have
+a ladder for.
 
 ## The rule that keeps it from rotting
 
@@ -156,6 +206,15 @@ what makes them testable and what lets a caller `--send` into them.
   width as a floor so a clipped word is never a button.
 - `segmented` — one chip per option; the chosen one is the accent with
   `on_accent` on it, which is what makes "selected" mean one thing everywhere.
+- `tabs` — a row of labels with an accent rule under the current one. Not a
+  `segmented`, although the two look alike: a chip *sets a value*, and a tab
+  *changes which panel is on screen*, so the label stays text, the rule is an
+  underline, the row is exactly `Style::row` tall (the rule lives inside it) and
+  the accessibility role is `Tab` with `Selected` set — which egui does not do
+  for a `WidgetInfo::selected`, since it maps that to *toggled*. A segmented row
+  in a row pinned to the right edge used to draw its options backwards, because
+  `ui.horizontal` inherits the parent's direction; both widgets now ask for
+  left-to-right themselves, so the order a caller passes is the order on screen.
 - `menu_row` — a full-width list entry, with the tick marking the value already
   in the field.
 - `cross`, `cross_at`, `plus` — the icon buttons, drawn from two strokes and
@@ -295,17 +354,47 @@ margin or a header row that moves is a picture before it is a dialog, and
 360×300 window — where the body is clipped, the bar is visible and the `done`
 button is asserted to be inside the sheet and clickable.
 
+**A card may also have tabs**, and they sit between the header and the body for
+the reason the footer sits below it: the way from one panel to another must not
+scroll out of reach either. The card reserves the row it is given, so the sheet's
+height formula is the header plus a tab row plus the *longest* panel's rows plus
+the footer — the longest, because a card that grew when a tab was clicked would
+move its own buttons under the pointer. Settings is the only tabbed card; the
+`tabs` primitive is in the crate so the next one does not invent a second.
+
 ## The settings menu
 
 The settings menu is mouse-first: rows are click targets, font size is a drag value, family
-and theme are combo boxes, toggles are checkboxes. `Settings::ui` takes `&self` — the
+and theme are combo boxes, the look and the scheme are segmented rows, the accent is a hex
+field, and toggles are checkboxes. `Settings::ui` takes `&self` — the
 renderer holds a borrow — so a control *reports* its edit as a `Change` and `Settings::apply`
 writes the draft.
 
 Every control declares an accessible name of the form `<row> value`, not the row name,
 because the row's label already carries the bare name and two nodes with one name cannot be
-addressed from a test. Port rows exist only when a port is focused: baud and CR translation
-belong to one device.
+addressed from a test. (A segmented row is the exception and names each chip `<row> <value>`,
+because each chip names its own value.) Which rows are shown is a filter rather than a
+layout: port rows exist only when a port is focused — baud and CR translation belong to one
+device — and the look's scheme and accent only when the look owns its colours.
+
+**Two tabs, and general comes first.** The sheet outgrew one column: it holds the window's
+look (four presets, a scheme, an accent), the grid's colours and font, and a session's
+serial policy. General is the first tab and the sheet opens on it, so where the rows are
+never moves between openings; `Row::panel` is the one place the split is written, and a row
+that belonged to neither tab is a setting nobody can reach (there is a test for that).
+
+The look row is five chips in the earlier screenshots and four now: `native`, `adwaita`,
+`windows`, `egui`. `dtr` was a fifth, and it was the same thing as `egui` twice — the
+chrome this program draws with egui's own widgets — so the config reads `dtr` as an old
+spelling of `egui` and the menu offers one chip.
+
+The accent is a **hex number, not a colour picker**: egui has no picker, and a terminal
+config file already speaks `#RRGGBB`. The field takes typing and offers the four looks'
+own accents behind its arrow, with `default` first — an empty accent means "the look's
+own", the same way an empty theme means the built-in colours, and that has to be
+*reachable* rather than only reachable by deleting text. A half-typed hex is not a colour:
+the field keeps what was typed, marks itself, and the draft keeps the last thing that
+parsed.
 
 **The card is the keyboard map's kind, with both ways out.** It has the same header (a
 title and a `cross`), the same centered dimmed card, and a footer with `save` (primary) and
@@ -422,7 +511,10 @@ query a widget by accessible label, `.click()`, `harness.run()`, assert what it 
 `UPDATE_SNAPSHOTS=1 cargo test` writes a baseline PNG under `crates/dtr/tests/snapshots/` and
 the plain run compares, with one snapshot per state worth seeing — `tab_bar` and
 `tab_bar_hover` — because a hand-painted hover fill is invisible to every test where the
-pointer is elsewhere.
+pointer is elsewhere. The settings sheet has three, because it is the card with the most
+states: `settings_menu` (the first tab as it opens), `settings_appearance` (a look that owns
+its colours, so the scheme chips and the accent field are there) and `settings_general` (a
+port's rows). `tabs` is the primitive's own gallery picture.
 
 These baselines follow the same LFS rule as the widget gallery — `.gitignore` ignores `*.png`
 with an exception for this directory, and `.gitattributes` sends it through LFS — so a
@@ -440,7 +532,12 @@ disagreeing.
 - The macOS palette. Linux's is no longer a question — `native` there is
   Adwaita read through the portal — so what is left is the platform nobody has
   measured, and a constructor that guesses would be the one thing worse than
-  having none.
+  having none. (`adwaita`, `windows` and `egui` are *not* that guess: they are
+  asked for by name, on any platform.)
+- Whether `native` should accept a scheme override. It takes its scheme from the
+  desktop today, which is what "native" means, but a person whose desktop turns
+  over at sunset may want the chrome to stay put — the setting would be a fourth
+  `scheme` value (`pin`) rather than a hidden override, so the row can say so.
 - Whether the settings menu's four `egui::ComboBox`es should become a painted
   `Combo`: their open rows are `menu_row` already, but the closed control is
   still egui's, so it is the last place a `native` skin stops. `Editable` is
@@ -448,6 +545,9 @@ disagreeing.
   `Edit::Typed` as well as `Edit::Picked`.
 - Where a key hint is drawn: the serial sheet's footer writes `enter connect`
   as text, and nothing paints a keycap yet.
+- What a "general" row could be beyond serial: `terminal.scrollback_limit` is in
+  the config file and the menu does not show it, because it takes effect when a
+  terminal is created and the menu's promise is that everything applies live.
 
 *(A chip and a checkbox sharing one radius was on this list; the answer was no.
 `Style::check_radius` is separate from `chip_radius` because Adwaita rounds a

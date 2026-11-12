@@ -7,6 +7,13 @@
 //!
 //! Everything applies live, per the rule the user set: a serial setting that can
 //! only take effect on reconnect reconnects, and the pane keeps its scrollback.
+//!
+//! The card has two **panels**, because it outgrew one column: appearance is what
+//! the window and the grid look like, general is what a session does. A row
+//! belongs to one panel and says so ([`Row::panel`]), which is also what decides
+//! which rows a panel shows right now — the port's rate and CR translation exist
+//! only while a port is focused, and the chrome's scheme and accent only while the
+//! chrome is one this program paints ([`Row::shown`]).
 
 use dtr_config::Config;
 
@@ -16,33 +23,98 @@ const BAUDS: &[u32] = &[
     9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600,
 ];
 
+/// Which panel of the sheet is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Panel {
+    Appearance,
+    General,
+}
+
+impl Panel {
+    /// In the order the tab row draws them: general first, then appearance.
+    pub const ALL: [Panel; 2] = [Panel::General, Panel::Appearance];
+
+    fn label(self) -> &'static str {
+        match self {
+            Panel::Appearance => "appearance",
+            Panel::General => "general",
+        }
+    }
+
+    /// The rows this panel shows, in the order they read.
+    ///
+    /// Three things decide that order: which panel the row belongs to, whether the
+    /// row describes something that exists right now, and — for the chrome's
+    /// scheme and accent — whether the chosen look has those of its own. A
+    /// `native` window reads both from the desktop, so the rows are not there to
+    /// be filled in.
+    fn rows(self, port: bool, owns_colours: bool) -> Vec<Row> {
+        Row::ALL
+            .into_iter()
+            .filter(|row| row.panel() == self)
+            .filter(|row| row.shown(port, owns_colours))
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Row {
+    Widgets,
+    Scheme,
+    Accent,
+    Theme,
     FontSize,
     FontFamily,
-    Theme,
     Baud,
     CrToCrlf,
     AutoReconnect,
 }
 
 impl Row {
-    /// Rows that describe the terminal itself, always shown.
-    const FILE: [Row; 4] = [
+    const ALL: [Row; 9] = [
+        Row::Widgets,
+        Row::Scheme,
+        Row::Accent,
+        Row::Theme,
         Row::FontSize,
         Row::FontFamily,
-        Row::Theme,
+        Row::Baud,
+        Row::CrToCrlf,
         Row::AutoReconnect,
     ];
-    /// Rows that describe one port, shown only while a serial session has focus:
-    /// a rate for a port that is not open is a number belonging to nothing.
-    const PORT: [Row; 2] = [Row::Baud, Row::CrToCrlf];
+
+    fn panel(self) -> Panel {
+        match self {
+            Row::Widgets
+            | Row::Scheme
+            | Row::Accent
+            | Row::Theme
+            | Row::FontSize
+            | Row::FontFamily => Panel::Appearance,
+            Row::Baud | Row::CrToCrlf | Row::AutoReconnect => Panel::General,
+        }
+    }
+
+    /// Whether the row describes something that exists right now.
+    fn shown(self, port: bool, owns_colours: bool) -> bool {
+        match self {
+            // A rate for a port that is not open is a number belonging to nothing.
+            Row::Baud | Row::CrToCrlf => port,
+            // `native` and `dtr` take their scheme and accent from the desktop and
+            // the terminal theme; a row for either would be a control nothing reads.
+            Row::Scheme | Row::Accent => owns_colours,
+            _ => true,
+        }
+    }
 
     fn label(self) -> &'static str {
         match self {
+            Row::Widgets => "widgets",
+            Row::Scheme => "scheme",
+            Row::Accent => "accent",
+            Row::Theme => "theme",
             Row::FontSize => "size",
             Row::FontFamily => "family",
-            Row::Theme => "theme",
             Row::Baud => "baud",
             Row::CrToCrlf => "cr_to_crlf",
             Row::AutoReconnect => "auto_reconnect",
@@ -51,8 +123,9 @@ impl Row {
 
     fn section(self) -> &'static str {
         match self {
-            Row::FontSize | Row::FontFamily => "font",
+            Row::Widgets | Row::Scheme | Row::Accent => "ui",
             Row::Theme => "",
+            Row::FontSize | Row::FontFamily => "font",
             Row::Baud | Row::CrToCrlf | Row::AutoReconnect => "serial",
         }
     }
@@ -67,12 +140,48 @@ impl Row {
     }
 }
 
+/// The first entry of the accent field's list: not a colour, the absence of one.
+///
+/// An empty field is "whatever the look would use", the same way an empty theme
+/// is the built-in colours, and it has to be *offered* rather than only reached by
+/// deleting text.
+const DEFAULT_ACCENT: &str = "default";
+
+/// The accents the looks ship with, for the field's list.
+///
+/// Asked of the presets rather than written out here, so a look that changes its
+/// default changes this list too. Deduplicated in order: Adwaita's blue and
+/// Windows' light-mode blue are the same colour, and a list with it twice is a
+/// list that looks like a bug.
+fn accent_choices() -> Vec<String> {
+    let mut choices = vec![DEFAULT_ACCENT.to_owned()];
+    for dark in [true, false] {
+        for preset in dtr_widgets::Preset::ALL {
+            let Some(accent) = preset.default_accent(dark) else {
+                continue;
+            };
+            let hex = dtr_config::hex([accent.r(), accent.g(), accent.b()]);
+            if !choices.contains(&hex) {
+                choices.push(hex);
+            }
+        }
+    }
+    choices
+}
+
 /// What a mouse edit in the menu asks for. The menu renders from `&self`, so a
 /// widget reports its edit rather than writing through a borrow the caller
 /// cannot lend it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     Select(usize),
+    /// The tab row: another panel, starting at its first row.
+    Panel(Panel),
+    Widgets(dtr_config::Widgets),
+    Scheme(dtr_config::Scheme),
+    /// The accent field's text, as typed: it may not parse yet, and a half-typed
+    /// hex must stay visible rather than being replaced by the old colour.
+    Accent(String),
     FontSize(f32),
     Family(Option<String>),
     Theme(Option<String>),
@@ -106,6 +215,8 @@ pub enum Reply {
 
 pub struct Settings {
     pub open: bool,
+    /// Which panel is showing, and the row the keyboard is on inside it.
+    panel: Panel,
     row: usize,
     draft: Config,
     /// The focused port's remembered settings, when a serial session has focus.
@@ -116,6 +227,9 @@ pub struct Settings {
     /// Families that passed the probe, loaded once when the menu opens.
     families: Vec<String>,
     themes: Vec<String>,
+    /// The accent field's text, which is what was typed: the draft holds the
+    /// parsed colour, and an empty field means "the look's own".
+    accent_text: String,
     /// What the menu opened with, so Esc can restore it.
     original: Config,
 }
@@ -124,12 +238,14 @@ impl Settings {
     pub fn new() -> Self {
         Self {
             open: false,
+            panel: Panel::Appearance,
             row: 0,
             draft: Config::default(),
             serial: None,
             port: None,
             families: Vec::new(),
             themes: Vec::new(),
+            accent_text: String::new(),
             original: Config::default(),
         }
     }
@@ -142,6 +258,10 @@ impl Settings {
 
     /// Open on `config`, editing `port`'s remembered settings as well when a
     /// serial session has focus.
+    ///
+    /// The sheet opens on the first tab, always: a panel that moved under the
+    /// pointer or under the eye between two openings is a panel nobody learns
+    /// where to find.
     pub fn show_port(
         &mut self,
         config: &Config,
@@ -151,9 +271,18 @@ impl Settings {
         self.port = port;
         self.serial = serial;
         self.open = true;
+        self.panel = Panel::ALL[0];
         self.row = 0;
         self.draft = config.clone();
         self.original = config.clone();
+        // Empty means "the look's own accent", the same as an empty theme meaning
+        // "the built-in colours".
+        self.accent_text = self
+            .draft
+            .ui
+            .accent
+            .map(dtr_config::hex)
+            .unwrap_or_default();
         // Neither list is worth a stall on the click that opened this menu. The
         // family probe is a fontconfig walk (warmed at startup, and started here
         // for a run that got here first) and the theme list a scan of six
@@ -192,23 +321,57 @@ impl Settings {
         &self.draft
     }
 
+    /// Which panel is showing. The sheet draws it; a test asks it.
+    #[cfg(test)]
+    pub fn panel(&self) -> Panel {
+        self.panel
+    }
+
+    /// Whether the chosen look has a scheme and an accent of its own.
+    ///
+    /// Asked of the crate that paints, so the answer to "does `windows` have an
+    /// accent" lives with `windows` rather than here.
+    fn owns_colours(&self) -> bool {
+        crate::ui::Look::choice_of(&self.draft)
+            .preset
+            .owns_its_colours()
+    }
+
     /// The rows this menu shows right now.
     pub fn rows(&self) -> Vec<Row> {
-        let mut rows = Row::FILE.to_vec();
-        if self.serial.is_some() {
-            // Between the terminal settings and the reconnect policy, which is
-            // where they read as a group.
-            for (offset, row) in Row::PORT.iter().enumerate() {
-                rows.insert(3 + offset, *row);
-            }
-        }
-        rows
+        self.panel.rows(self.serial.is_some(), self.owns_colours())
+    }
+
+    /// The rows of every panel, so the card can be as tall as the longest one and
+    /// switching panels does not resize the sheet under the pointer.
+    fn roomiest_rows(&self) -> usize {
+        Panel::ALL
+            .iter()
+            .map(|panel| panel.rows(self.serial.is_some(), self.owns_colours()).len())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Apply one edit from the mouse to the draft.
     pub fn apply(&mut self, change: Change) {
         match change {
             Change::Select(row) => self.row = row,
+            Change::Panel(panel) => {
+                self.panel = panel;
+                self.row = 0;
+            }
+            Change::Widgets(widgets) => self.draft.ui.widgets = widgets,
+            Change::Scheme(scheme) => self.draft.ui.scheme = scheme,
+            Change::Accent(text) => {
+                // A colour that does not parse is a colour being typed: the draft
+                // keeps the last one that did, and the field says so.
+                if text.trim().is_empty() {
+                    self.draft.ui.accent = None;
+                } else if let Some(accent) = dtr_config::parse_hex(&text) {
+                    self.draft.ui.accent = Some(accent);
+                }
+                self.accent_text = text;
+            }
             Change::FontSize(size) => self.draft.font.size = size,
             Change::Family(family) => self.draft.font.family = family,
             Change::Theme(theme) => self.draft.theme = theme,
@@ -224,6 +387,10 @@ impl Settings {
                 }
             }
         }
+        // A row list that just got shorter — `native` hides the scheme and the
+        // accent — must not leave the keyboard past its end.
+        let count = self.rows().len().max(1);
+        self.row = self.row.min(count - 1);
     }
 
     pub fn current_row(&self) -> Row {
@@ -279,6 +446,30 @@ impl Settings {
     /// Move the selected row by one step: +1 forward, -1 back.
     fn nudge(&mut self, step: i32) {
         match self.current_row() {
+            Row::Widgets => {
+                let all = dtr_config::Widgets::ALL;
+                let index = all
+                    .iter()
+                    .position(|widgets| *widgets == self.draft.ui.widgets)
+                    .unwrap_or(0) as i32;
+                let next = (index + step).rem_euclid(all.len() as i32) as usize;
+                self.draft.ui.widgets = all[next];
+            }
+            Row::Scheme => {
+                let all = [
+                    dtr_config::Scheme::System,
+                    dtr_config::Scheme::Light,
+                    dtr_config::Scheme::Dark,
+                ];
+                let index = all
+                    .iter()
+                    .position(|scheme| *scheme == self.draft.ui.scheme)
+                    .unwrap_or(0) as i32;
+                let next = (index + step).rem_euclid(all.len() as i32) as usize;
+                self.draft.ui.scheme = all[next];
+            }
+            // A colour is typed, not cycled: there is no order to step through.
+            Row::Accent => {}
             Row::FontSize => {
                 let next = (self.draft.font.size + step as f32).clamp(6.0, 48.0);
                 self.draft.font.size = next;
@@ -347,6 +538,12 @@ impl Settings {
     #[cfg(test)]
     fn value(&self, row: Row) -> String {
         match row {
+            Row::Widgets => self.draft.ui.widgets.to_string(),
+            Row::Scheme => self.draft.ui.scheme.to_string(),
+            Row::Accent => match self.draft.ui.accent {
+                Some(accent) => dtr_config::hex(accent),
+                None => "the look's own".to_owned(),
+            },
             Row::FontSize => format!("{:.0} pt", self.draft.font.size),
             Row::FontFamily => self
                 .draft
@@ -396,6 +593,18 @@ impl Settings {
             "theme".to_owned(),
             self.draft.theme.clone().unwrap_or_default(),
         ));
+        // The chrome: which look, which scheme, and the accent as `#RRGGBB` or
+        // empty for the look's own.
+        writes.push(("ui.widgets".to_owned(), self.draft.ui.widgets.to_string()));
+        writes.push(("ui.scheme".to_owned(), self.draft.ui.scheme.to_string()));
+        writes.push((
+            "ui.accent".to_owned(),
+            self.draft
+                .ui
+                .accent
+                .map(dtr_config::hex)
+                .unwrap_or_default(),
+        ));
         writes
     }
 }
@@ -411,18 +620,34 @@ impl Settings {
         let skin = look.skin();
         let palette = skin.palette;
         let style = &skin.style;
-        let rows = self.rows().len() as f32;
-        // Header, rows, the hint and the buttons. A fixed height, like the
-        // keyboard map: the card must not resize itself when the serial rows
-        // come and go, or the button under the pointer moves as it is pressed.
-        let height = 52.0 + rows * (style.row + 1.0) + 58.0;
+        // Header, the tab row, the longest panel's rows, the hint and the buttons.
+        // A fixed height, like the keyboard map: the card must not resize itself
+        // when the serial rows come and go or a look hides its scheme, or the
+        // button under the pointer moves as it is pressed. The longest panel is
+        // what it is sized for, so switching tabs moves nothing.
+        let rows = self.roomiest_rows() as f32;
+        let height = 52.0 + (style.row + style.gap) + rows * (style.row + 1.0) + 58.0;
         // The buttons are the card's footer, not the body's last row: the rows
         // above them scroll, and save and cancel must not scroll away with them.
         // A footer writes where its body does, which is why this is a cell.
         let answers = std::cell::RefCell::new(None::<Reply>);
+        // The tab row is above the body for the same reason: the way to the other
+        // panel must not scroll out of reach either.
+        let switched = std::cell::RefCell::new(None::<Panel>);
+        let options: Vec<(Panel, &str)> = Panel::ALL
+            .iter()
+            .map(|panel| (*panel, panel.label()))
+            .collect();
         let out = dtr_widgets::Card::new(egui::Id::new("dtr-settings"), "settings")
             .size(420.0, height)
             .close("close settings")
+            .tabs(|ui| {
+                if let Some(panel) =
+                    dtr_widgets::tabs(ui, &skin, "settings panel", self.panel, &options)
+                {
+                    *switched.borrow_mut() = Some(panel);
+                }
+            })
             .footer(|ui| {
                 // The keyboard still works — Enter and Esc are handled by the
                 // event loop — so the hint names the keys; the buttons are the
@@ -497,7 +722,14 @@ impl Settings {
         if out.close {
             Some(Reply::Cancel)
         } else {
-            answers.into_inner().or(out.body)
+            // The footer's buttons first: they are the way out of the sheet, and a
+            // tab click in the same frame is a change nobody can act on.
+            answers
+                .into_inner()
+                .or(switched
+                    .into_inner()
+                    .map(|panel| Reply::Change(Change::Panel(panel))))
+                .or(out.body)
         }
     }
 
@@ -513,6 +745,58 @@ impl Settings {
         // and two identical names make a control impossible to address.
         let name = format!("{} value", row.key());
         match row {
+            Row::Widgets => {
+                // Five looks, all of them drawn by this program: the two that read
+                // the machine and the three that carry their own colours. A chip
+                // names its own value, so the group is the row's key rather than
+                // the field name a single control would carry.
+                let options: Vec<(dtr_config::Widgets, String)> = dtr_config::Widgets::ALL
+                    .iter()
+                    .map(|widgets| (*widgets, widgets.to_string()))
+                    .collect();
+                let borrowed: Vec<(dtr_config::Widgets, &str)> = options
+                    .iter()
+                    .map(|(widgets, label)| (*widgets, label.as_str()))
+                    .collect();
+                dtr_widgets::segmented(ui, skin, &row.key(), self.draft.ui.widgets, &borrowed)
+                    .map(Change::Widgets)
+            }
+            Row::Scheme => dtr_widgets::segmented(
+                ui,
+                skin,
+                &row.key(),
+                self.draft.ui.scheme,
+                &[
+                    (dtr_config::Scheme::System, "system"),
+                    (dtr_config::Scheme::Light, "light"),
+                    (dtr_config::Scheme::Dark, "dark"),
+                ],
+            )
+            .map(Change::Scheme),
+            Row::Accent => {
+                // A hex number, which is what the config file holds; the arrow
+                // offers the accent every look ships with, so the way back to a
+                // default does not need a code remembered.
+                let valid = self.accent_text.trim().is_empty()
+                    || dtr_config::parse_hex(&self.accent_text).is_some();
+                let choices = accent_choices();
+                let edit = dtr_widgets::Editable::new("ui-accent", &self.accent_text, &name)
+                    .choices_label("accent choices")
+                    .width(140.0)
+                    .valid(valid)
+                    .show(ui, skin, &choices);
+                match edit {
+                    Some(dtr_widgets::Edit::Typed(text)) => Some(Change::Accent(text)),
+                    Some(dtr_widgets::Edit::Picked(label)) => {
+                        Some(Change::Accent(if label == DEFAULT_ACCENT {
+                            String::new()
+                        } else {
+                            label
+                        }))
+                    }
+                    None => None,
+                }
+            }
             Row::FontSize => {
                 // Drag left/right, or click to type. Both are the mouse.
                 let mut size = self.draft.font.size;
@@ -668,8 +952,13 @@ mod tests {
     fn enter_applies_and_escape_restores() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
         let before = settings.draft().font.size;
-        settings.row = 0;
+        settings.row = settings
+            .rows()
+            .iter()
+            .position(|row| *row == Row::FontSize)
+            .unwrap();
         assert!(settings.nudge_test(1));
         assert!(settings.draft().font.size > before);
 
@@ -747,6 +1036,9 @@ mod tests {
         settings.draft.font.size = 17.0;
         settings.draft.font.family = Some("Hack".to_owned());
         settings.draft.theme = Some("kanagawa wave".to_owned());
+        settings.draft.ui.widgets = dtr_config::Widgets::Adwaita;
+        settings.draft.ui.scheme = dtr_config::Scheme::Light;
+        settings.draft.ui.accent = Some([0xED, 0x5B, 0x00]);
         settings.serial = Some(dtr_store::SerialSettings {
             baud: 230_400,
             cr_to_crlf: false,
@@ -771,6 +1063,9 @@ mod tests {
         assert_eq!(parsed.font.size, 17.0);
         assert_eq!(parsed.font.family.as_deref(), Some("Hack"));
         assert_eq!(parsed.theme.as_deref(), Some("kanagawa wave"));
+        assert_eq!(parsed.ui.widgets, dtr_config::Widgets::Adwaita);
+        assert_eq!(parsed.ui.scheme, dtr_config::Scheme::Light);
+        assert_eq!(parsed.ui.accent, Some([0xED, 0x5B, 0x00]));
         assert!(!parsed.serial.auto_reconnect);
     }
 
@@ -796,15 +1091,153 @@ mod tests {
         assert!(keys.contains(&"font.family"));
         assert!(keys.contains(&"theme"));
         assert!(keys.contains(&"serial.auto_reconnect"));
+        assert!(keys.contains(&"ui.widgets"));
+        assert!(keys.contains(&"ui.scheme"));
+        assert!(keys.contains(&"ui.accent"));
         // Every row that lives in the file must have a writer; the serial rate
         // rows live in the store and are covered by `serial_write`.
-        for row in Row::FILE {
+        for row in Row::ALL {
+            if matches!(row, Row::Baud | Row::CrToCrlf) {
+                continue;
+            }
             assert!(
                 keys.contains(&row.key().as_str()),
                 "{} is not written",
                 row.key()
             );
         }
+    }
+
+    /// A panel is a filter over one list of rows, so every row is in exactly one:
+    /// a row in neither is a setting nobody can reach, and a row in both is a row
+    /// drawn twice under two names.
+    #[test]
+    fn every_row_belongs_to_exactly_one_panel() {
+        for row in Row::ALL {
+            let panels: Vec<Panel> = Panel::ALL
+                .into_iter()
+                .filter(|panel| panel.rows(true, true).contains(&row))
+                .collect();
+            assert_eq!(panels, vec![row.panel()], "{} is misplaced", row.key());
+        }
+    }
+
+    /// The sheet opens on the first tab, always: general, whichever session is
+    /// focused, so where the rows are never moves between openings.
+    #[test]
+    fn the_sheet_opens_on_the_first_tab() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(settings.panel(), Panel::General);
+        assert_eq!(
+            settings.rows(),
+            vec![Row::AutoReconnect],
+            "a shell has no port to describe"
+        );
+
+        settings.show_port(
+            &Config::default(),
+            Some("/dev/ttyUSB0".to_owned()),
+            Some(dtr_store::SerialSettings::default()),
+        );
+        assert_eq!(settings.panel(), Panel::General);
+        assert_eq!(
+            settings.rows(),
+            vec![Row::Baud, Row::CrToCrlf, Row::AutoReconnect]
+        );
+
+        // Appearance is where the window is, and it never has a port row.
+        settings.apply(Change::Panel(Panel::Appearance));
+        assert_eq!(
+            settings.rows(),
+            vec![Row::Widgets, Row::Theme, Row::FontSize, Row::FontFamily],
+            "a native shell has no scheme or accent of its own"
+        );
+    }
+
+    /// The port's rows are the port's panel, whatever else is showing: a baud rate
+    /// beside the font size was the one column this split exists to end.
+    #[test]
+    fn the_port_rows_are_on_the_general_panel() {
+        let mut settings = Settings::new();
+        settings.show_port(
+            &Config::default(),
+            Some("/dev/ttyUSB0".to_owned()),
+            Some(dtr_store::SerialSettings::default()),
+        );
+        assert!(!settings.rows().contains(&Row::FontSize));
+        settings.apply(Change::Panel(Panel::Appearance));
+        assert!(!settings.rows().contains(&Row::Baud));
+        assert_eq!(
+            settings.current_row(),
+            Row::Widgets,
+            "a panel starts at its first row"
+        );
+    }
+
+    /// The scheme and the accent exist only for a look that owns them, and the
+    /// keyboard must not be left on a row that just disappeared.
+    #[test]
+    fn the_look_rows_follow_the_look_that_owns_them() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
+        settings.apply(Change::Widgets(dtr_config::Widgets::Adwaita));
+        assert_eq!(
+            settings.rows(),
+            vec![
+                Row::Widgets,
+                Row::Scheme,
+                Row::Accent,
+                Row::Theme,
+                Row::FontSize,
+                Row::FontFamily
+            ]
+        );
+        // Stand on the accent, then ask for the look that has none.
+        settings.row = settings
+            .rows()
+            .iter()
+            .position(|row| *row == Row::Accent)
+            .unwrap();
+        settings.apply(Change::Widgets(dtr_config::Widgets::Native));
+        assert!(!settings.rows().contains(&Row::Accent));
+        assert!(
+            settings.row < settings.rows().len(),
+            "the row index outlived the row"
+        );
+    }
+
+    /// An accent is typed as a hex number, and a half-typed one must not be
+    /// mistaken for a colour: the field keeps what was typed and the draft keeps
+    /// the last thing that parsed.
+    #[test]
+    fn a_half_typed_accent_is_not_a_colour() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.apply(Change::Widgets(dtr_config::Widgets::Adwaita));
+        settings.apply(Change::Accent("#ED5B".to_owned()));
+        assert_eq!(settings.draft().ui.accent, None, "half a hex is not a hex");
+        assert_eq!(settings.accent_text, "#ED5B");
+        settings.apply(Change::Accent("#ED5B00".to_owned()));
+        assert_eq!(settings.draft().ui.accent, Some([0xED, 0x5B, 0x00]));
+        // Empty means the look's own, which is how the list's first entry reads.
+        settings.apply(Change::Accent(String::new()));
+        assert_eq!(settings.draft().ui.accent, None);
+        assert_eq!(settings.value(Row::Accent), "the look's own");
+    }
+
+    /// The accent list is the looks' own defaults, because a way back to a default
+    /// that has to be remembered is not a way back.
+    #[test]
+    fn the_accent_list_offers_the_looks_own_accents() {
+        let choices = accent_choices();
+        assert_eq!(choices.first().map(String::as_str), Some(DEFAULT_ACCENT));
+        assert!(choices.contains(&dtr_config::hex([0x35, 0x84, 0xE4])));
+        let mut unique = choices.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), choices.len(), "a default is listed twice");
     }
 
     impl Settings {
@@ -828,14 +1261,11 @@ mod kittest_tests {
     fn a_shell_menu_has_no_port_rows() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
+        assert_eq!(settings.rows(), vec![Row::AutoReconnect]);
+        settings.apply(Change::Panel(Panel::Appearance));
         assert_eq!(
             settings.rows(),
-            vec![
-                Row::FontSize,
-                Row::FontFamily,
-                Row::Theme,
-                Row::AutoReconnect
-            ]
+            vec![Row::Widgets, Row::Theme, Row::FontSize, Row::FontFamily]
         );
     }
 
@@ -863,6 +1293,7 @@ mod kittest_tests {
     fn picking_a_theme_from_the_combo_box_reports_it() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
         let look = crate::ui::Look::default();
         let change = std::rc::Rc::new(std::cell::RefCell::new(None));
         let sink = change.clone();
@@ -917,6 +1348,7 @@ mod kittest_tests {
 
     /// The rows are drawn and the menu renders: a snapshot catches a row that
     /// moves, a label that disappears, or the highlight landing on the wrong row.
+    /// This is the sheet as it opens, on the first tab.
     #[test]
     fn the_menu_renders() {
         let mut settings = Settings::new();
@@ -930,5 +1362,95 @@ mod kittest_tests {
         });
         harness.run();
         harness.snapshot("settings_menu");
+    }
+
+    /// The appearance panel, with a look that owns its colours: two more rows and
+    /// two more kinds of control — a segmented scheme and an accent field.
+    #[test]
+    fn the_appearance_panel_renders_its_rows() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
+        settings.apply(Change::Widgets(dtr_config::Widgets::Adwaita));
+        settings.apply(Change::Scheme(dtr_config::Scheme::Light));
+        settings.apply(Change::Accent("#ED5B00".to_owned()));
+        let look = crate::ui::Look::default();
+        let mut harness = Harness::new_ui(|ui| {
+            settings.ui(ui, &look);
+        });
+        harness.run();
+        // The rows exist, which is what the snapshot is for; the controls are
+        // addressed by name, which is what a screen reader sees.
+        harness.get_by_label("ui.accent value");
+        harness.snapshot("settings_appearance");
+    }
+
+    /// A port's panel on its own, with the port rows: the sheet a person with a
+    /// serial board open lands on.
+    #[test]
+    fn the_general_panel_renders_its_port_rows() {
+        let mut settings = Settings::new();
+        settings.show_port(
+            &Config::default(),
+            Some("/dev/ttyUSB0".to_owned()),
+            Some(dtr_store::SerialSettings {
+                baud: 115_200,
+                cr_to_crlf: true,
+                ..dtr_store::SerialSettings::default()
+            }),
+        );
+        let look = crate::ui::Look::default();
+        let mut harness = Harness::new_ui(|ui| {
+            settings.ui(ui, &look);
+        });
+        harness.run();
+        harness.get_by_label("serial.baud value");
+        harness.snapshot("settings_general");
+    }
+
+    /// The tabs are tabs: a press on the other one asks for its panel, and the
+    /// current one is marked selected for a screen reader.
+    #[test]
+    fn pressing_a_tab_asks_for_that_panel() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        let look = crate::ui::Look::default();
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = asked.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            if let Some(reply) = settings.ui(ui, &look) {
+                *sink.borrow_mut() = Some(reply);
+            }
+        });
+        harness.run();
+        harness.get_by_label("settings panel appearance").click();
+        harness.run();
+        assert_eq!(
+            *asked.borrow(),
+            Some(Reply::Change(Change::Panel(Panel::Appearance)))
+        );
+    }
+
+    /// The look is a segmented row of four, and a press on one of them reports it.
+    #[test]
+    fn picking_a_look_reports_it() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        settings.apply(Change::Panel(Panel::Appearance));
+        let look = crate::ui::Look::default();
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let sink = asked.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            if let Some(reply) = settings.ui(ui, &look) {
+                *sink.borrow_mut() = Some(reply);
+            }
+        });
+        harness.run();
+        harness.get_by_label("ui.widgets windows").click();
+        harness.run();
+        assert_eq!(
+            *asked.borrow(),
+            Some(Reply::Change(Change::Widgets(dtr_config::Widgets::Windows)))
+        );
     }
 }

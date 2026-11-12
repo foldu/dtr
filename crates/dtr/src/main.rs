@@ -102,8 +102,10 @@ struct Args {
     #[arg(long, value_name = "TEXT")]
     gpu: Option<String>,
 
-    /// What the controls look like: "native" (the platform's own) or "dtr".
-    /// Overrides `[ui] widgets` in the config.
+    /// What the controls look like: "native" (the platform's own), "adwaita",
+    /// "windows" or "egui" ("dtr" is an old spelling of "egui"). Overrides
+    /// `[ui] widgets` in the config; the scheme and the accent still come from the
+    /// file.
     #[arg(long, value_name = "STYLE")]
     widgets: Option<String>,
 
@@ -541,23 +543,29 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let preset = match args.widgets.as_deref() {
-        Some("dtr") => dtr_widgets::Preset::Dtr,
-        Some("native") => dtr_widgets::Preset::Native,
-        Some(other) => {
-            anyhow::bail!("--widgets is {other:?}; it must be \"dtr\" or \"native\"")
-        }
-        None => match config.ui.widgets {
-            dtr_config::Widgets::Dtr => dtr_widgets::Preset::Dtr,
-            dtr_config::Widgets::Native => dtr_widgets::Preset::Native,
-        },
-    };
+    // `--widgets` names the same five looks the config's `[ui] widgets` does, and
+    // the parser is the crate's, so the flag and the file cannot disagree about
+    // what a look is called. The scheme and the accent still come from the file:
+    // the flag chooses a look, it does not reset it.
+    let mut choice = ui::Look::choice_of(&config);
+    if let Some(name) = args.widgets.as_deref() {
+        choice.preset = dtr_widgets::Preset::parse(name).ok_or_else(|| {
+            let names: Vec<&str> = dtr_widgets::Preset::ALL
+                .iter()
+                .map(|preset| preset.as_str())
+                .collect();
+            anyhow::anyhow!(
+                "--widgets is {name:?}; it must be one of {}",
+                names.join(", ")
+            )
+        })?;
+    }
     let mut look = ui::Look::themed(
         config.font.size,
         config.font.family.clone(),
         config.font.path.clone(),
         theme.as_ref(),
-        preset,
+        choice,
     );
     let skin = look.skin();
     // Where the platform's answer came from, and why there is none where there is
@@ -571,7 +579,8 @@ fn main() -> anyhow::Result<()> {
     match &native.reason {
         Some(reason) => tracing::debug!(
             skin = crate::system::describe(&skin),
-            requested = look.preset.as_str(),
+            requested = look.choice.preset.as_str(),
+            scheme = look.choice.scheme.as_str(),
             accent = crate::system::accent_hex(&skin),
             hover = ?hover,
             source = native.source,
@@ -580,7 +589,8 @@ fn main() -> anyhow::Result<()> {
         ),
         None => tracing::debug!(
             skin = crate::system::describe(&skin),
-            requested = look.preset.as_str(),
+            requested = look.choice.preset.as_str(),
+            scheme = look.choice.scheme.as_str(),
             accent = crate::system::accent_hex(&skin),
             hover = ?hover,
             source = native.source,

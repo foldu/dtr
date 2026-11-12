@@ -16,7 +16,7 @@
 use egui::{Color32, Context, CornerRadius, Stroke, TextStyle};
 
 use crate::palette::Palette;
-use crate::style::{Preset, Style};
+use crate::style::{Preset, Scheme, Style};
 
 /// Windows 11's default accent, light and dark.
 ///
@@ -33,6 +33,12 @@ pub const WINDOWS_ACCENT_DARK: Color32 = Color32::from_rgb(0x60, 0xCD, 0xFF);
 /// blue rather than "whatever the theme's cursor was".
 pub const ADWAITA_ACCENT: Color32 = Color32::from_rgb(0x35, 0x84, 0xE4);
 
+/// egui's accent, which is really its hyperlink colour: egui has no accent of
+/// its own, and a link is the one thing it draws in a colour that means "act on
+/// me". Two values, because egui has two.
+pub const EGUI_ACCENT_DARK: Color32 = Color32::from_rgb(0x5A, 0xAA, 0xFF);
+pub const EGUI_ACCENT_LIGHT: Color32 = Color32::from_rgb(0x00, 0x9B, 0xFF);
+
 /// Which platform's chrome a skin is.
 ///
 /// Stored rather than inferred. `-v` used to guess from the style — a monospace
@@ -45,6 +51,7 @@ pub enum Origin {
     Dtr,
     Windows,
     Adwaita,
+    Egui,
 }
 
 /// Everything a widget draws with.
@@ -59,6 +66,11 @@ pub struct Skin {
 
 impl Skin {
     /// The terminal's own chrome, over whatever palette the theme produced.
+    ///
+    /// No preset selects this any more — the menu's fourth look is
+    /// [`Skin::egui`] — but it is what `native` falls back to on a machine that
+    /// cannot say what its own chrome looks like, and it is the skin dtr's own
+    /// snapshots are drawn in.
     pub fn dtr(palette: Palette) -> Self {
         Self {
             palette,
@@ -103,17 +115,22 @@ impl Skin {
         Self::windows(true, WINDOWS_ACCENT_DARK)
     }
 
-    /// The skin a preset names.
-    ///
-    /// `native` is the platform's own when the caller could read one, and the
-    /// dtr skin otherwise. The reading lives in the caller rather than here
-    /// because it is platform code — the Windows registry, the XDG portal — and
-    /// this crate stays free of I/O.
-    pub fn resolve(preset: Preset, dtr: Palette, native: Option<Self>) -> Self {
-        match preset {
-            Preset::Dtr => Self::dtr(dtr),
-            Preset::Native => native.unwrap_or_else(|| Self::dtr(dtr)),
+    /// egui's own look: its greys, its metrics, its shadow.
+    pub fn egui(dark: bool, accent: Color32) -> Self {
+        Self {
+            palette: Palette::egui(dark, accent),
+            style: Style::egui(),
+            origin: Origin::Egui,
         }
+    }
+
+    /// egui's look with egui's own accent, for the preview switch and a test.
+    pub fn egui_light() -> Self {
+        Self::egui(false, EGUI_ACCENT_LIGHT)
+    }
+
+    pub fn egui_dark() -> Self {
+        Self::egui(true, EGUI_ACCENT_DARK)
     }
 
     /// Which of egui's two styles this skin belongs to. egui keeps a dark and a
@@ -244,6 +261,66 @@ impl Skin {
     }
 }
 
+/// What the window was asked to look like: a preset, a scheme, and an accent.
+///
+/// The three travel together because they are one answer — `adwaita` in the light
+/// with the user's orange is a different window from `adwaita` in the dark with
+/// its own blue, and a caller that resolved them separately would be a caller
+/// that resolved them inconsistently.
+///
+/// Only [`Preset::owns_its_colours`] reads the scheme and the accent; the other
+/// two take theirs from where they come from. See [`Choice::skin`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Choice {
+    pub preset: Preset,
+    pub scheme: Scheme,
+    /// `None` keeps the preset's own default, so a window that never opened the
+    /// settings menu keeps following a future default rather than the value of
+    /// the day it was first saved.
+    pub accent: Option<Color32>,
+}
+
+impl Choice {
+    pub fn new(preset: Preset) -> Self {
+        Self {
+            preset,
+            ..Self::default()
+        }
+    }
+
+    /// The skin this asks for.
+    ///
+    /// `native` is the platform's skin, falling back to the terminal's own
+    /// (`Skin::dtr`) where this machine has no answer; it takes its scheme and
+    /// accent from the platform, which is why it does not read this `Choice`'s.
+    ///
+    /// `system`, for the other three, is the platform's dark flag; where the
+    /// platform says nothing, the terminal theme's own lightness stands in, since
+    /// a light theme on a machine with no portal is the one hint there is. No hint
+    /// at all is dark, which is what the built-in theme is.
+    pub fn skin(&self, dtr: Palette, native: Option<Skin>) -> Skin {
+        match self.preset {
+            Preset::Native => native.unwrap_or_else(|| Skin::dtr(dtr)),
+            preset => {
+                let system = native
+                    .as_ref()
+                    .map_or_else(|| dtr.is_dark(), |skin| skin.palette.is_dark());
+                let dark = self.scheme.dark(system);
+                let accent = self
+                    .accent
+                    .or_else(|| preset.default_accent(dark))
+                    .unwrap_or(ADWAITA_ACCENT);
+                match preset {
+                    Preset::Adwaita => Skin::adwaita(dark, accent),
+                    Preset::Windows => Skin::windows(dark, accent),
+                    // `owns_its_colours` and the arm above leave egui.
+                    _ => Skin::egui(dark, accent),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,38 +377,126 @@ mod tests {
         );
     }
 
-    /// Without a system palette, `native` is the dtr style — the decision, not a
-    /// silent failure.
+    /// Without a system palette, `native` is the terminal's own chrome — the
+    /// decision, not a silent failure.
     #[test]
-    fn native_falls_back_to_dtr_where_there_is_no_system_palette() {
+    fn native_falls_back_to_the_terminals_own_chrome() {
         assert_eq!(
-            Skin::resolve(Preset::Native, dtr_palette(), None),
+            Choice::new(Preset::Native).skin(dtr_palette(), None),
             Skin::dtr(dtr_palette())
         );
+        // ...and a look asked for by name never falls back: it is painted here.
         assert_eq!(
-            Skin::resolve(Preset::Dtr, dtr_palette(), None),
-            Skin::dtr(dtr_palette())
+            Choice::new(Preset::Egui).skin(dtr_palette(), None),
+            Skin::egui(true, crate::skin::EGUI_ACCENT_DARK)
         );
     }
 
     /// A preset is a request, not a promise: `native` uses the system skin when
-    /// there is one and `dtr` never does, even then.
+    /// there is one and a look asked for by name never does, even then.
     #[test]
     fn the_system_skin_is_used_by_native_alone() {
         // Both platforms' skins, because "the system skin" is not a Windows idea:
-        // on a GNOME desktop it is Adwaita's, and `resolve` does not care which.
+        // on a GNOME desktop it is Adwaita's, and the choice does not care which.
         for system in [
             Skin::windows_dark(),
             Skin::adwaita(true, crate::skin::ADWAITA_ACCENT),
         ] {
             assert_eq!(
-                Skin::resolve(Preset::Native, dtr_palette(), Some(system.clone())),
+                Choice::new(Preset::Native).skin(dtr_palette(), Some(system.clone())),
                 system
             );
             assert_eq!(
-                Skin::resolve(Preset::Dtr, dtr_palette(), Some(system)),
-                Skin::dtr(dtr_palette())
+                Choice::new(Preset::Egui).skin(dtr_palette(), Some(system)),
+                Skin::egui_dark()
             );
+        }
+    }
+
+    /// The three painted looks are one `Choice` away from each other, and each
+    /// reads the choice's own scheme and accent: `native` ignores both, which is
+    /// the line between a look and a source.
+    #[test]
+    fn a_painted_look_takes_the_chosen_scheme_and_accent() {
+        let orange = Color32::from_rgb(0xED, 0x5B, 0x00);
+        let dark_system = Some(Skin::adwaita(true, crate::skin::ADWAITA_ACCENT));
+        for preset in [Preset::Adwaita, Preset::Windows, Preset::Egui] {
+            let choice = Choice {
+                preset,
+                scheme: Scheme::Light,
+                accent: Some(orange),
+            };
+            let skin = choice.skin(dtr_palette(), dark_system.clone());
+            assert_eq!(skin.palette.accent, orange);
+            assert!(!skin.palette.is_dark(), "{preset:?} ignored `light`");
+
+            // `system` follows the desktop it was handed, not the terminal theme.
+            let system = Choice {
+                scheme: Scheme::System,
+                accent: None,
+                ..choice
+            }
+            .skin(dtr_palette(), dark_system.clone());
+            assert!(system.palette.is_dark(), "{preset:?} ignored the desktop");
+            // ...and without a desktop answer, the theme's own lightness stands in.
+            let themeless = Choice {
+                scheme: Scheme::System,
+                accent: None,
+                ..choice
+            }
+            .skin(
+                Palette::dtr([0xfa, 0xfa, 0xfb], [0x20, 0x20, 0x20], [0x35, 0x84, 0xe4]),
+                None,
+            );
+            assert!(!themeless.palette.is_dark(), "{preset:?} ignored the theme");
+        }
+
+        // The two sources keep their own answers whatever the choice says.
+        let shouted = Choice {
+            preset: Preset::Native,
+            scheme: Scheme::Light,
+            accent: Some(orange),
+        };
+        assert_eq!(
+            shouted.skin(dtr_palette(), dark_system),
+            Skin::adwaita(true, crate::skin::ADWAITA_ACCENT)
+        );
+    }
+
+    /// A preset with no accent chosen draws its own, per scheme — so the settings
+    /// menu can show the value a save would keep.
+    #[test]
+    fn an_unchosen_accent_is_the_presets_own() {
+        assert_eq!(
+            Preset::Adwaita.default_accent(true),
+            Some(crate::skin::ADWAITA_ACCENT)
+        );
+        assert_eq!(
+            Preset::Windows.default_accent(false),
+            Some(crate::skin::WINDOWS_ACCENT_LIGHT)
+        );
+        assert_eq!(
+            Preset::Windows.default_accent(true),
+            Some(crate::skin::WINDOWS_ACCENT_DARK)
+        );
+        assert_eq!(
+            Preset::Egui.default_accent(false),
+            Some(crate::skin::EGUI_ACCENT_LIGHT)
+        );
+        assert_eq!(Preset::Native.default_accent(true), None);
+        // What a choice with no accent gets, per preset.
+        for (preset, dark) in [
+            (Preset::Adwaita, true),
+            (Preset::Windows, false),
+            (Preset::Egui, true),
+        ] {
+            let skin = Choice {
+                preset,
+                scheme: if dark { Scheme::Dark } else { Scheme::Light },
+                accent: None,
+            }
+            .skin(dtr_palette(), None);
+            assert_eq!(skin.palette.accent, preset.default_accent(dark).unwrap());
         }
     }
 
@@ -346,5 +511,7 @@ mod tests {
             Skin::adwaita(false, crate::skin::ADWAITA_ACCENT).origin,
             Origin::Adwaita
         );
+        assert_eq!(Skin::egui_dark().origin, Origin::Egui);
+        assert_eq!(Skin::egui_light().origin, Origin::Egui);
     }
 }

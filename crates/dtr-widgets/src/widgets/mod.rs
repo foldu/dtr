@@ -26,6 +26,7 @@ mod combo;
 mod icons;
 mod menu;
 mod segmented;
+mod tabs;
 
 pub use block::{label_cell, row, section};
 pub use button::Button;
@@ -35,6 +36,7 @@ pub use combo::{Edit, Editable};
 pub use icons::{cross, cross_at, plus};
 pub use menu::menu_row;
 pub use segmented::segmented;
+pub use tabs::tabs;
 
 /// Make a response pointer-only, so its `clicked()` cannot have come from Enter.
 ///

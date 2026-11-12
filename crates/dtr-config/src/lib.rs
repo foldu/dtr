@@ -112,14 +112,22 @@ impl fmt::Display for Chrome {
 
 /// What the chrome's controls are drawn as.
 ///
-/// `Native` is the platform's own look — the system palette and Windows 11's
-/// metrics — and `Dtr` is the terminal's: monospace, tighter, accent-lit. On a
-/// machine with no system palette `native` resolves to the dtr skin, so this is a
-/// preference, not a guarantee.
+/// `Native` is the platform's own look — the system palette, its scheme and the
+/// user's accent — and falls back to the terminal's own chrome where a machine
+/// cannot say. `Adwaita`, `Windows` and `Egui` are looks the program carries with
+/// it, so a person on Linux can have Windows' chrome and a person on Windows can
+/// have GNOME's; they are the three with a scheme and an accent of their own,
+/// because `native` reads both from the desktop.
+///
+/// `"dtr"` is accepted as an old spelling of `"egui"`: the fourth look is what this
+/// program's chrome used to be called, and a config file written before the menu
+/// existed keeps working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Widgets {
-    Dtr,
     Native,
+    Adwaita,
+    Windows,
+    Egui,
 }
 
 impl Default for Widgets {
@@ -131,8 +139,42 @@ impl Default for Widgets {
 impl fmt::Display for Widgets {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Dtr => "dtr",
             Self::Native => "native",
+            Self::Adwaita => "adwaita",
+            Self::Windows => "windows",
+            Self::Egui => "egui",
+        })
+    }
+}
+
+impl Widgets {
+    pub const ALL: [Widgets; 4] = [
+        Widgets::Native,
+        Widgets::Adwaita,
+        Widgets::Windows,
+        Widgets::Egui,
+    ];
+}
+
+/// Which scheme the chrome draws in.
+///
+/// `System` is the desktop's answer, and the default: a chrome that follows the
+/// desktop is the one that matches every other window at sunset. `Light` and
+/// `Dark` are an instruction, for someone who would rather the chrome stayed put.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl fmt::Display for Scheme {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
         })
     }
 }
@@ -141,14 +183,41 @@ impl fmt::Display for Widgets {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ui {
     pub widgets: Widgets,
+    /// The scheme, for the looks that own one. `native` and `dtr` ignore it.
+    pub scheme: Scheme,
+    /// The accent as `#RRGGBB`, for the looks that own one. `None` keeps the
+    /// preset's own default, so a window that never set one still follows a
+    /// future default rather than the value of the day it was first saved.
+    pub accent: Option<[u8; 3]>,
 }
 
 impl Default for Ui {
     fn default() -> Self {
         Self {
             widgets: Widgets::default(),
+            scheme: Scheme::default(),
+            accent: None,
         }
     }
+}
+
+/// A colour as `#RRGGBB`, which is what the config file holds and the settings
+/// menu shows.
+pub fn hex(colour: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", colour[0], colour[1], colour[2])
+}
+
+/// Parse `#RRGGBB` or `RRGGBB`, the two spellings a person types.
+///
+/// A three-digit `#RGB` is not accepted: the value is written back by the settings
+/// menu, and a short form that came back long is a line the user did not write.
+pub fn parse_hex(text: &str) -> Option<[u8; 3]> {
+    let digits = text.trim().strip_prefix('#').unwrap_or(text.trim());
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?])
 }
 
 impl Default for Config {
@@ -272,13 +341,48 @@ impl Config {
                     .as_str()
                     .ok_or_else(|| Error::Value("ui.widgets must be a string".into()))?;
                 config.ui.widgets = match text {
-                    "dtr" => Widgets::Dtr,
                     "native" => Widgets::Native,
+                    "adwaita" => Widgets::Adwaita,
+                    "windows" => Widgets::Windows,
+                    // The fourth look's old name: one thing, two spellings.
+                    "egui" | "dtr" => Widgets::Egui,
                     other => {
                         return Err(Error::Value(format!(
-                            "ui.widgets is {other:?}; it must be \"dtr\" or \"native\""
+                            "ui.widgets is {other:?}; it must be one of \
+                             \"native\", \"adwaita\", \"windows\" or \"egui\""
                         )));
                     }
+                };
+            }
+            if let Some(scheme) = ui.get("scheme") {
+                let text = scheme
+                    .as_str()
+                    .ok_or_else(|| Error::Value("ui.scheme must be a string".into()))?;
+                config.ui.scheme = match text {
+                    "system" | "" => Scheme::System,
+                    "light" => Scheme::Light,
+                    "dark" => Scheme::Dark,
+                    other => {
+                        return Err(Error::Value(format!(
+                            "ui.scheme is {other:?}; it must be \"system\", \"light\" or \"dark\""
+                        )));
+                    }
+                };
+            }
+            if let Some(accent) = ui.get("accent") {
+                let text = accent
+                    .as_str()
+                    .ok_or_else(|| Error::Value("ui.accent must be a string".into()))?;
+                // The settings menu writes an empty string to mean "the preset's
+                // own", the same way it writes "no theme".
+                config.ui.accent = if text.is_empty() {
+                    None
+                } else {
+                    Some(parse_hex(text).ok_or_else(|| {
+                        Error::Value(format!(
+                            "ui.accent is {text:?}; it must be a colour like \"#3584E4\""
+                        ))
+                    })?)
                 };
             }
         }
@@ -478,7 +582,10 @@ fn keep_decor(existing: &Item, item: &mut Item) {
 }
 
 /// The shipped default file, written when the user asks for one.
-pub const TEMPLATE: &str = r#"# dtr configuration.
+///
+/// `r##` rather than `r#`: the accent's own example is a quoted `#RRGGBB`, and a
+/// `"#` inside an `r#"` string ends it.
+pub const TEMPLATE: &str = r##"# dtr configuration.
 #
 # Every value here is optional; the defaults are shown. Edit this file by hand
 # or with `dtr config set <section.key> <value>`, which keeps your comments.
@@ -502,10 +609,19 @@ chrome = "client"
 
 [ui]
 # What the chrome's controls look like. "native" is the platform's own — the
-# system palette, Windows 11's metrics — and is the default; "dtr" is the
-# terminal's: monospace labels, tighter rows, the theme's accent. On a machine
-# with no system palette (Linux) "native" is the dtr style anyway.
+# system palette, its scheme, the user's accent — and is the default; on a machine
+# with no system palette it is the terminal's own chrome instead. "adwaita",
+# "windows" and "egui" are looks dtr carries with it, so a person on Linux can
+# have Windows' chrome and a person on Windows can have GNOME's. "dtr" is an old
+# spelling of "egui" and still reads as it.
 widgets = "native"
+# The scheme those three draw in: "system" (the default) follows the desktop,
+# "light" and "dark" are an instruction. "native" ignores it — its scheme is the
+# desktop's.
+scheme = "system"
+# The accent those three draw with, as #RRGGBB. Leave it empty (or out) to keep
+# the look's own: Adwaita's blue, Windows' accent, egui's link colour.
+# accent = "#3584E4"
 
 [terminal]
 # Bytes of scrollback a tab keeps before the oldest pages are dropped. There is
@@ -532,7 +648,7 @@ size = 14
 # family = "JetBrains Mono"
 # Path to a .ttf/.otf to use instead of the embedded font.
 # path = "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"
-"#;
+"##;
 
 #[derive(Debug)]
 pub enum Error {
@@ -681,23 +797,86 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
     #[test]
     fn the_controls_are_native_unless_asked_otherwise() {
         assert_eq!(Config::default().ui.widgets, super::Widgets::Native);
+        assert_eq!(Config::default().ui.scheme, super::Scheme::System);
+        assert_eq!(Config::default().ui.accent, None);
+        for widgets in super::Widgets::ALL {
+            let text = format!("[ui]\nwidgets = \"{widgets}\"\n");
+            assert_eq!(
+                Config::parse(&text).unwrap().ui.widgets,
+                widgets,
+                "{widgets} did not survive the round trip"
+            );
+        }
+        // The fourth look's old name is the same look, not a fifth one.
         assert_eq!(
             Config::parse("[ui]\nwidgets = \"dtr\"\n")
                 .unwrap()
                 .ui
                 .widgets,
-            super::Widgets::Dtr
+            super::Widgets::Egui
         );
     }
 
+    /// A wrong value names the key and every value it could have been: a file the
+    /// terminal refused is a file a person has to fix, and "invalid" is not a fix.
     #[test]
     fn a_wrong_widget_style_names_the_key_and_the_values() {
         let error = Config::parse("[ui]\nwidgets = \"fancy\"\n")
             .unwrap_err()
             .to_string();
         assert!(error.contains("ui.widgets"), "{error}");
-        assert!(error.contains("native"), "{error}");
-        assert!(error.contains("dtr"), "{error}");
+        for name in ["native", "adwaita", "windows", "egui"] {
+            assert!(error.contains(name), "{name} missing from {error}");
+        }
+    }
+
+    /// The scheme is one of three answers, and an absent key is "the desktop's" —
+    /// the one value a file expresses by leaving the line out, because that is
+    /// what it already means.
+    #[test]
+    fn the_scheme_is_system_light_or_dark() {
+        for (text, expected) in [
+            ("system", super::Scheme::System),
+            ("light", super::Scheme::Light),
+            ("dark", super::Scheme::Dark),
+            ("", super::Scheme::System),
+        ] {
+            let file = format!("[ui]\nscheme = \"{text}\"\n");
+            assert_eq!(Config::parse(&file).unwrap().ui.scheme, expected);
+        }
+        let error = Config::parse("[ui]\nscheme = \"sepia\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ui.scheme"), "{error}");
+        assert!(error.contains("dark"), "{error}");
+    }
+
+    /// An accent is `#RRGGBB`, written either way, and an empty string is "the
+    /// look's own" — the same spelling the theme key uses for "none".
+    #[test]
+    fn an_accent_is_a_hex_colour_or_nothing() {
+        for text in ["#3584E4", "3584e4", " #3584E4 "] {
+            let file = format!("[ui]\naccent = \"{text}\"\n");
+            assert_eq!(
+                Config::parse(&file).unwrap().ui.accent,
+                Some([0x35, 0x84, 0xE4]),
+                "{text:?} did not parse"
+            );
+        }
+        assert_eq!(
+            Config::parse("[ui]\naccent = \"\"\n").unwrap().ui.accent,
+            None
+        );
+        for bad in ["#358", "blue", "#3584E", "#GGGGGG"] {
+            let file = format!("[ui]\naccent = \"{bad}\"\n");
+            let error = Config::parse(&file).unwrap_err().to_string();
+            assert!(error.contains("ui.accent"), "{bad:?}: {error}");
+        }
+        assert_eq!(
+            super::hex([0x35, 0x84, 0xE4]),
+            "#3584E4",
+            "the writer's spelling must be the reader's"
+        );
     }
 
     #[test]

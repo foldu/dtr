@@ -2883,6 +2883,9 @@ impl App {
         self.look.size = self.config.font.size;
         self.look.family = self.config.font.family.clone();
         self.look.fallback = self.config.font.fallback.clone();
+        // The look, its scheme and its accent are the draft's now: the skin is
+        // derived per frame from these, so the next frame is the new chrome.
+        self.look.choice = crate::ui::Look::choice_of(&self.config);
 
         if theme_changed {
             let theme = self
@@ -2895,7 +2898,7 @@ impl App {
                 self.look.family.clone(),
                 self.look.path.clone(),
                 theme.as_ref(),
-                self.look.preset,
+                self.look.choice,
             );
             self.theme = theme.clone();
             for tab in &mut self.tabs {
@@ -3789,7 +3792,7 @@ impl App {
                         self.look.family.clone(),
                         self.look.path.clone(),
                         Some(&theme),
-                        self.look.preset,
+                        self.look.choice,
                     );
                     let tab = &mut self.tabs[self.active];
                     for pane in tab.leaves.values_mut() {
