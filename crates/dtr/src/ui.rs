@@ -470,14 +470,9 @@ pub fn app_menu(
     let button = response.rect;
     let mut popup = egui::Popup::menu(&response).width(180.0);
     if let Some(tip) = skin.style.tip_height {
-        // A beak needs two things the other looks do not. Room: the body stands a
-        // beak's height off the button, so the beak fills the space between them
-        // rather than being drawn over the button. And the middle: a beak cannot
-        // sit on a rounded corner, so a body hanging off the button's edge would
-        // drag its beak inwards and point at nothing in particular — GNOME moves
-        // the popover, not the beak, and egui falls back to an edge alignment
-        // when a centred menu would not fit.
-        popup = popup.align(egui::RectAlign::BOTTOM).gap(tip);
+        // A body hung off the button's edge cannot point its beak at the middle of
+        // the button, and a beak is the whole reason the body is where it is.
+        popup = dtr_widgets::point_at(ui, popup, button, tip);
     }
     let popup = popup.show(|ui| {
         ui.set_min_width(180.0);
@@ -724,10 +719,11 @@ pub fn tab_bar(
         );
         let mut popup = egui::Popup::menu(&response);
         if let Some(tip) = skin.style.tip_height {
-            // Centred under the `+` and a beak's height clear of it, for the same
-            // reasons as the app menu: the beak belongs in the space between the
-            // two, pointing at the middle of the button.
-            popup = popup.align(egui::RectAlign::BOTTOM).gap(tip);
+            // Aimed at the `+` for the same reason as the app menu — and this is
+            // the menu that needs it: 600 points wide, with the `+` close enough
+            // to the window's left edge that a body centred on the button is
+            // pushed back, which is when a beak hung off the edge loses the plot.
+            popup = dtr_widgets::point_at(ui, popup, response.rect, tip);
         }
         let menu = popup.show(|ui| {
             ui.set_min_width(220.0);
@@ -1418,6 +1414,34 @@ mod kittest_tests {
         harness.get_by_label("menu").click();
         harness.run_steps(3);
         harness.snapshot("app_menu_adwaita");
+    }
+
+    /// The `+`'s menu in Adwaita's look, with a serial port whose line is long
+    /// enough to make the body wider than the space beside the `+`. The body is
+    /// pushed back to the window's edge — and the beak still lands on the middle
+    /// of the `+`, which is the thing a body hung off the button's edge could not
+    /// do: it was drawn 20 points to the right of it.
+    #[test]
+    fn the_new_tab_menu_renders_in_the_adwaita_skin() {
+        use crate::sources::Destination;
+
+        let look = Look {
+            choice: dtr_widgets::Choice::new(dtr_widgets::Preset::Adwaita),
+            ..Look::default()
+        };
+        let labels = vec!["demo".to_owned()];
+        let destinations = vec![Destination::Serial {
+            path: "/dev/ttyUSB0".to_owned(),
+            detail: "Dual RS232-HS - FTDI - 0403:6010".to_owned(),
+        }];
+        let mut harness = Harness::new_ui(move |ui| {
+            look.skin().apply(ui.ctx());
+            let _ = tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT, &[]);
+        });
+        harness.run_steps(2);
+        harness.get_by_label("new tab").click();
+        harness.run_steps(3);
+        harness.snapshot("new_tab_menu_adwaita");
     }
 
     /// Every embedded image has a decoder behind it.

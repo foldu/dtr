@@ -9,7 +9,8 @@
 //! than the choice it is trying to show.
 //!
 //! [`menu_tip`] is the other half of a popover: the triangle pointing back at the
-//! control that opened it.
+//! control that opened it, and [`point_at`] is where the body goes so the tip can
+//! point at its middle.
 
 use egui::{Sense, Ui};
 
@@ -123,6 +124,49 @@ pub fn menu_separator(ui: &mut Ui, skin: &Skin) {
     );
 }
 
+/// Aim a menubutton's popover at the middle of its button, with the beak's room
+/// under it.
+///
+/// A beak cannot sit on the body's rounded corner, so a body hung off the
+/// button's edge drags its beak inwards by a corner plus half the base and stops
+/// pointing at the button: the `+`'s menu, 600 points wide with the `+` near the
+/// window's left edge, had its beak 20 points to the right of the `+`. GNOME's
+/// rule is the one here — the body centres on the button, and a body too wide to
+/// centre is pushed back inside the window rather than hanging off it. Either
+/// way the beak keeps the button's own centre to point at; only a body pinned to
+/// a window edge, with the button nearer to that edge than a corner, leaves the
+/// beak to give way.
+///
+/// The width is egui's own estimate for the popup, the same number its own
+/// alignment is computed from, because the body has not been laid out yet.
+///
+/// The anchor rect is the button's, moved sideways rather than shortened: the
+/// body still opens below the button, and flips above it when it has to.
+pub fn point_at<'a>(
+    ui: &Ui,
+    popup: egui::Popup<'a>,
+    button: egui::Rect,
+    tip: f32,
+) -> egui::Popup<'a> {
+    let width = popup.get_expected_size().map_or(0.0, |size| size.x);
+    let centre = body_centre(button.center().x, width, ui.ctx().content_rect());
+    let anchor = egui::Rect::from_center_size(egui::pos2(centre, button.center().y), button.size());
+    popup
+        .anchor(egui::PopupAnchor::ParentRect(anchor))
+        .align(egui::RectAlign::BOTTOM)
+        .gap(tip)
+}
+
+/// The x the body's middle wants to be at: the button's, pushed back inside the
+/// window by however much a body that wide would stick out.
+fn body_centre(button_x: f32, width: f32, content: egui::Rect) -> f32 {
+    let half = width / 2.0;
+    (button_x - half).clamp(
+        content.left(),
+        (content.right() - width).max(content.left()),
+    ) + half
+}
+
 /// Draw the tip of a popover: the little triangle that points back at the
 /// control the popover came from.
 ///
@@ -233,7 +277,7 @@ fn tip_x(body: egui::Rect, anchor_x: f32, radius: f32, half: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::tip_x;
+    use super::{body_centre, tip_x};
 
     fn body(left: f32, right: f32) -> egui::Rect {
         egui::Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(right, 100.0))
@@ -273,5 +317,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Placement and clamp together. A body too wide to centre on its button is
+    /// pushed back to the window's edge, and the tip still has the button's own
+    /// centre to point at: the `+` menu, 600 points wide with the `+` at x=252 in
+    /// a 900-point window, used to put its beak 20 points to the right of it.
+    #[test]
+    fn a_body_too_wide_to_centre_still_points_at_the_button() {
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0));
+        let button = egui::Rect::from_min_size(egui::pos2(235.0, 0.0), egui::vec2(34.0, 30.0));
+        let centre = body_centre(button.center().x, 600.0, content);
+        assert_eq!(centre, 300.0, "the body is pinned to the left edge");
+        let body =
+            egui::Rect::from_center_size(egui::pos2(centre, 130.0), egui::vec2(600.0, 200.0));
+        assert_eq!(
+            tip_x(body, button.center().x, 12.0, 12.0),
+            button.center().x
+        );
+    }
+
+    /// A body that fits centres on the button, so its tip needs no clamp at all.
+    #[test]
+    fn a_body_that_fits_centres_on_the_button() {
+        let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 600.0));
+        let button = egui::Rect::from_min_size(egui::pos2(774.0, 0.0), egui::vec2(28.0, 30.0));
+        let centre = body_centre(button.center().x, 193.0, content);
+        assert_eq!(centre, button.center().x);
+        let body =
+            egui::Rect::from_center_size(egui::pos2(centre, 130.0), egui::vec2(193.0, 200.0));
+        assert_eq!(
+            tip_x(body, button.center().x, 12.0, 12.0),
+            button.center().x
+        );
     }
 }

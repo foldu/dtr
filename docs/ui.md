@@ -243,7 +243,8 @@ what makes them testable and what lets a caller `--send` into them.
   button's, so there is no geometry at the call site. `Style::tip_height` is
   `None` in the looks whose popovers have no beak at all — Windows 11's menus,
   egui's own popups — because a tip that is not there is a different shape, not
-  a smaller one.
+  a smaller one. `point_at` is the other half: it puts the body where the beak
+  can point at the middle of the button and a beak's height clear of it.
 
 The serial sheet is drawn entirely with these: `serial_dialog.rs` contains no
 colour, radius or stroke width, and its row heights and gaps come from
@@ -343,11 +344,13 @@ grows into the button and reads as a flap hanging off it. And the tip goes over 
 *centre* of the control, which a body hanging off the button's edge cannot do — the tip may
 not sit on a rounded corner, so it slides inwards by a corner plus half the base, which is
 `tip_x` and the whole of the "left, middle or right" there is. The body moves instead:
-`app_menu` and the `+` ask for `RectAlign::BOTTOM` when the skin has a tip, and egui falls
-back to an edge alignment when a centred menu would not fit — the `+`'s own menu is 600
-points wide on a machine with four serial ports, so there it is the beak that gives way.
-GNOME moves the popover, not the beak. Only the two strip menus have one: a combo's list is
-a dropdown, and the beak is a menubutton's.
+`point_at` centres the body on the button and pushes it back inside the window when a body
+that wide would not fit (`body_centre`). That is what keeps the beak on the middle of the
+`+` — a 600-point menu pinned to the window's left edge, with its beak 20 points off the
+button until the body moved. GNOME moves the popover, not the beak. Only the two strip menus
+have one, and that was measured rather than assumed: a real `GtkDropDown`'s list is a plain
+rounded rectangle with no beak, so a combo's popover is a dropdown, and the beak is a
+menubutton's.
 
 **About is a card, not a dialog** (`crates/dtr/src/about.rs`): every fact on it is a
 compile-time constant (`env!("CARGO_PKG_VERSION")`), so it cannot disagree with the binary,

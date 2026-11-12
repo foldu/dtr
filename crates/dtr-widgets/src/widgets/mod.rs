@@ -35,7 +35,7 @@ pub use card::{Card, CardOutput, prime_area};
 pub use check::{check, check_box};
 pub use combo::{Edit, Editable};
 pub use icons::{cross, cross_at, plus};
-pub use menu::{menu_row, menu_row_chord, menu_separator, menu_tip};
+pub use menu::{menu_row, menu_row_chord, menu_separator, menu_tip, point_at};
 pub use segmented::segmented;
 pub use stripe::{Stripe, stripe};
 pub use tabs::tabs;
