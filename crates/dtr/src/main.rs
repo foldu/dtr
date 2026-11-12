@@ -13,6 +13,7 @@ mod layout;
 mod linkmenu;
 mod logbook;
 mod modem;
+mod notify;
 mod pager;
 mod palette;
 mod pane;

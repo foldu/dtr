@@ -37,6 +37,29 @@ pub struct Config {
     /// terminal's built-in colours.
     pub theme: Option<String>,
     pub terminal: Terminal,
+    /// Where a program's notification goes. `[notifications]`.
+    pub notifications: Notifications,
+}
+
+/// How a program's `OSC 9`/`OSC 777` reaches the person.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notifications {
+    /// Use the desktop's own notification channel when the machine has one.
+    ///
+    /// On by default on every platform, because the alternative is dtr drawing
+    /// its own toast and a person with notifications already configured expects
+    /// the one their desktop uses. A machine with no channel — Windows today,
+    /// deliberately (a toast there needs a Start Menu shortcut with an
+    /// AppUserModelID), and a Linux session without a notification daemon — falls
+    /// back to that toast anyway, so this key is only ever a way to *prefer*
+    /// dtr's window.
+    pub os: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { os: true }
+    }
 }
 
 /// Facts about the terminal itself, as opposed to what it is showing.
@@ -256,6 +279,7 @@ impl Default for Config {
             ui: Ui::default(),
             theme: None,
             terminal: Terminal::default(),
+            notifications: Notifications::default(),
         }
     }
 }
@@ -439,6 +463,14 @@ impl Config {
                 config.terminal.window_resize = resize.as_bool().ok_or_else(|| {
                     Error::Value("terminal.window_resize must be true or false".into())
                 })?;
+            }
+        }
+
+        if let Some(section) = document.get("notifications").and_then(Item::as_table) {
+            if let Some(os) = section.get("os") {
+                config.notifications.os = os
+                    .as_bool()
+                    .ok_or_else(|| Error::Value("notifications.os must be true or false".into()))?;
             }
         }
 
@@ -738,6 +770,22 @@ mod tests {
                 "the message should say why: {error}"
             );
         }
+    }
+
+    #[test]
+    fn notifications_reach_the_desktop_by_default() {
+        // The desktop's channel is the one a person with notifications already
+        // configured expects; dtr's toast is the fallback, not the preference.
+        assert!(Config::parse("").unwrap().notifications.os);
+        assert!(
+            !Config::parse("[notifications]\nos = false\n")
+                .unwrap()
+                .notifications
+                .os
+        );
+        let error =
+            Config::parse("[notifications]\nos = \"maybe\"\n").expect_err("a string is not a bool");
+        assert!(format!("{error}").contains("notifications.os"), "{error}");
     }
 
     #[test]

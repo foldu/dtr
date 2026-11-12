@@ -681,6 +681,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         config: startup.config.clone(),
         config_path: startup.config_path.clone(),
         toast: None,
+        notifier: crate::notify::system(startup.config.notifications.os),
         clipboard_cache,
         pending_resize: None,
     };
@@ -1281,6 +1282,9 @@ struct App {
     /// clipboard — so the UI keeps this warm on the two occasions the clipboard
     /// can have changed under us: a copy of ours, and a paste of theirs.
     clipboard_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Where a program's notification goes: the desktop's channel when the
+    /// machine has one, and the in-app toast when it does not.
+    notifier: std::sync::Arc<dyn crate::notify::Notifier>,
     /// A `CSI 8 t` request the window has not been able to honour yet, because
     /// the first frame had not measured a cell when it arrived.
     pending_resize: Option<(Option<u16>, Option<u16>)>,
@@ -3075,6 +3079,12 @@ impl App {
     /// switched it without touching the file), and a reload must, because the
     /// file just said which theme it wants.
     fn adopt_config(&mut self, config: dtr_config::Config) {
+        // The file is live, and this is a key it can change: rebuilding is a
+        // thread and a bus connection, so it happens only when the answer
+        // actually differs.
+        if self.config.notifications.os != config.notifications.os {
+            self.notifier = crate::notify::system(config.notifications.os);
+        }
         self.config = config;
         // `[keys]` is a document, not a menu: a rebinding arrives here or not at
         // all, and a keymap that remembered the old chords would leave the file
@@ -4569,12 +4579,17 @@ impl ApplicationHandler<UserEvent> for App {
                     for notice in session.pane.take_notices() {
                         let text = match (notice.title.is_empty(), notice.body.is_empty()) {
                             (false, false) => format!("{}: {}", notice.title, notice.body),
-                            (false, true) => notice.title,
-                            (true, false) => notice.body,
+                            (false, true) => notice.title.clone(),
+                            (true, false) => notice.body.clone(),
                             (true, true) => continue,
                         };
                         tracing::debug!(%text, "a program sent a notification");
-                        self.toast = Some((text, std::time::Instant::now()));
+                        // The desktop is asked first; the toast is what happens
+                        // when the answer is no — not a second copy of the same
+                        // notice on top of the desktop's own.
+                        if self.notifier.notify(&notice) == crate::notify::Delivered::No {
+                            self.toast = Some((text, std::time::Instant::now()));
+                        }
                         bell_behind |= index != self.active;
                     }
                     let rung = session.pane.take_bells();
