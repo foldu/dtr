@@ -17,12 +17,20 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_DWMCOLORIZATIONCOLORCHANGED,
-    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_THEMECHANGED,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMOUSELEAVE, WM_SETTINGCHANGE, WM_SYSCOMMAND,
+    WM_THEMECHANGED,
 };
+
+/// `WM_MOUSELEAVE`. windows-sys files it under `UI::Controls`, and this crate
+/// pulls in only the hand it needs, so the one constant is spelled here.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// Identifies dtr's subclass, in case anything else subclasses the window too.
 const SUBCLASS: usize = 0x6474_7200;
@@ -39,6 +47,51 @@ static MAXIMIZE: [AtomicI32; 4] = [
     AtomicI32::new(0),
     AtomicI32::new(0),
 ];
+
+/// Whether the pointer is over the maximise button, as last reported by the
+/// window's own hit test.
+///
+/// Answering `HTMAXBUTTON` moves the pointer into the non-client area for that
+/// rectangle, which means egui never sees a hover there: Windows sends
+/// `WM_NCMOUSEMOVE`, not the client message egui-winit translates. The hit test
+/// is therefore also the only place that can notice the hover, and this flag is
+/// how the drawing code learns what it saw.
+static MAXIMIZE_HOVER: AtomicI32 = AtomicI32::new(0);
+
+/// Did the last hit test land on the maximise button?
+pub fn maximize_hovered() -> bool {
+    MAXIMIZE_HOVER.load(Ordering::Relaxed) != 0
+}
+
+/// Record the hover the hit test saw, and ask for a frame when it changed.
+///
+/// The hit test runs inside the mouse message, not the paint loop, so writing
+/// the flag alone would leave the button the old colour until something else
+/// happened to redraw the window — which is a hover that arrives a second late
+/// or never. Invalidating turns the change into a `WM_PAINT`, which winit
+/// delivers as a redraw request.
+fn set_maximize_hover(hwnd: HWND, inside: bool) {
+    let was = MAXIMIZE_HOVER.swap(i32::from(inside), Ordering::Relaxed) != 0;
+    if was == inside {
+        return;
+    }
+    if inside {
+        // Without this Windows never sends `WM_NCMOUSELEAVE` for the button,
+        // and a pointer that leaves the window straight from it would leave the
+        // fill lit. Tracking is per-entry and one-shot, so it is asked for here
+        // rather than kept on.
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE | TME_NONCLIENT,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        // SAFETY: `track` is a live local with the layout the API expects.
+        unsafe { TrackMouseEvent(&mut track) };
+    }
+    // SAFETY: `hwnd` is the live window the hit test was called for.
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+}
 
 /// Record where the maximise button is, in points, for this frame.
 pub fn set_maximize_rect(rect: egui::Rect, scale: f32) {
@@ -87,10 +140,23 @@ unsafe extern "system" fn procedure(
             // SAFETY: `hwnd` is the window this procedure was called for, and
             // `point` is a live local.
             unsafe { ScreenToClient(hwnd, &mut point) };
-            if point.x >= left && point.x < right && point.y >= top && point.y < bottom {
+            let inside = point.x >= left && point.x < right && point.y >= top && point.y < bottom;
+            // Every mouse move over the window asks this question, so the
+            // answer is also the hover state: it goes false again as soon as
+            // the pointer leaves the button, without a second message to say
+            // so.
+            set_maximize_hover(hwnd, inside);
+            if inside {
                 return HTMAXBUTTON as LRESULT;
             }
+        } else {
+            set_maximize_hover(hwnd, false);
         }
+    }
+    if message == WM_MOUSELEAVE || message == WM_NCMOUSELEAVE {
+        // Leaving the window is not another hit test, so clear the hover here
+        // or a pointer that left over the button leaves it lit.
+        set_maximize_hover(hwnd, false);
     }
     if message == WM_NCLBUTTONDOWN && wparam as u32 == HTMAXBUTTON {
         // Answering the hit test with `HTMAXBUTTON` moves the click into the

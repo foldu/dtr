@@ -92,6 +92,18 @@ pub enum Effect {
     Cancel,
 }
 
+/// What the card asked for.
+///
+/// A mouse edit is a [`Reply::Change`] because the draft is only written when
+/// the card is saved; the save and cancel buttons report the same [`Effect`] the
+/// keyboard does, so the two ways out cannot disagree.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reply {
+    Change(Change),
+    Apply,
+    Cancel,
+}
+
 pub struct Settings {
     pub open: bool,
     row: usize,
@@ -219,12 +231,18 @@ impl Settings {
         rows[self.row.min(rows.len() - 1)]
     }
 
+    /// Throw the draft away and close. Esc, the cross and the cancel button are
+    /// the same answer, so they are the same function.
+    pub fn cancel(&mut self) {
+        self.draft = self.original.clone();
+        self.open = false;
+    }
+
     pub fn handle(&mut self, key: &winit::keyboard::Key) -> Option<Effect> {
         use winit::keyboard::Key;
         match key {
             Key::Named(winit::keyboard::NamedKey::Escape) => {
-                self.draft = self.original.clone();
-                self.open = false;
+                self.cancel();
                 return Some(Effect::Cancel);
             }
             Key::Named(winit::keyboard::NamedKey::Enter) => return Some(Effect::Apply),
@@ -389,105 +407,93 @@ impl Settings {
     /// Draw the menu. Every control is a mouse control: a row is a click target
     /// for selection, and the values are a drag number, two combo boxes and two
     /// toggles. The keyboard still works, but nothing here needs it.
-    pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) -> Option<Change> {
+    pub fn ui(&self, ui: &mut egui::Ui, look: &crate::ui::Look) -> Option<Reply> {
         let skin = look.skin();
         let palette = skin.palette;
         let style = &skin.style;
-        let mut change = None;
-        let screen = ui.max_rect();
-        let width = 420.0_f32.min(screen.width() - 32.0);
         let rows = self.rows().len() as f32;
-        let height = 44.0 + rows * (style.row + 1.0) + 34.0;
-        let rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
-        crate::ui::prime_area(
-            ui.ctx(),
-            egui::Id::new("dtr-settings"),
-            egui::Order::Foreground,
-            rect,
-            true,
-        );
-        // Dim the terminal behind the menu: the settings are the subject now.
-        ui.painter().rect_filled(screen, 0.0, palette.scrim);
-        egui::Area::new(egui::Id::new("dtr-settings"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.min)
-            .constrain(false)
-            // A fade-in would make the menu invisible on the first frame, and
-            // the first frame is the only one a capture has.
-            .fade_in(false)
-            .show(ui.ctx(), |ui| {
-                // The drag number and the combo boxes are still egui's own, so
-                // the menu hands them the skin's style rather than inheriting the
-                // frame's.
-                skin.apply(ui.ctx());
-                ui.set_min_size(rect.size());
-                egui::Frame::new()
-                    .fill(palette.card)
-                    .stroke(egui::Stroke::new(style.border, palette.border))
-                    .corner_radius(style.card_radius)
-                    .inner_margin(style.card_margin)
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("settings")
-                                .font(style.title_font.clone())
-                                .color(palette.text),
+        // Header, rows, the hint and the buttons. A fixed height, like the
+        // keyboard map: the card must not resize itself when the serial rows
+        // come and go, or the button under the pointer moves as it is pressed.
+        let height = 52.0 + rows * (style.row + 1.0) + 58.0;
+        let out = dtr_widgets::Card::new(egui::Id::new("dtr-settings"), "settings")
+            .size(420.0, height)
+            .close("close settings")
+            .show(ui, &skin, |ui, _inner| {
+                ui.add_space(8.0);
+                let mut reply = None;
+                for (index, row) in self.rows().iter().enumerate() {
+                    let selected = index == self.row;
+                    let section = row.section();
+                    let clicked = std::cell::Cell::new(None);
+                    ui.horizontal(|ui| {
+                        let name = if section.is_empty() {
+                            row.label().to_owned()
+                        } else {
+                            format!("{section}.{}", row.label())
+                        };
+                        // The label is the selection target, so clicking
+                        // a row does what the arrow keys do.
+                        let label = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(name)
+                                    .font(style.value_font.clone())
+                                    .color(if selected { palette.text } else { palette.dim }),
+                            )
+                            .sense(egui::Sense::click()),
                         );
-                        ui.add_space(8.0);
-                        for (index, row) in self.rows().iter().enumerate() {
-                            let selected = index == self.row;
-                            let section = row.section();
-                            let clicked = std::cell::Cell::new(None);
-                            ui.horizontal(|ui| {
-                                let name = if section.is_empty() {
-                                    row.label().to_owned()
-                                } else {
-                                    format!("{section}.{}", row.label())
-                                };
-                                // The label is the selection target, so clicking
-                                // a row does what the arrow keys do.
-                                let label = ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(name)
-                                            .font(style.value_font.clone())
-                                            .color(if selected {
-                                                palette.text
-                                            } else {
-                                                palette.dim
-                                            }),
-                                    )
-                                    .sense(egui::Sense::click()),
-                                );
-                                if label.clicked() {
-                                    clicked.set(Some(Change::Select(index)));
-                                }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if let Some(edit) = self.control(ui, *row, &skin) {
-                                            clicked.set(Some(edit));
-                                        }
-                                    },
-                                );
-                            });
-                            if change.is_none() {
-                                change = clicked.into_inner();
-                            }
-                            if matches!(row, Row::AutoReconnect) {
-                                ui.add_space(2.0);
-                            }
+                        if label.clicked() {
+                            clicked.set(Some(Change::Select(index)));
                         }
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new("click to change   enter save   esc cancel")
-                                .font(egui::FontId::new(
-                                    style.label_font.size - 1.0,
-                                    style.label_font.family.clone(),
-                                ))
-                                .color(palette.dim),
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(edit) = self.control(ui, *row, &skin) {
+                                clicked.set(Some(edit));
+                            }
+                        });
                     });
+                    if reply.is_none() {
+                        reply = clicked.into_inner().map(Reply::Change);
+                    }
+                    if matches!(row, Row::AutoReconnect) {
+                        ui.add_space(2.0);
+                    }
+                }
+                ui.add_space(6.0);
+                // The keyboard still works — Enter and Esc are handled by
+                // the event loop — so the hint names the keys; the
+                // buttons are the same two answers for the mouse.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("enter saves   ·   esc cancels")
+                            .font(egui::FontId::new(
+                                style.label_font.size - 1.0,
+                                style.label_font.family.clone(),
+                            ))
+                            .color(palette.dim),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if dtr_widgets::Button::new("save")
+                            .primary()
+                            .width(72.0)
+                            .show(ui, &skin)
+                        {
+                            reply = Some(Reply::Apply);
+                        }
+                        if dtr_widgets::Button::new("cancel")
+                            .width(72.0)
+                            .show(ui, &skin)
+                        {
+                            reply = Some(Reply::Cancel);
+                        }
+                    });
+                });
+                reply
             });
-        change
+        if out.close {
+            Some(Reply::Cancel)
+        } else {
+            out.body
+        }
     }
 
     /// The widget on the right of a row. Every one is a mouse control; each
@@ -869,9 +875,39 @@ mod kittest_tests {
         harness.get_by_label("built-in").click();
         harness.run();
         assert!(
-            matches!(*change.borrow(), Some(Change::Theme(_))),
+            matches!(*change.borrow(), Some(Reply::Change(Change::Theme(_)))),
             "clicking a theme must report the choice"
         );
+    }
+
+    /// The card's three ways out are buttons, and each reports the same answer
+    /// the keyboard gives: save applies, cancel and the cross throw the draft
+    /// away.
+    #[test]
+    fn the_cross_and_the_footer_buttons_report_their_answers() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        let look = crate::ui::Look::default();
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = answers.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            if let Some(reply) = settings.ui(ui, &look) {
+                sink.borrow_mut().push(reply);
+            }
+        });
+        harness.run();
+
+        harness.get_by_label("save").click();
+        harness.run();
+        assert_eq!(answers.borrow().last(), Some(&Reply::Apply));
+
+        harness.get_by_label("cancel").click();
+        harness.run();
+        assert_eq!(answers.borrow().last(), Some(&Reply::Cancel));
+
+        harness.get_by_label("close settings").click();
+        harness.run();
+        assert_eq!(answers.borrow().last(), Some(&Reply::Cancel));
     }
 
     /// The rows are drawn and the menu renders: a snapshot catches a row that

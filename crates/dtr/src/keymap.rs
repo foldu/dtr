@@ -58,158 +58,119 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
     let skin = look.skin();
     let palette = skin.palette;
     let style = &skin.style;
-    let screen = ui.max_rect();
 
-    let width = WIDTH.min(screen.width() - 32.0).max(360.0);
-    // The card is a fixed box with a scrolling body, like the sheet: the dtr
-    // style fits its twenty-two rows and the native style does not fit them in a
-    // 620-point window at all, and a card that scrolls is honest where a card
-    // that clips is a lie.
-    let height = HEIGHT.min(screen.height() - 32.0).max(280.0);
-    let rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
     // Two columns, so the whole map is on one screen: a cheat sheet you have to
     // scroll is one you cannot glance at. The split follows `Group::ALL`, which
     // is the order a reader expects, rather than restating it here.
     let columns: [&[Group]; 2] = [&Group::ALL[..Group::COLUMNS], &Group::ALL[Group::COLUMNS..]];
 
-    let id = egui::Id::new("dtr-keymap");
-    crate::ui::prime_area(ui.ctx(), id, egui::Order::Foreground, rect, true);
+    let out = dtr_widgets::Card::new(egui::Id::new("dtr-keymap"), "keys")
+        .size(WIDTH, HEIGHT)
+        .min(360.0, 280.0)
+        .body_min(320.0)
+        .close("close keyboard map")
+        .show(ui, &skin, |ui, inner| {
+            ui.add_space(style.gap * 2.0);
+            let mut event = None;
+            // Where the row being rebound is, so the popup can sit under it.
+            // Found while the rows are painted, which is the only pass there is.
+            let mut anchor = None;
 
-    // The terminal is not the subject while this is up. The same scrim as the
-    // serial sheet: enough to read the card against, not so much that the window
-    // looks disabled.
-    ui.painter().rect_filled(screen, 0.0, palette.scrim);
-
-    let mut event = None;
-    // Where the row being rebound is, so the popup can sit under it. Found while
-    // the rows are painted, which is the only pass there is.
-    let mut anchor = None;
-    egui::Area::new(id)
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .constrain(false)
-        // A fade would make the card invisible on the first frame, and a capture
-        // has exactly one.
-        .fade_in(false)
-        .show(ui.ctx(), |ui| {
-            // egui's own labels are still egui's, so the card hands them the
-            // skin's style.
-            skin.apply(ui.ctx());
-            ui.set_min_size(rect.size());
-            egui::Frame::new()
-                .fill(palette.card)
-                .stroke(egui::Stroke::new(style.border, palette.border))
-                .corner_radius(style.card_radius)
-                .inner_margin(style.card_margin)
+            egui::ScrollArea::vertical()
+                .id_salt(egui::Id::unique("dtr-keymap-columns"))
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let inner = (width - style.card_margin.sum().x).max(320.0);
-                    ui.set_width(inner);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("keys")
-                                .font(style.title_font.clone())
-                                .color(palette.text),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if dtr_widgets::cross(ui, &skin, "close keyboard map", 24.0).clicked()
-                            {
-                                event = Some(Event::Close);
+                    ui.horizontal_top(|ui| {
+                        for (index, groups) in columns.iter().enumerate() {
+                            if index > 0 {
+                                ui.add_space(style.gap * 3.0);
                             }
-                        });
-                    });
-                    ui.add_space(style.gap * 2.0);
-
-                    egui::ScrollArea::vertical()
-                        .id_salt(egui::Id::unique("dtr-keymap-columns"))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.horizontal_top(|ui| {
-                                for (index, groups) in columns.iter().enumerate() {
-                                    if index > 0 {
-                                        ui.add_space(style.gap * 3.0);
+                            ui.vertical(|ui| {
+                                // Room for the scroll bar, because a
+                                // floating one paints over the last
+                                // characters of the key names in the
+                                // right-hand column — which is exactly
+                                // the column the `[keys]` spellings are
+                                // in. When the map fits, the reserve is
+                                // a few points of margin.
+                                let bar = ui.spacing().scroll.bar_width;
+                                ui.set_width((inner - bar) / 2.0 - style.gap * 2.0);
+                                // The columns do not hold chords of the
+                                // same length — `ctrl-alt-shift-right`
+                                // against `shift-pageup` — so each asks
+                                // its own widest instead of sharing one
+                                // guess that is cramped in one column and
+                                // wasteful in the other.
+                                let chord_width =
+                                    chord_width(ui, &skin, keymap, groups);
+                                for (position, group) in groups.iter().enumerate() {
+                                    // The gap goes before each group but
+                                    // the first, not after each: a
+                                    // trailing gap is what makes the
+                                    // body one line taller than the card.
+                                    if position > 0 {
+                                        ui.add_space(style.gap * 1.5);
                                     }
-                                    ui.vertical(|ui| {
-                                        // Room for the scroll bar, because a
-                                        // floating one paints over the last
-                                        // characters of the key names in the
-                                        // right-hand column — which is exactly
-                                        // the column the `[keys]` spellings are
-                                        // in. When the map fits, the reserve is
-                                        // a few points of margin.
-                                        let bar = ui.spacing().scroll.bar_width;
-                                        ui.set_width((inner - bar) / 2.0 - style.gap * 2.0);
-                                        // The columns do not hold chords of the
-                                        // same length — `ctrl-alt-shift-right`
-                                        // against `shift-pageup` — so each asks
-                                        // its own widest instead of sharing one
-                                        // guess that is cramped in one column and
-                                        // wasteful in the other.
-                                        let chord_width =
-                                            chord_width(ui, &skin, keymap, groups);
-                                        for (position, group) in groups.iter().enumerate() {
-                                            // The gap goes before each group but
-                                            // the first, not after each: a
-                                            // trailing gap is what makes the
-                                            // body one line taller than the card.
-                                            if position > 0 {
-                                                ui.add_space(style.gap * 1.5);
-                                            }
-                                            section(ui, &skin, group.title());
-                                            ui.add_space(style.gap);
-                                            for action in crate::keys::ALL
-                                                .iter()
-                                                .copied()
-                                                .filter(|action| action.group() == *group)
-                                            {
-                                                let editing = overlay
-                                                    .edit
-                                                    .as_ref()
-                                                    .is_some_and(|(editing, _)| *editing == action);
-                                                let row = row(
-                                                    ui,
-                                                    &skin,
-                                                    keymap,
-                                                    action,
-                                                    editing,
-                                                    chord_width,
-                                                );
-                                                if editing {
-                                                    anchor = Some(row.rect);
-                                                }
-                                                if row.clicked && event.is_none() {
-                                                    event = Some(Event::Edit(action));
-                                                }
-                                            }
+                                    section(ui, &skin, group.title());
+                                    ui.add_space(style.gap);
+                                    for action in crate::keys::ALL
+                                        .iter()
+                                        .copied()
+                                        .filter(|action| action.group() == *group)
+                                    {
+                                        let editing = overlay
+                                            .edit
+                                            .as_ref()
+                                            .is_some_and(|(editing, _)| *editing == action);
+                                        let row = row(
+                                            ui,
+                                            &skin,
+                                            keymap,
+                                            action,
+                                            editing,
+                                            chord_width,
+                                        );
+                                        if editing {
+                                            anchor = Some(row.rect);
                                         }
-                                    });
+                                        if row.clicked && event.is_none() {
+                                            event = Some(Event::Edit(action));
+                                        }
+                                    }
                                 }
                             });
-                        });
-
-                    ui.add_space(style.gap);
-                    ui.label(
-                        egui::RichText::new(
-                            "esc closes   ·   press a row to rebind it   ·   the names are [keys] in the config",
-                        )
-                        .font(egui::FontId::new(
-                            style.label_font.size - 1.0,
-                            style.label_font.family.clone(),
-                        ))
-                        .color(palette.dim),
-                    );
-
-                    // The popup is the second thing drawn and the last in the
-                    // layer, so it floats above the rows it is anchored to.
-                    if let Some((action, notice)) = &overlay.edit {
-                        let at = anchor.unwrap_or(rect);
-                        if let Some(asked) = popup(ui, &skin, screen, at, *action, notice.as_deref())
-                        {
-                            event = Some(asked);
                         }
-                    }
+                    });
                 });
+
+            ui.add_space(style.gap);
+            ui.label(
+                egui::RichText::new(
+                    "esc closes   ·   press a row to rebind it   ·   the names are [keys] in the config",
+                )
+                .font(egui::FontId::new(
+                    style.label_font.size - 1.0,
+                    style.label_font.family.clone(),
+                ))
+                .color(palette.dim),
+            );
+
+            // The popup is the second thing drawn and the last in the
+            // layer, so it floats above the rows it is anchored to.
+            if let Some((action, notice)) = &overlay.edit {
+                let screen = ui.ctx().content_rect();
+                let at = anchor.unwrap_or_else(|| ui.max_rect());
+                if let Some(asked) = popup(ui, &skin, screen, at, *action, notice.as_deref()) {
+                    event = Some(asked);
+                }
+            }
+            event
         });
-    event
+    if out.close {
+        Some(Event::Close)
+    } else {
+        out.body
+    }
 }
 
 /// How wide one column's chord column has to be: the widest chord in the groups

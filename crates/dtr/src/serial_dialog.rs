@@ -10,7 +10,7 @@
 //! `serialport`'s, so the form, the store and the open call cannot drift apart.
 
 use dtr_store::{DataBits, FlowControl, Parity, SerialSettings as Settings, StopBits};
-use dtr_widgets::{Button, Edit, Editable, Footer, Skin, check, cross, row, section, segmented};
+use dtr_widgets::{Button, Edit, Editable, Footer, Skin, check, row, section, segmented};
 
 use crate::ui::Look;
 
@@ -276,101 +276,45 @@ impl SerialDialog {
         // the window, a capture, a kittest harness — gets a working loader.
         crate::ui::install_image_loaders(ui.ctx());
         let skin = look.skin();
-        let p = skin.palette;
         let s = &skin.style;
-        let screen = ui.max_rect();
-        let width = (WIDTH.min(screen.width() - 32.0)).max(360.0);
-        let height = (HEIGHT.min(screen.height() - 32.0)).max(320.0);
-        let rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
-        let id = egui::Id::new("dtr-serial-dialog");
-        crate::ui::prime_area(ui.ctx(), id, egui::Order::Foreground, rect, true);
-
-        // The terminal is not the subject while this is up. Same weight as the
-        // settings menu: enough to read the sheet against, not so much that the
-        // window looks disabled.
-        ui.painter().rect_filled(screen, 0.0, p.scrim);
-
         let baud_ok = self.baud().is_some();
-        let mut event = None;
-        egui::Area::new(id)
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.min)
-            .constrain(false)
-            // A fade would make the sheet invisible on the first frame, and a
-            // capture has exactly one.
-            .fade_in(false)
-            .show(ui.ctx(), |ui| {
-                // The sheet is the one place stock egui widgets still appear (the
-                // text field inside `Editable`), so it hands them the skin's style
-                // rather than inheriting whatever the frame was using.
-                skin.apply(ui.ctx());
-                ui.set_min_size(rect.size());
-                egui::Frame::new()
-                    .fill(p.card)
-                    .stroke(egui::Stroke::new(s.border, p.border))
-                    .corner_radius(s.card_radius)
-                    .inner_margin(s.card_margin)
-                    .show(ui, |ui| {
-                        ui.set_width((width - s.card_margin.sum().x).max(320.0));
-                        self.header(ui, &skin, &mut event);
-                        ui.add_space(s.gap * 3.0);
-                        self.profiles_ui(ui, &skin, baud_ok, &mut event);
-                        ui.add_space(s.gap * 2.0);
-                        self.line_ui(ui, &skin, &mut event);
-                        ui.add_space(s.gap);
-                        self.signals_ui(ui, &skin, &mut event);
-                        ui.add_space(s.gap);
-                        self.terminal_ui(ui, &skin, &mut event);
-                        ui.add_space(s.gap * 3.0);
-                        self.footer_ui(ui, &skin, baud_ok, &mut event);
-                    });
-            });
-        event
-    }
-
-    fn header(&self, ui: &mut egui::Ui, skin: &Skin, event: &mut Option<Event>) {
-        let p = skin.palette;
-        let s = &skin.style;
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("serial connection")
-                    .font(s.label_font.clone())
-                    .color(p.dim),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if cross(ui, skin, "close serial connection", 24.0).clicked() {
-                    *event = Some(Event::Cancel);
+        let summary = self.settings.summary();
+        let out = dtr_widgets::Card::new(egui::Id::new("dtr-serial-dialog"), &self.port)
+            .size(WIDTH, HEIGHT)
+            .min(360.0, 320.0)
+            .body_min(320.0)
+            .kicker("serial connection")
+            .trailing(&summary)
+            .close("close serial connection")
+            .show(ui, &skin, |ui, _inner| {
+                let mut event = None;
+                if !self.detail.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(&self.detail)
+                            .font(egui::FontId::new(
+                                s.label_font.size - 1.0,
+                                s.label_font.family.clone(),
+                            ))
+                            .color(skin.palette.dim),
+                    );
                 }
+                ui.add_space(s.gap * 3.0);
+                self.profiles_ui(ui, &skin, baud_ok, &mut event);
+                ui.add_space(s.gap * 2.0);
+                self.line_ui(ui, &skin, &mut event);
+                ui.add_space(s.gap);
+                self.signals_ui(ui, &skin, &mut event);
+                ui.add_space(s.gap);
+                self.terminal_ui(ui, &skin, &mut event);
+                ui.add_space(s.gap * 3.0);
+                self.footer_ui(ui, &skin, baud_ok, &mut event);
+                event
             });
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(&self.port)
-                    .font(s.title_font.clone())
-                    .color(p.text),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(self.settings.summary())
-                        .font(egui::FontId::new(
-                            s.label_font.size - 1.0,
-                            s.label_font.family.clone(),
-                        ))
-                        .color(p.dim),
-                );
-            });
-        });
-        if !self.detail.is_empty() {
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(&self.detail)
-                    .font(egui::FontId::new(
-                        s.label_font.size - 1.0,
-                        s.label_font.family.clone(),
-                    ))
-                    .color(p.dim),
-            );
+        if out.close {
+            Some(Event::Cancel)
+        } else {
+            out.body
         }
     }
 

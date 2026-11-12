@@ -156,6 +156,22 @@ pub fn maximize_rect(strip: Rect, kind: Kind) -> Rect {
     boxes(strip, kind)[1].1
 }
 
+/// Whether the platform's own hit test is currently over the maximise button.
+///
+/// Only Windows has one, and the button there is part of the non-client area
+/// (that is what offers the snap layouts), so egui cannot report its hover; the
+/// hit test in `chrome/windows.rs` is the only witness.
+fn platform_maximize_hover() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::maximize_hovered()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// Draw the window buttons, right-aligned in `strip`, and report a press.
 pub fn buttons(
     ui: &mut Ui,
@@ -199,7 +215,9 @@ pub fn buttons_for(
             response.surrender_focus();
         }
 
-        let hovered = response.hovered() || response.is_pointer_button_down_on();
+        let hovered = response.hovered()
+            || response.is_pointer_button_down_on()
+            || (action == Hit::Maximize && platform_maximize_hover());
         let close = action == Hit::Close;
         let fill = if hovered && close {
             // `#C42B1C`, with the glyph going white so it stays legible on it.

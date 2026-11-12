@@ -587,6 +587,12 @@ account behind each of these.
   differs), `SettingChanged` from the portal — then asks for a repaint. `-v` logs
   `chrome skin=… requested=… accent=… source=…`, which is the difference between a
   preference and an outcome, and `source=` names the reader that answered.
+- **An overlay is a `Card` body, not its own window.** `dtr_widgets::Card` owns
+  the modal shell (centered clamped rect, primed area, scrim, frame, skin) and the
+  header convention; a screen supplies only its body, and its footer when it has
+  one. About, the keyboard map, settings and the serial sheet each had a copy of
+  that shell before it existed, which is how their scrims and margins could
+  disagree (`docs/ui.md` §The card).
 - **Painted controls belong in `crates/dtr-widgets/src/widgets/`**: `Editable` (a text
   field with a dropdown arrow, reporting `Edit::Typed` and `Edit::Picked` as different
   answers), the layout primitives `label_cell`/`row`/`section`, and `check`, `Button`,
@@ -631,6 +637,12 @@ account behind each of these.
   (`chrome::drag_area`), or a press on the menu starts a window drag. **About is a card,
   not a dialog** (`crates/dtr/src/about.rs`): every fact on it is a compile-time constant,
   so it cannot disagree with the binary.
+- **egui's window commands are the backend's job**: a frame's `StartDrag`,
+  `BeginResize` and `Maximized` live in `FullOutput::viewport_output` and do nothing unless
+  `egui_winit::process_viewport_commands` is called, and egui's maximised flag arrives only
+  through `update_viewport_info` and `RawInput::viewports`. Missing both left the Windows
+  caption unmovable, the window unresizable and the restore glyph wrong (`docs/chrome.md`
+  §8), while every kittest passed.
 - **`egui::Window` renders nothing inside `Context::run_ui`**, which is why the palette is
   an overlay drawn into the same `Ui`. **A widget's background painted after its text hides
   the text** — the palette's selected row was invisible until the highlight was drawn first

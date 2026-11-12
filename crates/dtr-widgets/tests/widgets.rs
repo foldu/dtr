@@ -11,7 +11,8 @@
 //! would only be checked when somebody remembered to.
 
 use dtr_widgets::{
-    ADWAITA_ACCENT, Button, Edit, Editable, Footer, Palette, Skin, check, row, section, segmented,
+    ADWAITA_ACCENT, Button, Card, Edit, Editable, Footer, Palette, Skin, check, row, section,
+    segmented,
 };
 use egui::{RichText, Stroke, vec2};
 use std::cell::RefCell;
@@ -236,6 +237,31 @@ fn gallery(ui: &mut egui::Ui, skin: &Skin, state: &mut State) {
                 });
         },
     );
+}
+
+/// The card is the shell four surfaces share: a kicker row with the way out, a
+/// title with its detail, and a body the screen owns. The gallery draws the
+/// serial sheet's own frame above; this is the primitive on its own, so a
+/// margin or a header row that drifts is a picture before it is a dialog.
+#[test]
+fn a_card_carries_its_header_and_its_body() {
+    let skin = dtr_skin();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(vec2(640.0, 480.0))
+        .build_ui(move |ui| {
+            let _ = Card::new(egui::Id::unique("gallery-card"), "ttyUSB0")
+                .size(420.0, 280.0)
+                .min(300.0, 200.0)
+                .kicker("serial connection")
+                .trailing("115200 8N1")
+                .close("close gallery card")
+                .show(ui, &skin, |ui, _inner| {
+                    ui.add_space(8.0);
+                    ui.label("The shell every surface shares.");
+                });
+        });
+    harness.run();
+    harness.snapshot("card");
 }
 
 fn harness(skin: Skin) -> egui_kittest::Harness<'static> {

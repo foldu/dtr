@@ -20,6 +20,7 @@
 
 mod block;
 mod button;
+mod card;
 mod check;
 mod combo;
 mod icons;
@@ -28,6 +29,7 @@ mod segmented;
 
 pub use block::{label_cell, row, section};
 pub use button::Button;
+pub use card::{Card, CardOutput, prime_area};
 pub use check::{check, check_box};
 pub use combo::{Edit, Editable};
 pub use icons::{cross, cross_at, plus};

@@ -245,6 +245,24 @@ Afterwards, when it bites: tab overflow (the 138 points make it arrive sooner), 
   topmost click-sensing widget and the winner depends on allocation order — the
   "sometimes unresponsive" bug the tab chips already carry a comment about. The drag region
   is an explicit rect over what is left.
+- **A `ViewportCommand` is not a winit call.** `StartDrag`, `BeginResize`, `Maximized`,
+  `Minimized` and `SetTheme` leave the frame in `FullOutput::viewport_output`, and they only
+  become window operations when `egui_winit::process_viewport_commands` is handed that
+  output; `update_viewport_info` is the other half, because egui reads the maximised flag
+  from `RawInput::viewports` and defaults it to `None`. dtr did neither until 2026-11-12,
+  so on Windows the caption could not drag the window and the resize borders could not
+  resize it — the maximise button still worked only because `WM_NCLBUTTONDOWN` is handled
+  by hand — and the frame never knew it was maximised, so the restore glyph never appeared.
+  `-v` logs `viewport commands commands=[…]` for every list egui produced; a missing
+  `StartDrag` there is a press that never reached the drag region, and a present one is a
+  command the backend was not delivering.
+- **`HTMAXBUTTON` costs egui the hover.** Answering the hit test moves the pointer into the
+  non-client area for that rectangle, so Windows sends `WM_NCMOUSEMOVE` and egui-winit never
+  sees a pointer position there — the button stayed unlit on Windows while the other two,
+  which are client widgets, lit up. The hit test is therefore also the hover recorder:
+  `chrome/windows.rs` keeps `MAXIMIZE_HOVER`, invalidates the window when it changes (a hit
+  test is not a paint, so the flag alone would arrive a frame late or never), and
+  `chrome::buttons_for` ORs it into `response.hovered()` for the maximise button.
 - **The offscreen path has no window.** `--screenshot` has no maximise state to read, so it
   keeps drawing tabs without buttons. The caption is drawn by `app.rs`, not by
   `ui::tab_bar`, which is why the kittest baselines do not move.

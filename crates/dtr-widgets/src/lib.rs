@@ -37,6 +37,6 @@ pub use palette::{AccentLadder, Palette};
 pub use skin::{ADWAITA_ACCENT, Origin, Skin, WINDOWS_ACCENT_DARK, WINDOWS_ACCENT_LIGHT};
 pub use style::{Focus, Footer, Preset, Section, Style, Title};
 pub use widgets::{
-    Button, Edit, Editable, check, check_box, cross, cross_at, label_cell, menu_row, plus, row,
-    section, segmented,
+    Button, Card, CardOutput, Edit, Editable, check, check_box, cross, cross_at, label_cell,
+    menu_row, plus, prime_area, row, section, segmented,
 };

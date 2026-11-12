@@ -200,23 +200,7 @@ impl Look {
 /// window (the second frame draws), but `--screenshot` renders exactly one
 /// frame, so an unprimed area would be missing from every capture. Seeding the
 /// state with the rectangle we already know skips that pass.
-pub(crate) fn prime_area(
-    ctx: &egui::Context,
-    id: egui::Id,
-    order: egui::Order,
-    rect: egui::Rect,
-    interactable: bool,
-) {
-    let mut state = egui::AreaState::default();
-    state.pivot_pos = Some(rect.min);
-    state.size = Some(rect.size());
-    state.interactable = interactable;
-    ctx.memory_mut(|memory| {
-        memory
-            .areas_mut()
-            .set_state(egui::LayerId::new(order, id), state);
-    });
-}
+pub(crate) use dtr_widgets::prime_area;
 
 /// Draw a full-screen overlay in a layer above the panes.
 ///
@@ -589,42 +573,61 @@ pub fn tab_bar(
         );
         let menu = egui::Popup::menu(&response).show(|ui| {
             ui.set_min_width(220.0);
-            if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
-                clicked = Some(TabHit::New(None));
-                ui.close();
-            }
-            // The groups are separated, not just prefixed. `serial …` and
-            // `ssh …` are different verbs that lead to different panes, and a
-            // run of `/dev/tty…` rows with an `ssh` row in the middle is one
-            // where the pointer lands on the wrong half of the menu. A group
-            // that is empty takes its separator with it, so a machine with no
-            // serial ports looks like it always did.
-            for serial in [true, false] {
-                let group: Vec<&crate::sources::Destination> = destinations
-                    .iter()
-                    .filter(|destination| destination.is_serial() == serial)
-                    .collect();
-                if group.is_empty() {
-                    continue;
-                }
-                ui.separator();
-                for destination in group {
-                    if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
-                        clicked = Some(TabHit::New(Some(destination.clone())));
+            // A machine with forty hosts gets a menu taller than the screen,
+            // and a menu whose last host is below the taskbar is a host you
+            // cannot pick. The body scrolls instead, with a bar that says so:
+            // the plus is at the top of the window, so the screen less a strip
+            // is what there is to spend.
+            let max_height = (ui.ctx().content_rect().height() - 80.0).max(160.0);
+            // A solid bar, not the floating one egui defaults to: a bar that
+            // appears only while the wheel turns is a bar a person who has not
+            // found the wheel never sees, and a floating one would paint over
+            // the host names it is there to reveal.
+            ui.spacing_mut().scroll.floating = false;
+            egui::ScrollArea::vertical()
+                .id_salt("dtr-new-tab-menu")
+                .max_height(max_height)
+                .auto_shrink([true, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(ui, |ui| {
+                    ui.set_min_width(220.0);
+                    if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
+                        clicked = Some(TabHit::New(None));
                         ui.close();
                     }
-                }
-            }
-            if destinations.is_empty() {
-                ui.label(
-                    egui::RichText::new("no serial ports and no ssh hosts")
-                        .font(egui::FontId::new(
-                            skin.style.label_font.size - 1.0,
-                            skin.style.label_font.family.clone(),
-                        ))
-                        .color(palette.dim),
-                );
-            }
+                    // The groups are separated, not just prefixed. `serial …` and
+                    // `ssh …` are different verbs that lead to different panes, and a
+                    // run of `/dev/tty…` rows with an `ssh` row in the middle is one
+                    // where the pointer lands on the wrong half of the menu. A group
+                    // that is empty takes its separator with it, so a machine with no
+                    // serial ports looks like it always did.
+                    for serial in [true, false] {
+                        let group: Vec<&crate::sources::Destination> = destinations
+                            .iter()
+                            .filter(|destination| destination.is_serial() == serial)
+                            .collect();
+                        if group.is_empty() {
+                            continue;
+                        }
+                        ui.separator();
+                        for destination in group {
+                            if dtr_widgets::menu_row(ui, &skin, &destination.label(), false) {
+                                clicked = Some(TabHit::New(Some(destination.clone())));
+                                ui.close();
+                            }
+                        }
+                    }
+                    if destinations.is_empty() {
+                        ui.label(
+                            egui::RichText::new("no serial ports and no ssh hosts")
+                                .font(egui::FontId::new(
+                                    skin.style.label_font.size - 1.0,
+                                    skin.style.label_font.family.clone(),
+                                ))
+                                .color(palette.dim),
+                        );
+                    }
+                });
         });
         let _ = menu;
     });
@@ -842,6 +845,35 @@ mod kittest_tests {
         harness.get_by_label("new tab").click();
         harness.run();
         harness.snapshot("new_tab_menu");
+    }
+
+    /// Forty hosts do not fit on a screen, and a menu that grows past the
+    /// window is a menu whose last hosts cannot be picked. The body scrolls
+    /// instead — and the bar is visible, so the menu says there is more.
+    #[test]
+    fn a_long_new_tab_menu_scrolls_instead_of_running_off_the_window() {
+        use crate::sources::Destination;
+        let look = Look::default();
+        let labels = vec!["demo".to_owned()];
+        let destinations: Vec<Destination> = (0..40)
+            .map(|index| Destination::Ssh {
+                alias: format!("host{index:02}"),
+                detail: format!("user{index}@10.0.0.{index}"),
+            })
+            .collect();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 360.0))
+            .build_ui(move |ui| {
+                tab_bar(ui, &labels, 0, &destinations, &look);
+            });
+        harness.run();
+
+        harness.get_by_label("new tab").click();
+        // The first popup frame is a sizing pass; the scroll area's cap is
+        // only observable once the menu has settled.
+        harness.run();
+        harness.run();
+        harness.snapshot("new_tab_menu_scrolled");
     }
 
     /// Enter belongs to the terminal, even after a chip was clicked.

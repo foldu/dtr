@@ -212,6 +212,13 @@ focused session, and every switch goes through `App::set_active`, which logs
 `active tab from=… to=… why=…`. The chip's colours and radii are the skin's; its elision and
 its two rects are the strip's, and `New tab`'s menu is `menu_row` rows.
 
+**The `+` menu scrolls when the destinations do not fit.** A config with dozens of `Host`
+entries made a menu taller than the window, and the last hosts were below the taskbar with
+no way to reach them. The body is now an `egui::ScrollArea` capped at the window less a
+strip, with a **solid bar**: a floating bar appears only while the wheel turns — which is
+no help to a person who has not found the wheel — and paints over the host names it is
+there to reveal. `new_tab_menu_scrolled` is the snapshot of forty hosts at 640×360.
+
 **The strip's own menu is a burger at the right-hand end, next to the caption buttons**, on
 both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
 `menu_row`s — settings, keyboard map, about. The right end because the left is where tabs
@@ -249,6 +256,26 @@ unresponsive"**, too: egui gives the press to the topmost widget that senses cli
 chip, its close cross and the icon on top made the winner depend on allocation order —
 disjoint rects, and `Image::paint_at` for anything that must not sense anything.
 
+## The card
+
+**One card, four surfaces.** `dtr_widgets::Card` owns the modal shell — the
+screen-clamped and centered rectangle, the primed `Area` (so the first frame is
+not in the corner), the scrim, the frame, the skin installed on the context, and
+the header. Four surfaces had each spelled that shell out: about, the keyboard
+map, the settings menu and the serial sheet. Their bodies differ and stay their
+own — two-column scrolling map, a form of rows, a list of prose — but the shell
+does not, and four copies of a scrim and a radius are four places for them to
+drift.
+
+The header convention is the card's too: an optional dim **kicker** above the
+title (it carries the cross, because that is the way out of the sentence the
+kicker starts), the **title**, an inline **note** (`version 0.1.0`) or a
+right-aligned **trailing** detail (`115200 8N1`), and the named cross. The footer
+belongs to the body: settings wants save/cancel, the keyboard map a hint, the
+serial sheet both, and a card that guessed would grow a slot per screen.
+`crates/dtr-widgets/tests/widgets.rs` keeps the standalone `card` baseline, so a
+margin or a header row that moves is a picture before it is a dialog.
+
 ## The settings menu
 
 The settings menu is mouse-first: rows are click targets, font size is a drag value, family
@@ -260,6 +287,14 @@ Every control declares an accessible name of the form `<row> value`, not the row
 because the row's label already carries the bare name and two nodes with one name cannot be
 addressed from a test. Port rows exist only when a port is focused: baud and CR translation
 belong to one device.
+
+**The card is the keyboard map's kind, with both ways out.** It has the same header (a
+title and a `cross`), the same centered dimmed card, and a footer with `save` (primary) and
+`cancel`; the X cancels, because an X that saved would be the one control on the card that
+does not say what it does. A mouse edit is reported as `Reply::Change`, and the buttons
+report the same `Effect::Apply`/`Effect::Cancel` the keyboard's Enter and Esc do, so the
+four ways out cannot disagree. It had neither a cross nor a button, which made the keyboard
+the only way to finish a menu a mouse can otherwise drive completely.
 
 **A menu that opens slowly the first time is doing its work in the frame**:
 `usable_families` builds a fontconfig collection and probes every family by loading a face

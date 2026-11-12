@@ -4542,7 +4542,7 @@ impl ApplicationHandler<UserEvent> for App {
                         gpu.set_window_title(label);
                     }
                     let mut tab_click = None;
-                    let mut settings_change = None;
+                    let mut settings_reply = None;
                     let capture_path = match self.capture.take() {
                         Some((path, when)) if std::time::Instant::now() >= when => Some(path),
                         other => {
@@ -4679,7 +4679,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &self.destinations,
                         &mut tab_click,
                         self.status_visible(),
-                        &mut settings_change,
+                        &mut settings_reply,
                         capture_path.as_deref(),
                         &look,
                         ime,
@@ -4746,11 +4746,22 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(choice) = menu_choice {
                         self.link_menu_choice(choice);
                     }
-                    if let Some(change) = settings_change {
+                    if let Some(reply) = settings_reply {
                         // A mouse edit updates the draft, and the file is written
-                        // when the menu is saved — same as a keyboard edit.
-                        self.settings.apply(change);
-                        self.repaint("settings changed");
+                        // when the menu is saved — same as a keyboard edit. The
+                        // card's own buttons are the keyboard's Enter and Esc, so
+                        // the mouse and the keyboard leave through one door.
+                        match reply {
+                            crate::settings::Reply::Change(change) => {
+                                self.settings.apply(change);
+                                self.repaint("settings changed");
+                            }
+                            crate::settings::Reply::Apply => self.apply_settings(),
+                            crate::settings::Reply::Cancel => {
+                                self.settings.cancel();
+                                self.repaint("settings closed");
+                            }
+                        }
                     }
                     match tab_click {
                         // A click on a tab is a switch, exactly like the chord.
@@ -5252,7 +5263,7 @@ impl Gpu {
         destinations: &[crate::sources::Destination],
         tab_click: &mut Option<crate::ui::TabHit>,
         status_visible: bool,
-        settings_change: &mut Option<crate::settings::Change>,
+        settings_reply: &mut Option<crate::settings::Reply>,
         capture: Option<&std::path::Path>,
         look: &Look,
         // The composition being typed, and where its box belongs. Both are
@@ -5296,7 +5307,20 @@ impl Gpu {
             skin.apply(&self.egui_ctx);
             self.installed_skin = Some(skin);
         }
-        let raw_input = self.egui_state.take_egui_input(&self.window);
+        // egui talks to the window through `ViewportCommand`s — start a drag,
+        // begin a resize, maximise, minimise — and it only knows what the window
+        // is doing (focused? maximised?) if it is told every frame. Both halves
+        // are easy to leave out by hand: without `update_viewport_info` the
+        // maximised flag is always `None`, so the restore glyph never appears,
+        // and without `process_viewport_commands` every command is silently
+        // dropped, which is a title bar that does not move and a window that
+        // does not resize on Windows.
+        let mut viewport_info = egui::ViewportInfo::default();
+        egui_winit::update_viewport_info(&mut viewport_info, &self.egui_ctx, &self.window, false);
+        let mut raw_input = self.egui_state.take_egui_input(&self.window);
+        raw_input
+            .viewports
+            .insert(egui::ViewportId::ROOT, viewport_info.clone());
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             // A client-side frame must exist even with no tabs, or the window
             // has no way to be moved or closed while the last tab is going away.
@@ -5470,8 +5494,8 @@ impl Gpu {
             // The palette is an overlay above the panes: a file listing
             // must not cover the command line it sits beside.
             if let Some(settings) = settings {
-                if let Some(change) = settings.ui(ui, look) {
-                    *settings_change = Some(change);
+                if let Some(asked) = settings.ui(ui, look) {
+                    *settings_reply = Some(asked);
                 }
             }
             // The keyboard map sits above the palette and the pager: it is the
@@ -5552,6 +5576,31 @@ impl Gpu {
 
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output);
+
+        // The other half of the viewport conversation: drag, resize, maximise,
+        // minimise, title and decorations all arrive here as commands, and a
+        // backend that drops them leaves the window's own caption dead.
+        let mut actions_requested = Vec::new();
+        if let Some(output) = full_output.viewport_output.remove(&egui::ViewportId::ROOT) {
+            if !output.commands.is_empty() {
+                // A caption press that does nothing is easiest to see here: the
+                // command is either in this list or the frame never asked.
+                tracing::debug!(commands = ?output.commands, "viewport commands");
+            }
+            egui_winit::process_viewport_commands(
+                &self.egui_ctx,
+                &mut viewport_info,
+                output.commands,
+                &self.window,
+                &mut actions_requested,
+            );
+        }
+        for action in actions_requested {
+            // dtr handles its clipboard and screenshots itself, so an action
+            // here is a request the keymap does not make. Log it rather than
+            // pretend it happened.
+            tracing::debug!(?action, "egui asked for an action dtr does not take");
+        }
 
         let pixels_per_point = full_output.pixels_per_point;
         let clipped = self
