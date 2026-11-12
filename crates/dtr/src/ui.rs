@@ -1368,4 +1368,47 @@ mod kittest_tests {
             }
         }
     }
+
+    /// A popup is a layer above the window's own, and the grid is not.
+    ///
+    /// `layer_id_at` is never `None` inside the window — the root layer's rect
+    /// is the whole content area, so it is found under the pointer wherever the
+    /// pointer is — and "a layer is there" was read as "an egui surface is
+    /// there". That made the wheel over the `+` menu scroll the terminal behind
+    /// it, and a link under the pointer never lit its hand. The pair below is
+    /// what `App::over_egui` has to tell apart, taken from the real popup
+    /// rather than assumed, because egui's area bookkeeping is the half of it
+    /// that is not dtr's.
+    #[test]
+    fn the_new_tab_menu_is_a_layer_above_the_grid() {
+        let look = Look::default();
+        let labels = vec!["demo".to_owned()];
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 360.0))
+            .build_ui(move |ui| {
+                egui::Panel::top("strip").show(ui, |ui| {
+                    tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT, &[]);
+                });
+                // The grid is not an egui widget: the window's renderer paints
+                // it, and only the space is reserved here.
+                ui.allocate_space(ui.available_size());
+            });
+        harness.run_steps(2);
+        let grid = harness.ctx.content_rect().center();
+        let under = harness.ctx.layer_id_at(grid).expect("the root layer");
+        assert!(
+            !crate::app::above_the_root(under),
+            "the grid is the window's own layer, not an egui surface: {under:?}"
+        );
+
+        harness.get_by_label("new tab").click();
+        // The first popup frame is a sizing pass; the layer exists on the next.
+        harness.run_steps(3);
+        let menu = harness.get_by_label("local shell").rect().center();
+        let popup = harness.ctx.layer_id_at(menu).expect("the menu's layer");
+        assert!(
+            crate::app::above_the_root(popup),
+            "the menu is above the root layer: {popup:?}"
+        );
+    }
 }

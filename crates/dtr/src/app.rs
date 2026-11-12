@@ -929,6 +929,34 @@ fn closed(active: usize, count: usize) -> Option<usize> {
     Some(active.min(count - 2))
 }
 
+/// Whether a layer egui found under the pointer is one of its own surfaces — a
+/// card, a popup, a file pane — rather than the window's root.
+///
+/// `layer_id_at` is never `None` inside the window: the root layer's rect is the
+/// whole content area, so it is found under the pointer wherever the pointer is.
+/// Asking "is there a layer here" therefore answered *yes* over the grid, which
+/// made `over_egui` true everywhere — a link under the pointer never lit its
+/// hand, and a wheel over the `+` menu was read as the grid's because the test
+/// could not tell the two apart. The layer *above* the root is the question.
+pub(crate) fn above_the_root(layer: egui::LayerId) -> bool {
+    layer != egui::LayerId::background()
+}
+
+/// Whether a wheel notch belongs to the terminal.
+///
+/// Three bits, and the notch has to pass all of them: no overlay has taken the
+/// window, the pointer is over the focused pane, and no egui surface is on top
+/// of it. The last two are separate questions — the `+` menu is a popup drawn
+/// *over* the grid, and the grid's root layer is under both.
+///
+/// The wheel is not a key: egui reads it from the same event stream the pane
+/// does, so a surface that scrolls itself moved *and* the scrollback behind it
+/// moved too. The handler used to know two surfaces by name — the pager and the
+/// serial sheet — and every other one scrolled two things at once.
+fn wheel_reaches_the_terminal(overlay: bool, over_grid: bool, over_egui: bool) -> bool {
+    !overlay && over_grid && !over_egui
+}
+
 /// The cell of the grid under a physical point, or `None` when it is not the
 /// grid's.
 ///
@@ -1834,17 +1862,20 @@ impl App {
     /// Whether the pointer is over an egui surface — a file pane, a card, a menu,
     /// a scroll bar — rather than the grid.
     ///
-    /// `layer_id_at` answers for the areas egui drew above the base layer, which
+    /// `layer_id_at` answers for the areas egui drew above the root layer, which
     /// is what a card, a popup and a file pane are. The tab strip and the status
-    /// bar are painted, not areas, so they are the cell mapping's business:
-    /// `cell_at` refuses a point outside the pane.
+    /// bar are painted into the root layer, not areas of their own, so they are
+    /// the cell mapping's business: `cell_at` refuses a point outside the pane.
     fn over_egui(&self, at: (f64, f64)) -> bool {
         let Some(gpu) = self.gpu.as_ref() else {
             return false;
         };
         let scale = self.scale();
         let points = egui::pos2(at.0 as f32 / scale, at.1 as f32 / scale);
-        gpu.egui_state.egui_ctx().layer_id_at(points).is_some()
+        gpu.egui_state
+            .egui_ctx()
+            .layer_id_at(points)
+            .is_some_and(above_the_root)
     }
 
     /// The pointer moved: if it entered a different cell, ask the pane what
@@ -2285,12 +2316,13 @@ impl App {
         // sharper case: it opens *at* the pointer, exactly where the preview would
         // be, and the tooltip layer sits above a foreground menu. The pointer over
         // an egui surface — a menu, a file pane, a scroll bar — is the same answer
-        // for the same reason: the preview would follow it there.
+        // for the same reason: the preview would follow it there. The window's own
+        // layer is under the pointer everywhere, so only a layer above it counts.
         if self.overlay_open() {
             return None;
         }
         if let Some(pointer) = ctx.pointer_latest_pos()
-            && ctx.layer_id_at(pointer).is_some()
+            && ctx.layer_id_at(pointer).is_some_and(above_the_root)
         {
             return None;
         }
@@ -4045,6 +4077,23 @@ impl App {
         }
     }
 
+    /// The focused pane's rectangle, in physical pixels.
+    ///
+    /// A split moves the grid's origin, so "is the pointer over the terminal"
+    /// is a question only the pane views answer. The cell under the pointer and
+    /// the wheel both ask it, and two answers that disagreed would put a notch
+    /// and a click in different panes.
+    fn focused_pane_rect(&self) -> Option<crate::layout::Rect> {
+        let gpu = self.gpu.as_ref()?;
+        let metrics = gpu.metrics();
+        let tab = &self.tabs[self.active];
+        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        self.pane_views(tab, metrics, screen, gpu.scale())
+            .into_iter()
+            .find(|(id, _)| *id == tab.focus)
+            .map(|(_, pane)| pane.rect)
+    }
+
     /// Which cell is under a physical pixel position, if any.
     ///
     /// The grid starts at the window origin: the status bar is a separate panel
@@ -4054,14 +4103,7 @@ impl App {
         let metrics = gpu.metrics();
         let session = self.session()?;
         let frame = session.frame.as_ref()?;
-        // Relative to the focused pane: a split moves the grid's origin.
-        let tab = &self.tabs[self.active];
-        let screen = (gpu.config.width as f32, gpu.config.height as f32);
-        let pane = self
-            .pane_views(tab, metrics, screen, gpu.scale())
-            .into_iter()
-            .find(|(id, _)| *id == tab.focus)
-            .map(|(_, pane)| pane.rect)?;
+        let pane = self.focused_pane_rect()?;
         let (col, row) = cell_of(
             pane,
             (metrics.cell_width, metrics.cell_height),
@@ -4874,10 +4916,26 @@ impl ApplicationHandler<UserEvent> for App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     winit::event::MouseScrollDelta::PixelDelta(position) => position.y / 20.0,
                 };
-                // The pager scrolls itself: egui reads the wheel from the event
-                // stream, and sending the same wheel to the shell's scrollback
-                // would move a view the pager is covering.
-                if lines != 0.0 && !self.pager.is_open() && self.serial_dialog.is_none() {
+                // The wheel is not a key, and egui reads the same event: a
+                // surface that scrolls itself — the `+` menu's host list, a
+                // card's body, the pager — would move *and* take the scrollback
+                // behind it with it. Which of the two was asked is the pointer's
+                // question, and it has three parts: no overlay has the window,
+                // the pointer is over the focused pane, and no egui surface is
+                // drawn above it.
+                let (over_grid, over_egui) = match self.cursor_position {
+                    Some((x, y)) => (
+                        self.focused_pane_rect()
+                            .is_some_and(|pane| pane.contains(x as f32, y as f32)),
+                        self.over_egui((x, y)),
+                    ),
+                    // No pointer yet: the focused terminal is the only thing a
+                    // notch can be for.
+                    None => (true, false),
+                };
+                if lines != 0.0
+                    && wheel_reaches_the_terminal(self.overlay_open(), over_grid, over_egui)
+                {
                     // A program that tracks the mouse gets the wheel as buttons 4
                     // and 5, which is how vim and every pager over ssh scroll.
                     // Shift is the selection key again, so it still scrolls the
@@ -6331,7 +6389,7 @@ impl Gpu {
 mod tests {
     use super::{
         BELL_FLASH, bell_alpha, cell_of, closed, copy_to, cycled, mouse_goes_to_program, save_name,
-        tab_name,
+        tab_name, wheel_reaches_the_terminal,
     };
 
     /// A bell is a flash that fades and then stops: `Some` while it rings, `None`
@@ -6443,6 +6501,32 @@ mod tests {
         );
         assert!(!mouse_goes_to_program(false, false), "nobody asked for it");
         assert!(!mouse_goes_to_program(false, true), "shift changes nothing");
+    }
+
+    /// A wheel notch is the pointer's, not the focused pane's.
+    ///
+    /// egui reads the same wheel event, so a notch over a surface that scrolls
+    /// itself used to move that surface *and* the scrollback behind it. The
+    /// pager was the only such surface the handler knew about by name; the `+`
+    /// menu and a card's body scrolled two things at once.
+    #[test]
+    fn a_wheel_over_an_egui_surface_is_not_the_terminals() {
+        assert!(
+            wheel_reaches_the_terminal(false, true, false),
+            "over the grid, nothing in front of it"
+        );
+        assert!(
+            !wheel_reaches_the_terminal(true, true, false),
+            "an overlay has taken the window, even with the pointer outside it"
+        );
+        assert!(
+            !wheel_reaches_the_terminal(false, false, false),
+            "the tab strip and the status bar are not the grid"
+        );
+        assert!(
+            !wheel_reaches_the_terminal(false, true, true),
+            "a popup drawn over the grid — the + menu — scrolls itself"
+        );
     }
 
     #[test]

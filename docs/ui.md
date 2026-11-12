@@ -287,6 +287,19 @@ strip, with a **solid bar**: a floating bar appears only while the wheel turns �
 no help to a person who has not found the wheel — and paints over the host names it is
 there to reveal. `new_tab_menu_scrolled` is the snapshot of forty hosts at 640×360.
 
+**A scroll belongs to whatever the pointer is over.** The wheel is not a key: egui reads the
+same event from the stream the pane does, so a surface that scrolls itself — that host
+list, a card's body, the pager — moved *and* took the terminal's scrollback with it. The
+handler knew two surfaces by name (the pager, the serial sheet), so every other one
+scrolled two things at once. `wheel_reaches_the_terminal` asks the pointer instead: no
+overlay has the window, the pointer is inside the focused pane, and no egui layer is above
+the grid. That last test was wrong for a while in a way worth recording —
+`Context::layer_id_at` is never `None` inside the window, because egui registers the root
+layer with the whole content rect, so "a layer is there" had been read as "an egui surface
+is there". It also meant a link under the pointer never lit its hand or raised a preview.
+`above_the_root` is the question, and `the_new_tab_menu_is_a_layer_above_the_grid` pins it
+with the real popup.
+
 **The strip's own menu is a burger at the right-hand end, next to the caption buttons**, on
 both platforms: `crate::ui::app_menu`, a Lucide `menu.svg` icon, a `Popup::menu` of
 `menu_row`s — settings, keyboard map, about. The right end because the left is where tabs

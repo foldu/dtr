@@ -77,6 +77,14 @@ refused while a drag that leaves it is clamped (`pane_pixels`); a wheel notch is
 and 5, press *and* release (X10 has no other spelling), and shift sends it to scrollback
 instead.
 
+**A wheel notch belongs to whatever the pointer is over.** egui reads the same event from
+the stream the pane does, so a notch over a popup or a scrolling card moved that surface
+*and* the scrollback behind it — the handler used to name the pager and the serial sheet
+and had no answer for anything else. `wheel_reaches_the_terminal` asks instead: no
+overlay has the window, the pointer is inside the focused pane, and no egui layer is above
+the grid. The account, including why `Context::layer_id_at` alone is not the question, is
+in `docs/ui.md`.
+
 **A paste is the program's too**: `pane::pasted` turns breaks into CR and wraps the text in
 `ESC[200~ … ESC[201~` when `?2004h` is on, because a bracketed paste is what stops a
 multi-line paste from executing its middle lines.
