@@ -537,6 +537,16 @@ Precedence is command line, then config file, then the remembered port settings,
 115200 8N1. The config file outranks memory because it is a declaration rather than the side effect
 of the last session.
 
+**The file is live.** It is watched (`crate::watch::ConfigWatcher` on the directory that holds it,
+so a file that does not exist yet and an editor that writes by renaming a temporary are both seen),
+a burst of events settles into one reload 150 ms after the last one, and the reload goes through
+`App::adopt_config` — the same function a settings save uses — so the look, the font, the theme and
+the `[keys]` map all move together and a key added to the file tomorrow is one a reload applies.
+A file that does not parse is not a window that closes: the running config stays, `-v` carries the
+parser's line and column, and a toast says the file did not take. A change that arrives while the
+settings sheet is open waits for it to close, because the sheet owns the window's look until then;
+a save wins over a deferred change, since it just wrote over it.
+
 `font.size` and `font.path` are honoured: a `.ttf`/`.otf` is loaded into egui's monospace family at
 context creation (loading per frame would rebuild the glyph atlas on every repaint).
 

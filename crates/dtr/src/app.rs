@@ -26,6 +26,11 @@ pub enum UserEvent {
     Frame,
     /// A watched file changed: `~/.ssh/config` was edited.
     Files,
+    /// The config file changed on disk: `dtr --config-set`, an editor, a
+    /// `git checkout`. Its own event, because a config is not a destination —
+    /// `Files` starts a scan, and this re-reads the file that describes the
+    /// window.
+    Config,
     /// A background scan finished: the destinations to offer now.
     Destinations(Vec<crate::sources::Destination>),
     /// Something the SFTP worker finished.
@@ -543,6 +548,14 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 let _ = proxy.send_event(UserEvent::Files);
             }
         }),
+        config_watch: crate::watch::ConfigWatcher::spawn(&startup.config_path, {
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(UserEvent::Config);
+            }
+        }),
+        config_settle: crate::watch::Settle::default(),
+        config_deferred: false,
         destinations: Vec::new(),
         // A background runtime for the UI's own slow work, separate from the
         // panes: those are single-threaded by design, one per session.
@@ -1094,6 +1107,15 @@ struct App {
     /// The watcher for destination files. Held so the watch stays alive.
     #[allow(dead_code)]
     watcher: Option<crate::watch::Watcher>,
+    /// The config file's own watcher, held for the same reason.
+    #[allow(dead_code)]
+    config_watch: Option<crate::watch::ConfigWatcher>,
+    /// The file is written in bursts, so a change only starts a clock.
+    config_settle: crate::watch::Settle,
+    /// A reload that arrived while the settings sheet was open, waiting for it
+    /// to close: the sheet owns the window's look until then, and re-reading
+    /// the file under a half-finished draft would take the preview away.
+    config_deferred: bool,
     /// The runtime that does the slow work: enumerating serial ports reads
     /// udev or SetupAPI, which is milliseconds-to-tens-of-milliseconds — an
     /// eternity on a thread that is also drawing the frame. The UI thread asks
@@ -2886,10 +2908,10 @@ impl App {
 
         let serial_changed = draft.serial != self.config.serial;
 
-        self.config = draft;
         // The theme was resolved when the row moved, not now: a palette command
         // switches the theme without touching the file, and a save must not
         // quietly undo it.
+        self.adopt_config(draft);
         let config = self.config.clone();
         self.show_look(&config, false);
 
@@ -2965,7 +2987,68 @@ impl App {
         }
 
         self.settings.open = false;
+        // A save is the later word: a file change that arrived while the sheet
+        // was open was overwritten by this one, so there is nothing left to
+        // reload.
+        self.config_deferred = false;
         self.repaint("settings applied");
+    }
+
+    /// Take `config` as the truth: it is the file's now, and the keys follow it.
+    ///
+    /// The look is the caller's, because the two callers differ on one point
+    /// that matters — a save must not resolve `theme` again (a palette command
+    /// switched it without touching the file), and a reload must, because the
+    /// file just said which theme it wants.
+    fn adopt_config(&mut self, config: dtr_config::Config) {
+        self.config = config;
+        // `[keys]` is a document, not a menu: a rebinding arrives here or not at
+        // all, and a keymap that remembered the old chords would leave the file
+        // describing a keyboard nobody has.
+        self.keymap = crate::keys::Keymap::new(&self.config.keys);
+    }
+
+    /// Read the config file again, because it changed on disk.
+    ///
+    /// `dtr --config-set`, an editor and a `git checkout` all land here, and what
+    /// they change is everything the window is: the look, the font, the theme,
+    /// the keys. A broken file is not a window that closes — the running config
+    /// stays and the error is said out loud, the same bargain as at startup.
+    fn reload_config(&mut self) {
+        let parsed = dtr_config::Config::load(&self.config_path);
+        let config = match parsed {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(%err, path = %self.config_path.display(), "config reload");
+                // A toast is an overlay 240 points wide, not a stack trace: the
+                // parser's line and column are in the log, and what a glance
+                // needs is that the file did not take.
+                self.toast = Some((
+                    "config.toml has an error".to_owned(),
+                    std::time::Instant::now(),
+                ));
+                self.repaint("config reload failed");
+                return;
+            }
+        };
+        if config == self.config {
+            // A save of our own, or a touch that changed nothing: adopting it
+            // would rebuild the grid and re-send the theme for no reason.
+            tracing::debug!("config reload: unchanged");
+            return;
+        }
+        // The terminals' colours are the file's too, and a theme it named is a
+        // change like any other.
+        self.adopt_config(config);
+        tracing::debug!(
+            widgets = %self.config.ui.widgets,
+            scheme = %self.config.ui.scheme,
+            theme = self.config.theme.as_deref().unwrap_or("built-in"),
+            "config reloaded"
+        );
+        let config = self.config.clone();
+        self.show_look(&config, true);
+        self.repaint("config reloaded");
     }
 
     /// Put the sheet's draft on the window, now.
@@ -4075,6 +4158,14 @@ impl ApplicationHandler<UserEvent> for App {
         report_loop(self);
         self.check_exit_deadline(event_loop);
 
+        // A reload that arrived while the sheet was open runs once it is closed,
+        // before anything else this iteration: the window the reload describes
+        // should be the one the next frame draws.
+        if self.config_deferred && !self.settings.open {
+            self.config_deferred = false;
+            self.reload_config();
+        }
+
         // The control flow is **sticky**: winit keeps the last value until
         // something sets it again. Every deadline set below is in the past by
         // the time the next iteration runs, so leaving one in place makes every
@@ -4193,6 +4284,25 @@ impl ApplicationHandler<UserEvent> for App {
             None => {}
         }
 
+        // The config file, once it has been quiet for a moment. A change that
+        // arrives while the settings sheet is open waits for it: the sheet owns
+        // the window's look, and re-reading the file under a half-finished draft
+        // would take the preview away from under the pointer. A save wins over
+        // the deferred change — the draft was written over it.
+        match self.config_settle.due() {
+            Some(due) if std::time::Instant::now() >= due => {
+                if self.config_settle.take(std::time::Instant::now()) {
+                    if self.settings.open {
+                        self.config_deferred = true;
+                    } else {
+                        self.reload_config();
+                    }
+                }
+            }
+            Some(due) => sooner(due, &mut deadline),
+            None => {}
+        }
+
         // One value, every iteration: without this the last deadline stays set
         // and every poll times out immediately.
         event_loop.set_control_flow(match deadline {
@@ -4211,6 +4321,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // A file changed: scan now rather than at the next poll.
                 self.scan_due = std::time::Instant::now();
                 self.repaint("watched file changed");
+            }
+            UserEvent::Config => {
+                // The file is written in bursts, so this only starts a clock;
+                // `about_to_wait` reads it once the file has been quiet.
+                self.config_settle.note(std::time::Instant::now());
+                self.repaint("config file changed");
             }
             UserEvent::Sftp(event) => {
                 self.sftp_event(event);

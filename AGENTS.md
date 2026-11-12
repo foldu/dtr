@@ -689,11 +689,14 @@ account behind each of these.
   filled in later, not on the click**: `usable_families` is a fontconfig walk cached in a
   `OnceLock` and warmed before the window, and the theme list is read once in `show` — a
   control that rescans per frame is a scan per frame (`docs/ui.md` §The settings menu).
+- **The config file is live, and it is the other writer of the same settings**: `watch.rs`
+  watches its directory, a burst settles into one `App::reload_config`, and a reload adopts the
+  file through the same `adopt_config` a save uses — so **a new key is a key a reload applies**.
+  A file that does not parse keeps the running config and says so.
 - **One theme is compiled in, and a file of the same name beats it**: `theme::load` asks the
   search paths first (exact name, then ignoring case) and falls back to the `include_str!`-ed
-  `Kanagawa Wave`, because Ghostty's themes on NixOS are a store path and the one-file
-  Windows exe has no `share/`, so `~/.config/dtr/themes/Kanagawa Wave` is how you change it
-  and `theme = "kanagawa wave"` is how you select it.
+  `Kanagawa Wave`, so `~/.config/dtr/themes/Kanagawa Wave` is how you change it and
+  `theme = "kanagawa wave"` is how you select it.
 - **Key bindings are config, and the format is Zed's**: `[keys]` maps an action name to a
   chord, a named key, or several chords in a row, and `false` hands a chord back to the
   shell. Two rules bite: **shifted punctuation is written as the character it produces**
