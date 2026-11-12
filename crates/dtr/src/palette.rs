@@ -584,4 +584,24 @@ mod kittest_tests {
         harness.run();
         harness.snapshot("palette_adwaita");
     }
+
+    /// A window too short for ten rows shows fewer of them, and the card still
+    /// ends inside the window: the row count is measured from what the field
+    /// left, so the clamp is the same arithmetic as the tall skin in reverse.
+    #[test]
+    fn the_palette_fits_a_short_window() {
+        let mut palette = Palette::new(false);
+        palette.toggle();
+        let look = Look {
+            choice: dtr_widgets::Choice::new(dtr_widgets::Preset::Windows),
+            ..Look::default()
+        };
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(560.0, 300.0))
+            .build_ui(|ui| {
+                palette.ui(ui, &look);
+            });
+        harness.run();
+        harness.snapshot("palette_short");
+    }
 }
