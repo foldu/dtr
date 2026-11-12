@@ -27,7 +27,8 @@ use libghostty_vt::render::{
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::terminal::{
-    ColorScheme, Mode, Point, PointCoordinate, PointSpace, SizeReportSize,
+    ClipboardReadError, ClipboardReplyContent, ColorScheme, Mode, Point, PointCoordinate,
+    PointSpace, SizeReportSize,
 };
 use portable_pty::MasterPty;
 
@@ -526,6 +527,10 @@ impl Pane {
         theme: Option<crate::theme::Theme>,
         scrollback: usize,
         budget: FrameBudget,
+        // Shared by every pane: one refresh of the system clipboard updates what
+        // all of them can answer, and `clipboard_read` is the policy.
+        clipboard: Arc<Mutex<Option<String>>>,
+        clipboard_read: bool,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
@@ -546,6 +551,7 @@ impl Pane {
         let cwd_seen = Arc::clone(&cwd);
         let bells = Arc::new(AtomicU32::new(0));
         let rung = Arc::clone(&bells);
+        let shared_clipboard = Arc::clone(&clipboard);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = async_channel::unbounded::<Command>();
 
@@ -574,6 +580,8 @@ impl Pane {
                     Arc::clone(&ended_flag),
                     Arc::clone(&cwd_seen),
                     rung,
+                    shared_clipboard,
+                    clipboard_read,
                     theme,
                     scrollback,
                     budget,
@@ -935,6 +943,8 @@ async fn run(
     ended: Arc<std::sync::atomic::AtomicBool>,
     cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     bells: Arc<AtomicU32>,
+    clipboard: Arc<Mutex<Option<String>>>,
+    clipboard_read: bool,
     theme: Option<crate::theme::Theme>,
     scrollback: usize,
     budget: FrameBudget,
@@ -1006,6 +1016,27 @@ async fn run(
         term.on_bell(move |_term| {
             rung.fetch_add(1, Ordering::Relaxed);
             wake();
+        })?;
+    }
+    // `OSC 52 ; c ; ?`: a program asks for the clipboard. The reply must be
+    // given *inside* this callback and the pane thread cannot reach the system
+    // clipboard, so it answers from what the UI last read. A request that is not
+    // allowed is refused rather than ignored: "no" is an answer a program can
+    // act on, and silence is not — and it never reads the OS clipboard itself.
+    {
+        let clip = Arc::clone(&clipboard);
+        term.on_clipboard_read(move |_term, read| {
+            let wants_text = read.mimes().any(|mime| mime.starts_with(b"text/"));
+            let text = clip.lock().ok().and_then(|slot| slot.clone());
+            match (clipboard_read && wants_text, text) {
+                (true, Some(text)) if !text.is_empty() => {
+                    let content = [ClipboardReplyContent::new(b"text/plain", text.as_bytes())];
+                    read.reply(Ok(&content), &[], false);
+                }
+                // Denied covers both "policy says no" and "nothing to give":
+                // the protocol tells the program either way.
+                _ => read.reply(Err(ClipboardReadError::Denied), &[], false),
+            }
         })?;
     }
 
@@ -3797,6 +3828,18 @@ mod session_tests {
     use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
 
     fn pane(script: String, remote: Option<&str>, args: Vec<String>) -> Pane {
+        pane_given(script, remote, args, None, false)
+    }
+
+    /// A pane whose clipboard the UI has already filled, and a policy for
+    /// whether a program may read it.
+    fn pane_given(
+        script: String,
+        remote: Option<&str>,
+        args: Vec<String>,
+        clipboard: Option<&str>,
+        clipboard_read: bool,
+    ) -> Pane {
         let mut config = pty::Config {
             program: Some("/bin/sh".to_owned()),
             remote: remote.map(str::to_owned),
@@ -3806,12 +3849,15 @@ mod session_tests {
         all.extend(args);
         config.args = all;
         let budget: FrameBudget = Arc::new(AtomicU64::new(frame_budget(None).as_nanos() as u64));
+        let shared = Arc::new(Mutex::new(clipboard.map(str::to_owned)));
         Pane::spawn(
             Transport::Shell(config),
             None,
             None,
             dtr_config::SCROLLBACK_LIMIT,
             budget,
+            shared,
+            clipboard_read,
             || {},
         )
         .expect("a shell pane")
@@ -4535,6 +4581,43 @@ mod session_tests {
         assert_eq!(pane.take_bells(), 0);
     }
 
+    /// `OSC 52 ; c ; ?` is a program asking for the clipboard. It is answered
+    /// from what the UI last read, because the reply is due inside a synchronous
+    /// callback on a thread that cannot touch the OS clipboard — and when the
+    /// config does not allow it the program is told *no*, which is a different
+    /// thing from the silence dtr used to give.
+    #[test]
+    fn a_clipboard_read_is_answered_only_when_allowed() {
+        let allow = |clipboard: Option<&'static str>, allowed: bool| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let out = dir.path().join("read");
+            let script = reader(r"printf '\033]52;c;?\033\\'; ", &out);
+            let pane = pane_given(script, None, Vec::new(), clipboard, allowed);
+            // The base64 of "hello" is aGVsbG8=; a refused read answers with an
+            // empty selection, which is the payload's own way of saying no.
+            wait_for_bytes(&pane, &out, "\x1b]52;c;", "an OSC 52 read");
+            std::thread::sleep(Duration::from_millis(200));
+            let got = std::fs::read_to_string(&out).unwrap_or_default();
+            (pane, got)
+        };
+
+        let (_, allowed) = allow(Some("hello"), true);
+        assert!(
+            allowed.contains("\x1b]52;c;aGVsbG8=\x1b\\"),
+            "an allowed read should carry the clipboard: {allowed:?}"
+        );
+
+        let (_, refused) = allow(Some("hello"), false);
+        assert!(
+            !refused.contains("aGVsbG8="),
+            "a refused read must not leak the clipboard: {refused:?}"
+        );
+        assert!(
+            refused.contains("\x1b]52;c;\x1b\\"),
+            "a refused read should still answer, with nothing: {refused:?}"
+        );
+    }
+
     /// The size reports are how a program learns the cell: an image viewer, a
     /// TUI preview or a neovim image plugin that has to guess from the font size
     /// guesses wrong on a HiDPI window and after every resize. `CSI 16 t` is the
@@ -4855,6 +4938,8 @@ mod session_tests {
             None,
             dtr_config::SCROLLBACK_LIMIT,
             budget,
+            Arc::new(Mutex::new(None)),
+            false,
             || {},
         )
         .expect("an nvim pane");
@@ -5058,6 +5143,8 @@ mod session_tests {
             None,
             dtr_config::SCROLLBACK_LIMIT,
             budget,
+            Arc::new(Mutex::new(None)),
+            false,
             || {},
         )
         .expect("an nvim pane");

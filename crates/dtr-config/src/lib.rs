@@ -47,6 +47,14 @@ pub struct Terminal {
     /// Clamped to `[0, SCROLLBACK_LIMIT]` when the file is read: a value above
     /// the ceiling is a mistake, not an instruction, and the error says so.
     pub scrollback_limit: usize,
+    /// Whether a program may read the clipboard with `OSC 52 ; c ; ?`.
+    ///
+    /// Off by default. A read is a real capability — a program on the far end of
+    /// an ssh session could ask for whatever was copied last — so it is opt-in,
+    /// and a request that is not allowed is *refused* rather than ignored, which
+    /// is a difference the program can see. (Ghostty's `clipboard-read` defaults
+    /// to asking; dtr has no prompt yet, so the honest default is "no".)
+    pub clipboard_read: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -250,6 +258,7 @@ impl Default for Terminal {
     fn default() -> Self {
         Self {
             scrollback_limit: SCROLLBACK_LIMIT,
+            clipboard_read: false,
         }
     }
 }
@@ -413,6 +422,11 @@ impl Config {
                     )));
                 }
                 config.terminal.scrollback_limit = value as usize;
+            }
+            if let Some(read) = terminal.get("clipboard_read") {
+                config.terminal.clipboard_read = read.as_bool().ok_or_else(|| {
+                    Error::Value("terminal.clipboard_read must be true or false".into())
+                })?;
             }
         }
 
@@ -712,6 +726,21 @@ mod tests {
                 "the message should say why: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_clipboard_read_is_off_unless_the_file_says_so() {
+        // A read is a capability, so the default cannot be "yes".
+        assert!(!Config::parse("").unwrap().terminal.clipboard_read);
+        assert!(
+            Config::parse("[terminal]\nclipboard_read = true\n")
+                .unwrap()
+                .terminal
+                .clipboard_read
+        );
+        let error = Config::parse("[terminal]\nclipboard_read = \"always\"\n")
+            .expect_err("a string is not a bool");
+        assert!(format!("{error}").contains("clipboard_read"), "{error}");
     }
 
     #[test]

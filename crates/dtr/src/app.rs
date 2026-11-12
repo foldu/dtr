@@ -325,6 +325,9 @@ pub fn capture_headless(
         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
             crate::pane::frame_budget(None).as_nanos() as u64,
         )),
+        // A capture has no clipboard of its own, and nothing to allow.
+        std::sync::Arc::new(std::sync::Mutex::new(None)),
+        false,
         || {},
     )?;
     if !startup.send.is_empty() {
@@ -499,12 +502,18 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     let frame_budget: crate::pane::FrameBudget = std::sync::Arc::new(
         std::sync::atomic::AtomicU64::new(crate::pane::frame_budget(None).as_nanos() as u64),
     );
+    // Created before the first pane, because every pane shares it and the first
+    // one is spawned here rather than through `App::open`.
+    let clipboard_cache: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     let pane = TermPane::spawn(
         startup.transport,
         startup.log.clone(),
         startup.theme.clone(),
         startup.scrollback,
         std::sync::Arc::clone(&frame_budget),
+        std::sync::Arc::clone(&clipboard_cache),
+        startup.config.terminal.clipboard_read,
         {
             let proxy = proxy.clone();
             move || {
@@ -664,6 +673,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         config: startup.config.clone(),
         config_path: startup.config_path.clone(),
         toast: None,
+        clipboard_cache,
     };
     // `--files` for screenshots and for starting next to a listing; the pane
     // gets focus, so the arrow keys work immediately.
@@ -1251,6 +1261,13 @@ struct App {
     /// A copy note and when it was made. Shown briefly, because "did that
     /// work?" is asked at the moment the answer still matters.
     toast: Option<(String, std::time::Instant)>,
+    /// The clipboard as this window last saw it, shared with every pane.
+    ///
+    /// A program that asks (`OSC 52 ; c ; ?`) is answered on the pane thread
+    /// inside a synchronous callback, and that thread cannot touch the OS
+    /// clipboard — so the UI keeps this warm on the two occasions the clipboard
+    /// can have changed under us: a copy of ours, and a paste of theirs.
+    clipboard_cache: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// `--select START:END`, still waiting for a frame to say how wide the grid
     /// is: the pane wants viewport cells, the flag names linear ones.
     scripted_selection: Option<(usize, usize)>,
@@ -2294,6 +2311,7 @@ impl App {
     /// "copied" while the clipboard is untouched. Writing it here as well
     /// makes the copy real, and a failure is logged rather than assumed.
     fn set_clipboard(&mut self, text: &str) {
+        self.remember_clipboard(text);
         let clipboard = match self.clipboard.as_mut() {
             Some(clipboard) => clipboard,
             None => match arboard::Clipboard::new() {
@@ -2321,6 +2339,18 @@ impl App {
         }
     }
 
+    /// Keep the panes' copy of the clipboard in step with the system's.
+    ///
+    /// It is written here, on the two occasions dtr itself touches the
+    /// clipboard, rather than read on demand: a program's `OSC 52` read is
+    /// answered synchronously on a pane thread, which cannot reach the OS
+    /// clipboard at all.
+    fn remember_clipboard(&self, text: &str) {
+        if let Ok(mut slot) = self.clipboard_cache.lock() {
+            *slot = Some(text.to_owned());
+        }
+    }
+
     /// Read the system clipboard, by hand.
     ///
     /// The same reason as `set_clipboard`: egui owns its own handle and its own
@@ -2336,7 +2366,7 @@ impl App {
                 }
             }
         }
-        match self.clipboard.as_mut()?.get_text() {
+        let text = match self.clipboard.as_mut()?.get_text() {
             Ok(text) => {
                 tracing::debug!(chars = text.chars().count(), "clipboard read");
                 Some(text)
@@ -2345,7 +2375,11 @@ impl App {
                 tracing::warn!(%err, "could not read the clipboard");
                 None
             }
+        };
+        if let Some(text) = text.as_deref() {
+            self.remember_clipboard(text);
         }
+        text
     }
 
     /// Hand a paste to the focused session.
@@ -3192,6 +3226,8 @@ impl App {
             self.theme.clone(),
             self.config.terminal.scrollback_limit,
             std::sync::Arc::clone(&self.frame_budget),
+            std::sync::Arc::clone(&self.clipboard_cache),
+            self.config.terminal.clipboard_read,
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);
             },
@@ -3312,6 +3348,8 @@ impl App {
             self.theme.clone(),
             self.config.terminal.scrollback_limit,
             std::sync::Arc::clone(&self.frame_budget),
+            std::sync::Arc::clone(&self.clipboard_cache),
+            self.config.terminal.clipboard_read,
             move || {
                 let _ = proxy.send_event(UserEvent::Frame);
             },
