@@ -765,7 +765,7 @@ mod tests {
         let look = Look::default();
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             let strip = ui.max_rect();
-            crate::ui::tab_bar(ui, &labels, 0, &[], &look, crate::ui::TAB_CHIP_HEIGHT);
+            crate::ui::tab_bar(ui, &labels, 0, &[], &look, crate::ui::TAB_CHIP_HEIGHT, &[]);
             if let Some(hit) = buttons_for(ui, strip, false, &look, Kind::Windows, Glyphs::Painted)
             {
                 sink.borrow_mut().push(hit);
@@ -800,7 +800,8 @@ mod tests {
         let look = Look::default();
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             let strip = ui.max_rect();
-            let bar = crate::ui::tab_bar(ui, &labels, 0, &[], &look, crate::ui::TAB_CHIP_HEIGHT);
+            let bar =
+                crate::ui::tab_bar(ui, &labels, 0, &[], &look, crate::ui::TAB_CHIP_HEIGHT, &[]);
             *seen_rects.borrow_mut() = Some((strip, bar.used));
             if let Some(drag) = drag_area(ui, strip, bar.used) {
                 sink.borrow_mut().push(drag);

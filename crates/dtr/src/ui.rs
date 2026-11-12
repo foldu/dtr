@@ -499,6 +499,9 @@ pub fn tab_bar(
     // The strip is the title bar, so its height is the platform's and the chip's
     // is [`tab_chip_height`]'s; neither can be a constant in here.
     chip_height: f32,
+    // What each tab's program says it is doing, one per label. Empty is the
+    // same as "nothing to say", which is what every caller but the window has.
+    activity: &[crate::pane::Activity],
 ) -> TabStrip {
     // Idempotent, and here rather than only at startup so every caller — the
     // window, a capture, a kittest harness — gets a working loader.
@@ -583,6 +586,43 @@ pub fn tab_bar(
             };
             let painter = ui.painter();
             painter.rect_filled(rect, skin.style.chip_radius, fill);
+            // The program's own report, on the chip's bottom edge: a fraction
+            // when it gave one, a sweeping band when it is working without a
+            // number, and the whole stripe when it is a *state* — done, paused,
+            // blocked or failed — because "42%" of a failed build means nothing.
+            //
+            // The colour is the chip's own foreground, not the accent: the
+            // active chip *is* the accent, so an accent stripe on it is invisible
+            // — which is what the first version drew. Only "needs you" gets the
+            // palette's danger slot, and a blocked build and a failed one share
+            // it because there is no warning slot to tell them apart yet.
+            if let Some(activity) = activity.get(index) {
+                let (what, colour) = match activity.state {
+                    crate::pane::ActivityState::Idle => (None, fg),
+                    crate::pane::ActivityState::Working => (
+                        Some(match activity.percent {
+                            Some(percent) => {
+                                dtr_widgets::Stripe::Fraction(f32::from(percent) / 100.0)
+                            }
+                            None => dtr_widgets::Stripe::Indeterminate,
+                        }),
+                        fg,
+                    ),
+                    crate::pane::ActivityState::Paused => (
+                        Some(dtr_widgets::Stripe::Fraction(
+                            activity.percent.map_or(0.0, |p| f32::from(p) / 100.0),
+                        )),
+                        fg.gamma_multiply(0.5),
+                    ),
+                    crate::pane::ActivityState::Done => (Some(dtr_widgets::Stripe::State), fg),
+                    crate::pane::ActivityState::Blocked | crate::pane::ActivityState::Error => {
+                        (Some(dtr_widgets::Stripe::State), palette.danger)
+                    }
+                };
+                if let Some(what) = what {
+                    dtr_widgets::stripe(painter, rect, what, colour, ui.input(|i| i.time));
+                }
+            }
             painter.galley(
                 egui::pos2(rect.left() + 7.0, rect.center().y - galley.size().y / 2.0),
                 galley,
@@ -909,7 +949,9 @@ mod kittest_tests {
             },
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT).hit {
+            if let Some(hit) =
+                tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT, &[]).hit
+            {
                 *sink.borrow_mut() = Some(hit);
             }
         });
@@ -993,7 +1035,7 @@ mod kittest_tests {
             },
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT);
+            tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT, &[]);
         });
         harness.run();
 
@@ -1019,7 +1061,7 @@ mod kittest_tests {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(640.0, 360.0))
             .build_ui(move |ui| {
-                tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT);
+                tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT, &[]);
             });
         harness.run();
 
@@ -1043,7 +1085,7 @@ mod kittest_tests {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = std::rc::Rc::clone(&seen);
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT).hit {
+            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT, &[]).hit {
                 sink.borrow_mut().push(hit);
             }
         });
@@ -1078,7 +1120,7 @@ mod kittest_tests {
         let long = "/home/somebody/src/a/directory/with/a/deliberately/long/name".to_owned();
         let labels = vec![long.clone(), "shell".to_owned()];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT);
+            tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT, &[]);
         });
         harness.run();
 
@@ -1116,7 +1158,7 @@ mod kittest_tests {
             "shell".to_owned(),
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT);
+            tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT, &[]);
         });
         harness.run();
         harness.get_by_label("2 shell").hover();
@@ -1132,7 +1174,7 @@ mod kittest_tests {
         let look = Look::default();
         let labels = vec!["demo".to_owned(), "shell".to_owned()];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT);
+            tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT, &[]);
         });
         harness.run();
 
@@ -1172,7 +1214,7 @@ mod kittest_tests {
             // (Installed per harness, not per process — each has its own ctx.)
             // Accumulate: a click is reported on the frame it happens and the
             // next frame starts from `None`.
-            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT).hit {
+            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT, &[]).hit {
                 *sink.borrow_mut() = Some(index);
             }
         });
@@ -1224,7 +1266,7 @@ mod kittest_tests {
         let look = Look::default();
         let mut harness = Harness::new_ui(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT);
+            tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT, &[]);
         });
         harness.run();
         harness.snapshot("tab_bar");
@@ -1249,7 +1291,7 @@ mod kittest_tests {
         let mut harness = Harness::new_ui(move |ui| {
             ui.ctx()
                 .global_style_mut(|style| style.spacing.interact_size.y = 34.0);
-            let strip = tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT);
+            let strip = tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT, &[]);
             sink.set(strip.used);
         });
         harness.run();

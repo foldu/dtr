@@ -126,8 +126,7 @@ tag mirroring on.
   `input::unescape` turns `\n`, `\r`, `\t`, `\e` and `\\` into bytes, so
   `--send "printf \"one\\ntwo\\n\""` types a *newline* inside the quoted string and
   leaves the shell in a continuation prompt. Escape the backslash again, or put the
-  sample in a file and type its path. (A sample that prints bare `\n` is fine now: the line
-  discipline adds the CR.)
+  sample in a file and type its path.
 - **This file has a budget, and it is silent when it is exceeded**: a session loads at most
   64 KB of `AGENTS.md` and drops the rest, so a file that grows past it loses its *tail* —
   which is the index. Keep it to rules: the rule, and the clause that makes it stick. The
@@ -238,9 +237,12 @@ tag mirroring on.
   a split or a close unzooms first or the change happens off screen. `fit_panes` asks the
   same `visible`, so a hidden pane is not resized behind the one on screen.
 - **`O` and `0` look identical in egui's default monospace**, so `OK` looks like `0K` in a
-  screenshot; before touching the render path run
-  `nix develop .#default --command bash -c 'cargo test -p dtr --bin dtr the_vt_core'` — if
-  that passes, the cells are right and you are looking at a font ambiguity.
+  screenshot; run `cargo test -p dtr --bin dtr the_vt_core` first — if it passes the cells
+  are right and you are looking at a font ambiguity.
+- **A duty the core publishes and dtr never answers is a program talking to a wall**:
+  `pane.rs` registers the `Effects` dtr can serve, and a duty that changes no cell — a
+  `BEL`, a `CSI 8 t`, an `OSC 11` — must wake the UI itself or it waits for the next
+  keystroke (`docs/ghostty.md` §2).
 
 ## Keys, mouse, IME, selection
 
@@ -782,7 +784,7 @@ the two payloads that are ours.
 | Undefined `ghostty_terminal_mode_get` | crates.io `libghostty-vt 0.2.2` is broken; the git rev in `Cargo.toml` is the pinned one |
 | `Terminal` cannot cross threads | it is `!Send`; each pane owns its own thread and runtime |
 | fish renders nothing, or writes nothing | it needs writable `XDG_*` dirs in the sandbox, and the terminal must reply on `on_pty_write` (a shell waits for its answer) |
-| `a pty with sh on it: No such file or directory` | portable-pty passes `$HOME` to `current_dir` without checking it exists; `pty::start_dir` always hands it a real directory, because a stale home made the whole spawn fail with a bare `ENOENT` |
+| `a pty with sh on it: No such file or directory` | portable-pty passes `$HOME` to `current_dir` unchecked; `pty::start_dir` always hands it a real directory, because a stale home made the spawn fail with a bare `ENOENT` |
 | `cargo test` does not refresh the binary | build first; `target/debug/dtr` is what you run, tests do not rebuild it |
 | A removed pane takes two panes with it | the recursive remove returned "delete me" and the grandparent deleted the collapsed subtree; only the direct parent may collapse |
 | Line height is far too small | swash reports `descent` as a *positive* distance below the baseline; negating it halves the cell |

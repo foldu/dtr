@@ -29,7 +29,7 @@ use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::terminal::{
     ClipboardReadError, ClipboardReplyContent, ColorScheme, Mode, Point, PointCoordinate,
-    PointSpace, ResizeWindow, SizeReportSize,
+    PointSpace, ProgramStatusState, ProgressState, ResizeWindow, SizeReportSize,
 };
 use portable_pty::MasterPty;
 
@@ -496,6 +496,124 @@ pub struct LinkReply {
     pub uri: Option<String>,
 }
 
+/// What a program says it is doing, for the tab chip.
+///
+/// Two protocols report this and they overlap: `OSC 9;4` (progress, which
+/// carries a percentage and a state) and `OSC 7501` (program status, which
+/// carries a state, and usually no percentage). One value is enough for a
+/// stripe in the chip, so both are folded into this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    pub state: ActivityState,
+    /// `None` is "no number": indeterminate work, or a state with no progress.
+    pub percent: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActivityState {
+    /// Nothing to show: the program said nothing, or took it back.
+    #[default]
+    Idle,
+    Working,
+    /// `OSC 9;4`'s pause: the work is there but not moving.
+    Paused,
+    /// Finished, and the result is waiting to be looked at.
+    Done,
+    /// Waiting for the user — the one state worth interrupting for.
+    Blocked,
+    Error,
+}
+
+impl ActivityState {
+    /// Higher wins when several records disagree.
+    ///
+    /// The order is what a person needs to know first: something failed, then
+    /// something needs them, then something is running — and "done" is only
+    /// worth a mark when nothing else is happening.
+    fn weight(self) -> u8 {
+        match self {
+            Self::Error => 5,
+            Self::Blocked => 4,
+            Self::Working => 3,
+            Self::Paused => 2,
+            Self::Done => 1,
+            Self::Idle => 0,
+        }
+    }
+}
+
+/// The `OSC 7501` records, one per id, folded into one [`Activity`].
+///
+/// The protocol's records are a tree — `build/test` is a child of `build` — and
+/// a report replaces its record completely, so this is a map and not a stack.
+#[derive(Default)]
+struct StatusRecords {
+    records: std::collections::BTreeMap<String, Activity>,
+}
+
+impl StatusRecords {
+    fn apply(&mut self, id: &str, state: ActivityState, percent: Option<u8>) {
+        if id.is_empty() {
+            if state == ActivityState::Idle {
+                self.records.clear();
+            } else {
+                self.records
+                    .insert(String::new(), Activity { state, percent });
+            }
+            return;
+        }
+        // A report with no state (`Clear`) removes its record and every record
+        // beneath it, which is why the prefix is `id/`.
+        if state == ActivityState::Idle {
+            let prefix = format!("{id}/");
+            self.records
+                .retain(|key, _| key != id && !key.starts_with(&prefix));
+            return;
+        }
+        self.records
+            .insert(id.to_owned(), Activity { state, percent });
+    }
+
+    /// The one activity worth showing: the heaviest state, with its percentage.
+    fn activity(&self) -> Activity {
+        self.records
+            .values()
+            .copied()
+            .max_by_key(|activity| activity.state.weight())
+            .unwrap_or_default()
+    }
+}
+
+/// The two protocols that say what a program is doing, folded into one value.
+#[derive(Default)]
+struct ActivityModel {
+    /// `OSC 9;4`: a state and, usually, a percentage.
+    progress: Activity,
+    /// `OSC 7501`: per-record states, which may be several.
+    status: StatusRecords,
+}
+
+impl ActivityModel {
+    /// The heavier of the two, keeping a percentage when it belongs to the
+    /// state that won.
+    fn combined(&self) -> Activity {
+        let status = self.status.activity();
+        let (heavy, light) = if status.state.weight() > self.progress.state.weight() {
+            (status, self.progress)
+        } else {
+            (self.progress, status)
+        };
+        Activity {
+            state: heavy.state,
+            percent: heavy.percent.or(if heavy.state == light.state {
+                light.percent
+            } else {
+                None
+            }),
+        }
+    }
+}
+
 /// Something a program asked the *person* to see: a desktop notification
 /// (`OSC 9`, `OSC 777`). The pane cannot show it — it has no window — so it is
 /// parked here for the UI, which shows it as a toast and asks for attention.
@@ -535,6 +653,8 @@ pub struct Pane {
     resize_request: Arc<Mutex<Option<(Option<u16>, Option<u16>)>>>,
     /// Notifications the program asked for, waiting for the UI.
     notices: Arc<Mutex<Vec<Notice>>>,
+    /// What the program says it is doing, for the tab chip's stripe.
+    activity: Arc<Mutex<Activity>>,
 }
 
 impl Pane {
@@ -577,6 +697,8 @@ impl Pane {
         let asked = Arc::clone(&resize_request);
         let notices = Arc::new(Mutex::new(Vec::new()));
         let notified = Arc::clone(&notices);
+        let activity = Arc::new(Mutex::new(Activity::default()));
+        let busy = Arc::clone(&activity);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let (tx, rx) = async_channel::unbounded::<Command>();
 
@@ -608,6 +730,7 @@ impl Pane {
                     shared_clipboard,
                     asked,
                     notified,
+                    busy,
                     clipboard_read,
                     theme,
                     scrollback,
@@ -634,6 +757,7 @@ impl Pane {
             bells,
             resize_request,
             notices,
+            activity,
         })
     }
 
@@ -662,6 +786,11 @@ impl Pane {
             .lock()
             .ok()
             .and_then(|mut slot| slot.take())
+    }
+
+    /// What the program says it is doing, for the tab chip.
+    pub fn activity(&self) -> Activity {
+        self.activity.lock().map(|slot| *slot).unwrap_or_default()
     }
 
     /// Notifications the program asked for since the last ask.
@@ -992,6 +1121,7 @@ async fn run(
     clipboard: Arc<Mutex<Option<String>>>,
     resize_request: Arc<Mutex<Option<(Option<u16>, Option<u16>)>>>,
     notices: Arc<Mutex<Vec<Notice>>>,
+    activity: Arc<Mutex<Activity>>,
     clipboard_read: bool,
     theme: Option<crate::theme::Theme>,
     scrollback: usize,
@@ -1064,6 +1194,62 @@ async fn run(
         term.on_bell(move |_term| {
             rung.fetch_add(1, Ordering::Relaxed);
             wake();
+        })?;
+    }
+    // What the program is doing. Two protocols report it — `OSC 9;4` with a
+    // percentage and `OSC 7501` with per-record states — so both write into one
+    // model and the chip gets one answer, because a stripe has room for one.
+    {
+        let model = Rc::new(RefCell::new(ActivityModel::default()));
+        let slot = Arc::clone(&activity);
+
+        let progress_model = Rc::clone(&model);
+        let progress_slot = Arc::clone(&slot);
+        let progress_wake = Arc::clone(&wake);
+        term.on_progress_report(move |_term, report| {
+            let state = match report.state() {
+                Ok(ProgressState::Remove) => ActivityState::Idle,
+                Ok(ProgressState::Set | ProgressState::Indeterminate) => ActivityState::Working,
+                Ok(ProgressState::Pause) => ActivityState::Paused,
+                Ok(ProgressState::Error) => ActivityState::Error,
+                // A state these bindings do not know yet: leave the stripe as
+                // it is rather than guessing what it meant.
+                Ok(_) | Err(_) => return,
+            };
+            let percent = report
+                .progress()
+                .filter(|_| matches!(state, ActivityState::Working));
+            let mut model = progress_model.borrow_mut();
+            model.progress = Activity { state, percent };
+            if let Ok(mut slot) = progress_slot.lock() {
+                *slot = model.combined();
+            }
+            progress_wake();
+        })?;
+
+        let status_model = Rc::clone(&model);
+        let status_slot = Arc::clone(&slot);
+        let status_wake = Arc::clone(&wake);
+        term.on_program_status(move |_term, report| {
+            let state = match report.state() {
+                Ok(ProgramStatusState::Idle) => ActivityState::Idle,
+                Ok(ProgramStatusState::Working) => ActivityState::Working,
+                Ok(ProgramStatusState::Done) => ActivityState::Done,
+                Ok(ProgramStatusState::Blocked) => ActivityState::Blocked,
+                Ok(ProgramStatusState::Error) => ActivityState::Error,
+                // `Clear` removes the record: the same thing an empty report
+                // with `Idle` does, so the model has one way to remove.
+                Ok(ProgramStatusState::Clear) => ActivityState::Idle,
+                Ok(_) | Err(_) => return,
+            };
+            let id = String::from_utf8_lossy(report.id()).into_owned();
+            let percent = report.progress();
+            let mut model = status_model.borrow_mut();
+            model.status.apply(&id, state, percent);
+            if let Ok(mut slot) = status_slot.lock() {
+                *slot = model.combined();
+            }
+            status_wake();
         })?;
     }
     // `OSC 9` and `OSC 777`: a program wants the person to see something — a
@@ -3460,6 +3646,68 @@ mod tests {
 }
 
 #[cfg(test)]
+mod activity_tests {
+    use super::{Activity, ActivityModel, ActivityState, StatusRecords};
+
+    fn at(state: ActivityState, percent: Option<u8>) -> Activity {
+        Activity { state, percent }
+    }
+
+    /// The protocol's records are a tree, a report replaces its record, and a
+    /// `Clear` takes the record and everything under it. What the chip shows is
+    /// the heaviest of them: something failed beats something needs you, which
+    /// beats something running.
+    #[test]
+    fn the_heaviest_program_status_wins() {
+        let mut status = StatusRecords::default();
+        status.apply("build", ActivityState::Working, Some(40));
+        assert_eq!(status.activity(), at(ActivityState::Working, Some(40)));
+
+        status.apply("build/test", ActivityState::Blocked, None);
+        assert_eq!(
+            status.activity(),
+            at(ActivityState::Blocked, None),
+            "waiting for the user is what a person needs to know"
+        );
+
+        // Clearing the parent clears the child too.
+        status.apply("build", ActivityState::Idle, None);
+        assert_eq!(status.activity(), at(ActivityState::Idle, None));
+    }
+
+    /// A root clear removes every record, and a report with no percentage for a
+    /// state that has one keeps the old percentage out of the answer.
+    #[test]
+    fn a_root_clear_removes_everything() {
+        let mut status = StatusRecords::default();
+        status.apply("a", ActivityState::Working, Some(10));
+        status.apply("b", ActivityState::Working, Some(20));
+        status.apply("", ActivityState::Idle, None);
+        assert_eq!(status.activity(), at(ActivityState::Idle, None));
+    }
+
+    /// Two protocols describe the same thing; the chip has room for one answer,
+    /// so the heavier state wins and a percentage is kept only when it belongs
+    /// to that state.
+    #[test]
+    fn progress_and_status_are_folded_into_one_answer() {
+        let mut model = ActivityModel::default();
+        model.progress = at(ActivityState::Working, Some(42));
+        assert_eq!(model.combined(), at(ActivityState::Working, Some(42)));
+
+        model.status.apply("build", ActivityState::Blocked, None);
+        assert_eq!(
+            model.combined(),
+            at(ActivityState::Blocked, None),
+            "a blocked status must not inherit the progress percentage"
+        );
+
+        model.status.apply("build", ActivityState::Idle, None);
+        assert_eq!(model.combined(), at(ActivityState::Working, Some(42)));
+    }
+}
+
+#[cfg(test)]
 mod cwd_tests {
     use super::CwdSniffer;
 
@@ -4722,6 +4970,37 @@ mod session_tests {
             refused.contains("\x1b]52;c;\x1b\\"),
             "a refused read should still answer, with nothing: {refused:?}"
         );
+    }
+
+    /// `OSC 9;4` and `OSC 7501` both say what the program is doing. The pane
+    /// folds them into one value for the tab chip, and the heavier of the two
+    /// wins — a build that is blocked is more important than one at 42%.
+    #[test]
+    fn a_program_can_say_what_it_is_doing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("activity");
+        let script = reader(
+            r"printf '\033]9;4;1;42\033\\'; sleep 0.4; printf '\033]7501;state=blocked\033\\'; ",
+            &out,
+        );
+        let pane = pane(script, None, Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let activity = pane.activity();
+            if activity.state == ActivityState::Working && activity.percent == Some(42) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no progress: {activity:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        loop {
+            let activity = pane.activity();
+            if activity.state == ActivityState::Blocked {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no status: {activity:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// `OSC 9` and `OSC 777` are a program asking the *person* to see something.

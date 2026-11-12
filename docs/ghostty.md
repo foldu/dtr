@@ -60,8 +60,8 @@ a terminal that does not understand the question.
 | `OSC 52 ; c ; ?` — clipboard **read** | mediated: `clipboard-read = ask/allow/deny` | **answers**, from the clipboard the UI last read, or **refuses** with an empty selection — `terminal.clipboard_read`, off by default, because dtr has no prompt to ask with | — | done |
 | `BEL` | `bell-features`: visual, window attention, audio | **flashes** the pane for 140 ms and never makes a sound; a bell in a tab nobody is looking at asks the window for attention instead | — | done (visual only) |
 | `OSC 9 ; …`, `OSC 777` — desktop notification | system notification | **shown** as dtr's own toast, and the window asks for attention if it was a background tab — the in-window notice, not the OS notification centre | — | done (in-window) |
-| `OSC 9 ; 4 ; …` — progress | tab/taskbar progress | **dropped** | `on_progress_report` | M |
-| `OSC 7501` — program status (working, done, waiting) | title/status integration, and the protocol's support query is answered | **dropped**, so the support query is unanswered too and programs see the protocol as unsupported | `on_program_status` | M |
+| `OSC 9 ; 4 ; …` — progress | tab/taskbar progress | **drawn** as a stripe on the tab chip: a fraction when the program gave one, a sliding band when it is working with no number | — | done |
+| `OSC 7501` — program status (working, done, waiting) | title/status integration, and the protocol's support query is answered | **drawn** as the same stripe: per-record states are folded into one answer (error beats blocked beats working), and blocked or failed fills it in the palette's danger colour. The support query is answered because the callback is registered. No warning slot, so a blocked build and a failed one look alike | — | done |
 | `CSI ? 2026 h … l` — synchronized output | holds the frame and captures it at the start of the hold | **holds**: the burst publish and its gate timer are suppressed until the release, which publishes in the batch that carries it; a scroll or a keystroke still paints | — | done |
 | `OSC 11 ; …` — **set** the default background | repaints the window background | **repaints**: the pane paints its own default background first in the grid pass, the colours come from the terminal's *effective* `bg_color`/`fg_color`, and the frame gate compares them so a set with no cell change still publishes | — | done |
 | `CSI 8 ; rows ; cols t` — resize the window | may resize the surface (`vt-window-resize-allowed`) | **honoured behind `terminal.window_resize`** (off by default): the UI resizes by the delta in cells, and keeps a request that arrives before the first frame has measured one | — | done |
@@ -226,9 +226,9 @@ preview.
    cursor half went with it (a block inverts its cell).
 4. **Synchronized output** — *done*: the burst publish and its gate timer are
    held until the release.
-5. **Bell, notifications, command finished** (M): the bell is *done* (flash and
-   window attention, no sound); `OSC 9`/`777`, `OSC 9;4` and `OSC 7501` still
-   have no surface to report to.
+5. **Bell, notifications, command finished** — *done*: the bell flashes the pane
+   (and asks the window for attention, never a sound), `OSC 9`/`777` are a toast,
+   and `OSC 9;4`/`OSC 7501` are a stripe on the tab chip.
 6. **Search** (L). The core has the search (`libghostty_vt::search::Search`); the
    work is the overlay, the six bindings and the colours.
 7. **Confirm close, undo, select-all, font size keys, fullscreen** (S–M).

@@ -570,6 +570,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
                 frame: None,
                 label,
                 program_title: String::new(),
+                activity: crate::pane::Activity::default(),
                 serial,
                 remote,
                 alias: startup_alias,
@@ -1004,6 +1005,10 @@ struct Session {
     /// title and later clears it should fall back to naming the session, not to
     /// being called nothing.
     program_title: String,
+    /// What the program says it is doing, for the tab chip's stripe. Polled
+    /// rather than pushed: it is a state, not an event, and the last answer is
+    /// the only one worth drawing.
+    activity: crate::pane::Activity,
     /// Whether this session has modem lines, for the status strip.
     serial: bool,
     /// Whether the shell is an `ssh` client, so its reported directory belongs
@@ -3255,6 +3260,7 @@ impl App {
                     frame: None,
                     label: transport.describe(),
                     program_title: String::new(),
+                    activity: crate::pane::Activity::default(),
                     serial: matches!(transport, Transport::Serial(_)),
                     // A remote shell reports the *remote* directory; it must not
                     // be adopted as a local path by a new tab.
@@ -3393,6 +3399,7 @@ impl App {
                 frame: None,
                 label: transport.describe(),
                 program_title: String::new(),
+                activity: crate::pane::Activity::default(),
                 serial: matches!(transport, Transport::Serial(_)),
                 remote: alias.is_some(),
                 alias,
@@ -4579,6 +4586,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // it is invisible, which is the same as silence.
                         bell_behind |= index != self.active;
                     }
+                    session.activity = session.pane.activity();
                     if let Some(frame) = session.pane.take_frame() {
                         if frame.title != session.program_title {
                             tracing::debug!(
@@ -4989,6 +4997,18 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(label) = tabs.get(self.active) {
                         gpu.set_window_title(label);
                     }
+                    // One stripe per chip: what the tab's program says it is
+                    // doing. The activity lives on the session, because the
+                    // strip is drawn from labels and a label cannot carry it.
+                    let activity: Vec<crate::pane::Activity> = self
+                        .tabs
+                        .iter()
+                        .map(|tab| {
+                            tab.focused_terminal()
+                                .map(|session| session.activity)
+                                .unwrap_or_default()
+                        })
+                        .collect();
                     let mut tab_click = None;
                     let mut settings_reply = None;
                     let capture_path = match self.capture.take() {
@@ -5123,6 +5143,7 @@ impl ApplicationHandler<UserEvent> for App {
                         serial_dialog.as_ref(),
                         &mut serial_event,
                         &tabs,
+                        &activity,
                         self.active,
                         &self.destinations,
                         &mut tab_click,
@@ -5716,6 +5737,7 @@ impl Gpu {
         serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
         serial_event: &mut Option<crate::serial_dialog::Event>,
         tabs: &[String],
+        activity: &[crate::pane::Activity],
         active_tab: usize,
         destinations: &[crate::sources::Destination],
         tab_click: &mut Option<crate::ui::TabHit>,
@@ -5829,6 +5851,7 @@ impl Gpu {
                             destinations,
                             &look,
                             chip_height,
+                            &activity,
                         );
                         if let Some(hit) = bar.hit {
                             *tab_click = Some(hit);
