@@ -207,6 +207,13 @@ cannot answer this — it records a run, and a tab opened from this menu never r
 count lives where the choice does. `--no-remember`, or a store that will not open, is the config
 file's order again.
 
+**The count never adds a row.** `~/.ssh/config` decides which hosts exist and the store only
+decides their order, so a host deleted from the file stops being offered however many times it was
+opened — the next two-second scan takes the row away, even with the menu open, and a config file
+that has gone leaves no hosts behind. The count is kept rather than pruned: a host that comes back
+to the file comes back with its history instead of starting at zero, which is the difference
+between "this host is gone" and "this file is being edited".
+
 The answer is `TabHit::New(Option<Destination>)`, and it is a *typed* destination because the
 menu used to infer "serial" from a leading `/` while the app opened every entry as `ssh` — so
 picking a port ran `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers

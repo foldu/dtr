@@ -173,6 +173,11 @@ pub fn shell_destinations() -> Vec<Destination> {
 
 /// The ssh hosts the new-tab menu offers: `~/.ssh/config`'s aliases, with the
 /// detail line each one shows, in the order the menu should show them.
+///
+/// The file decides *which* hosts; the remembered uses only decide in what order.
+/// A host that was deleted from the config is not a row, however many times it
+/// was opened, because the store is a lookup for the aliases the file names and
+/// never a list of its own.
 pub fn ssh_destinations(uses: &HashMap<String, dtr_store::SshUse>) -> Vec<Destination> {
     by_use(ssh_hosts(&ssh_config_path()), uses)
         .into_iter()
@@ -187,6 +192,9 @@ pub fn ssh_destinations(uses: &HashMap<String, dtr_store::SshUse>) -> Vec<Destin
 /// looks exactly as it did before there was a counter: the order somebody wrote
 /// `ssh_config` in is one they chose, and it is only recorded use that outranks
 /// it.
+///
+/// It sorts and never adds: a count is only looked up for a host the caller
+/// already has, so a host the config no longer names cannot return as a row.
 fn by_use(
     mut hosts: Vec<(String, String)>,
     uses: &HashMap<String, dtr_store::SshUse>,
@@ -525,7 +533,7 @@ fn shell_name(program: &Path) -> String {
 mod tests {
     use super::{
         LocalShell, by_use, com_port_name, local_shells, one_per_name, ordered, resolved,
-        shell_name, shells_in, uart_absent, unique,
+        shell_name, shells_in, ssh_hosts, uart_absent, unique,
     };
 
     /// `/etc/shells` is programs, one per line, with `#` comments and blank
@@ -739,6 +747,50 @@ mod tests {
             names(by_use(hosts(), &uses)),
             vec!["alpha", "gamma", "beta"],
             "the same count, the more recent first"
+        );
+    }
+
+    /// The config file is the list and the store is only its order: a host that
+    /// was deleted from `~/.ssh/config` is not offered, however many times it was
+    /// opened, and a config that is gone leaves nothing behind either.
+    #[test]
+    fn a_host_the_config_no_longer_names_is_not_offered() {
+        use dtr_store::SshUse;
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "Host alpha\n  HostName 127.0.0.1\n\nHost gamma\n  HostName 127.0.0.1\n",
+        )
+        .expect("write the config");
+
+        // `beta` is the one that was used most and it is no longer in the file.
+        let mut uses = HashMap::new();
+        uses.insert("beta".to_owned(), SshUse { uses: 9, last: 30 });
+
+        let offered = |uses: &HashMap<String, SshUse>| -> Vec<String> {
+            by_use(ssh_hosts(&config), uses)
+                .into_iter()
+                .map(|(alias, _)| alias)
+                .collect()
+        };
+        assert_eq!(
+            offered(&uses),
+            ["alpha", "gamma"],
+            "a count for a host the file does not name is a lookup, not a row"
+        );
+        assert_eq!(
+            offered(&uses),
+            offered(&HashMap::new()),
+            "a stale count changes nothing at all about the rows that are left"
+        );
+
+        std::fs::remove_file(&config).expect("remove the config");
+        assert!(
+            offered(&uses).is_empty(),
+            "no config file is no hosts, whatever the store remembers"
         );
     }
 }
