@@ -2071,6 +2071,14 @@ impl App {
             }
             return;
         }
+        // What egui drew, egui gets. A card's button, a file pane's row and the
+        // notice over a pane that is waiting for its connection are all surfaces
+        // in a layer above the root; a press that fell through them would start a
+        // selection in the grid behind — for the waiting pane, a highlight drawn
+        // over the very screen the notice dimmed.
+        if self.over_egui(at) {
+            return;
+        }
         self.pointer_down(at);
     }
 
@@ -4512,6 +4520,25 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // A pane waiting for its connection is a state that changes with the
+        // clock: the notice counts the wait down, and a countdown that only
+        // moved when the pointer did would be a still picture claiming to be a
+        // timer. Two frames a second is the resolution it is written in — whole
+        // seconds — and the state clears itself when the pty comes back.
+        let waiting = self.tabs[self.active].leaves.values().any(|pane| {
+            matches!(pane, Pane::Terminal(session) if session.pane.stats().retry().is_some())
+        });
+        if waiting {
+            self.repaint("a pane is waiting for its connection");
+            sooner(
+                std::time::Instant::now() + std::time::Duration::from_millis(500),
+                &mut deadline,
+            );
+            if let Some(gpu) = &self.gpu {
+                gpu.window.request_redraw();
+            }
+        }
+
         // A scan is cheap to *ask* for and expensive to *do*, so asking never
         // blocks the frame: the work goes to the worker runtime and comes back
         // as an event.
@@ -5014,7 +5041,6 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut label = String::from("files");
                     let (mut rx, mut tx) = (0u64, 0u64);
                     let (mut rx_rate, mut tx_rate) = (0.0f64, 0.0f64);
-                    let mut connected = true;
                     let mut scrollback = 0u64;
                     let mut modem = None;
                     let mut counters = false;
@@ -5022,7 +5048,6 @@ impl ApplicationHandler<UserEvent> for App {
                         let stats = session.pane.stats().clone();
                         label = session.label.clone();
                         (rx, tx) = (stats.rx(), stats.tx());
-                        connected = stats.connected();
                         scrollback = stats.scrollback();
                         modem = session.serial.then(|| (stats.dtr(), stats.rts()));
                         counters = session.counters;
@@ -5044,7 +5069,6 @@ impl ApplicationHandler<UserEvent> for App {
                         tx,
                         rx_rate,
                         tx_rate,
-                        connected,
                         scrollback,
                         modem,
                         counters,
@@ -5241,6 +5265,24 @@ impl ApplicationHandler<UserEvent> for App {
                             _ => None,
                         })
                         .collect();
+                    // A pane whose connection is not there has no cells worth
+                    // reading and a state worth showing: it is drawn over the
+                    // rectangle the grid pass reserved, once per pane, so a
+                    // split says which half is waiting.
+                    let waiting: Vec<crate::ui::Waiting> = tab
+                        .layout
+                        .visible(area, crate::ui::SPLIT_GAP * gpu.scale(), tab.zoom)
+                        .into_iter()
+                        .filter_map(|(id, rect)| {
+                            let session = tab.leaves.get(&id)?.terminal()?;
+                            Some(crate::ui::Waiting {
+                                id,
+                                rect,
+                                retry: session.pane.stats().retry()?,
+                            })
+                        })
+                        .collect();
+                    let mut reconnect_ask = None;
                     let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
                     // The composition box hangs off the caret of the focused
                     // terminal, and the platform's candidate window is told the same
@@ -5347,6 +5389,8 @@ impl ApplicationHandler<UserEvent> for App {
                         &look,
                         ime,
                         &mut close_window,
+                        &waiting,
+                        &mut reconnect_ask,
                     );
                     // The keyboard map's answers. Its Escape and its captured
                     // key are handled where the keys are; a click has to come back
@@ -5361,6 +5405,25 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if let Some(picked) = tmux_pick {
                         self.tmux_pick(picked);
+                    }
+                    // What the notice over a waiting pane was asked for. Both
+                    // answers are the app's: the pane can hurry its own wait, and
+                    // only the app can close a tab.
+                    if let Some((id, ask)) = reconnect_ask {
+                        match ask {
+                            crate::ui::ReconnectAsk::Now => {
+                                let command = crate::pane::Command::Retry;
+                                if let Some(session) = self.tabs[self.active]
+                                    .leaves
+                                    .get(&id)
+                                    .and_then(Pane::terminal)
+                                {
+                                    session.pane.send(command);
+                                }
+                            }
+                            crate::ui::ReconnectAsk::Close => self.close_tab(self.active),
+                        }
+                        self.repaint("a waiting pane was answered");
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -5945,6 +6008,9 @@ impl Gpu {
         // The caption's close button: the drawing code knows it was pressed, but
         // only the event loop can close the window.
         close: &mut bool,
+        // Panes whose connection is not there, and where the answers go.
+        waiting: &[crate::ui::Waiting],
+        reconnect_ask: &mut Option<(crate::layout::LeafId, crate::ui::ReconnectAsk)>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -6151,7 +6217,17 @@ impl Gpu {
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
-                .show(ui, |_ui| {});
+                .show(ui, |ui| {
+                    // The notice over a pane that is waiting for its connection,
+                    // one per pane, drawn here rather than over the whole window:
+                    // the pane's rectangle is the one thing that says *which*
+                    // session is not there.
+                    for pane in waiting {
+                        if let Some(ask) = crate::ui::reconnect(ui, pane, look) {
+                            *reconnect_ask = Some((pane.id, ask));
+                        }
+                    }
+                });
             // A frameless window's borders. The window manager's grip went with
             // the frame, so the strips are ours — added after the panels so the
             // few pixels at the edge belong to the resize and not to whatever

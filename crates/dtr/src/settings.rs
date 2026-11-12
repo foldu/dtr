@@ -558,7 +558,7 @@ impl Settings {
             .iter()
             .map(|panel| (*panel, panel.label()))
             .collect();
-        let out = dtr_widgets::Card::new(egui::Id::new("dtr-preferences"), "preferences")
+        let out = dtr_widgets::Card::new(egui::Id::unique("dtr-preferences"), "preferences")
             .size(420.0, height)
             .close("close preferences")
             .tabs(|ui| {

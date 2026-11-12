@@ -713,11 +713,13 @@ a machine that has none).
 not the end of the session it was hosting, and the exit status is what says which is which: `ssh` exits
 255 when ssh itself failed, so that is a connection that must be remade; any other status is the remote
 command's own, which means somebody typed `exit`, and the tab closes exactly as before. A drop keeps
-the tab and its scrollback, prints one yellow line of dtr's own (`-- reconnecting to jupyter in
-/srv/app --`, because the shell that died cannot say anything and a pane that stops looks like one
-waiting for a key) and starts the client again after a backoff — 1 s doubling to 30 s, reset once a
+the tab and its scrollback, puts a card over the pane saying what it is doing and where it is going
+back to — the shell that died cannot say anything, and a pane that stops looks like one waiting for a
+key — and starts the client again after a backoff — 1 s doubling to 30 s, reset once a
 connection has stayed up for 10 s, so a host that is down is not asked once a second and a session that
-comes back is not slow for the rest of the day. There is no give-up count: the wait is capped, the
+comes back is not slow for the rest of the day. The card counts the wait down and offers *retry now*
+and *close tab*; it is a state the pane publishes and the frame draws, not a line in the scrollback,
+which would be a lie the moment the next attempt started (`docs/sessions.md` §7). There is no give-up count: the wait is capped, the
 number of attempts is not, because a laptop can be shut for a day and the session it was holding is
 still worth reopening when the network returns — a cap would turn that into "closed while you were not
 looking". A host that is down at *startup* goes through the same path, which is why the first

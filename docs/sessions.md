@@ -159,9 +159,41 @@ alternate screen, `DECSCUSR`'s shape and visibility, and the kitty stack (`CSI <
 The *text* is left alone, because the last screen before the drop is the first thing a
 person wants to read.
 
-The notice — `-- reconnecting to jupyter in /srv/app --` — is written into the terminal
-rather than the pty, because nothing at the other end would read it, and writing it to a pty
-that does not exist yet is how the reconnect message used to disappear.
+### The wait is a card, not a line of output
+
+The wait used to be announced the only way a terminal can announce anything: `-- reconnecting
+to jupyter in /srv/app --` written into the grid, right after the text it was interrupting.
+It was wrong in three ways, and each of them only shows up once somebody is using the
+terminal for work.
+
+**It is history the moment it is printed.** A wait of a second leaves a line in the
+scrollback that is true for a second and a lie for the rest of the session; a host that is
+down for a minute leaves thirty of them, and the output the person wanted to read is now
+thirty lines up. **It reads as output.** Nothing distinguishes it from something the far end
+said, and a terminal's job is to be a pipe for what the far end said. And **it cannot change
+its mind**: the one thing a person watching a dropped connection wants to know is whether
+anything is happening — *is it still trying, and how long until the next attempt?* — and a
+printed line cannot answer that, because a line cannot count down.
+
+So the drop is a **state**, not an event. The pane publishes `pane::Retry` — what it is
+connecting to, the directory it will come back in, which attempt this is, and either the
+moment of the next one, "dialling now", or, for a serial port, "watching for the device" —
+and `ui::reconnect` draws it. The card is `dtr_widgets::Card` with `Order::Middle`, so it is
+above the grid (and above a file pane in the next leaf) and below every modal: a palette
+opened over it must not be covered by a notice about a session. It is centered on the *pane's*
+rectangle, so a split says which half is waiting, and its scrim dims only that pane.
+
+The card carries the two things worth offering while it is up: **retry now**, which moves the
+deadline without resetting the ladder — pressing it twice a minute must not turn the pane into
+a one-second dialler — and **close tab**, which is how a person gives up. Both are `App`'s:
+the pane can hurry its own wait, and only the app can close a tab.
+
+Two consequences worth writing down. The countdown is a state that changes with the clock, so
+a waiting pane asks for a frame twice a second (`App::about_to_wait`) — a countdown that only
+moved when the pointer did would be a still picture pretending to be a timer. And the notice
+*owns its rectangle*: a press over it is the card's, not the terminal's, or a drag would start
+a selection over the very screen the card dimmed. `App::left_press` asks `over_egui` before it
+maps a point to a cell, which is the same question the wheel and the link hover already ask.
 
 ## 8. A session knows its directory only because it says so
 
@@ -224,9 +256,9 @@ has no file at all — so the filter can only remove what the kernel itself has 
 
 Two traps in the transport. **"No bytes" is not "the reader ended"**: the pane keeps the
 byte sender alive for reconnects, so `bytes_rx.recv()` never returns `None` and a disconnect
-arrives on `closed_rx` instead. And a serial port renders `reconnecting…` when it cannot
-disconnect, which means `Stats::connected` was left at its `Default` — only the serial
-reader ever turns it false.
+arrives on `closed_rx` instead. And a notice over a transport that cannot disconnect means
+`Stats::retry` was set and never cleared — only a drop sets it, and only a connection that
+opens clears it.
 
 ## 11. A serial read ends when the driver says so
 

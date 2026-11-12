@@ -335,8 +335,6 @@ pub struct Status<'a> {
     pub tx: u64,
     pub rx_rate: f64,
     pub tx_rate: f64,
-    /// False while the transport is gone and something is trying to get it back.
-    pub connected: bool,
     /// DTR and RTS levels, when the transport has modem lines at all.
     pub modem: Option<(bool, bool)>,
     /// Rows of scrollback below the viewport; 0 is the live screen.
@@ -399,6 +397,139 @@ pub fn toast(ui: &mut Ui, look: &Look, text: &str, alpha: f32) {
 fn faded(colour: Color32, alpha: f32) -> Color32 {
     let [r, g, b, _] = colour.to_srgba_unmultiplied();
     Color32::from_rgba_unmultiplied(r, g, b, (255.0 * alpha.clamp(0.0, 1.0)) as u8)
+}
+
+/// One pane whose connection is not there, for the frame to draw.
+///
+/// The rectangle is physical pixels, like a file pane's: the grid is laid out in
+/// those, and egui is not.
+pub struct Waiting {
+    pub id: crate::layout::LeafId,
+    pub rect: crate::layout::Rect,
+    pub retry: crate::pane::Retry,
+}
+
+/// What a press on the notice asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectAsk {
+    /// Try now, rather than at the end of the wait.
+    Now,
+    /// Give up. Closing the tab is how a person has always given up on a
+    /// connection that will not come back.
+    Close,
+}
+
+/// Draw the notice over a pane whose connection is not there.
+///
+/// This is a *state*, not a line of output. The pane publishes it — `Retry` —
+/// and this draws it, so the notice can count down, disappear when the pty
+/// comes back, and offer the two things worth offering while it is up. A line
+/// written into the grid could do none of those: it is history the moment it is
+/// printed, it reads as something the far end said, and a host that is down for
+/// a minute fills the scrollback with it.
+///
+/// It is the pane's rectangle, not the window's, so a split says which half is
+/// waiting, and it is drawn in the middle layer: above the grid and above a file
+/// pane next door, below every modal, because a palette opened over it must not
+/// be covered by a notice about a session.
+///
+/// Returns the button that was pressed, if any.
+pub fn reconnect(ui: &mut Ui, view: &Waiting, look: &Look) -> Option<ReconnectAsk> {
+    let pixels = ui.ctx().pixels_per_point();
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(view.rect.x / pixels, view.rect.y / pixels),
+        egui::vec2(view.rect.width / pixels, view.rect.height / pixels),
+    );
+    // A pane too small to hold the card is a pane where the notice would be the
+    // only thing on screen: the split is the problem, and covering it does not
+    // help.
+    if rect.width() < 140.0 || rect.height() < 56.0 {
+        return None;
+    }
+    let retry = &view.retry;
+    let skin = look.skin();
+    let palette = skin.palette;
+    let style = skin.style.clone();
+    let small = egui::FontId::new(style.label_font.size - 1.0, style.label_font.family.clone());
+    let line = retry_line(retry);
+    // A first connection is not a reconnection: the pane quotes the host in both
+    // cases, and the word in front of it is the whole difference between "this
+    // is how it starts" and "this started and then broke".
+    let title = if retry.attempt == 0 && retry.when != crate::pane::When::Watching {
+        "connecting"
+    } else {
+        "reconnecting"
+    };
+    let mut ask = None;
+    // The card is clamped and centered against the `Ui` it is given, so it is
+    // given the pane: it centers in the pane, and its scrim covers the pane and
+    // nothing else.
+    let mut bounded = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    bounded.set_clip_rect(rect);
+    dtr_widgets::Card::new(egui::Id::unique(("dtr-reconnect", view.id)), title)
+        .order(egui::Order::Middle)
+        .size(340.0, 150.0)
+        .note(&retry.what)
+        .footer(|ui| {
+            ui.horizontal(|ui| {
+                if matches!(retry.when, crate::pane::When::At(_))
+                    && dtr_widgets::Button::new("retry now").show(ui, &skin)
+                {
+                    ask = Some(ReconnectAsk::Now);
+                }
+                if dtr_widgets::Button::new("close tab").show(ui, &skin) {
+                    ask = Some(ReconnectAsk::Close);
+                }
+            });
+        })
+        .show(&mut bounded, &skin, |ui, _| {
+            if let Some(dir) = &retry.dir {
+                ui.label(
+                    RichText::new(format!("reopening in {dir}"))
+                        .font(small.clone())
+                        .color(palette.dim),
+                );
+            }
+            ui.label(
+                RichText::new(line)
+                    .font(style.value_font.clone())
+                    .color(palette.text),
+            );
+            if let Some(why) = &retry.why {
+                ui.add_space(4.0);
+                ui.label(RichText::new(why).font(small.clone()).color(palette.dim));
+            }
+        });
+    ask
+}
+
+/// What the notice says is happening, in one line.
+///
+/// The countdown is the point of the notice: "waiting" and "waiting, and the
+/// next attempt is in four seconds" are different things to a person deciding
+/// whether to wait or to close the tab.
+fn retry_line(retry: &crate::pane::Retry) -> String {
+    use crate::pane::When;
+    match retry.when {
+        // A device is watched rather than dialled, so there is no deadline to
+        // count: the port either turns up or it does not.
+        When::Watching => "watching for the device".to_owned(),
+        When::Dialling if retry.attempt == 0 => "waiting for the host".to_owned(),
+        When::Dialling => format!("attempt {} · connecting", retry.attempt),
+        When::At(at) => {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            let wait = if left.is_zero() {
+                "now".to_owned()
+            } else {
+                format!("in {} s", left.as_secs() + 1)
+            };
+            format!("attempt {} · next attempt {wait}", retry.attempt)
+        }
+    }
 }
 
 /// The tab strip: one chip per tab, the active one lit, each clickable.
@@ -1004,13 +1135,6 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
                     .color(p.accent),
             );
         }
-        if !status.connected {
-            ui.label(
-                RichText::new("reconnecting…")
-                    .font(body_font.clone())
-                    .color(p.accent),
-            );
-        }
         if !status.counters {
             return;
         }
@@ -1450,6 +1574,116 @@ mod kittest_tests {
         assert!(
             short.rect().width() < label_width,
             "a short title should not be padded to the cap"
+        );
+    }
+
+    /// A pane that is waiting for its connection says so over the pane, as a
+    /// card: the state, the wait, and the two things a person can do about it.
+    ///
+    /// This used to be a line written into the terminal, which is a notice in
+    /// the scrollback of a session with no program behind it. The assertions are
+    /// on what the card draws, because the card *is* the notice now: a pane that
+    /// went back to printing it would have no card for these to find.
+    #[test]
+    fn a_waiting_pane_draws_a_notice_over_its_own_rectangle() {
+        use crate::pane::{Retry, When};
+        let look = Look::default();
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = std::rc::Rc::clone(&asked);
+        let waiting = Waiting {
+            id: 1,
+            rect: crate::layout::Rect::new(0.0, 0.0, 640.0, 400.0),
+            retry: Retry {
+                what: "jupyter".to_owned(),
+                dir: Some("/srv/app".to_owned()),
+                attempt: 3,
+                when: When::At(std::time::Instant::now() + std::time::Duration::from_secs(4)),
+                why: None,
+            },
+        };
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 400.0))
+            .build_ui(move |ui| {
+                if let Some(ask) = reconnect(ui, &waiting, &look) {
+                    sink.borrow_mut().push(ask);
+                }
+            });
+        harness.run();
+
+        // What it is, what it was doing, and where it will be put back.
+        assert!(
+            harness.query_by_label("reconnecting").is_some(),
+            "the card does not say what it is"
+        );
+        assert!(harness.query_by_label("jupyter").is_some());
+        assert!(harness.query_by_label("reopening in /srv/app").is_some());
+        let line = harness.get_by_label("attempt 3 · next attempt in 4 s");
+        assert!(line.rect().width() > 0.0);
+
+        harness.snapshot("reconnecting");
+
+        // Both answers are reported back to the app, which is the only thing
+        // that can send to a pane or close a tab.
+        harness.get_by_label("close tab").click();
+        harness.run();
+        assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Close]);
+        asked.borrow_mut().clear();
+        harness.get_by_label("retry now").click();
+        harness.run();
+        assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Now]);
+    }
+
+    /// The countdown is the reason this is a card and not a line of text: a wait
+    /// says how long it is, and a device that is watched says there is nothing to
+    /// count.
+    #[test]
+    fn the_wait_is_said_in_words() {
+        use crate::pane::{Retry, When};
+        let base = Retry {
+            what: "jupyter".to_owned(),
+            dir: None,
+            attempt: 0,
+            when: When::Dialling,
+            why: None,
+        };
+        assert_eq!(
+            retry_line(&base),
+            "waiting for the host",
+            "the first connection is not a retry"
+        );
+        assert_eq!(
+            retry_line(&Retry {
+                attempt: 2,
+                when: When::Dialling,
+                ..base.clone()
+            }),
+            "attempt 2 · connecting"
+        );
+        assert_eq!(
+            retry_line(&Retry {
+                attempt: 3,
+                when: When::At(std::time::Instant::now() + std::time::Duration::from_secs(4)),
+                ..base.clone()
+            }),
+            "attempt 3 · next attempt in 4 s",
+            "a part second is a second: the wait is not over until it is"
+        );
+        assert_eq!(
+            retry_line(&Retry {
+                attempt: 3,
+                when: When::At(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+                ..base.clone()
+            }),
+            "attempt 3 · next attempt now"
+        );
+        assert_eq!(
+            retry_line(&Retry {
+                what: "/dev/ttyUSB0".to_owned(),
+                when: When::Watching,
+                ..base
+            }),
+            "watching for the device",
+            "a port has no deadline: it either turns up or it does not"
         );
     }
 

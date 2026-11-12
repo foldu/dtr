@@ -462,8 +462,10 @@ second connection, and what each of these failures looked like.
   alternate screen with mouse modes on, so `reset_modes` clears them through the core
   before the reopen — including the kitty stack (`CSI < 999 u`) and DECSCUSR's shape and
   visibility — while leaving the text, because the last screen before the drop is the
-  first thing one wants to read. The notice (`-- reconnecting to jupyter in /srv/app --`)
-  goes into the terminal, not the pty, because nothing at the other end would read it.
+  first thing one wants to read. **The drop is a state, not a line of output**: the pane
+  publishes `Retry` and `crate::ui::reconnect` draws a card over the pane — a countdown,
+  *retry now*, *close tab* — in `Order::Middle`, so above the grid and below every modal,
+  and sized to the *pane*, so a split says which half is waiting.
 - **A session knows its directory only because it says so**: `/proc` is Linux-only and an
   ssh session has no local process, so `CwdSniffer` watches for OSC 7
   (`ESC ] 7 ; file://host/path`) before the VT core, holding an unterminated sequence from
@@ -489,8 +491,9 @@ second connection, and what each of these failures looked like.
   `~/.ssh/config` on a 250 ms `stat` — `notify` was two watches and a thread for one file
   (`docs/compio.md` §5). **"No bytes" is not "the reader ended"**: the pane keeps
   the byte sender alive for reconnects, so a disconnect arrives on `closed_rx`.
-  **`reconnecting…` on a transport that cannot disconnect** means `Stats::connected` was
-  left at its `Default` — only the serial reader turns it false.
+  **A notice on a transport that cannot disconnect** means `Stats::retry` was set and never
+  cleared. **A clock-driven state needs frames**: a waiting notice wakes `about_to_wait`
+  twice a second.
 - **A serial read ends when the driver says so, and the size asked for is a latency
   floor**: on Windows `ReadFile` completes at the requested count or a timeout, and a
   flood leaves no gap for an inter-byte timeout to notice — 8 KB was 355 ms of silence at

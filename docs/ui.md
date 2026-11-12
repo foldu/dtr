@@ -388,14 +388,15 @@ disjoint rects, and `Image::paint_at` for anything that must not sense anything.
 
 ## The card
 
-**One card, four surfaces.** `dtr_widgets::Card` owns the modal shell — the
+**One card, five surfaces.** `dtr_widgets::Card` owns the modal shell — the
 screen-clamped and centered rectangle, the primed `Area` (so the first frame is
 not in the corner), the scrim, the frame, the skin installed on the context, and
 the header. Four surfaces had each spelled that shell out: about, the keyboard
-map, the preferences menu and the serial sheet. Their bodies differ and stay their
-own — two-column scrolling map, a form of rows, a list of prose — but the shell
-does not, and four copies of a scrim and a radius are four places for them to
-drift.
+map, the preferences menu and the serial sheet; the fifth, the notice over a pane
+whose connection dropped, is the one that is not a modal (§A card is not always a
+modal). Their bodies differ and stay their own — two-column scrolling map, a form
+of rows, a list of prose — but the shell does not, and four copies of a scrim and
+a radius are four places for them to drift.
 
 The header convention is the card's too: an optional dim **kicker** above the
 title (it carries the cross, because that is the way out of the sentence the
@@ -432,6 +433,17 @@ height formula is the header plus a tab row plus the *longest* panel's rows plus
 the footer — the longest, because a card that grew when a tab was clicked would
 move its own buttons under the pointer. Settings is the only tabbed card; the
 `tabs` primitive is in the crate so the next one does not invent a second.
+
+**A card is not always a modal.** `Card::order` says which layer it is drawn in,
+and the fifth card is the one that needs it: the notice over a terminal whose
+connection dropped (`ui::reconnect`). That one belongs to a *pane*, not to the
+window — it is centered on the pane's rectangle and its scrim dims only that pane,
+so a split says which half is waiting — and it must be coverable, because a
+palette opened over it is a question the person is answering. So it is drawn in
+`Order::Middle`: above the grid and a file pane next door, below every modal.
+Layer order *within* one `Order` is the order the areas were first created in,
+which is not something a card can know, and that is why the order is a choice
+rather than a computed answer.
 
 ## The preferences menu
 

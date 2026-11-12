@@ -227,13 +227,59 @@ pub struct Frame {
     pub title: String,
 }
 
-/// Byte counters, shared with the UI. Totals only: the rate is the UI's
-/// business, because it is the UI's clock that decides when to repaint.
+/// A connection that is not there right now: what the pane is doing about it,
+/// for the UI to draw over the pane.
+///
+/// The pane used to say this by writing `-- reconnecting to jupyter --` into the
+/// terminal. That is a line in the *history* of a session that has no program at
+/// the other end of it: it scrolls away under the output the person is trying to
+/// read, it looks exactly like something the far end said, and a host that is
+/// down for a minute fills the scrollback with the same sentence thirty times.
+/// The state is published instead, and `crate::ui::reconnect` draws it: where a
+/// countdown can run, and where the two things worth offering while it is up —
+/// try now, give up — can be.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// What is being connected to: an ssh alias, or a serial port.
+    pub what: String,
+    /// The directory the session will be put back in, when it knows one.
+    pub dir: Option<String>,
+    /// How many attempts have been made since the session was last alive. Zero
+    /// is the first connection, which is *connecting* and not *re*connecting.
+    pub attempt: u32,
+    pub when: When,
+    /// What the last attempt said, when it said something the person has not
+    /// already read in the grid.
+    pub why: Option<String>,
+}
+
+/// What a [`Retry`] is doing at this instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    /// An attempt is on its way: ssh is dialling, or the pty is starting.
+    Dialling,
+    /// Nothing is running. The next attempt is due at `at`.
+    At(std::time::Instant),
+    /// A serial port that went away. The reader watches for it, so there is no
+    /// deadline to count down: the device either turns up or it does not.
+    Watching,
+}
+
+/// What a pane publishes for the UI besides its frames: byte counters, the
+/// scrollback depth, modem lines, and the connection that is not there.
+///
+/// Totals only where it is a counter: the rate is the UI's business, because it
+/// is the UI's clock that decides when to repaint.
 #[derive(Debug)]
 pub struct Stats {
     rx: AtomicU64,
     tx: AtomicU64,
-    connected: std::sync::atomic::AtomicBool,
+    /// The connection that is not there, while it is not there.
+    ///
+    /// A lock rather than an atomic because it is several fields that have to
+    /// agree with each other, and the cost is one uncontended `lock` per frame
+    /// against a state that changes twice a minute.
+    retry: std::sync::Mutex<Option<Retry>>,
     /// Rows below the viewport: 0 means you are looking at the live screen.
     scrollback: AtomicU64,
     dtr: std::sync::atomic::AtomicBool,
@@ -253,10 +299,9 @@ impl Default for Stats {
         Self {
             rx: AtomicU64::new(0),
             tx: AtomicU64::new(0),
-            // A pane that exists has a live source until it says otherwise; a
-            // shell or a replay never disconnects, and claiming otherwise put a
-            // "reconnecting…" warning on a healthy session.
-            connected: std::sync::atomic::AtomicBool::new(true),
+            // Nothing is being retried until something says so, and a shell or
+            // a replay never says so at all.
+            retry: std::sync::Mutex::new(None),
             scrollback: AtomicU64::new(0),
             dtr: std::sync::atomic::AtomicBool::new(false),
             rts: std::sync::atomic::AtomicBool::new(false),
@@ -282,13 +327,25 @@ impl Stats {
         self.tx.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
-    /// False while the transport is gone and we are trying to get it back.
-    pub fn connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
+    /// The connection that is gone, while it is gone: an ssh host that dropped,
+    /// a serial port that was unplugged, a first connection that has not opened
+    /// yet. `None` means there is nothing to get back.
+    pub fn retry(&self) -> Option<Retry> {
+        self.retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
-    fn set_connected(&self, connected: bool) {
-        self.connected.store(connected, Ordering::Relaxed);
+    /// Publish the state, and repaint for it: it changes when the clock says so
+    /// and when a connection opens, and neither is a keystroke the UI would
+    /// otherwise be drawing.
+    fn set_retry(&self, retry: Option<Retry>, wake: &Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = retry;
+        wake();
     }
 
     /// Rows of scrollback below the viewport.
@@ -422,6 +479,12 @@ pub enum Command {
     /// Apply a theme to the live terminal. Cells are re-read from the terminal,
     /// so existing text takes the new palette too.
     SetTheme(Option<crate::theme::Theme>),
+    /// Stop waiting and try now.
+    ///
+    /// A host that has been down for a minute is waiting thirty seconds when it
+    /// comes back, and the notice over the pane says so: a person who has just
+    /// fixed the network is the one thing that knows better than the ladder.
+    Retry,
     /// Apply serial settings. A baud or framing change reconnects; the pane
     /// keeps its scrollback and its place.
     SetSerial {
@@ -1062,32 +1125,6 @@ fn note_modes(term: &Terminal<'_, '_>, seen: &mut KeyModes, stats: &Stats) {
     }
 }
 
-/// A line of dtr's own in the session's scrollback.
-///
-/// The shell cannot say this — it is gone — and a pane that simply stops looks
-/// exactly like one waiting for input. It is written into the terminal rather
-/// than the pty: nothing downstream is running that could read it.
-#[allow(clippy::too_many_arguments)]
-fn notice(
-    term: &mut Terminal<'static, '_>,
-    text: &str,
-    state: &mut RenderState<'static>,
-    rows: &mut RowIterator<'static>,
-    cells: &mut CellIterator<'static>,
-    out: &Mutex<Option<Frame>>,
-    wake: &Arc<dyn Fn() + Send + Sync>,
-    selection: &mut Option<SelectionAnchors>,
-    shown: &mut Displayed,
-) -> anyhow::Result<()> {
-    let mut line = String::with_capacity(text.len() + 16);
-    // CR LF, not LF: the session is raw, so nothing rewrites it for us.
-    line.push_str("\r\n\x1b[33m");
-    line.push_str(text);
-    line.push_str("\x1b[0m\r\n");
-    term.vt_write(line.as_bytes());
-    publish(term, state, rows, cells, out, wake, true, selection, shown)
-}
-
 /// One `select` arm's timer: armed when `on`, and a future that never resolves
 /// when it is not.
 ///
@@ -1501,7 +1538,6 @@ async fn run(
             let reader = port.try_clone()?;
             sink = Some(Sink::Serial(port));
             source_alive = true;
-            stats.set_connected(true);
             spawn_serial_reader(
                 reader,
                 cfg.cr_to_crlf,
@@ -1519,12 +1555,28 @@ async fn run(
             }
         }
         Transport::Shell(config) => {
+            // A shell of this machine opens in milliseconds and has nothing to
+            // come back from, so it publishes nothing; an ssh session is a
+            // connection, and its first attempt is a wait like any other.
+            let remote = config.remote.clone();
             // Not opened here. An ssh session is a connection and a connection
             // drops, so the first connection goes through the same path as the
             // ones after it: a host that is not answering is a pane that waits,
             // not an app that exits with an error nobody can act on.
             shell = Some(config);
             open_at = Some(std::time::Instant::now());
+            if let Some(remote) = remote {
+                stats.set_retry(
+                    Some(Retry {
+                        what: remote,
+                        dir: None,
+                        attempt: 0,
+                        when: When::Dialling,
+                        why: None,
+                    }),
+                    &wake,
+                );
+            }
         }
         Transport::Replay(path) => {
             let bytes = std::fs::read(&path)?;
@@ -1685,9 +1737,21 @@ async fn run(
                     continue;
                 }
                 source_alive = false;
-                stats.set_connected(false);
                 if let Some((cfg, identity)) = reconnect.clone() {
                     tracing::warn!(port = %cfg.port, "device gone; watching for it");
+                    // A port has no dialling to do: the watcher looks for the
+                    // device every half second, so there is no deadline to
+                    // count down and no attempt to hurry along.
+                    stats.set_retry(
+                        Some(Retry {
+                            what: cfg.port.clone(),
+                            dir: None,
+                            attempt: 0,
+                            when: When::Watching,
+                            why: None,
+                        }),
+                        &wake,
+                    );
                     let tx = reconnect_tx.clone();
                     compio::runtime::spawn(async move {
                         loop {
@@ -1730,29 +1794,18 @@ async fn run(
                 // The size the window has now, not the one it had when the
                 // session first opened.
                 config.size = Some(pty_size);
-                if reopening {
-                    // The shell that died cannot say this, and a pane that
-                    // simply stops is indistinguishable from one waiting for a
-                    // key. Written before the attempt, so whatever ssh says
-                    // about it appears underneath.
-                    let where_ = match &last_dir {
-                        Some(dir) => format!(" in {dir}"),
-                        None => String::new(),
-                    };
-                    notice(
-                        &mut term,
-                        &format!(
-                            "-- reconnecting to {}{where_} --",
-                            alias.as_deref().unwrap_or("the session")
-                        ),
-                        &mut state,
-                        &mut rows,
-                        &mut cells,
-                        &out,
+                // The attempt is running now, so the notice over the pane stops
+                // counting down and says what it is doing.
+                if alias.is_some()
+                    && let Some(current) = stats.retry()
+                {
+                    stats.set_retry(
+                        Some(Retry {
+                            when: When::Dialling,
+                            ..current
+                        }),
                         &wake,
-                        &mut selection,
-                        &mut shown,
-                    )?;
+                    );
                 }
                 match start_shell(&config, &bytes_tx, &exit_tx, &log) {
                     Ok(open) => {
@@ -1761,6 +1814,11 @@ async fn run(
                         source_alive = true;
                         opened_at = std::time::Instant::now();
                         ever_opened = true;
+                        // There is a pty again, so the wait is over — and the
+                        // *state* is what the UI was drawing, so it has to go
+                        // the moment the attempt lands, not when the first bytes
+                        // happen to arrive.
+                        stats.set_retry(None, &wake);
                         tracing::info!(reconnecting = reopening, "session opened");
                         if !typed_early.is_empty() {
                             let bytes = std::mem::take(&mut typed_early);
@@ -1783,20 +1841,23 @@ async fn run(
                             return Err(err);
                         }
                         tracing::warn!(%err, alias = ?alias, "cannot reopen the session");
-                        notice(
-                            &mut term,
-                            &format!("-- cannot start ssh: {err} --"),
-                            &mut state,
-                            &mut rows,
-                            &mut cells,
-                            &out,
-                            &wake,
-                            &mut selection,
-                            &mut shown,
-                        )?;
                         let wait = backoff.next();
                         tracing::info!(ms = wait.as_millis() as u64, "retrying");
-                        open_at = Some(std::time::Instant::now() + wait);
+                        // A spawn that failed never reached a program, so
+                        // nothing is about to print the reason: the notice says
+                        // it instead of the grid.
+                        let at = std::time::Instant::now() + wait;
+                        open_at = Some(at);
+                        stats.set_retry(
+                            Some(Retry {
+                                what: alias.clone().unwrap_or_else(|| "the session".to_owned()),
+                                dir: last_dir.clone(),
+                                attempt: backoff.attempt,
+                                when: When::At(at),
+                                why: Some(err.to_string()),
+                            }),
+                            &wake,
+                        );
                         reopening = true;
                     }
                 }
@@ -1829,7 +1890,22 @@ async fn run(
                     reset_modes(&mut term);
                     note_modes(&term, &mut keys_seen, &stats);
                     reopening = true;
-                    open_at = Some(std::time::Instant::now() + wait);
+                    let at = std::time::Instant::now() + wait;
+                    open_at = Some(at);
+                    // What the shell that dropped was doing is the far end's to
+                    // say, and it said it in the grid; the notice says the part
+                    // only this side knows — where it is going back to, and how
+                    // long it will be.
+                    stats.set_retry(
+                        Some(Retry {
+                            what: alias.clone().unwrap_or_else(|| "the session".to_owned()),
+                            dir: last_dir.clone(),
+                            attempt: backoff.attempt,
+                            when: When::At(at),
+                            why: None,
+                        }),
+                        &wake,
+                    );
                 } else {
                     tracing::info!(code = exit.code, "session ended");
                     source_alive = false;
@@ -1891,7 +1967,7 @@ async fn run(
                                 .unwrap_or(false);
                             sink = Some(Sink::Serial(port));
                             source_alive = true;
-                            stats.set_connected(true);
+                            stats.set_retry(None, &wake);
                             // A fresh flag per connection: the old one is spent.
                             serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                             spawn_serial_reader(
@@ -1910,6 +1986,30 @@ async fn run(
             cmd = rx.recv().fuse() => {
                 let Ok(command) = cmd else { break };
                 match command {
+                    Command::Retry => {
+                        // Only a wait can be hurried: an attempt that is already
+                        // dialling has nothing to start over, and a serial port
+                        // is watched rather than dialled. The ladder is left
+                        // where it is — a person pressing the button twice a
+                        // minute must not turn the pane into a one-second
+                        // dialler — so this only moves the deadline.
+                        if let Some(at) = open_at.as_mut()
+                            && *at > std::time::Instant::now()
+                        {
+                            tracing::info!("retrying now");
+                            let now = std::time::Instant::now();
+                            *at = now;
+                            if let Some(current) = stats.retry() {
+                                stats.set_retry(
+                                    Some(Retry {
+                                        when: When::At(now),
+                                        ..current
+                                    }),
+                                    &wake,
+                                );
+                            }
+                        }
+                    }
                     Command::Write(bytes) => {
                         // What actually reaches the session, and how often: the
                         // other half of a doubled keystroke.
@@ -4237,6 +4337,30 @@ mod session_tests {
         }
     }
 
+    /// Wait until the pane says it is waiting for its connection, and hand over
+    /// what it said.
+    ///
+    /// The notice used to be a line in the grid and these tests used to search
+    /// for it. It is a state the UI draws now, so the assertion is on the state:
+    /// a test that still looked for `-- reconnecting --` would pass on a pane
+    /// that had gone back to writing it into the session.
+    fn wait_for_retry(pane: &Pane, within: Duration, attempt: u32) -> Retry {
+        let deadline = Instant::now() + within;
+        loop {
+            // The attempt counts from the connection that is *not* the first:
+            // zero is "connecting", which a pane that has never opened also
+            // says, so waiting for it would pass before anything had dropped.
+            if let Some(retry) = pane.stats().retry().filter(|r| r.attempt >= attempt) {
+                return retry;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the pane never said it was waiting for its connection"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// A program names its own tab: OSC 0 and OSC 2 are how a shell, nvim, tmux
     /// or an ssh client says what it is. The title arrives *after* the last cell
     /// was drawn, so this only works if a title change publishes by itself —
@@ -4275,11 +4399,23 @@ mod session_tests {
             n = counter.display()
         );
         let pane = pane(script, Some("test-host"), Vec::new());
-        let text = wait_for(&pane, "second", Duration::from_secs(20));
-        // It says what it is doing: the shell that dropped cannot.
+        let retry = wait_for_retry(&pane, Duration::from_secs(20), 1);
+        // It says what it is doing: the shell that dropped cannot, and the
+        // notice is a state the UI draws rather than a line in the grid — which
+        // is why the grid is not where this is asserted any more.
+        assert_eq!(retry.what, "test-host", "{retry:?}");
         assert!(
-            text.contains("reconnecting to test-host"),
-            "the pane never said it was reconnecting:\n{text}"
+            retry.attempt >= 1,
+            "the first retry is attempt 1: {retry:?}"
+        );
+        assert!(
+            matches!(retry.when, When::At(_) | When::Dialling),
+            "{retry:?}"
+        );
+        let text = wait_for(&pane, "second", Duration::from_secs(20));
+        assert!(
+            !text.contains("reconnecting to"),
+            "the notice was written into the grid again:\n{text}"
         );
         // And the pane is still there, which is the whole point: a tab that
         // vanished on a dropped connection would take the scrollback with it.
@@ -4312,8 +4448,13 @@ mod session_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!pane.ended(), "a failed connection ended the pane");
-        let text = wait_for(&pane, "reconnecting", Duration::from_secs(5));
-        assert!(text.contains("reconnecting to test-host"), "{text}");
+        let retry = wait_for_retry(&pane, Duration::from_secs(5), 1);
+        assert_eq!(retry.what, "test-host", "{retry:?}");
+        // Bounded in rate: the wait grows, and the notice counts it down.
+        assert!(
+            matches!(retry.when, When::At(at) if at > Instant::now()),
+            "{retry:?}"
+        );
     }
 
     /// The directory the session reported comes back with it. The path is on the
