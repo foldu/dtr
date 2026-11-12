@@ -135,13 +135,14 @@ impl Destination {
     /// and a row that only said `web` would not tell you which one it was going
     /// to do.
     ///
-    /// A shell keeps its program in the detail column because the name is not
-    /// the whole answer: the same `bash` may be the profile's or a store path,
-    /// the system's PowerShell or PowerShell 7, and the row is where you find
-    /// out which program you are about to type in.
+    /// A shell is its name and nothing else. The program is not printed beside
+    /// it for two reasons: one row per name means it could not tell two rows
+    /// apart, and a store path is fifty characters of menu for a word that
+    /// already says which shell it is. `dtr -v` logs `shell started program=…`
+    /// when a tab opens, which is where "which bash was that" belongs.
     pub fn label(&self) -> String {
         match self {
-            Self::Shell { name, program } => format!("shell {name}  {program}"),
+            Self::Shell { name, .. } => format!("shell {name}"),
             Self::Serial { path, detail } if detail.is_empty() => format!("serial {path}"),
             Self::Serial { path, detail } => format!("serial {path}  {detail}"),
             Self::Ssh { alias, detail } if detail.is_empty() => format!("ssh {alias}"),

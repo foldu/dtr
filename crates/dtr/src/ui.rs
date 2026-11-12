@@ -718,16 +718,30 @@ pub fn tab_bar(
             "new tab",
             egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
         );
-        let mut popup = egui::Popup::menu(&response);
+        // What the body will say, measured before the body exists: a row fills
+        // the width it is offered, so a body left to decide for itself takes
+        // everything from the `+` to the window's edge. Every row the menu can
+        // draw is in the list, the fallback and the note included, and the
+        // widest of them is the width.
+        let mut rows: Vec<String> = destinations
+            .iter()
+            .map(crate::sources::Destination::label)
+            .collect();
+        rows.push("local shell".to_owned());
+        rows.push("no serial ports and no ssh hosts".to_owned());
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let width = dtr_widgets::menu_width(ui, &skin, &rows).max(220.0);
+
+        let mut popup = egui::Popup::menu(&response).width(width);
         if let Some(tip) = skin.style.tip_height {
             // Aimed at the `+` for the same reason as the app menu — and this is
-            // the menu that needs it: 600 points wide, with the `+` close enough
-            // to the window's left edge that a body centred on the button is
-            // pushed back, which is when a beak hung off the edge loses the plot.
+            // the menu that needs it: it is a narrow body hung off a button close
+            // enough to the window's left edge that a body aligned to the
+            // button's edge would be pushed back inside the window, which is when
+            // a beak stops pointing at what opened it.
             popup = dtr_widgets::point_at(ui, popup, response.rect, tip);
         }
         let menu = popup.show(|ui| {
-            ui.set_min_width(220.0);
             // A machine with forty hosts gets a menu taller than the screen,
             // and a menu whose last host is below the taskbar is a host you
             // cannot pick. The body scrolls instead, with a bar that says so:
@@ -745,7 +759,6 @@ pub fn tab_bar(
                 .auto_shrink([true, true])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
-                    ui.set_min_width(220.0);
                     // The shells are their own group and they come first: a
                     // local shell is what a `+` is usually for. They are
                     // discovered rather than listed, so a machine with three
@@ -1047,7 +1060,7 @@ mod kittest_tests {
 
         harness.get_by_label("new tab").click();
         harness.run();
-        harness.get_by_label("shell bash  /bin/bash").click();
+        harness.get_by_label("shell bash").click();
         harness.run();
         assert_eq!(
             clicked.borrow().clone(),

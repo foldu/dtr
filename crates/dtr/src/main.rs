@@ -219,7 +219,7 @@ struct Args {
     themes: bool,
 
     /// List the local shells found on this machine — the same list the `+` menu
-    /// offers — one `name<TAB>program` per line, then exit
+    /// offers — one name per line, then exit
     #[arg(long)]
     shells: bool,
 
@@ -465,10 +465,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if args.shells {
-        // The same list the `+` menu offers, so what a person sees here is what
-        // the menu will do: the name the row is called, then the program it runs.
+        // The same list the `+` menu offers, and the same words: a name is what
+        // the row says, and a menu row cannot show the program beside it.
         for shell in crate::sources::local_shells() {
-            println!("{}\t{}", shell.name, shell.program);
+            println!("{}", shell.name);
         }
         return Ok(());
     }

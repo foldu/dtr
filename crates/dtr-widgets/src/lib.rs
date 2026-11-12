@@ -48,6 +48,6 @@ pub use skin::{
 pub use style::{Focus, Footer, Preset, Scheme, Section, Style, Title};
 pub use widgets::{
     Button, Card, CardOutput, Edit, Editable, Stripe, check, check_box, cross, cross_at,
-    label_cell, menu_row, menu_row_chord, menu_separator, menu_tip, plus, point_at, prime_area,
-    row, section, segmented, stripe, tabs,
+    label_cell, menu_row, menu_row_chord, menu_separator, menu_tip, menu_width, plus, point_at,
+    prime_area, row, section, segmented, stripe, tabs,
 };

@@ -105,6 +105,43 @@ fn row(ui: &mut Ui, skin: &Skin, label: &str, selected: bool, chord: Option<&str
     super::pointer_only(response).clicked()
 }
 
+/// The width a popover needs for its rows, insets and a scroll bar included.
+///
+/// A row fills the width it is offered — that is what makes the hover fill span
+/// the menu rather than the text — so a body left to decide for itself takes
+/// everything from the button to the window's edge: the new-tab menu was 600
+/// points wide with its words bunched at the left. The caller measures the rows
+/// it is about to draw and gives the body that width, which is what every
+/// popover on the desktop does: as wide as the widest row, and no wider.
+///
+/// The bar is *always* counted. A solid scroll bar takes its width out of the
+/// rows, and it appears only when the list is taller than the room there is; a
+/// body that grows a bar and clips its longest row because nobody reserved the
+/// space is worse than one with a few points to spare.
+pub fn menu_width(ui: &Ui, skin: &Skin, labels: &[&str]) -> f32 {
+    let style = &skin.style;
+    let widest = labels
+        .iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap(
+                    (*label).to_owned(),
+                    style.value_font.clone(),
+                    skin.palette.text,
+                )
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let scroll = &ui.spacing().scroll;
+    let bar = scroll.bar_width + 2.0 * scroll.bar_inner_margin;
+    widest
+        + style.padding.x * 2.0
+        + f32::from(style.menu_margin.left)
+        + f32::from(style.menu_margin.right)
+        + bar
+}
+
 /// A rule between groups in a menu.
 ///
 /// Not `ui.separator()`: egui's takes the whole width it is offered, which is

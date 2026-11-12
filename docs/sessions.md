@@ -413,13 +413,15 @@ Two rules keep the list a menu rather than an inventory:
   then the well-known paths, then `PATH`. So a NixOS profile symlinked into the store and named
   twice in `/etc/shells` is one row, the one the machine means, and a `nix develop` that puts a
   second `bash` first on `PATH` does not get a second row. The name is the executable's without
-  the `.exe` Windows builds carry, and the detail column is the program, because `bash` alone
-  does not say which bash.
+  the `.exe` Windows builds carry, and it is the whole row: the program is not printed beside it,
+  because a store path is fifty characters of menu for a word that already says which shell it is,
+  and one row per name means a second row could not be told apart by it anyway. `-v` logs
+  `shell started program=…` when a tab opens, which is where "which bash was that" belongs.
 - **The first row is the shell a bare `+` starts**, because it is the first candidate
   `pty::candidates()` would spawn. A menu whose first row is not what `Ctrl+Shift+T` does would
   be a lie about the default.
 
-`dtr --shells` prints the same list — name, tab, program — which is how the Windows guest was
+`dtr --shells` prints the same list, one name per line, which is how the Windows guest was
 checked and how a person sees what was found without opening the menu.
 
 Not in the list: `wsl.exe`, whose shells belong to another virtual machine and are found by

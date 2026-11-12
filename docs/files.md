@@ -176,6 +176,15 @@ The `+` opens `egui::Popup::menu`: the shells this machine has, then serial port
 are discovered rather than listed — `/etc/shells` on Unix, the well-known installs and `PATH` on
 Windows — one row per name with the login shell first (`docs/sessions.md` §13).
 
+Two things about the body were settled by looking at it. **It is as wide as its widest row**,
+not as wide as the window: a row fills the width it is offered (that is what makes the hover fill
+span the menu rather than the text), so a body left to decide for itself took everything from the
+`+` to the window's edge — 600 points of menu with the words bunched at the left.
+`dtr_widgets::menu_width` measures the rows it is about to draw, the scroll bar's width included,
+and the popup is given that width. And **a shell's row is its name**, `shell bash`, not where
+bash lives: one row per name means a path could not tell two rows apart, and fifty characters of
+store path is a menu nobody can read. The program is in `-v`'s `shell started program=…`.
+
 The answer is `TabHit::New(Option<Destination>)`, and it is a *typed* destination because the
 menu used to infer "serial" from a leading `/` while the app opened every entry as `ssh` — so
 picking a port ran `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers
