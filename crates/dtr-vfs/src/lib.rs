@@ -120,11 +120,15 @@ pub struct Entry {
 
 /// A batch of a listing, or the error that ended it. A dropped receiver
 /// cancels the walk.
-pub type Batches = tokio::sync::mpsc::Receiver<Result<Vec<Entry>>>;
+pub type Batches = async_channel::Receiver<Result<Vec<Entry>>>;
 
 /// Where futures come from. Spelled out rather than using a macro so the trait
 /// stays object-safe without pulling in a proc macro.
-pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+///
+/// Not `Send`: compio's timers hold a thread-local `Rc`, and a completion-based
+/// runtime is thread-per-core by design — the backend types are `Send + Sync`,
+/// the futures they return are only ever polled on one thread.
+pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
 
 /// One machine's filesystem.
 pub trait Backend: Send + Sync {
@@ -231,7 +235,7 @@ impl Vfs {
         let dest = cache::path_for(&self.root, &at.backend, &at.path);
         if let Some(parent) = dest.parent() {
             let parent = parent.to_path_buf();
-            tokio::task::spawn_blocking(move || cache::ensure_dir(&parent))
+            compio::runtime::spawn_blocking(move || cache::ensure_dir(&parent))
                 .await
                 .map_err(|err| anyhow::anyhow!("{err}"))??;
         }
@@ -242,7 +246,7 @@ impl Vfs {
         // Private by default: this is somebody's remote file, not ours to
         // leave world-readable because the umbrella happened to be 0022.
         let owned = dest.clone();
-        tokio::task::spawn_blocking(move || cache::restrict(&owned))
+        compio::runtime::spawn_blocking(move || cache::restrict(&owned))
             .await
             .map_err(|err| anyhow::anyhow!("{err}"))??;
         Ok(dest)
@@ -288,15 +292,15 @@ pub fn open_externally(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    async fn drain(mut batches: Batches) -> Vec<Entry> {
+    async fn drain(batches: Batches) -> Vec<Entry> {
         let mut out = Vec::new();
-        while let Some(batch) = batches.recv().await {
+        while let Ok(batch) = batches.recv().await {
             out.extend(batch.expect("batch"));
         }
         out
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn a_local_directory_streams_its_entries() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
@@ -324,7 +328,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dest).unwrap(), "hello");
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn a_local_missing_path_is_an_error_not_an_empty_file() {
         let backend = Local::new();
         let err = backend
@@ -334,7 +338,7 @@ mod tests {
         assert!(err.to_string().contains("definitely"), "{err}");
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn the_memory_backend_behaves_like_a_filesystem() {
         let mem = Memory::new();
         mem.write("/home/lab/notes.txt", b"hello");
@@ -382,7 +386,7 @@ mod tests {
 
     /// A local file is its own path: materialising it must never copy, or every
     /// click would fork the file the user is working on.
-    #[tokio::test]
+    #[compio::test]
     async fn a_local_file_materialises_to_itself() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
@@ -394,7 +398,7 @@ mod tests {
 
     /// A remote file is fetched under its own machine and tree, so whatever
     /// opens it shows a name that says where it came from.
-    #[tokio::test]
+    #[compio::test]
     async fn a_remote_file_materialises_into_the_cache() {
         let dir = tempfile::tempdir().unwrap();
         // Stand in for the ssh backend: the cache path and the write are what

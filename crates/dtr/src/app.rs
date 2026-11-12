@@ -541,9 +541,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         // Looked at on `ConfigWatch::POLL`, not watched.
         config_due: std::time::Instant::now(),
         destinations: Vec::new(),
-        // The background runtime is built on first use (`App::bg`), so a
+        // The background thread is started on first use (`App::bg`), so a
         // session that never scans or lists starts none.
-        bg_rt: None,
+        bg: None,
         scanning: false,
         scan_due: std::time::Instant::now(),
         tabs: vec![Tab::new(
@@ -674,12 +674,13 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
     // on Linux — and asks for a repaint through the same door as every other
     // background result. It is the background runtime's first user, so the
     // runtime exists from the first frame even before anything has scanned.
-    if let Some(bg) = app.bg() {
-        crate::system::watch(&bg, {
-            let proxy = app.proxy.clone();
-            move || {
+    {
+        let proxy = app.proxy.clone();
+        app.bg_spawn(move |runtime| {
+            crate::system::watch(runtime, move || {
                 let _ = proxy.send_event(UserEvent::Frame);
-            }
+            });
+            async {}
         });
     }
     event_loop.run_app(&mut app)?;
@@ -705,17 +706,15 @@ fn cycled(active: usize, count: usize, forward: bool) -> usize {
 /// was the last one.
 /// The worker: one connection per alias, reused until the alias changes.
 ///
-/// Everything blocking lives here, on a thread of its own with a
-/// current-thread runtime — the same shape as a pane, for the opposite reason:
-/// a transfer must never share a thread with the emulator.
+/// Everything blocking lives here, on a thread of its own with a runtime of its
+/// own — the same shape as a pane, for the opposite reason: a transfer must
+/// never share a thread with the emulator. compio's handles are thread-local,
+/// so this is also the thread that must own the session.
 fn sftp_worker(
     rx: std::sync::mpsc::Receiver<SftpMsg>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(err) => {
             tracing::error!(%err, "sftp runtime");
@@ -840,11 +839,17 @@ async fn copy_to(
     let local = vfs.materialise(location).await?;
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await?;
+            compio::fs::create_dir_all(parent).await?;
         }
     }
-    tokio::fs::copy(&local, dest).await?;
-    Ok(tokio::fs::metadata(dest).await?.len())
+    // No completion-based copy: `std::fs::copy` is what the standard library
+    // does best here, and a file copy blocks wherever it runs.
+    let from = local.clone();
+    let to = dest.to_owned();
+    compio::runtime::spawn_blocking(move || std::fs::copy(&from, &to))
+        .await
+        .map_err(|err| anyhow::anyhow!("could not copy: {err}"))??;
+    Ok(compio::fs::metadata(dest).await?.len())
 }
 
 /// The alias an `ssh` pane is connected to, if it is remote at all.
@@ -1088,12 +1093,13 @@ struct App {
     config_deferred: bool,
     /// When the config file is looked at next.
     config_due: std::time::Instant,
-    /// The one runtime that does slow work for the window: enumerating serial
-    /// ports reads udev or SetupAPI, a directory walk and a thumbnail decode are
-    /// not for the drawing thread, and a closing tab's teardown waits on a
-    /// child. Built on first use by `App::bg`; one runtime rather than three so
-    /// the idle count is one thread, not four (`docs/compio.md` §4).
-    bg_rt: Option<tokio::runtime::Runtime>,
+    /// The thread that does slow work for the window: enumerating serial ports
+    /// reads udev or SetupAPI, a directory walk and a thumbnail decode are not
+    /// for the drawing thread, and a closing tab's teardown waits on a child.
+    /// Started on first use by `App::bg`; one thread with one runtime rather
+    /// than three, so the idle count is one thread, not four
+    /// (`docs/compio.md` §4).
+    bg: Option<crate::worker::Worker>,
     /// A scan is in flight; asking again would only queue duplicate work.
     scanning: bool,
     /// When the next poll is due. Serial devices have no portable notification,
@@ -1863,9 +1869,6 @@ impl App {
         let described = location.describe();
         tracing::info!(target = %described, "opening a link");
 
-        let Some(bg) = self.bg() else {
-            return;
-        };
         let vfs = std::sync::Arc::clone(&self.vfs);
         let proxy = self.proxy.clone();
         // A remote file cannot be handed to a viewer as a path, so it is
@@ -1877,7 +1880,7 @@ impl App {
             dtr_vfs::BackendId::Ssh(alias) => Some(alias.clone()),
             dtr_vfs::BackendId::Local => None,
         };
-        bg.spawn(async move {
+        self.bg_spawn(move |_runtime| async move {
             let outcome = async {
                 let meta = vfs.stat(&location).await?;
                 if meta.kind.is_dir() {
@@ -1888,7 +1891,7 @@ impl App {
                     return Ok(());
                 }
                 let path = vfs.materialise(&location).await?;
-                tokio::task::spawn_blocking(move || dtr_vfs::open_externally(&path))
+                compio::runtime::spawn_blocking(move || dtr_vfs::open_externally(&path))
                     .await
                     .map_err(|err| anyhow::anyhow!("{err}"))??;
                 Ok::<(), anyhow::Error>(())
@@ -2028,14 +2031,11 @@ impl App {
             tracing::debug!("a save dialog is already up");
             return;
         }
-        let Some(bg) = self.bg() else {
-            return;
-        };
         let default = save_target(&location.path);
         let parent = self.proxy.clone();
         let window = self.gpu.as_ref().map(|gpu| Arc::clone(gpu.window()));
         self.picking_save = true;
-        bg.spawn_blocking(move || {
+        self.bg_blocking(move || {
             let chosen = pick_save_path(window, &default);
             tracing::debug!(?chosen, "save dialog answered");
             let _ = parent.send_event(UserEvent::SavePath {
@@ -2056,15 +2056,12 @@ impl App {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| dest.display().to_string());
-        let Some(bg) = self.bg() else {
-            return;
-        };
         let vfs = std::sync::Arc::clone(&self.vfs);
         let proxy = self.proxy.clone();
         // Said before rather than after: a file over a slow link is a silence,
         // and a silence nobody explained reads as a button that did nothing.
         self.toast = Some((format!("saving {name}..."), std::time::Instant::now()));
-        bg.spawn(async move {
+        self.bg_spawn(move |_runtime| async move {
             let outcome = copy_to(&vfs, &location, &dest).await;
             let note = match outcome {
                 Ok(bytes) => format!(
@@ -2193,9 +2190,6 @@ impl App {
     /// Fetch (if remote) and decode, off this thread, then answer with the key so
     /// a reply for a link the pointer has left cannot replace a newer picture.
     fn load_thumbnail(&mut self, key: crate::thumb::Key, location: dtr_vfs::Location) {
-        let Some(bg) = self.bg() else {
-            return;
-        };
         let vfs = std::sync::Arc::clone(&self.vfs);
         let proxy = self.proxy.clone();
         // Claimed only once there is something to claim it with: a request that
@@ -2205,7 +2199,7 @@ impl App {
             return;
         }
         let described = location.describe();
-        bg.spawn(async move {
+        self.bg_spawn(move |_runtime| async move {
             let result = async {
                 // The size limit has to come from a `stat`, before the bytes: a
                 // remote 400 MB scan must never be downloaded to find out it is
@@ -2218,7 +2212,7 @@ impl App {
                     meta.len
                 );
                 let local = vfs.materialise(&location).await?;
-                tokio::task::spawn_blocking(move || crate::thumb::load(&local))
+                compio::runtime::spawn_blocking(move || crate::thumb::load(&local))
                     .await
                     .map_err(|err| anyhow::anyhow!("{err}"))?
             }
@@ -2503,32 +2497,47 @@ impl App {
         Some(((cell % cols) as u16, (cell / cols) as u16))
     }
 
-    /// The background runtime's handle, building the runtime the first time
-    /// something asks for one.
+    /// Run `future` on the background thread and let it finish on its own.
     ///
-    /// One runtime, not one per worker thread pool: scans, file listings,
-    /// thumbnails and a closing tab's teardown all answer on the UI thread with
-    /// an event, and a long call is `spawn_blocking`, which gets a thread of its
-    /// own whatever runtime it is on. The census in `docs/compio.md` §4 counted
-    /// four threads for two such runtimes; this is one, and it is built where it
-    /// is first needed rather than at startup for the sake of it.
-    ///
-    /// A `Handle` is returned rather than a borrow, so a caller can hold it
-    /// while it reads the other fields it needs.
-    fn bg(&mut self) -> Option<tokio::runtime::Handle> {
-        if self.bg_rt.is_none() {
-            self.bg_rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                // Each slow call gets a thread of its own from the blocking
-                // pool; the ceiling guards against a runaway, not a queue.
-                .max_blocking_threads(16)
-                .enable_all()
-                .thread_name("dtr-bg")
-                .build()
-                .map_err(|err| tracing::warn!(%err, "no background runtime"))
-                .ok();
+    /// `make` builds the future *there*, which is where compio lets one be
+    /// built; a bare `spawn` would not do, because compio cancels a task when
+    /// its `JoinHandle` is dropped.
+    fn bg_spawn<F, Fut>(&mut self, make: F)
+    where
+        F: FnOnce(&compio::runtime::Runtime) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        if let Some(bg) = self.bg() {
+            bg.spawn_with(make);
         }
-        self.bg_rt.as_ref().map(|runtime| runtime.handle().clone())
+    }
+
+    /// The same for a blocking task; the answer arrives as a `UserEvent`.
+    fn bg_blocking(&mut self, work: impl FnOnce() + Send + 'static) {
+        if let Some(bg) = self.bg() {
+            bg.blocking(work);
+        }
+    }
+
+    /// The background thread, started the first time something asks for one.
+    ///
+    /// One thread, not one per kind of work: scans, file listings, thumbnails
+    /// and a closing tab's teardown all answer on the UI thread with an event,
+    /// and a long call is a blocking task of the runtime it runs on. The census
+    /// in `docs/compio.md` §4 counted four threads for two such runtimes; this
+    /// is one, and it is built where it is first needed rather than at startup
+    /// for the sake of it.
+    fn bg(&mut self) -> Option<&crate::worker::Worker> {
+        if self.bg.is_none() {
+            self.bg = match crate::worker::Worker::spawn("dtr-bg") {
+                Ok(worker) => Some(worker),
+                Err(err) => {
+                    tracing::warn!(%err, "no background thread");
+                    None
+                }
+            };
+        }
+        self.bg.as_ref()
     }
 
     /// Ask the background runtime for a fresh destination list.
@@ -2542,12 +2551,9 @@ impl App {
         if self.scanning {
             return;
         }
-        let Some(bg) = self.bg() else {
-            return;
-        };
         self.scanning = true;
         let proxy = self.proxy.clone();
-        bg.spawn_blocking(move || {
+        self.bg_blocking(move || {
             let mut destinations = crate::sources::serial_destinations();
             destinations.extend(crate::sources::ssh_destinations());
             let _ = proxy.send_event(UserEvent::Destinations(destinations));
@@ -3215,20 +3221,20 @@ impl App {
         // can take as long as the child takes to notice. That is not allowed to
         // happen between two frames: the tab goes to the background runtime and
         // the UI thread moves on.
-        let dead = self.tabs.remove(index);
         let at = std::time::Instant::now();
-        match self.bg() {
-            Some(bg) => {
-                bg.spawn_blocking(move || {
+        let mut dead = Some(self.tabs.remove(index));
+        if let Some(worker) = self.bg() {
+            if let Some(tab) = dead.take() {
+                worker.blocking(move || {
                     let started = std::time::Instant::now();
-                    drop(dead);
+                    drop(tab);
                     tracing::debug!(ms = started.elapsed().as_millis(), "tab torn down");
                 });
             }
-            None => {
-                drop(dead);
-                tracing::debug!(ms = at.elapsed().as_millis(), "tab torn down inline");
-            }
+        }
+        if let Some(tab) = dead {
+            drop(tab);
+            tracing::debug!(ms = at.elapsed().as_millis(), "tab torn down inline");
         }
         // Focus the tab that took its place, or the one before it when the last
         // tab closed.
@@ -6026,7 +6032,7 @@ mod tests {
     /// it names does not have to exist yet: a native dialog lets a name be typed
     /// into a folder that was typed as well, and "saved" for a file that is not
     /// there is the worst of the three answers.
-    #[tokio::test]
+    #[compio::test]
     async fn a_picked_path_is_where_the_copy_lands() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("holiday.png");

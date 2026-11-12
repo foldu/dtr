@@ -82,7 +82,7 @@ per cell. The wait has its own deadline in `about_to_wait`, because a stopped po
 no events and a deadline checked only on input never fires.
 
 Then `stat` **before** `materialise`: a remote 400 MB scan must never be downloaded to find out
-it is too big. Then the decoder runs on the files runtime, never the drawing thread.
+it is too big. Then the decoder runs on the background thread, never the drawing thread.
 
 The cache key is `{ machine, path }`, not a path — `.bashrc` on three hosts is three files. The
 preview is a tooltip-layer `Area` with `interactable(false)`, placed below-right of the pointer
@@ -128,7 +128,7 @@ preview draws 14 points from it, in a layer above the menu.
 ## 8. The file dialog is the platform's, and it blocks
 
 `rfd` gives the XDG portal (zenity without one) and the Common Item Dialog on Windows. It runs
-on the files runtime and answers with `UserEvent::SavePath`, because on the drawing thread it
+on the background thread and answers with `UserEvent::SavePath`, because on the drawing thread it
 would freeze the window for as long as somebody browses.
 
 A dialog that never appears returns the same `None` as a cancel, which is why `LogTracer` is

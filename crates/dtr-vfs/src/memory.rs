@@ -84,15 +84,17 @@ impl Backend for Memory {
                     .with_context(|| format!("fetch {}", path.display()))?
                     .clone()
             };
-            tokio::fs::write(dest, &bytes)
+            let written = bytes.len() as u64;
+            compio::fs::write(dest, bytes)
                 .await
+                .0
                 .with_context(|| format!("write {}", dest.display()))?;
-            Ok(bytes.len() as u64)
+            Ok(written)
         })
     }
 
     fn list(&self, path: &Path) -> Batches {
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (tx, rx) = async_channel::bounded(4);
         let mut entries: Vec<Entry> = Vec::new();
         let mut seen = BTreeSet::new();
 
@@ -125,11 +127,12 @@ impl Backend for Memory {
 
         // One batch, then the stream ends: an in-memory listing is already
         // whole, and pretending otherwise would test nothing real.
-        tokio::spawn(async move {
+        compio::runtime::spawn(async move {
             if !entries.is_empty() {
                 let _ = tx.send(Ok(entries)).await;
             }
-        });
+        })
+        .detach();
         rx
     }
 }

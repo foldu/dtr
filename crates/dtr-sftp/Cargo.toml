@@ -8,6 +8,8 @@ description = "SFTP over the host's own ssh: one child process, one protocol str
 
 [dependencies]
 anyhow.workspace = true
-russh-sftp = "3.0.1"
-tokio = { workspace = true, features = ["process", "io-util", "rt", "sync", "time", "macros", "fs"] }
-tracing.workspace = true
+compio.workspace = true
+
+[dev-dependencies]
+async-channel.workspace = true
+tempfile.workspace = true

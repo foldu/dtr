@@ -57,7 +57,7 @@ impl Platform for Portal {
     }
 
     async fn read(&self) -> Result<Reading, String> {
-        tokio::time::timeout(BUDGET, gather())
+        compio::time::timeout(BUDGET, gather())
             .await
             .unwrap_or_else(|_| {
                 Err(format!(
@@ -84,16 +84,16 @@ impl Portal {
     pub(super) async fn changed(&self) {
         loop {
             let Ok(connection) = zbus::Connection::session().await else {
-                tokio::time::sleep(RETRY).await;
+                compio::time::sleep(RETRY).await;
                 continue;
             };
             let Ok(proxy) = zbus::Proxy::new(&connection, PORTAL, PORTAL_PATH, PORTAL_IFACE).await
             else {
-                tokio::time::sleep(RETRY).await;
+                compio::time::sleep(RETRY).await;
                 continue;
             };
             let Ok(mut stream) = proxy.receive_signal("SettingChanged").await else {
-                tokio::time::sleep(RETRY).await;
+                compio::time::sleep(RETRY).await;
                 continue;
             };
             // Said out loud because it is the half of this that cannot be seen from
@@ -115,7 +115,7 @@ impl Portal {
                 }
             }
             // The connection dropped without a change; start again.
-            tokio::time::sleep(RETRY).await;
+            compio::time::sleep(RETRY).await;
         }
     }
 

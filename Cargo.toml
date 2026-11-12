@@ -90,19 +90,30 @@ unicode-width = "0.2"
 shlex = "2"
 fontique = "0.12"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "io-util", "macros"] }
+# The runtime we are moving to: one thread a pane, IOCP on Windows and io_uring
+# on Linux, and `spawn` accepts `!Send` futures (a terminal is `!Send`). Its
+# timers, fs and process are separate crates behind these features.
+# `docs/compio.md` is the measurement behind the choice.
+compio = { version = "0.19", features = ["runtime", "io", "fs", "process", "time", "macros"] }
+# A select over the pane loop's arms. compio has no `select!`, and this is the
+# crate its own timers use; the `async-await` feature is what has the macro.
+futures-util = { version = "0.3", default-features = false, features = ["async-await"] }
+# Channels that are not a runtime's: bounded and unbounded, futures-based, so
+# the pane's commands, bytes and exits do not have to come from tokio.
+async-channel = "2"
+# One async mutex, where a backend is shared between tasks.
+async-lock = "3"
 # The serial port is `serialport`'s own, read on a thread of its own: a runtime's
 # readiness wrapper has to decide when a read is finished, and on Windows the
 # driver decides that by byte count — see `crates/dtr/src/serial.rs`.
 # Reading the desktop's own colours on Linux: the XDG settings portal is one
-# D-Bus call, and zbus is a pure-Rust client for it. The `tokio` transport is the
-# point — dtr already runs two tokio runtimes, so this reuses them instead of
-# putting `async-io`'s second reactor beside them (77 lock entries against 86,
-# measured; see `docs/gtk-palette.md` §6). Optional, because it is a whole D-Bus
-# stack for two numbers (23 packages added to `Cargo.lock`): without it the Linux
-# reader takes the scheme from the theme's name, which is a palette but not a live
-# one.
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+# D-Bus call, and zbus is a pure-Rust client for it. The `async-io` backend is
+# the point: zbus drives its own executor on one thread of its own, so the call
+# is runtime-agnostic and does not drag tokio back in for two numbers
+# (`docs/compio.md` §2). Optional, because it is a whole D-Bus stack for two
+# numbers: without it the Linux reader takes the scheme from the theme's name,
+# which is a palette but not a live one.
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # rfd says "Using zenity fallback" and "failed to …" through `log`; this is what

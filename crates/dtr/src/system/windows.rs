@@ -37,7 +37,7 @@ impl Platform for Registry {
         // paged in under a roaming profile. A blocking thread makes the rule the
         // same on both platforms: the OS call happens where the OS call happens,
         // and the future that wraps it is the same shape as the portal's.
-        tokio::task::spawn_blocking(facts)
+        compio::runtime::spawn_blocking(facts)
             .await
             .map_err(|err| format!("the registry read did not finish: {err}"))
     }

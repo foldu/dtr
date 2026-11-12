@@ -32,6 +32,7 @@ mod thumb;
 mod ui;
 mod uri;
 mod watch;
+mod worker;
 
 use pane::Transport;
 

@@ -197,8 +197,9 @@ closing drops the text.
 
 `serialport::available_ports` every couple of seconds. udev is Linux-only and Windows
 enumerates COM ports by a different route, so one mechanism that works on both beats a fast
-one that only exists here. Files differ: `~/.ssh/config` is watched with `notify`, because
-that mechanism *is* portable.
+one that only exists here. The config file used to be watched with `notify`; it is now one
+`stat` on a 250 ms deadline, which is cheaper than a watch and portable by construction
+(`docs/compio.md` §5).
 
 Two traps in the transport. **"No bytes" is not "the reader ended"**: the pane keeps the
 byte sender alive for reconnects, so `bytes_rx.recv()` never returns `None` and a disconnect

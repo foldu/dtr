@@ -2,7 +2,7 @@
 //!
 //! `cargo run -p dtr-sftp --example probe -- <alias> [path]`
 
-#[tokio::main(flavor = "current_thread")]
+#[compio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let alias = args.next().expect("usage: probe <alias> [path]");

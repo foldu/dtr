@@ -153,18 +153,17 @@ tag mirroring on.
   `present` makes every vsynced frame look like work.
 - **The UI thread asks for slow work, it does not do it**: serial enumeration hits udev or
   SetupAPI and the ssh config is a file read, and either drops a frame, so
-  `App::request_scan` hands work to a one-thread runtime (`App::worker`) and the result
-  arrives as a `UserEvent` (`scanning` stops duplicates, `scan_due` is the poll interval);
-  files work has its own runtime (`App::files_rt`), and `close_tab` hands teardown to
-  `spawn_blocking`.
-- **A capture needs a frame, and an idle window draws none**: `--capture` happens while
-  drawing, so a settled window writes nothing; waking from `about_to_wait` does not fix it
-  on a plain shell window — still open.
+  `App::request_scan` hands work to `App::bg` — one worker thread with a compio runtime of
+  its own — and the result arrives as a `UserEvent` (`scanning` stops duplicates,
+  `scan_due` is the poll interval); `close_tab` hands teardown there too. **A compio
+  runtime belongs to its thread**: the UI thread cannot own one, a job builds its future
+  *on* that thread, and a dropped `JoinHandle` cancels the task, so fire-and-forget is
+  `.detach()` (`docs/compio.md` §10).
 
 ## Panes, publishing, and geometry
 
-- **`Terminal` is `!Send`**: one thread per pane, current-thread tokio `LocalSet`,
-  commands and slots.
+- **`Terminal` is `!Send`**: one thread per pane, a compio runtime on it (`spawn` takes
+  `!Send` futures), commands and slots — no `LocalSet`, and `select!` has no guards.
 - **A terminal without a scrollback limit is a memory leak with a schedule**: the core
   defaults to *unlimited*, so `pane::new_terminal` sets it from
   `config.terminal.scrollback_limit`; there is no unlimited spelling,
@@ -482,13 +481,13 @@ second connection, and what each of these failures looked like.
   keyboard is (`j`, `k`, `b` and space are a shell's keys), it draws in the foreground
   `overlay` layer because a file pane is an `Area`, and it takes the page height from the
   *last* frame because a `ScrollArea` is measured, not asked.
-- **Devices are polled, not watched**: `serialport::available_ports` every couple of
-  seconds, because udev is Linux-only and Windows enumerates COM ports by another route;
-  `~/.ssh/config` is watched with `notify` because that mechanism *is* portable. **"No
-  bytes" is not "the reader ended"**: the pane keeps the byte sender alive for reconnects,
-  so a disconnect arrives on `closed_rx`. **`reconnecting…` on a transport that cannot
-  disconnect** means `Stats::connected` was left at its `Default` — only the serial reader
-  turns it false.
+- **Devices are polled, not watched, and so is the config**: `available_ports` every
+  couple of seconds (udev is Linux-only; Windows enumerates COM ports another way) and
+  `~/.ssh/config` on a 250 ms `stat` — `notify` was two watches and a thread for one file
+  (`docs/compio.md` §5). **"No bytes" is not "the reader ended"**: the pane keeps
+  the byte sender alive for reconnects, so a disconnect arrives on `closed_rx`.
+  **`reconnecting…` on a transport that cannot disconnect** means `Stats::connected` was
+  left at its `Default` — only the serial reader turns it false.
 - **A serial read ends when the driver says so, and the size asked for is a latency
   floor**: on Windows `ReadFile` completes at the requested count or a timeout, and a
   flood leaves no gap for an inter-byte timeout to notice — 8 KB was 355 ms of silence at
@@ -693,9 +692,9 @@ account behind each of these.
   `OnceLock` and warmed before the window, and the theme list is read once in `show` — a
   control that rescans per frame is a scan per frame (`docs/ui.md` §The settings menu).
 - **The config file is live, and it is the other writer of the same settings**: `watch.rs`
-  watches its directory, a burst settles into one `App::reload_config`, and a reload adopts the
-  file through the same `adopt_config` a save uses — so **a new key is a key a reload applies**.
-  A file that does not parse keeps the running config and says so.
+  `stat`s it on a deadline, a burst settles into one `App::reload_config`, and a reload
+  adopts the file through the same `adopt_config` a save uses — so **a new key is a key a
+  reload applies**. A file that does not parse keeps the running config and says so.
 - **One theme is compiled in, and a file of the same name beats it**: `theme::load` asks the
   search paths first (exact name, then ignoring case) and falls back to the `include_str!`-ed
   `Kanagawa Wave`, so `~/.config/dtr/themes/Kanagawa Wave` is how you change it and
@@ -780,7 +779,7 @@ the two payloads that are ours.
 | Wine: FXC shader error building egui | Wine finds dx12 first and cannot compile it; `WGPU_BACKEND=vulkan` |
 | `Dropped TexturesDelta with 1 unapplied deltas` | egui panics unless `textures_delta.clear()` is called |
 | Undefined `ghostty_terminal_mode_get` | crates.io `libghostty-vt 0.2.2` is broken; the git rev in `Cargo.toml` is the pinned one |
-| `Terminal` cannot cross threads | it is `!Send`; each pane owns its own thread and `LocalSet` |
+| `Terminal` cannot cross threads | it is `!Send`; each pane owns its own thread and runtime |
 | fish renders nothing, or writes nothing | it needs writable `XDG_*` dirs in the sandbox, and the terminal must reply on `on_pty_write` (a shell waits for its answer) |
 | `a pty with sh on it: No such file or directory` | portable-pty passes `$HOME` to `current_dir` without checking it exists; `pty::start_dir` always hands it a real directory, because a stale home made the whole spawn fail with a bare `ENOENT` |
 | `cargo test` does not refresh the binary | build first; `target/debug/dtr` is what you run, tests do not rebuild it |
@@ -806,8 +805,8 @@ the two payloads that are ours.
 - `docs/ttl-gaps.md` — what the TTL interpreter still does not do, and the order worth
   doing it in.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
-- `docs/compio.md` — a completion-based runtime, measured: one thread a pane; the serial
-  lumping was the driver's.
+- `docs/compio.md` — the compio port: one runtime a thread, why tokio went, and its
+  traps.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face: Han/kana,
   fullwidth punctuation, Nerd Font icons, emoji. Read it before changing `prepare_pane`'s
   placement rules.

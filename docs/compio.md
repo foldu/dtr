@@ -1,14 +1,21 @@
 # compio instead of tokio — decision memo
 
-Status: measured, 2026-11-12 · Scope: whether the pane's runtime should be a completion-based
-one, what that would do to the serial transport, and — because that is what the question turns
-into — the process's thread count and the one dependency that looks replaceable.
+Status: measured 2026-11-12, **and then taken** — §10 is the as-built record. Scope: whether
+the pane's runtime should be a completion-based one, what that would do to the serial
+transport, and — because that is what the question turns into — the process's thread count and
+the one dependency that looks replaceable.
 
-**Not implemented, and not because it is impossible.** compio builds for both of dtr's targets
-and a COM port is expressible in about thirty lines of its public API (§3.1, §3.2). It was
-rejected as a *fix*: the read granularity that made a u-boot `#####` flood crawl is
-`serial.sys`'s, and compio delivers it unchanged (§3.3). The bug was fixed by the read timeout
-and a thread ([`docs/sessions.md` §11](sessions.md)), one commit before this memo.
+**Rejected as a fix, then adopted as a runtime.** compio builds for both of dtr's targets and a
+COM port is expressible in about thirty lines of its public API (§3.1, §3.2). It was rejected
+as a *fix*: the read granularity that made a u-boot `#####` flood crawl is `serial.sys`'s, and
+compio delivers it unchanged (§3.3). The bug was fixed by the read timeout and a thread
+([`docs/sessions.md` §11](sessions.md)), one commit before this memo. The port happened
+afterwards for a different reason — tokio should not be in the tree — and §10 says what it
+cost and what it caught.
+
+> The rest of this memo is the *decision* as it was made, kept because §10 would otherwise have
+> nothing to check itself against. Where it says "keep tokio", read "keep tokio **for the
+> fix**"; §10 supersedes the recommendation, not the measurements.
 
 Question: dtr drives one OS thread per pane with a current-thread tokio runtime, a `LocalSet`
 and a single `select!`. A completion-based runtime matches "one thread per pane" more closely
@@ -20,6 +27,9 @@ could replace `notify` (§5).
 ---
 
 ## 1. Recommendation
+
+> Superseded by §10: the tree was ported after all, for the dependency reason below rather than
+> for a measurement.
 
 **Keep tokio.** The two reasons the question was asked both dissolved under measurement:
 
@@ -240,8 +250,8 @@ under the polling backend a custom op's `pre_submit`/`operate` is a readiness-th
 `Decision`, which fits; under io_uring you would want a `POLL_ADD`-shaped op rather than
 guessing what `op::Read` does with a pollable, non-regular fd (§6).
 
-**But dtr should stop watching instead.** Two `NonRecursive` watches, one access-event filter
-and a 150 ms settler is the whole of notify's work here:
+**But dtr should stop watching instead — done, before the port.** Two `NonRecursive` watches,
+one access-event filter and a 150 ms settler was the whole of notify's work here:
 
 - **`/dev` is redundant on every platform.** `available_ports` is already polled every two
   seconds (`App::request_scan`), and that poll is the only thing that finds a device on
@@ -415,3 +425,125 @@ winvm ssh -- cmd /c 'C:\dtr\compio_probe.exe'
 
 The feed is 64-byte writes at 11 520 B/s (115200 8N1) and the pty runner gives `virsh console`
 the tty it insists on; without it, `virsh console` refuses to run with piped stdin.
+
+---
+
+## 10. As built
+
+The port happened after the measurements above, for a reason none of them settles: tokio
+should not be in the tree. Every recommendation in §1 is about whether compio *fixes* or
+*shrinks* something, and the answer was no; a dependency count is a different question.
+This section is the record, so the next reader can check the predictions rather than re-run
+them.
+
+### 10.1 What moved
+
+| where | from | to |
+|---|---|---|
+| `pane.rs` | current-thread tokio + `LocalSet`, `spawn_local` | `Runtime::new()` per pane thread and `block_on(run(..))`; `compio::runtime::spawn` takes the `!Send` futures directly |
+| pane loop | `tokio::select!` with `, if` guards | `futures_util::select!` and a `when(on, future)` helper (§10.3) |
+| pane timers | `tokio::time::{Instant, sleep_until}` | `std::time::Instant` and `compio::time::sleep_until` |
+| pane channels | `tokio::sync::mpsc::unbounded` | `async_channel` — `try_send` on the reader threads, which are still threads |
+| `worker.rs` (new) | three tokio runtimes (`dtr-scan`, `dtr-files`) | one thread with a runtime and a mailbox of closures |
+| `dtr-vfs` | `tokio::fs`, `tokio::sync::Mutex`, `mpsc` batches | `compio::fs`, `async_lock::Mutex`, `async_channel`; the directory walk is `spawn_blocking` |
+| `dtr-vfs::ssh` | one `Mutex<Option<Session>>` shared across threads | one thread *per alias* with `Op` messages (§10.3, trap 4) |
+| `dtr-sftp` | `russh-sftp` + tokio io traits | our own SFTP v3 codec (§10.2) |
+| `system` | zbus on `tokio`, `tokio::sync::Notify` | zbus on `async-io`, an `async_channel` pair in a `OnceLock` |
+
+`cargo tree -i tokio` prints nothing. The lock file still has a `tokio` stanza, because
+`zbus` declares it as an *optional* dependency and a lockfile lists those whether or not the
+feature is on; nothing builds it.
+
+### 10.2 The SFTP client, since it is the piece that was not on the menu
+
+`russh-sftp` was the last tokio dependent, and it is a protocol codec, not a transport: the
+transport is still the host's `ssh -s <alias> sftp`, exactly as before. What replaced it is
+`crates/dtr-sftp/src/lib.rs` — about 430 lines of framing for the seven operations dtr
+calls:
+
+- `SSH_FXP_INIT` / `SSH_FXP_VERSION` (version 3, the one every OpenSSH speaks);
+- `OPENDIR` / `READDIR` / `CLOSE` for a listing, `STAT` for the one bit a click needs,
+  `OPEN` / `READ` / `CLOSE` for a download, `REALPATH` for the home directory;
+- one request in flight at a time, every answer checked against the id it belongs to, so a
+  late reply to a timed-out request cannot be read as the answer to the next one.
+
+The byte stream is a `Wire` trait with two methods (`write_all`, `read_exact`), which is
+what lets `tests/mock.rs` drive the same code over a pair of channels, with a mock server
+that answers the same packets. The child is killed by `Drop`, not by a `kill_on_drop` flag
+that does not exist here.
+
+Two details worth their lines: `File` is **positional** in compio (`write_all_at`, not
+`write_all`), so the download's offset is the protocol's own; and `BufResult` is a tuple
+*struct*, so its fields are reached with `.0`/`.1` rather than a tuple pattern.
+
+### 10.3 The traps, in the order they bit
+
+1. **A dropped `JoinHandle` cancels the task.** tokio's `JoinHandle` detaches on drop;
+   compio's `Drop` calls `task.cancel(true)`. So `let _ = rt.spawn(..)` is a spawn that runs
+   nothing, which is exactly what a fire-and-forget call site looks like. Everything
+   detached goes through `.detach()` now, and `App::bg_spawn`/`bg_blocking`/`Worker` say it
+   once each. It was caught by a directory listing coming back empty, not by a compiler.
+2. **A runtime belongs to its thread.** `Runtime::new()` binds the executor and the driver to
+   the calling thread; nothing polls that runtime unless *that* thread is inside
+   `block_on`/`run`. The UI thread therefore cannot own one — a task spawned from the event
+   loop would be queued for ever — and a future built off the thread that will poll it holds
+   the wrong `SharedFd`s. `worker.rs` is the answer: a thread, its runtime, and a mailbox of
+   closures that build their futures *on* that thread.
+3. **`select!` has no guards and wants fused futures.** `futures_util::select!` takes
+   `<pat> = <expr>` with no `if`, and every branch must be a `FusedFuture`. The pane's six
+   guarded arms became `when(condition, future)`, which returns
+   `Either<F, Pending<F::Output>>` — armed, or a future that cannot complete — and `.fuse()`
+   per arm. The expression form stack-pins, so the `!Unpin` futures of `async fn`s need no
+   `Box::pin`.
+4. **compio's handles are thread-local.** `ChildStdin` wraps `SharedFd`, which holds an
+   `Rc`, so a `Session` is `!Send` and cannot live in a `Mutex` behind a `Backend: Send +
+   Sync`. That is why the ssh backend became one thread per alias with an `Op` mailbox:
+   the thread that opened the child is the thread that speaks to it, and the mutex that
+   serialises operations lives on that thread. `dtr-vfs`'s `BoxFuture` also lost its `Send`
+   bound, because compio's timers hold the same `Rc`.
+5. **`async_channel`'s `Receiver` is `&self`,** unlike tokio's `&mut self`, which removed
+   the borrow problems the pane loop would otherwise have had with its own receivers.
+
+### 10.4 The census, as built
+
+Same window, same machine, one shell pane idle, after the port (`/proc/<pid>/task/*`
+`{comm,wchan}`):
+
+| thread | waiting in | what it is |
+|---|---|---|
+| `dtr` | `do_epoll_wait` | winit's X11 loop |
+| `dtr-pane` | `io_cqring_wait` | the pane's compio runtime, in io_uring |
+| `dtr-pty` | `wait_woken` | a blocking read on the pty master (unchanged) |
+| `dtr-bg` | `io_cqring_wait` | the worker thread's runtime |
+| `dtr-bg` | `futex` | one idle asyncify thread from the first scan |
+| `async-io` | `do_epoll_wait` | zbus's reactor |
+| `zbus::Connectio` | `futex` | zbus's internal executor |
+
+**Seven of 77**, against eight before, and the composition is the interesting part:
+`notify`'s loop is gone, the four `dtr-scan`/`dtr-files` threads are two `dtr-bg` threads,
+and zbus costs two threads it used to borrow. So the count moved exactly as §4 predicted
+(8 → 7) by a different subtraction than §4 expected — one thread less, three threads'
+worth of churn. The 69 others are still the software rasteriser.
+
+The pty and the serial port are still read by threads: compio has no pty, and the serial
+reader's `IDLE_FLUSH` timeout is what made a flood parse as it lands (§3.3). **The serial
+behaviour is therefore unchanged by construction, and was not re-measured in the guest** —
+if a regression shows up there, it is in the pane loop, not in the transport.
+
+### 10.5 How it was checked
+
+- `cargo test --workspace`: every suite green, including the pane's session tests (real
+  ptys, reconnects, key and mouse encodings) and the SFTP mock server over a channel.
+- `cargo fmt --all -- --check`.
+- `nix build .#windows`: the gnu cross build links the whole binary with compio, which is
+  the one thing §3.1 left open (it had only been proved for a probe).
+- A real window under Xvfb and lavapipe, `--capture`: the shell draws, and `-v` shows
+  `destinations` arriving — the worker thread's scan completing and its event landing.
+
+### 10.6 What it cost
+
+- compio is pre-1.0 with independently versioned modules (§8), and the pane loop now depends
+  on `compio-runtime 0.12`'s behaviour.
+- zbus brings two threads where it used to borrow dtr's runtime.
+- The SFTP codec is ours: the operations dtr calls are covered, and nothing else is — there
+  is no write path, no resume, and no `SSH_FXP_EXTENDED`.

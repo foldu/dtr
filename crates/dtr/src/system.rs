@@ -132,10 +132,7 @@ fn first_reading() -> Resolution {
     // one has no runtime to re-use: a current-thread one is the smallest way to
     // ask the same question from a caller that cannot wait for an answer it is
     // about to draw.
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
+    let Ok(runtime) = compio::runtime::Runtime::new() else {
         return Resolution {
             skin: None,
             source: "none",
@@ -217,19 +214,21 @@ pub async fn refresh() {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = reading;
 }
 
-/// Keep the native skin current, on the worker runtime.
+/// Keep the native skin current, on the app's background runtime.
 ///
 /// `wake` is how the repaint is asked for: a skin that changed under a frame that
 /// never draws again is a skin that did not change. It is a closure rather than a
 /// `UserEvent` because this module has no business knowing about the event loop.
-pub fn watch(worker: &tokio::runtime::Handle, wake: impl Fn() + Send + 'static) {
-    worker.spawn(async move {
-        loop {
-            wait_for_change().await;
-            refresh().await;
-            wake();
-        }
-    });
+pub fn watch(worker: &compio::runtime::Runtime, wake: impl Fn() + Send + 'static) {
+    worker
+        .spawn(async move {
+            loop {
+                wait_for_change().await;
+                refresh().await;
+                wake();
+            }
+        })
+        .detach();
 }
 
 /// The platform's "your colours changed" signal, or a future that never resolves
@@ -241,7 +240,10 @@ async fn wait_for_change() {
 
 #[cfg(windows)]
 async fn wait_for_change() {
-    CHANGED.notified().await;
+    let (_, changes) = channel();
+    // One read is one refresh, so drain what a burst of messages left behind.
+    let _ = changes.recv().await;
+    while changes.try_recv().is_ok() {}
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -251,8 +253,18 @@ async fn wait_for_change() {
 
 /// Notified by the window procedure, which is why this exists as a separate door:
 /// the procedure cannot await, and must not block.
+///
+/// A channel rather than a condition variable because both ends have to exist
+/// without a runtime: the sender is touched from a `WM_*` procedure, and the
+/// receiver from the watcher task.
 #[cfg(windows)]
-static CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static CHANGED: std::sync::OnceLock<(async_channel::Sender<()>, async_channel::Receiver<()>)> =
+    std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn channel() -> &'static (async_channel::Sender<()>, async_channel::Receiver<()>) {
+    CHANGED.get_or_init(async_channel::unbounded)
+}
 
 /// The desktop says its colours changed.
 ///
@@ -261,7 +273,7 @@ static CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// two reads from being lost.
 #[cfg(windows)]
 pub fn changed() {
-    CHANGED.notify_one();
+    let _ = channel().0.try_send(());
 }
 
 fn report(reading: &Resolution) {
@@ -351,8 +363,7 @@ mod tests {
     }
 
     fn answer<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
+        compio::runtime::Runtime::new()
             .expect("a runtime")
             .block_on(future)
     }

@@ -10,7 +10,9 @@ description = "Files, whichever machine they live on: one trait over local and r
 anyhow.workspace = true
 dirs.workspace = true
 dtr-sftp.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
+compio.workspace = true
+async-channel.workspace = true
+async-lock.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

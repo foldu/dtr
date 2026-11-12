@@ -1,7 +1,8 @@
 //! The emulation side of a session.
 //!
 //! A pane owns a `!Send` `libghostty_vt::Terminal` on its own thread, inside a
-//! current-thread tokio runtime and a `LocalSet` (PLAN §2.5). What it publishes
+//! completion-based compio runtime — its `spawn` takes `!Send` futures, which is
+//! the whole requirement (PLAN §2.5, `docs/compio.md`). What it publishes
 //! is an owned [`Frame`] in a latest-value slot: the UI always draws the newest
 //! one and never touches the terminal or blocks the emulation thread.
 
@@ -17,6 +18,9 @@ use std::thread;
 use libghostty_vt::Terminal;
 use libghostty_vt::key::{Encoder as KeyEncoder, Event as KeyEvent};
 use libghostty_vt::mouse;
+// `select!` polls fused futures; `.fuse()` is how a fresh one is made per
+// iteration without every future type having to implement `FusedFuture`.
+use futures_util::FutureExt as _;
 use libghostty_vt::render::{
     CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator, Snapshot,
 };
@@ -449,7 +453,7 @@ pub struct LinkReply {
 
 pub struct Pane {
     latest: Arc<Mutex<Option<Frame>>>,
-    tx: tokio::sync::mpsc::UnboundedSender<Command>,
+    tx: async_channel::Sender<Command>,
     stats: Arc<Stats>,
     /// The last thing the pane copied, for the UI to put on the clipboard.
     copied: Arc<Mutex<Option<String>>>,
@@ -500,48 +504,42 @@ impl Pane {
         let cwd = Arc::new(Mutex::new(None));
         let cwd_seen = Arc::clone(&cwd);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let (tx, rx) = async_channel::unbounded::<Command>();
 
         thread::Builder::new()
             .name("dtr-pane".into())
             .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
+                let rt = match compio::runtime::Runtime::new() {
                     Ok(rt) => rt,
                     Err(err) => {
                         tracing::error!(%err, "pane runtime");
                         return;
                     }
                 };
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&rt, async move {
-                    if let Err(err) = run(
-                        rx,
-                        published,
-                        Arc::clone(&wake),
-                        transport,
-                        counted,
-                        log,
-                        copy_sink,
-                        captured_sink,
-                        link_sink,
-                        Arc::clone(&ended_flag),
-                        Arc::clone(&cwd_seen),
-                        theme,
-                        scrollback,
-                        budget,
-                    )
-                    .await
-                    {
-                        tracing::error!(%err, "pane");
-                        if let Ok(mut slot) = failure.lock() {
-                            *slot = Some(format!("{err}"));
-                        }
-                        wake();
+                // `block_on` drives the executor and the completion driver
+                // together, so the tasks the loop spawns run beside it.
+                if let Err(err) = rt.block_on(run(
+                    rx,
+                    published,
+                    Arc::clone(&wake),
+                    transport,
+                    counted,
+                    log,
+                    copy_sink,
+                    captured_sink,
+                    link_sink,
+                    Arc::clone(&ended_flag),
+                    Arc::clone(&cwd_seen),
+                    theme,
+                    scrollback,
+                    budget,
+                )) {
+                    tracing::error!(%err, "pane");
+                    if let Ok(mut slot) = failure.lock() {
+                        *slot = Some(format!("{err}"));
                     }
-                });
+                    wake();
+                }
             })?;
 
         Ok(Self {
@@ -605,7 +603,7 @@ impl Pane {
     pub fn send(&self, command: Command) {
         // A closed channel means the pane is gone; the app is already tearing
         // down or replacing it, so there is nothing useful to say.
-        let _ = self.tx.send(command);
+        let _ = self.tx.try_send(command);
     }
 }
 
@@ -679,8 +677,8 @@ struct Open {
 /// connection dropped, and `wait` blocks, which the pane's own thread must not.
 fn start_shell(
     config: &pty::Config,
-    bytes: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    exited: &tokio::sync::mpsc::UnboundedSender<ShellExit>,
+    bytes: &async_channel::Sender<Vec<u8>>,
+    exited: &async_channel::Sender<ShellExit>,
     log: &Option<Arc<LogWriter>>,
 ) -> anyhow::Result<Open> {
     let pty::Shell {
@@ -704,7 +702,7 @@ fn start_shell(
                     Ok(0) => break,
                     Ok(n) => {
                         log_chunk(&log, &buf[..n]);
-                        if tx.send(buf[..n].to_vec()).is_err() {
+                        if tx.try_send(buf[..n].to_vec()).is_err() {
                             // Nobody is listening any more: the pane is gone,
                             // and so is any reason to wait for this child.
                             return;
@@ -723,7 +721,7 @@ fn start_shell(
                     None
                 }
             };
-            let _ = done.send(ShellExit {
+            let _ = done.try_send(ShellExit {
                 code,
                 at: std::time::Instant::now(),
             });
@@ -853,8 +851,25 @@ fn notice(
     publish(term, state, rows, cells, out, wake, true, selection, shown)
 }
 
+/// One `select` arm's timer: armed when `on`, and a future that never resolves
+/// when it is not.
+///
+/// `select!` has no per-arm guards, and a disabled `sleep_until` whose deadline
+/// has already passed is a branch that is ready on every iteration — a spin. So
+/// a disabled arm gets a future that cannot complete instead.
+fn when<F: std::future::Future>(
+    on: bool,
+    future: F,
+) -> futures_util::future::Either<F, std::future::Pending<F::Output>> {
+    if on {
+        futures_util::future::Either::Left(future)
+    } else {
+        futures_util::future::Either::Right(std::future::pending())
+    }
+}
+
 async fn run(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
+    rx: async_channel::Receiver<Command>,
     out: Arc<Mutex<Option<Frame>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
     transport: Transport,
@@ -944,11 +959,14 @@ async fn run(
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
 
-    let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    // The pane holds a sender for the life of the loop, so none of these ever
+    // reports "closed": a reader that ends says so on `closed_tx` instead, and
+    // an arm on a channel with no producer simply stays pending.
+    let (bytes_tx, bytes_rx) = async_channel::unbounded::<Vec<u8>>();
     // Separate from `bytes_rx`: the pane keeps `bytes_tx` alive for reconnects,
     // so the byte channel never closes, and "the reader ended" needs its own
     // signal or a disconnect goes unnoticed.
-    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (closed_tx, closed_rx) = async_channel::unbounded::<()>();
     let mut sink: Option<Sink> = None;
     let mut source_alive = false;
     // What to reopen if the device disappears, and how to recognise it.
@@ -965,14 +983,14 @@ async fn run(
     let paste_tick =
         matches!(transport, Transport::Serial(_)).then(|| std::time::Duration::from_millis(20));
     let mut paste: Vec<u8> = Vec::new();
-    let mut paste_at: Option<tokio::time::Instant> = None;
-    let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<serial::Port>();
+    let mut paste_at: Option<std::time::Instant> = None;
+    let (reconnect_tx, reconnect_rx) = async_channel::unbounded::<serial::Port>();
     // Dropping the master closes the pty, which is what ends the child.
     let mut pty_keep: Option<Box<dyn MasterPty + Send>> = None;
     // A shell — local or ssh — is opened by one path, used at startup and after
     // every dropped connection. `open_at` is when to try next.
     let mut shell: Option<pty::Config> = None;
-    let mut open_at: Option<tokio::time::Instant> = None;
+    let mut open_at: Option<std::time::Instant> = None;
     // Set when the next open is a reconnection, so the pane says so and puts the
     // session back where it was rather than starting it at home.
     let mut reopening = false;
@@ -990,7 +1008,7 @@ async fn run(
     // Separate from `closed_rx` because a shell's exit says something a serial
     // port's does not: how it exited, which is the difference between a session
     // the user ended and a connection that dropped under it.
-    let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel::<ShellExit>();
+    let (exit_tx, exit_rx) = async_channel::unbounded::<ShellExit>();
     // The last directory the session reported, whichever machine it is on. Not
     // `cwd`: a remote path is not a local directory, but it is where a reconnect
     // belongs.
@@ -1005,7 +1023,7 @@ async fn run(
     // bracketed paste, and the deadline that stops it waiting for a program
     // that never speaks.
     let mut early_paste: Option<Vec<u8>> = None;
-    let mut early_at: Option<tokio::time::Instant> = None;
+    let mut early_at: Option<std::time::Instant> = None;
     // The key encoder is the terminal's, not a table: what a key sends depends
     // on modes only the terminal knows (`input::fill` explains which). One per
     // pane, with one event reused, because both hold allocations and a keystroke
@@ -1081,7 +1099,7 @@ async fn run(
             // ones after it: a host that is not answering is a pane that waits,
             // not an app that exits with an error nobody can act on.
             shell = Some(config);
-            open_at = Some(tokio::time::Instant::now());
+            open_at = Some(std::time::Instant::now());
         }
         Transport::Replay(path) => {
             let bytes = std::fs::read(&path)?;
@@ -1089,15 +1107,18 @@ async fn run(
             source_alive = true;
             let tx = bytes_tx.clone();
             let replay_log = log.clone();
-            tokio::task::spawn_local(async move {
+            // Detached on purpose: the replay ends by itself, and a dropped
+            // `JoinHandle` would cancel it (compio cancels on drop).
+            compio::runtime::spawn(async move {
                 for chunk in bytes.chunks(256) {
                     log_chunk(&replay_log, chunk);
-                    if tx.send(chunk.to_vec()).is_err() {
+                    if tx.try_send(chunk.to_vec()).is_err() {
                         return;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    compio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-            });
+            })
+            .detach();
         }
         Transport::Demo => term.vt_write(DEMO),
     }
@@ -1134,13 +1155,13 @@ async fn run(
     // cell of the grid. So a pane publishes at most once per budget — and, when
     // it has to wait, a timer arm publishes the frame it owes rather than
     // leaving the picture stale until the next byte arrives.
-    let mut next_publish = tokio::time::Instant::now();
+    let mut next_publish = std::time::Instant::now();
     let mut publish_pending = false;
     loop {
-        tokio::select! {
-            chunk = bytes_rx.recv(), if source_alive => {
+        futures_util::select! {
+            chunk = bytes_rx.recv().fuse() => {
                 match chunk {
-                    Some(bytes) => {
+                    Ok(bytes) => {
                         // A flood arrives as thousands of small chunks — the pty
                         // hands over only what is queued when the reader wakes.
                         // Parse everything already queued, for at most one
@@ -1150,7 +1171,7 @@ async fn run(
                         // window, and the UI rewrites this when it does.
                         let gate =
                             std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
-                        let deadline = tokio::time::Instant::now() + gate;
+                        let deadline = std::time::Instant::now() + gate;
                         let mut bytes = bytes;
                         let (mut chunks, mut total) = (0u32, 0usize);
                         loop {
@@ -1175,7 +1196,7 @@ async fn run(
                                 }
                             }
                             marks.write(&mut term, &bytes)?;
-                            if tokio::time::Instant::now() >= deadline {
+                            if std::time::Instant::now() >= deadline {
                                 break;
                             }
                             match bytes_rx.try_recv() {
@@ -1208,35 +1229,39 @@ async fn run(
                             .await;
                         }
                         tracing::debug!(chunks, bytes = total, "burst parsed");
-                        if tokio::time::Instant::now() >= next_publish {
+                        if std::time::Instant::now() >= next_publish {
                             publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
-                            next_publish = tokio::time::Instant::now() + gate;
+                            next_publish = std::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
                             publish_pending = true;
                         }
                     }
-                    // The reader is gone — the child closed the pty. This arm is
-                    // ready for ever once the channel is empty, so stop
-                    // selecting on it rather than spinning through it.
-                    None => source_alive = false,
+                    // The reader is gone — the child closed the pty. The pane
+                    // keeps its own sender alive, so this arm would otherwise
+                    // stay pending; saying it explicitly is cheaper than
+                    // parsing a disconnect as "nothing yet".
+                    Err(_) => source_alive = false,
                 }
             }
-            _ = tokio::time::sleep_until(next_publish), if publish_pending => {
+            _ = when(publish_pending, compio::time::sleep_until(next_publish)).fuse() => {
                 publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
-                next_publish = tokio::time::Instant::now()
+                next_publish = std::time::Instant::now()
                     + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
                 publish_pending = false;
             }
-            _ = closed_rx.recv(), if source_alive => {
+            closed = when(source_alive, closed_rx.recv()).fuse() => {
+                if closed.is_err() {
+                    continue;
+                }
                 source_alive = false;
                 stats.set_connected(false);
                 if let Some((cfg, identity)) = reconnect.clone() {
                     tracing::warn!(port = %cfg.port, "device gone; watching for it");
                     let tx = reconnect_tx.clone();
-                    tokio::task::spawn_local(async move {
+                    compio::runtime::spawn(async move {
                         loop {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            compio::time::sleep(std::time::Duration::from_millis(500)).await;
                             if tx.is_closed() {
                                 return;
                             }
@@ -1248,7 +1273,7 @@ async fn run(
                             match cfg.open_at(&path) {
                                 Ok(stream) => {
                                     tracing::info!(port = %path, "device is back");
-                                    let _ = tx.send(stream);
+                                    let _ = tx.try_send(stream);
                                     return;
                                 }
                                 Err(err) => {
@@ -1256,13 +1281,15 @@ async fn run(
                                 }
                             }
                         }
-                    });
+                    })
+                    .detach();
                 }
             }
-            _ = tokio::time::sleep_until(
-                    open_at.unwrap_or_else(tokio::time::Instant::now)
-                ), if open_at.is_some() && shell.is_some() =>
-            {
+            _ = when(
+                open_at.is_some() && shell.is_some(),
+                compio::time::sleep_until(open_at.unwrap_or_else(std::time::Instant::now))
+            )
+            .fuse() => {
                 open_at = None;
                 let config = shell.as_ref().expect("guarded by `shell.is_some()`");
                 let mut config = if reopening {
@@ -1339,15 +1366,15 @@ async fn run(
                         )?;
                         let wait = backoff.next();
                         tracing::info!(ms = wait.as_millis() as u64, "retrying");
-                        open_at = Some(tokio::time::Instant::now() + wait);
+                        open_at = Some(std::time::Instant::now() + wait);
                         reopening = true;
                     }
                 }
             }
-            exit = exit_rx.recv() => {
+            exit = exit_rx.recv().fuse() => {
                 // The loop holds a sender for as long as the pane exists, so the
                 // channel cannot end while anything is listening.
-                let Some(exit) = exit else { continue };
+                let Ok(exit) = exit else { continue };
                 // The child is gone. What that means is the whole question: an
                 // ssh client that exits because the user typed `exit` is the end
                 // of the session, and one that exits because the network went
@@ -1372,7 +1399,7 @@ async fn run(
                     reset_modes(&mut term);
                     note_modes(&term, &mut keys_seen, &stats);
                     reopening = true;
-                    open_at = Some(tokio::time::Instant::now() + wait);
+                    open_at = Some(std::time::Instant::now() + wait);
                 } else {
                     tracing::info!(code = exit.code, "session ended");
                     source_alive = false;
@@ -1380,10 +1407,11 @@ async fn run(
                     wake();
                 }
             }
-            _ = tokio::time::sleep_until(
-                    early_at.unwrap_or_else(tokio::time::Instant::now)
-                ), if early_at.is_some() =>
-            {
+            _ = when(
+                early_at.is_some(),
+                compio::time::sleep_until(early_at.unwrap_or_else(std::time::Instant::now))
+            )
+            .fuse() => {
                 early_at = None;
                 if let Some(text) = early_paste.take() {
                     write_paste(
@@ -1400,9 +1428,11 @@ async fn run(
                     .await;
                 }
             }
-            _ = tokio::time::sleep_until(paste_at.unwrap_or_else(tokio::time::Instant::now)),
-                if paste_at.is_some() && !paste.is_empty() =>
-            {
+            _ = when(
+                paste_at.is_some() && !paste.is_empty(),
+                compio::time::sleep_until(paste_at.unwrap_or_else(std::time::Instant::now))
+            )
+            .fuse() => {
                 const CHUNK: usize = 128;
                 let tick = paste_tick.unwrap_or_default();
                 let take = CHUNK.min(paste.len());
@@ -1418,11 +1448,11 @@ async fn run(
                 paste_at = if paste.is_empty() {
                     None
                 } else {
-                    Some(tokio::time::Instant::now() + tick)
+                    Some(std::time::Instant::now() + tick)
                 };
             }
-            stream = reconnect_rx.recv(), if !source_alive && reconnect.is_some() => {
-                if let Some(port) = stream {
+            stream = when(!source_alive && reconnect.is_some(), reconnect_rx.recv()).fuse() => {
+                if let Ok(port) = stream {
                     match port.try_clone() {
                         Ok(reader) => {
                             let cr_to_crlf = reconnect
@@ -1447,8 +1477,8 @@ async fn run(
                     }
                 }
             }
-            cmd = rx.recv() => {
-                let Some(command) = cmd else { break };
+            cmd = rx.recv().fuse() => {
+                let Ok(command) = cmd else { break };
                 match command {
                     Command::Write(bytes) => {
                         // What actually reaches the session, and how often: the
@@ -1847,7 +1877,7 @@ async fn run(
                             // because the wrapping is the program's answer and
                             // no program is running yet to give one.
                             early_paste = Some(bytes);
-                            early_at = Some(tokio::time::Instant::now() + EARLY_PASTE);
+                            early_at = Some(std::time::Instant::now() + EARLY_PASTE);
                             continue;
                         }
                         write_paste(
@@ -1971,7 +2001,7 @@ async fn write_paste(
     stats: &Stats,
     paste_tick: Option<std::time::Duration>,
     paste: &mut Vec<u8>,
-    paste_at: &mut Option<tokio::time::Instant>,
+    paste_at: &mut Option<std::time::Instant>,
     typed_early: &mut Vec<u8>,
     ever_opened: bool,
     text: Vec<u8>,
@@ -1987,7 +2017,7 @@ async fn write_paste(
         None => deliver(&bytes, term, stats, sink, typed_early, ever_opened).await,
         Some(_) => {
             *paste = bytes;
-            *paste_at = Some(tokio::time::Instant::now());
+            *paste_at = Some(std::time::Instant::now());
         }
     }
 }
@@ -2132,10 +2162,10 @@ async fn flush_replies(replies: &RefCell<Vec<u8>>, sink: &mut Option<Sink>) {
 fn spawn_serial_reader(
     port: serial::Port,
     cr_to_crlf: bool,
-    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tx: async_channel::Sender<Vec<u8>>,
     log: Option<Arc<LogWriter>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-    closed: tokio::sync::mpsc::UnboundedSender<()>,
+    closed: async_channel::Sender<()>,
 ) {
     let spawned = std::thread::Builder::new()
         .name("dtr-serial".into())
@@ -2145,12 +2175,12 @@ fn spawn_serial_reader(
                 read_serial(port, cr_to_crlf.then(CrToCrlf::default), tx, log, stop);
                 // The pane keeps the byte channel alive for reconnects, so this
                 // is the only way it learns the reader is gone.
-                let _ = closed.send(());
+                let _ = closed.try_send(());
             }
         });
     if let Err(err) = spawned {
         tracing::error!(%err, "serial reader");
-        let _ = closed.send(());
+        let _ = closed.try_send(());
     }
 }
 
@@ -2162,7 +2192,7 @@ fn spawn_serial_reader(
 fn read_serial(
     mut port: serial::Port,
     mut mapper: Option<CrToCrlf>,
-    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tx: async_channel::Sender<Vec<u8>>,
     log: Option<Arc<LogWriter>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -2200,7 +2230,7 @@ fn read_serial(
             (None, Some(n)) => out.extend_from_slice(&buf[..n]),
             (None, None) => {}
         }
-        if !out.is_empty() && tx.send(out.clone()).is_err() {
+        if !out.is_empty() && tx.try_send(out.clone()).is_err() {
             break;
         }
     }

@@ -22,9 +22,11 @@ are in the library.
 So:
 
 - read the portal over the session bus with **`zbus`** (a pure-Rust D-Bus
-  client, MIT, no GLib link) on its **`tokio`** transport, because dtr already
-  runs tokio: one connection and two `Read` calls, with a 500 ms ceiling on the
-  whole reading;
+  client, MIT, no GLib link) on its **`async-io`** transport: one connection and
+  two `Read` calls, with a 500 ms ceiling on the whole reading. It used to borrow
+  dtr's `tokio` runtime; since the compio port (`docs/compio.md`) there is no
+  tokio to borrow, so zbus drives its own executor on its own thread and the
+  reading is runtime-agnostic;
 - read the *theme name* from `GTK_THEME` and `settings.ini` — the two places a
   plain reader can look — and refuse a name that is not Adwaita rather than
   painting Adwaita's surfaces on Breeze; no subprocess, and `None` when nothing
@@ -41,9 +43,10 @@ So:
   A parser that cannot evaluate `color-mix()`, `oklab()` or the injected accent
   would produce a palette GTK does not show, which is worse than the dtr skin.
 
-The only new dependency is **`zbus` 5** (MIT), on its `tokio` transport, and it
-was taken (§6.3). It is a D-Bus client, not a toolkit: it links no GLib, it
-reuses the runtime dtr already runs, and it reads the same service `rfd`'s
+The only new dependency is **`zbus` 5** (MIT), on its `async-io` transport, and
+it was taken (§6.3). It is a D-Bus client, not a toolkit: it links no GLib, it
+brings its own executor rather than borrowing dtr's, and it reads the same
+service `rfd`'s
 `xdg-portal` backend already uses for the file dialog. It does bring a tree — 77
 lock entries in a probe, against zero crates for the `busctl --json=short`
 variant in §4.2, which is the same design with a subprocess instead of a client.
@@ -558,8 +561,8 @@ scanning):
   `ThemeChanged` and nothing else at all, so the other two are heard here or not
   at all; re-reading both registry values on any of them costs less than deciding
   which one meant what. The procedure cannot await — and must not block a message
-  loop — so it calls `system::changed()`, which `notify_one`s the watcher (a
-  permit keeps a change that arrives between two readings). The read itself runs
+  loop — so it calls `system::changed()`, which sends on the watcher's channel (a
+  queued message keeps a change that arrives between two readings). The read itself runs
   on a blocking thread (`spawn_blocking`): Win32 has no asynchronous registry API,
   so that is the floor rather than a shortcut (see the comment in
   `crates/dtr/src/system/windows.rs`).
