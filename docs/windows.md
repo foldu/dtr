@@ -102,9 +102,10 @@ where a half-pixel cell would show, and it is the number to try next.
 
 egui panels are dimensioned in **points**, and `fit_panes` reserves space in **physical
 pixels** (`crates/dtr/src/app.rs:3016`). The tab strip gets this right and says so:
-`.exact_size(crate::ui::TAB_HEIGHT)` in points (`crates/dtr/src/app.rs:4396`,
-`crates/dtr/src/app.rs:4402`), with a comment recording that multiplying by the scale there
-made it grow twice at scale 2. The status panel does exactly that multiplication:
+`.exact_size(title_height)` in points — the platform's caption height, `chrome::title_height`
+(`crates/dtr/src/app.rs:4396`, `crates/dtr/src/app.rs:4402`) — with a comment recording that
+multiplying by the scale there made it grow twice at scale 2. The status panel does exactly
+that multiplication:
 
 ```rust
 .exact_size(crate::ui::STATUS_HEIGHT * self.scale())   // app.rs:4429 — points × scale

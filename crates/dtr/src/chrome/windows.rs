@@ -18,19 +18,43 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
+use windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_DWMCOLORIZATIONCOLORCHANGED,
-    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMOUSELEAVE, WM_SETTINGCHANGE, WM_SYSCOMMAND,
-    WM_THEMECHANGED,
+    HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYCAPTION,
+    SM_CYSIZEFRAME, WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCMOUSELEAVE, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_THEMECHANGED,
 };
 
 /// `WM_MOUSELEAVE`. windows-sys files it under `UI::Controls`, and this crate
 /// pulls in only the hand it needs, so the one constant is spelled here.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// Where a standard window's client area starts, in points, at the DPI a window
+/// with `scale` has — i.e. how tall Windows' own caption band is there.
+///
+/// `GetSystemMetricsForDpi` and not `GetSystemMetrics`: winit's windows are
+/// per-monitor DPI aware, so a window dragged to a 125 % monitor has 120-DPI
+/// metrics even when the system is 96, and `GetSystemMetrics` would keep
+/// answering for the system's monitor — a caption that is the wrong height on
+/// exactly the display the window is on.
+pub fn caption_height(scale: f32) -> Option<f32> {
+    let dpi = (f64::from(scale) * 96.0).round().clamp(48.0, 768.0) as u32;
+    // SAFETY: the three indices are Windows' own constants and the call only
+    // reads a system metric. An index it does not know returns 0, which
+    // `caption_band` refuses rather than drawing a strip of no height.
+    let (caption, frame, padded) = unsafe {
+        (
+            GetSystemMetricsForDpi(SM_CYCAPTION, dpi),
+            GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi),
+            GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi),
+        )
+    };
+    super::caption_band(caption, frame, padded, scale)
+}
 
 /// Identifies dtr's subclass, in case anything else subclasses the window too.
 const SUBCLASS: usize = 0x6474_7200;

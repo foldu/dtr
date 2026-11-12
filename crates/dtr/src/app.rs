@@ -3558,18 +3558,36 @@ impl App {
     fn log_strip_geometry(&mut self, scale: f32) {
         // Once per scale change, so a HiDPI mismatch is visible without a
         // screenshot: the reservation and the strip must be the same number,
-        // both in physical pixels.
+        // both in physical pixels. `strip_points` is the platform's answer — 46
+        // for a GNOME header bar, Windows' own caption band — and `chip_points`
+        // follows it, so a bar that is too thin for its chip shows up here as
+        // numbers rather than as a judgement about a picture.
         if self.strip_logged == Some(scale) {
             return;
         }
         self.strip_logged = Some(scale);
+        let strip = self.title_height(scale);
         tracing::debug!(
             scale,
-            reserved_px = (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale,
-            strip_px = crate::ui::TAB_HEIGHT * scale,
-            tab_height_points = crate::ui::TAB_HEIGHT,
+            reserved_px = (strip + crate::ui::GRID_GAP) * scale,
+            strip_px = strip * scale,
+            strip_points = strip,
+            chip_points = crate::ui::tab_chip_height(strip),
             "strip geometry"
         );
+    }
+
+    /// The strip's height in points.
+    ///
+    /// With client chrome the strip *is* the title bar, so it is as tall as the
+    /// platform's own (`chrome::title_height`); with the window manager drawing
+    /// the frame it is a tab row and the height it always had.
+    fn title_height(&self, scale: f32) -> f32 {
+        if self.config.chrome == dtr_config::Chrome::Client {
+            crate::chrome::title_height(scale)
+        } else {
+            crate::ui::TAB_HEIGHT
+        }
     }
 
     fn top_inset(&self, scale: f32) -> f32 {
@@ -3577,7 +3595,7 @@ impl App {
         // for one tab (it is where the session is named, now that a shell has no
         // status bar), and reserving space only sometimes is how the prompt ended
         // up underneath it.
-        (crate::ui::TAB_HEIGHT + crate::ui::GRID_GAP) * scale
+        (self.title_height(scale) + crate::ui::GRID_GAP) * scale
     }
 
     /// The rectangle panes live in: below the strip, above the status bar.
@@ -5375,6 +5393,16 @@ impl Gpu {
             .viewports
             .insert(egui::ViewportId::ROOT, viewport_info.clone());
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            // The strip is the title bar when this window paints its own frame, so
+            // its height is the platform's own caption — 46 points for a GNOME
+            // header bar, Windows' queried band — and the chip follows it. With
+            // the window manager drawing a title bar the strip is only a tab row.
+            let title_height = if self.client_frame {
+                crate::chrome::title_height(self.scale())
+            } else {
+                crate::ui::TAB_HEIGHT
+            };
+            let chip_height = crate::ui::tab_chip_height(title_height);
             // A client-side frame must exist even with no tabs, or the window
             // has no way to be moved or closed while the last tab is going away.
             if !tabs.is_empty() || self.client_frame {
@@ -5387,7 +5415,7 @@ impl Gpu {
                     // grow with DPI twice, so at scale 2 it was 60 points tall
                     // over a 60 *pixel* reservation and the first rows slid
                     // underneath it — invisible at scale 1.
-                    .exact_size(crate::ui::TAB_HEIGHT)
+                    .exact_size(title_height)
                     // No inner margin: with a client-side frame the buttons run
                     // the strip's full height and the drag region is the whole
                     // row, so the inset belongs to the chips alone (below).
@@ -5402,17 +5430,20 @@ impl Gpu {
                         } else {
                             6.0
                         };
-                        let inset = egui::vec2(
-                            left,
-                            ((crate::ui::TAB_HEIGHT - crate::ui::TAB_CHIP_HEIGHT) / 2.0).floor(),
-                        );
+                        let inset = egui::vec2(left, ((title_height - chip_height) / 2.0).floor());
                         let mut chips = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(strip.shrink2(inset))
                                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         );
-                        let bar =
-                            crate::ui::tab_bar(&mut chips, tabs, active_tab, destinations, &look);
+                        let bar = crate::ui::tab_bar(
+                            &mut chips,
+                            tabs,
+                            active_tab,
+                            destinations,
+                            &look,
+                            chip_height,
+                        );
                         if let Some(hit) = bar.hit {
                             *tab_click = Some(hit);
                         }

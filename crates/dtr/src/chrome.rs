@@ -59,6 +59,73 @@ pub fn kind() -> Kind {
     }
 }
 
+/// libadwaita's client-side title bar, in points.
+///
+/// The number is in the theme's CSS, and dtr does not parse CSS (`system/linux.rs`
+/// says why), so it is measured out of libadwaita 1.9.3 and compiled in, the way
+/// the palette's constants are: `window:not(.ssd-frame) > headerbar.titlebar
+/// { min-height: 46px }`, and `headerbar { min-height: 47px }` for a header bar
+/// that is not in the titlebar position. GNOME's own applications — Nautilus,
+/// GNOME Terminal, Settings — are 46 points tall.
+pub const ADWAITA_TITLEBAR: f32 = 46.0;
+
+/// How tall the title bar is, in points, as the platform would have drawn it.
+///
+/// With `chrome = "client"` the strip *is* the title bar, so it has to be as tall
+/// as the one it replaces. 30 points was a tab row: beside a 46-point GNOME header
+/// bar it read as a strip of afterthought, and on Windows it was the tab row's
+/// height rather than the caption's.
+///
+/// - **Windows** asks. `SM_CYCAPTION + SM_CYSIZEFRAME + SM_CXPADDEDBORDER` at the
+///   window's DPI is exactly where a standard window's client area starts, which
+///   is the band a client-side caption stands in; `chrome/windows.rs` reads the
+///   three metrics, and [`caption_band`] is the arithmetic with the guest's
+///   numbers in its test.
+/// - **Adwaita** is [`ADWAITA_TITLEBAR`], measured out of the theme.
+pub fn title_height(scale: f32) -> f32 {
+    let platform = match kind() {
+        Kind::Windows => caption_height(scale).unwrap_or(0.0),
+        Kind::Adwaita => ADWAITA_TITLEBAR,
+    };
+    // The strip is also the tab row, and a tab row shorter than a tab is not a
+    // tab row. A platform that answers nothing gets what dtr always had.
+    platform.max(crate::ui::TAB_HEIGHT)
+}
+
+#[cfg(target_os = "windows")]
+fn caption_height(scale: f32) -> Option<f32> {
+    windows::caption_height(scale)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn caption_height(_scale: f32) -> Option<f32> {
+    None
+}
+
+/// Where a standard Windows window's client area starts, in points, from the
+/// three metrics its caption is made of.
+///
+/// Measured in the Windows 11 guest with `GetSystemMetricsForDpi`:
+///
+/// | DPI | `SM_CYCAPTION` | `SM_CYSIZEFRAME` | `SM_CXPADDEDBORDER` | pixels | points |
+/// | --- | --- | --- | --- | --- | --- |
+/// | 96 (100 %) | 23 | 4 | 4 | 31 | 31 |
+/// | 120 (125 %) | 29 | 4 | 5 | 38 | 30.4 |
+/// | 144 (150 %) | 34 | 5 | 6 | 45 | 30 |
+/// | 192 (200 %) | 45 | 5 | 8 | 58 | 29 |
+///
+/// A WinForms window in the same guest put its client area 31 pixels below the
+/// window's top at 96 DPI — `caption + frame + padded`, not the 32 some sources
+/// quote (that count includes the 1-pixel top border, which dtr draws itself, and
+/// which is part of the strip's own hairline).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn caption_band(caption: i32, frame: i32, padded: i32, scale: f32) -> Option<f32> {
+    if caption <= 0 || frame < 0 || padded < 0 || scale <= 0.0 {
+        return None;
+    }
+    Some((caption + frame + padded) as f32 / scale)
+}
+
 /// A window button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
@@ -536,6 +603,32 @@ mod tests {
         Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 30.0))
     }
 
+    /// The strip is a title bar, so it is as tall as the platform's own — and a
+    /// platform that answers nothing gets the tab row rather than no strip.
+    #[test]
+    fn the_strip_is_a_title_bar() {
+        assert_eq!(title_height(1.0), ADWAITA_TITLEBAR);
+        assert!(
+            title_height(1.0) > crate::ui::TAB_HEIGHT,
+            "46 points against the 30 a tab row had"
+        );
+        assert_eq!(caption_band(0, 0, 0, 1.0), None, "a metric of nothing");
+        assert_eq!(caption_band(23, 4, 4, 0.0), None, "no scale");
+    }
+
+    /// Windows' caption band is three metrics summed and divided by the window's
+    /// scale. The numbers are the guest's, read with `GetSystemMetricsForDpi`:
+    /// 31 pixels at 100 %, 38 at 125 % — 30.4 points, because Windows rounds each
+    /// metric to whole pixels and the band shrinks a little in points as the
+    /// display scales.
+    #[test]
+    fn a_windows_caption_is_three_metrics_in_points() {
+        assert_eq!(caption_band(23, 4, 4, 1.0), Some(31.0));
+        assert_eq!(caption_band(29, 4, 5, 1.25), Some(30.4));
+        assert_eq!(caption_band(34, 5, 6, 1.5), Some(30.0));
+        assert_eq!(caption_band(45, 5, 8, 2.0), Some(29.0));
+    }
+
     #[test]
     fn the_drag_region_begins_where_the_chips_end() {
         let used = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(240.0, 20.0));
@@ -671,7 +764,7 @@ mod tests {
         let look = Look::default();
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             let strip = ui.max_rect();
-            crate::ui::tab_bar(ui, &labels, 0, &[], &look);
+            crate::ui::tab_bar(ui, &labels, 0, &[], &look, crate::ui::TAB_CHIP_HEIGHT);
             if let Some(hit) = buttons_for(ui, strip, false, &look, Kind::Windows, Glyphs::Painted)
             {
                 sink.borrow_mut().push(hit);
@@ -706,7 +799,7 @@ mod tests {
         let look = Look::default();
         let mut harness = egui_kittest::Harness::new_ui(move |ui| {
             let strip = ui.max_rect();
-            let bar = crate::ui::tab_bar(ui, &labels, 0, &[], &look);
+            let bar = crate::ui::tab_bar(ui, &labels, 0, &[], &look, crate::ui::TAB_CHIP_HEIGHT);
             *seen_rects.borrow_mut() = Some((strip, bar.used));
             if let Some(drag) = drag_area(ui, strip, bar.used) {
                 sink.borrow_mut().push(drag);

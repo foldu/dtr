@@ -197,10 +197,11 @@ tag mirroring on.
   surface**: `WindowEvent::Resized` must call `fit_panes`, where per-size state belongs.
   **Two layouts must agree on the top inset**: `fit_panes` sizes and `pane_views` draws,
   both asking `App::top_inset`, or the pty keeps a taller area's rows. **With
-  `chrome = "client"` that strip is also the title bar**: the same 30 points hold the drag
-  region, eight resize borders and three platform buttons (`crate::chrome`) — the row
-  moved, its height did not — and the drag region stops at `buttons_rect`, or presses over
-  the chips become "sometimes unresponsive".
+  `chrome = "client"` that strip is also the title bar**: the platform's own caption height
+  holds the drag region, eight resize borders and three platform buttons (`crate::chrome`;
+  46 points from libadwaita, Windows' queried band) — the row moved, its height follows the
+  platform — and the drag region stops at `buttons_rect`, or presses over the chips become
+  "sometimes unresponsive".
 - **`inner_size()` is already physical, so a scale divided by it is always 1.0**:
   `Gpu::scale()` must be `window.scale_factor()`, or the physical/physical ratio reserves
   half the needed space on HiDPI (a 34 px inset over a 30 **point** strip); `-v` logs

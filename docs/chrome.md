@@ -18,13 +18,14 @@ named. Merging removes the first row and changes nothing about the second.
 
 | where | OS bar at 100% | after the merge |
 |---|---|---|
-| Windows 11 | ~32 px | strip at y=0, buttons inside it |
-| GNOME (X11 or Wayland) | ~37 px | same |
-| KDE Plasma | ~30 px | same |
+| Windows 11 | 31 px (measured) | strip at y=0, buttons inside it |
+| GNOME (X11 or Wayland) | 46 points (measured) | same |
+| KDE Plasma | ~30 px (not measured here) | same |
 | i3 / sway | 0 | nothing to gain — `chrome = native` |
 
-(The heights are approximate and were not measured in this tree; the point is that under a
-tiling WM there is no bar to merge with.)
+(The two measured rows are the ones this tree now reproduces — §5 has the queries and the
+CSS rule. KDE's number is still an estimate; under a tiling WM there is no bar to merge
+with.)
 
 Three costs, and they are layout facts rather than opinions:
 
@@ -152,14 +153,45 @@ Three independent levers.
 | button | 46×32 pt, butted together, full strip height | 24×24 pt circles, ~6 pt gaps, centred |
 | glyph | 10 pt | 16 pt |
 | caption icon | 16 pt, ~10 pt in from the edge | none |
-| strip height | 32 | 32 |
+| strip height | Windows' own caption band, queried | 46 pt (libadwaita) |
 | hover | flat fill per button | circle behind the glyph |
 | close | `#C42B1C` fill, white glyph | the same grey as the others |
 
-**Metrics.** egui works in points, and Windows scales caption metrics linearly with DPI,
-so 32 pt tall and 46 pt wide reproduce 32 px and 46 px at 100%, and 48/69 at 150%. No
-`GetSystemMetricsForDpi` call is needed for the common sizes; the exact 125% metric may be
-a pixel off, and that is the point at which to query instead of multiply.
+**The strip's height is the platform's, not a constant.** With client chrome the strip *is*
+the title bar, and 30 points was a tab row: beside a 46-point GNOME header bar it read as a
+strip of afterthought. `chrome::title_height(scale)` answers, and `-v` logs the answer as
+`strip geometry strip_points=… chip_points=…` so a picture is not the only evidence:
+
+- **Windows** asks. `SM_CAPTION + SM_CYSIZEFRAME + SM_CXPADDEDBORDER` via
+  `GetSystemMetricsForDpi` at the window's DPI is where a standard window's client area
+  starts, which is the band a client-side caption stands in (`chrome/windows.rs`). Measured
+  in the Windows 11 guest:
+
+  | DPI | caption | frame | padded | pixels | points |
+  | --- | --- | --- | --- | --- | --- |
+  | 96 (100 %) | 23 | 4 | 4 | 31 | 31 |
+  | 120 (125 %) | 29 | 4 | 5 | 38 | 30.4 |
+  | 144 (150 %) | 34 | 5 | 6 | 45 | 30 |
+  | 192 (200 %) | 45 | 5 | 8 | 58 | 29 |
+
+  A WinForms window in the same guest put its client area 31 pixels below the window top at
+  96 DPI, so the sum is the band; the 32 some sources quote includes the 1-pixel top border,
+  which dtr draws as the strip's own hairline. `GetSystemMetricsForDpi` and not
+  `GetSystemMetrics`: winit's windows are per-monitor DPI aware, and a window dragged to a
+  125 % monitor has 120-DPI metrics.
+- **GNOME** is a constant, because the number is in libadwaita's CSS and dtr does not parse
+  CSS (`system/linux.rs` says why): libadwaita 1.9.3's `window:not(.ssd-frame) >
+  headerbar.titlebar { min-height: 46px }` — `headerbar { min-height: 47px }` for one out of
+  the titlebar position. `gresource extract $libadwaita/org/gnome/Adwaita/styles/gtk.css`
+  and grep the rule is how it was checked here; Nautilus, GNOME Terminal and Settings are
+  all 46.
+
+**The chip follows the strip.** `ui::tab_chip_height` is the strip less six points of air
+above and below, floored at the 20-point chip and capped at Adwaita's own tab
+(`tabbar tab { min-height: 26px }`): so the Windows chip is unchanged (31 − 12 = 19, floored
+at 20) and a 46-point title bar gets a 26-point tab rather than a pill that reads as a
+button. With `chrome = "native"` the strip is only a tab row under the window manager's own
+title bar, and stays 30 points.
 
 **Glyphs** — the lever that matters most, because shape is what the eye recognises:
 

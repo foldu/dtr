@@ -238,10 +238,22 @@ pub const STATUS_HEIGHT: f32 = 24.0;
 /// Tabs existed before this and were invisible, which made `ctrl+tab` look
 /// broken rather than unused.
 pub const TAB_HEIGHT: f32 = 30.0;
-/// The chip inside the strip. The strip is taller than this by design: a chip
-/// that fills its panel makes any rounding in egui's layout paint over the first
-/// terminal row.
+/// The smallest a chip gets, in points. The strip is taller than this by design:
+/// a chip that fills its panel makes any rounding in egui's layout paint over the
+/// first terminal row. How tall it actually is in a given strip is
+/// [`tab_chip_height`].
 pub const TAB_CHIP_HEIGHT: f32 = 20.0;
+
+/// How tall a tab chip is in a strip `title_height` points tall.
+///
+/// The chip keeps the strip's air proportional: six points above and below it,
+/// which is what a 30-point tab row had and what Windows' 31-pixel caption band
+/// gives — and no taller than Adwaita's own tab, `tabbar tab { min-height: 26px }`,
+/// because a pill that filled a 46-point title bar would read as a button. So the
+/// Windows chip does not change and the GNOME one grows with the bar.
+pub fn tab_chip_height(title_height: f32) -> f32 {
+    (title_height - 12.0).clamp(TAB_CHIP_HEIGHT, 26.0)
+}
 /// How much room a chip's *text* may take before it is elided, in points.
 ///
 /// A title is whatever the session called itself: a working directory, a serial
@@ -431,6 +443,9 @@ pub fn tab_bar(
     active: usize,
     destinations: &[crate::sources::Destination],
     look: &Look,
+    // The strip is the title bar, so its height is the platform's and the chip's
+    // is [`tab_chip_height`]'s; neither can be a constant in here.
+    chip_height: f32,
 ) -> TabStrip {
     // Idempotent, and here rather than only at startup so every caller — the
     // window, a capture, a kittest harness — gets a working loader.
@@ -445,8 +460,8 @@ pub fn tab_bar(
     // became taller than the chip box it sits in and `Align::Center` pushed
     // the chips down past the strip's clip rect: their bottoms were cut off
     // after the settings menu had been opened once. A chip is
-    // `TAB_CHIP_HEIGHT` tall whoever asks, and the strip measures its own row.
-    ui.spacing_mut().interact_size.y = TAB_CHIP_HEIGHT;
+    // `chip_height` tall whoever asks, and the strip measures its own row.
+    ui.spacing_mut().interact_size.y = chip_height;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (index, label) in labels.iter().enumerate() {
@@ -479,8 +494,8 @@ pub fn tab_bar(
             // rule decide who gets the press, and the deciding factor is the
             // allocation order — which reads as a button that works only some of
             // the time. The chip itself only reserves space and senses hover.
-            let close_size = TAB_CHIP_HEIGHT - 4.0;
-            let size = egui::vec2(galley.size().x + 18.0 + close_size, TAB_CHIP_HEIGHT);
+            let close_size = chip_height - 4.0;
+            let size = egui::vec2(galley.size().x + 18.0 + close_size, chip_height);
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
 
             let close_rect = egui::Rect::from_center_size(
@@ -754,7 +769,7 @@ mod kittest_tests {
             },
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 0, &destinations, &look).hit {
+            if let Some(hit) = tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT).hit {
                 *sink.borrow_mut() = Some(hit);
             }
         });
@@ -838,7 +853,7 @@ mod kittest_tests {
             },
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 0, &destinations, &look);
+            tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT);
         });
         harness.run();
 
@@ -864,7 +879,7 @@ mod kittest_tests {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(640.0, 360.0))
             .build_ui(move |ui| {
-                tab_bar(ui, &labels, 0, &destinations, &look);
+                tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT);
             });
         harness.run();
 
@@ -888,7 +903,7 @@ mod kittest_tests {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = std::rc::Rc::clone(&seen);
         let mut harness = Harness::new_ui(move |ui| {
-            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look).hit {
+            if let Some(hit) = tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT).hit {
                 sink.borrow_mut().push(hit);
             }
         });
@@ -923,7 +938,7 @@ mod kittest_tests {
         let long = "/home/somebody/src/a/directory/with/a/deliberately/long/name".to_owned();
         let labels = vec![long.clone(), "shell".to_owned()];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 0, &[], &look);
+            tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT);
         });
         harness.run();
 
@@ -961,7 +976,7 @@ mod kittest_tests {
             "shell".to_owned(),
         ];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 0, &[], &look);
+            tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT);
         });
         harness.run();
         harness.get_by_label("2 shell").hover();
@@ -977,7 +992,7 @@ mod kittest_tests {
         let look = Look::default();
         let labels = vec!["demo".to_owned(), "shell".to_owned()];
         let mut harness = Harness::new_ui(move |ui| {
-            tab_bar(ui, &labels, 1, &[], &look);
+            tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT);
         });
         harness.run();
 
@@ -985,6 +1000,17 @@ mod kittest_tests {
         harness.get_by_label("1 demo").hover();
         harness.run();
         harness.snapshot("tab_bar_hover");
+    }
+
+    /// A chip grows with the strip and stops at a tab: six points of air either
+    /// side, so the Windows caption keeps the chip it had (31 − 12 = 19, floored
+    /// at 20) and a 46-point GNOME title bar gets Adwaita's 26-point tab instead
+    /// of a pill that reads as a button.
+    #[test]
+    fn a_chip_follows_the_strip_and_stops_at_a_tab() {
+        assert_eq!(tab_chip_height(TAB_HEIGHT), TAB_CHIP_HEIGHT);
+        assert_eq!(tab_chip_height(31.0), TAB_CHIP_HEIGHT);
+        assert_eq!(tab_chip_height(crate::chrome::ADWAITA_TITLEBAR), 26.0);
     }
 
     /// The strip's whole contract, without a window: a chip switches, its cross
@@ -1006,7 +1032,7 @@ mod kittest_tests {
             // (Installed per harness, not per process — each has its own ctx.)
             // Accumulate: a click is reported on the frame it happens and the
             // next frame starts from `None`.
-            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look).hit {
+            if let Some(index) = tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT).hit {
                 *sink.borrow_mut() = Some(index);
             }
         });
@@ -1058,7 +1084,7 @@ mod kittest_tests {
         let look = Look::default();
         let mut harness = Harness::new_ui(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            tab_bar(ui, &labels, 1, &[], &look);
+            tab_bar(ui, &labels, 1, &[], &look, TAB_CHIP_HEIGHT);
         });
         harness.run();
         harness.snapshot("tab_bar");
@@ -1083,7 +1109,7 @@ mod kittest_tests {
         let mut harness = Harness::new_ui(move |ui| {
             ui.ctx()
                 .global_style_mut(|style| style.spacing.interact_size.y = 34.0);
-            let strip = tab_bar(ui, &labels, 0, &[], &look);
+            let strip = tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT);
             sink.set(strip.used);
         });
         harness.run();
