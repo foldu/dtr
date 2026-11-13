@@ -188,10 +188,12 @@ store path is a menu nobody can read. The program is in `-v`'s `shell started pr
 **A shell's row leads with the machine's picture of that program, and with the shell's logo where
 the machine has none.** Windows answers with the executable's own icon (`system::app_icon`), the
 one Explorer shows: on the guest, `powershell` is the blue PowerShell mark and `cmd` the console
-window. Linux has no per-program icon to read — no shell is in the icon theme, and `gio info`
-says `application-x-executable` for bash and fish alike — so there the row leads with GNU Bash's,
-Zsh's, fish's or Nushell's own logo, and a shell with no logo (`sh`, `dash`, `ksh`) keeps the
-column and draws nothing, so the group's labels line up. A Windows executable with no icon of its
+window. Linux has no icon inside the executable, so it asks the two files a launcher asks — the
+program's `share/applications` entry, whose `Icon=` names a picture, and the icon theme the package
+installs beside it, which holds that picture under the name (`baash` ships both). A shell no
+package gave an entry leads with GNU Bash's, Zsh's, fish's or Nushell's own logo, and a shell with
+no logo (`sh`, `dash`, `ksh`) keeps the column and draws nothing, so the group's labels line up. A
+Windows executable with no icon of its
 own (an App Execution Alias is one) gets whatever Windows draws for it. A serial port leads with
 a cable and a host with a rack — Lucide glyphs in the skin's text colour, because neither has a
 picture: no icon theme knows `/dev/ttyUSB0`, and an alias is a name in a config file. `menu_width`

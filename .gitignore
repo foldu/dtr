@@ -3,8 +3,8 @@
 /result-*
 
 # Screenshots are outputs, not sources: `dtr --screenshot out.png` run in the
-# repo must never end up in a commit. Logo renders and the kittest baselines are
-# the deliberate exceptions (both go through LFS).
+# repo must never end up in a commit. Logo renders, the kittest baselines and the
+# test fixtures are the deliberate exceptions (all go through LFS).
 *.png
 !assets/**/*.png
 # A kittest baseline is an input: egui_kittest fails with "Missing snapshot"
@@ -12,6 +12,9 @@
 # nothing. The failure artefacts stay ignored, below.
 !crates/dtr/tests/snapshots/*.png
 !crates/dtr-widgets/tests/snapshots/*.png
+# A fixture is an input too: `the_menu_draws_a_shells_own_mark` reads a shell's
+# package — its desktop entry and the icon theme beside it — out of this tree.
+!crates/dtr/tests/fixtures/**/*.png
 *.jpg
 *.jpeg
 *.webp

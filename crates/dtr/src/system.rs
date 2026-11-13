@@ -15,7 +15,9 @@
 //! same kind of question — what does this machine already know that dtr would
 //! otherwise draw itself. Windows keeps an executable's icons inside the
 //! executable and the shell can read them back, so [`app_icon`] is the picture
-//! Explorer would show; Linux keeps no per-shell icon at all and says so.
+//! Explorer would show; Linux has no such resource, but a package that wants a
+//! mark installs a desktop entry naming an icon theme's picture, so [`app_icon`]
+//! reads the entry and then the theme.
 //!
 //! The reading is live: a desktop changes its scheme at sunset and its accent when
 //! the user picks one, and a terminal that keeps the chrome it started with is a
@@ -29,9 +31,7 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(windows)]
 use std::collections::HashMap;
-#[cfg(windows)]
 use std::sync::Mutex;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -363,28 +363,38 @@ pub struct Icon {
 /// Windows keeps an executable's icons in the executable and the shell knows how
 /// to read them, so this is the same picture Explorer shows — not a brand asset
 /// drawn into the binary, which would be a licence, a redraw and a stale
-/// duplicate of what the machine already has. Linux has nothing to read: a shell
-/// is not in the icon theme and has no desktop entry, so every program there
-/// answers `None` and a menu row starts its label where a marked one ends its
-/// mark.
+/// duplicate of what the machine already has. Linux looks where a launcher
+/// looks: the program's desktop entry names an icon in `Icon=`, and the icon
+/// theme the package installs holds it. A program no package gave an entry — most
+/// shells — answers `None`, and a menu row starts its label where a marked one
+/// ended its mark.
 ///
 /// Cached for the run, because a menu is rebuilt every frame and the answer costs
-/// a shell call. An icon is not a behaviour: a program reinstalled while dtr runs
-/// keeps the picture it had until the next start.
+/// a shell call or a directory walk. An icon is not a behaviour: a program
+/// reinstalled while dtr runs keeps the picture it had until the next start.
 pub fn app_icon(path: &str) -> Option<Arc<Icon>> {
+    static ICONS: OnceLock<Mutex<HashMap<String, Option<Arc<Icon>>>>> = OnceLock::new();
+    let icons = ICONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut icons = icons
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    icons
+        .entry(path.to_owned())
+        .or_insert_with(|| platform_icon(path).map(Arc::new))
+        .clone()
+}
+
+/// One platform's answer, uncached.
+fn platform_icon(path: &str) -> Option<Icon> {
     #[cfg(windows)]
     {
-        static ICONS: OnceLock<Mutex<HashMap<String, Option<Arc<Icon>>>>> = OnceLock::new();
-        let icons = ICONS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut icons = icons
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        icons
-            .entry(path.to_owned())
-            .or_insert_with(|| windows::app_icon(path).map(Arc::new))
-            .clone()
+        windows::app_icon(path)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::app_icon(path)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         // Named so a platform with no answer does not warn about the question.
         let _ = path;

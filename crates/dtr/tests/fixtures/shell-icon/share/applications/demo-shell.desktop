@@ -1,0 +1,11 @@
+# A package's own entry, laid out the way a launcher reads it: `Exec` says which
+# program this is, `Icon` says what to draw, and the theme beside this file holds
+# that name. `ui.rs`'s `the_menu_draws_a_shells_own_mark` points a shell row at it.
+[Desktop Entry]
+Type=Application
+Name=demo-shell
+Comment=A shell that ships a mark
+Exec=demo-shell --login
+Icon=demo-shell
+Terminal=true
+Categories=System;

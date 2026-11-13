@@ -647,10 +647,12 @@ missing-image glyph, a `⚠` egui's own fonts cannot render.
 **A shell's mark is the machine's where the machine has one, and the shell's own logo
 otherwise.** Windows answers with the executable's icon — `system::app_icon` takes
 `SHGetFileInfo`'s large icon, converts it to RGBA, and that is the picture Explorer and the
-taskbar show. Linux answers `None` for every program: a shell is in no icon theme and has no
-desktop entry, and `gio info` reports `application-x-executable` for bash and fish alike — one
-glyph for every executable, which is not a mark. So a Linux row leads with the project's own
-logo: GNU Bash's official one, Zsh's, fish's and Nushell's, fetched by
+taskbar show. Linux has no icon inside the executable, so it reads the two files a launcher
+reads: the program's entry under `share/applications` says `Icon=`, and the icon theme the same
+package installs holds the picture under that name — `baash` ships both, and that is the mark its
+row leads with. A package that gives its program no entry (bash, fish and most shells) has
+nothing there, and the row leads with the project's own logo instead: GNU Bash's official one,
+Zsh's, fish's and Nushell's, fetched by
 `scripts/shell-icons.sh`, which records where each came from and under what licence (a logo is a
 trademark being used to name its shell, which is what a logo is for). `sh`, `dash` and `ksh` have
 no logo, so their rows reserve the column and leave it empty: the shells of one machine do not all

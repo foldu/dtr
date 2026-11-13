@@ -1010,9 +1010,10 @@ fn host_glyph() -> egui::ImageSource<'static> {
 /// What a destination's row leads with.
 ///
 /// A shell is the machine's own icon of its program where the platform has one —
-/// Windows reads the executable — and otherwise the shell's own logo; a port and a
-/// host are glyphs, because there is nothing else to ask. `None` is a shell with
-/// neither, and its row keeps the column and draws nothing in it.
+/// Windows reads the executable's resource, Linux the desktop entry a package
+/// installs and the icon theme beside it — and otherwise the shell's own logo; a
+/// port and a host are glyphs, because there is nothing else to ask. `None` is a
+/// shell with neither, and its row keeps the column and draws nothing in it.
 fn row_mark(
     ui: &Ui,
     skin: &dtr_widgets::Skin,
@@ -1659,7 +1660,10 @@ mod kittest_tests {
 
     /// A shell's mark is the shell's own logo, and only for the shells that have
     /// one: `sh` is not GNU Bash and `dash` is not fish, so borrowing a mark would
-    /// be the menu telling a lie about what it is about to start.
+    /// be the menu telling a lie about what it is about to start. This is the
+    /// embedded table only — `baash`'s mark is its package's, drawn from the
+    /// desktop entry it installs, and `the_menu_draws_a_shells_own_mark` is where
+    /// that path is checked.
     #[test]
     fn the_shells_with_a_logo_are_the_four_that_have_one() {
         let logo = |name: &str| shell_logo(name).and_then(|source| source.uri().map(str::to_owned));
@@ -1775,6 +1779,41 @@ mod kittest_tests {
         harness.get_by_label("new tab").click();
         harness.run();
         harness.snapshot("new_tab_menu");
+    }
+
+    /// A shell whose package ships a desktop entry and an icon theme draws that
+    /// mark — not a project logo drawn here, and not an empty column. The two
+    /// rows are the whole contract: `demo-shell` is found by the `Exec=` of a
+    /// file called `demo-shell.desktop` under a package's `share/`, and its
+    /// `Icon=` is the name the theme beside it holds. `bash` has no such entry
+    /// and falls back to the logo embedded for it, which is why the two rows
+    /// carry different pictures.
+    #[test]
+    fn the_menu_draws_a_shells_own_mark() {
+        use crate::sources::Destination;
+        let look = Look::default();
+        let labels = vec!["demo".to_owned()];
+        let destinations = vec![
+            Destination::Shell {
+                name: "demo-shell".to_owned(),
+                program: format!(
+                    "{}/tests/fixtures/shell-icon/bin/demo-shell",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+            },
+            Destination::Shell {
+                name: "bash".to_owned(),
+                program: "/bin/bash".to_owned(),
+            },
+        ];
+        let mut harness = Harness::new_ui(move |ui| {
+            tab_bar(ui, &labels, 0, &destinations, &look, TAB_CHIP_HEIGHT, &[]);
+        });
+        harness.run();
+
+        harness.get_by_label("new tab").click();
+        harness.run();
+        harness.snapshot("new_tab_menu_shell_icon");
     }
 
     /// Forty hosts do not fit on a screen, and a menu that grows past the
