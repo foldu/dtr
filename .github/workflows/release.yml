@@ -2,6 +2,10 @@
 # commits, tags and pushes. The tag has to agree with Cargo.toml — flake.nix
 # reads the version from there, so there is one number and not two — and the
 # whole check suite has to be green before anything is published.
+#
+# Touched alongside ci.yml, and for the same reason: a workflow is registered by
+# a push that changes its file, not by existing on the default branch. Until it
+# is, a tag publishes nothing.
 name: release
 
 on:

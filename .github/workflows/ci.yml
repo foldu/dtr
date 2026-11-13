@@ -7,6 +7,12 @@
 #
 # Actions are pinned by commit SHA: this workflow runs on a mirror and a moved
 # major tag is a silent code change.
+#
+# Touched on purpose. GitHub registers a workflow when a push changes its file,
+# not when the file merely exists, and this repository was created on 2026-11-02
+# by importing a history that already contained this file — so its Actions tab
+# held no workflows and no runs at all, ever. This comment is the touch that
+# registers it. A re-import, or a new mirror, needs the same nudge.
 name: ci
 
 on:
