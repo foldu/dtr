@@ -159,7 +159,7 @@ alternate screen, `DECSCUSR`'s shape and visibility, and the kitty stack (`CSI <
 The *text* is left alone, because the last screen before the drop is the first thing a
 person wants to read.
 
-### The wait is a card, not a line of output
+### The wait is a state, not a line of output
 
 The wait used to be announced the only way a terminal can announce anything: `-- reconnecting
 to jupyter in /srv/app --` written into the grid, right after the text it was interrupting.
@@ -178,22 +178,41 @@ printed line cannot answer that, because a line cannot count down.
 So the drop is a **state**, not an event. The pane publishes `pane::Retry` — what it is
 connecting to, the directory it will come back in, which attempt this is, and either the
 moment of the next one, "dialling now", or, for a serial port, "watching for the device" —
-and `ui::reconnect` draws it. The card is `dtr_widgets::Card` with `Order::Middle`, so it is
-above the grid (and above a file pane in the next leaf) and below every modal: a palette
-opened over it must not be covered by a notice about a session. It is centered on the *pane's*
-rectangle, so a split says which half is waiting, and its scrim dims only that pane.
+and `ui::reconnect` draws it, in one of two shapes.
 
-The card carries the two things worth offering while it is up: **retry now**, which moves the
-deadline without resetting the ladder — pressing it twice a minute must not turn the pane into
-a one-second dialler — and **close tab**, which is how a person gives up. Both are `App`'s:
-the pane can hurry its own wait, and only the app can close a tab.
+**Covered**, the notice *is* the pane: its whole rectangle is repainted in the terminal's own
+background, and the state is written in the middle of it. That is loud on purpose, because a
+drop should be noticed, and a card floating on a dimmed screen would claim something else —
+that the terminal is still there with something on top of it, when the true thing is that
+this pane is not connected.
 
-Two consequences worth writing down. The countdown is a state that changes with the clock, so
-a waiting pane asks for a frame twice a second (`App::about_to_wait`) — a countdown that only
-moved when the pointer did would be a still picture pretending to be a timer. And the notice
-*owns its rectangle*: a press over it is the card's, not the terminal's, or a drag would start
-a selection over the very screen the card dimmed. `App::left_press` asks `over_egui` before it
-maps a point to a cell, which is the same question the wheel and the link hover already ask.
+**Folded**, it is one bar across the top of the pane: the state in a line, `retry now` and
+`close tab` at the right, and everything below it is the terminal's again — scrollback,
+selection, copy, hyperlinks. A press anywhere on the notice, or a wheel notch over it, folds
+it; pressing the bar unfolds it. That second shape is the one that matters, because the last
+screen before a drop is usually the thing a person wants: the stack trace, the command that
+was running, the address of the box that just vanished. A notice that covered it until the
+host came back would turn an outage into a data loss, and the terminal's own scrollback is
+the only copy of it there is.
+
+Both shapes carry the two things worth offering while they are up: **retry now**, which moves
+the deadline without resetting the ladder — pressing it twice a minute must not turn the pane
+into a one-second dialler — and **close tab**, which is how a person gives up. Both are
+`App`'s: the pane can hurry its own wait, and only the app can close a tab. The bar has no
+room for the directory or for what the last attempt said, so both live in its tooltip.
+
+Three consequences worth writing down. The countdown is a state that changes with the clock,
+so a waiting pane asks for a frame twice a second (`App::about_to_wait`) — a countdown that
+only moved when the pointer did would be a still picture pretending to be a timer. A fold
+belongs to *one* pane and *one* outage: `App::folded_notices` drops an id as soon as that pane
+stops waiting, so the next drop is loud again. And covered, the notice owns the pointer:
+`App::left_press` asks `over_egui` before it maps a point to a cell — the same question the
+wheel and the link hover already ask — so a press on it, or on a card's button, no longer
+starts a selection in the grid behind.
+
+The notice is drawn in `Order::Middle`, so it is above the grid (and above a file pane in the
+next leaf) and below every modal: a palette opened over it must not be covered by a notice
+about a session. Its rectangle is the *pane's*, so a split says which half is waiting.
 
 ## 8. A session knows its directory only because it says so
 

@@ -595,6 +595,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         quit: false,
         wake: std::cell::Cell::new(false),
         strip_logged: None,
+        folded_notices: std::collections::BTreeSet::new(),
         sftp: None,
         wake_why: std::cell::Cell::new("startup"),
         egui_redraw_pending: false,
@@ -1203,6 +1204,9 @@ struct App {
     wake: std::cell::Cell<bool>,
     /// The scale whose strip geometry was last logged.
     strip_logged: Option<f32>,
+    /// Panes whose waiting notice has been folded away to its bar. Per pane, and
+    /// only while that pane is waiting: the next drop starts loud again.
+    folded_notices: std::collections::BTreeSet<crate::layout::LeafId>,
     /// The SFTP worker, and the alias it is connected to.
     sftp: Option<std::sync::mpsc::Sender<SftpMsg>>,
     /// Why the last wake was asked for, so a spin can name its cause.
@@ -1857,6 +1861,27 @@ impl App {
             (x as f32 - rect.x).clamp(0.0, (rect.width - 1.0).max(0.0)),
             (y as f32 - rect.y).clamp(0.0, (rect.height - 1.0).max(0.0)),
         ))
+    }
+
+    /// Fold the notice over the focused pane away, if it is up.
+    ///
+    /// A wheel notch does this as well as a press: a person scrolling at a
+    /// terminal that has stopped is asking for the scrollback, and a notice that
+    /// answered "nothing" would be the reason they cannot read the command they
+    /// were running when it went away.
+    fn fold_notice(&mut self) -> bool {
+        let id = self.tabs[self.active].focus;
+        let waiting = self.tabs[self.active]
+            .leaves
+            .get(&id)
+            .and_then(Pane::terminal)
+            .is_some_and(|session| session.pane.stats().retry().is_some());
+        if !waiting || self.folded_notices.contains(&id) {
+            return false;
+        }
+        self.folded_notices.insert(id);
+        self.repaint("a waiting notice folded away");
+        true
     }
 
     /// Whether the pointer is over an egui surface — a file pane, a card, a menu,
@@ -5008,8 +5033,17 @@ impl ApplicationHandler<UserEvent> for App {
                     // notch can be for.
                     None => (true, false),
                 };
+                // A notch over a notice that covers the pane is "show me the
+                // screen": it folds the notice and scrolls the scrollback in the
+                // same motion, so the gesture that was refused hands back the text
+                // it was asking for.
+                let folded = lines != 0.0 && over_grid && self.fold_notice();
                 if lines != 0.0
-                    && wheel_reaches_the_terminal(self.overlay_open(), over_grid, over_egui)
+                    && wheel_reaches_the_terminal(
+                        self.overlay_open(),
+                        over_grid,
+                        over_egui && !folded,
+                    )
                 {
                     // A program that tracks the mouse gets the wheel as buttons 4
                     // and 5, which is how vim and every pager over ssh scroll.
@@ -5269,6 +5303,18 @@ impl ApplicationHandler<UserEvent> for App {
                     // reading and a state worth showing: it is drawn over the
                     // rectangle the grid pass reserved, once per pane, so a
                     // split says which half is waiting.
+                    // A fold is remembered per pane, and only while that pane is
+                    // waiting: the next drop is a new notice and starts covered.
+                    let still_waiting: std::collections::BTreeSet<_> = tab
+                        .leaves
+                        .iter()
+                        .filter_map(|(id, pane)| {
+                            let session = pane.terminal()?;
+                            session.pane.stats().retry()?;
+                            Some(*id)
+                        })
+                        .collect();
+                    self.folded_notices.retain(|id| still_waiting.contains(id));
                     let waiting: Vec<crate::ui::Waiting> = tab
                         .layout
                         .visible(area, crate::ui::SPLIT_GAP * gpu.scale(), tab.zoom)
@@ -5279,6 +5325,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 id,
                                 rect,
                                 retry: session.pane.stats().retry()?,
+                                folded: self.folded_notices.contains(&id),
                             })
                         })
                         .collect();
@@ -5422,6 +5469,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                             crate::ui::ReconnectAsk::Close => self.close_tab(self.active),
+                            crate::ui::ReconnectAsk::Fold => {
+                                self.folded_notices.insert(id);
+                            }
+                            crate::ui::ReconnectAsk::Unfold => {
+                                self.folded_notices.remove(&id);
+                            }
                         }
                         self.repaint("a waiting pane was answered");
                     }

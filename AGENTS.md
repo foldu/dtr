@@ -114,18 +114,17 @@ tag mirroring on.
   1800 × 1240 at 2×), `magick identify` catches a window that did not scale at all, and
   `stty size` from inside the shell is the pane's cell count — the number that changes
   when the *cell* scales (100 × 34 at 1×, 105 × 35 at 2×, five extra columns being the
-  whole-pixel ceiling). Two traps: the capture needs a frame then, so the sample must
-  still be printing (a `tick` line every 500 ms), and no window manager does not matter —
-  the window maps at its requested size.
+  whole-pixel ceiling). Two traps: the capture needs a frame then (so the sample must still
+  be printing, a `tick` every 500 ms), and no window manager does not matter — the window
+  maps at its requested size.
 - **Capture with a shell that does not read the user's bash rc**: dtr launches `$SHELL`,
   so a broken `~/.bashrc` lands *in the grid* — readline's `\[` and `\]` print literally
   and the prompt grows to half a screen. Use `--shell "bash --norc --noprofile"` for any
   capture, screenshot or font comparison.
 - **`--send` expands escapes, so a sample's own `\n` is not the one you wrote**:
   `input::unescape` turns `\n`, `\r`, `\t`, `\e` and `\\` into bytes, so
-  `--send "printf \"one\\ntwo\\n\""` types a *newline* inside the quoted string and
-  leaves the shell in a continuation prompt. Escape the backslash again, or put the
-  sample in a file and type its path.
+  a quoted `printf` gets a real newline and the shell waits at a continuation prompt.
+  Escape the backslash again, or put the sample in a file and type its path.
 - **This file has a budget, and it is silent when it is exceeded**: a session loads at most
   64 KB of `AGENTS.md` and drops the rest, so a file that grows past it loses its *tail* —
   which is the index. Keep it to rules: the rule, and the clause that makes it stick. The
@@ -463,9 +462,9 @@ second connection, and what each of these failures looked like.
   before the reopen — including the kitty stack (`CSI < 999 u`) and DECSCUSR's shape and
   visibility — while leaving the text, because the last screen before the drop is the
   first thing one wants to read. **The drop is a state, not a line of output**: the pane
-  publishes `Retry` and `crate::ui::reconnect` draws a card over the pane — a countdown,
-  *retry now*, *close tab* — in `Order::Middle`, so above the grid and below every modal,
-  and sized to the *pane*, so a split says which half is waiting.
+  publishes `Retry` and `crate::ui::reconnect` draws it: covered — the pane in its own
+  background, a countdown, *retry now* / *close tab* — or folded to one bar across the top,
+  so the last screen can be read and selected again. A press or a wheel notch folds it.
 - **A session knows its directory only because it says so**: `/proc` is Linux-only and an
   ssh session has no local process, so `CwdSniffer` watches for OSC 7
   (`ESC ] 7 ; file://host/path`) before the VT core, holding an unterminated sequence from
@@ -492,8 +491,8 @@ second connection, and what each of these failures looked like.
   (`docs/compio.md` §5). **"No bytes" is not "the reader ended"**: the pane keeps
   the byte sender alive for reconnects, so a disconnect arrives on `closed_rx`.
   **A notice on a transport that cannot disconnect** means `Stats::retry` was set and never
-  cleared. **A clock-driven state needs frames**: a waiting notice wakes `about_to_wait`
-  twice a second.
+  cleared. **A clock-driven state needs frames** — a notice wakes `about_to_wait` twice a
+  second — and **a fold lasts one outage** (`App::folded_notices`).
 - **A serial read ends when the driver says so, and the size asked for is a latency
   floor**: on Windows `ReadFile` completes at the requested count or a timeout, and a
   flood leaves no gap for an inter-byte timeout to notice — 8 KB was 355 ms of silence at

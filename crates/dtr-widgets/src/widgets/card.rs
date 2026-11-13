@@ -81,8 +81,6 @@ pub struct Card<'a> {
     tabs: Option<Box<dyn FnOnce(&mut Ui) + 'a>>,
     /// The width the body may not shrink below, inside the card's margin.
     body_min: f32,
-    /// Which layer the card is in.
-    order: egui::Order,
 }
 
 /// What the card did this frame: the cross, and whatever the body returned.
@@ -106,7 +104,6 @@ impl<'a> Card<'a> {
             footer: None,
             tabs: None,
             body_min: 0.0,
-            order: egui::Order::Foreground,
         }
     }
 
@@ -184,20 +181,6 @@ impl<'a> Card<'a> {
         self
     }
 
-    /// The layer the card is drawn in.
-    ///
-    /// [`egui::Order::Foreground`] by default, which is what a modal wants: it
-    /// is above everything the frame drew before it. A card that belongs to a
-    /// *pane* rather than to the window — a notice over one terminal while the
-    /// rest of the window is still being used — asks for [`egui::Order::Middle`]
-    /// instead, so that it sits above the panes and below the cards that must
-    /// never be covered by it. Layer order within one `Order` is the order the
-    /// areas were first created in, which is not something a card can know.
-    pub fn order(mut self, order: egui::Order) -> Self {
-        self.order = order;
-        self
-    }
-
     /// Draw the card and call `body` with the inner Ui and its content width.
     ///
     /// The width is passed rather than asked of the body because the card owns
@@ -214,7 +197,7 @@ impl<'a> Card<'a> {
         let width = self.size.x.min(screen.width() - 32.0).max(self.min.x);
         let height = self.size.y.min(screen.height() - 32.0).max(self.min.y);
         let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
-        prime_area(ui.ctx(), self.id, self.order, rect, true);
+        prime_area(ui.ctx(), self.id, egui::Order::Foreground, rect, true);
 
         // The terminal is not the subject while the card is up. Enough scrim to
         // read the card against, not so much that the window looks disabled.
@@ -226,7 +209,7 @@ impl<'a> Card<'a> {
         let mut close = false;
         let mut result = None;
         egui::Area::new(self.id)
-            .order(self.order)
+            .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
             .constrain(false)
             // A fade would make the card invisible on the first frame, and the

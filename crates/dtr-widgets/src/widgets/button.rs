@@ -17,6 +17,27 @@ pub struct Button<'a> {
     enabled: bool,
 }
 
+impl Button<'_> {
+    /// The width [`Button::show`] will use for `label`.
+    ///
+    /// A screen that composes a row of buttons — or centres one, or sizes a block
+    /// around one — needs the width before it draws, and the alternative is for
+    /// every screen to re-derive `label + 2 × padding` and disagree with the
+    /// button the first time the padding moves.
+    pub fn measured_width(ui: &Ui, skin: &Skin, label: &str) -> f32 {
+        let style = &skin.style;
+        ui.painter()
+            .layout_no_wrap(
+                label.to_owned(),
+                style.value_font.clone(),
+                skin.palette.text,
+            )
+            .size()
+            .x
+            + style.padding.x * 2.0
+    }
+}
+
 impl<'a> Button<'a> {
     pub fn new(label: &'a str) -> Self {
         Self {
@@ -68,7 +89,7 @@ impl<'a> Button<'a> {
         let width = self
             .width
             .unwrap_or(0.0)
-            .max(galley.size().x + style.padding.x * 2.0);
+            .max(Self::measured_width(ui, skin, self.label));
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(width, style.row),
             if self.enabled {

@@ -407,6 +407,10 @@ pub struct Waiting {
     pub id: crate::layout::LeafId,
     pub rect: crate::layout::Rect,
     pub retry: crate::pane::Retry,
+    /// Whether the notice has been folded away to its bar. The app owns this,
+    /// because it outlives a frame and a press is not the only thing that sets
+    /// it — a wheel notch does too.
+    pub folded: bool,
 }
 
 /// What a press on the notice asked for.
@@ -417,64 +421,200 @@ pub enum ReconnectAsk {
     /// Give up. Closing the tab is how a person has always given up on a
     /// connection that will not come back.
     Close,
+    /// Fold the notice away to its bar, so the screen underneath can be read,
+    /// selected and scrolled. A press anywhere on it, or a wheel notch.
+    Fold,
+    /// Unfold it again from the bar.
+    Unfold,
 }
 
 /// Draw the notice over a pane whose connection is not there.
 ///
-/// This is a *state*, not a line of output. The pane publishes it — `Retry` —
-/// and this draws it, so the notice can count down, disappear when the pty
-/// comes back, and offer the two things worth offering while it is up. A line
-/// written into the grid could do none of those: it is history the moment it is
-/// printed, it reads as something the far end said, and a host that is down for
-/// a minute fills the scrollback with it.
+/// Two shapes, one state. **Covered**, the notice *is* the pane: a terminal whose
+/// transport is gone has nothing to show, so its whole rectangle is repainted in
+/// the terminal's own background and the state is written in the middle of it —
+/// a card floating in a dimmed screen would claim something else, that the
+/// terminal is still there with something on top of it. **Folded**, it is a bar
+/// across the top of the pane: one line of chrome, and the screen underneath is
+/// the terminal's again.
 ///
-/// It is the pane's rectangle, not the window's, so a split says which half is
-/// waiting, and it is drawn in the middle layer: above the grid and above a file
-/// pane next door, below every modal, because a palette opened over it must not
-/// be covered by a notice about a session.
+/// The two exist because those are the two things a person wants, in that order.
+/// A drop is loud enough to be noticed, and then it has to get out of the way:
+/// the last screen before a drop is usually the thing one wants to read, select
+/// and copy — the stack trace, the command that was running — and a notice that
+/// covered it until the host came back would make an outage into a data loss.
+/// So anything that means "show me the screen" — a press anywhere on the notice,
+/// or a wheel notch over it — folds it, and the bar folds back open when pressed.
 ///
-/// Returns the button that was pressed, if any.
+/// Both shapes are drawn in the middle layer: above the grid and a file pane next
+/// door, below every modal. Covered, the pointer and the wheel belong to the
+/// notice, because nothing under it can be aimed at; folded, only the bar does,
+/// and everything else in the pane is the terminal's again.
+///
+/// Returns what was pressed, if any.
 pub fn reconnect(ui: &mut Ui, view: &Waiting, look: &Look) -> Option<ReconnectAsk> {
     let pixels = ui.ctx().pixels_per_point();
     let rect = egui::Rect::from_min_size(
         egui::pos2(view.rect.x / pixels, view.rect.y / pixels),
         egui::vec2(view.rect.width / pixels, view.rect.height / pixels),
     );
-    // A pane too small to hold the card is a pane where the notice would be the
-    // only thing on screen: the split is the problem, and covering it does not
-    // help.
-    if rect.width() < 140.0 || rect.height() < 56.0 {
-        return None;
+    let (title, line) = headings(&view.retry);
+    if view.folded {
+        folded(ui, view, rect, look, title, &line)
+    } else {
+        // A pane with no room for a block and its buttons keeps its blank grid
+        // rather than a notice with its own way out cut off — and then there is
+        // nothing to fold, so the bar is what it gets instead.
+        if rect.width() < 160.0 || rect.height() < 120.0 {
+            return folded(ui, view, rect, look, title, &line);
+        }
+        covered(ui, view, rect, look, title, &line)
     }
+}
+
+/// The whole pane: the terminal's surface, with the state in the middle of it.
+fn covered(
+    ui: &mut Ui,
+    view: &Waiting,
+    rect: egui::Rect,
+    look: &Look,
+    title: &str,
+    line: &str,
+) -> Option<ReconnectAsk> {
     let retry = &view.retry;
     let skin = look.skin();
     let palette = skin.palette;
     let style = skin.style.clone();
-    let small = egui::FontId::new(style.label_font.size - 1.0, style.label_font.family.clone());
-    let line = retry_line(retry);
-    // A first connection is not a reconnection: the pane quotes the host in both
-    // cases, and the word in front of it is the whole difference between "this
-    // is how it starts" and "this started and then broke".
-    let title = if retry.attempt == 0 && retry.when != crate::pane::When::Watching {
-        "connecting"
-    } else {
-        "reconnecting"
-    };
+    let label = egui::FontId::new(style.label_font.size - 1.0, style.label_font.family.clone());
+    let wrap = (rect.width() - 2.0 * NOTICE_MARGIN).max(120.0);
+    // A short pane keeps the rows that matter — what it is, what it is doing, the
+    // way out and the way back — and drops the detail.
+    let roomy = rect.height() >= 170.0;
+    let roomiest = rect.height() >= 210.0;
+    // The block is measured, not guessed: the rows use three fonts and two
+    // buttons, and a block sized by eye is a block whose centring is off by the
+    // width of a word. `layout` is the wrapping the labels will do and
+    // `Button::measured_width` is the width the button will take, so these are
+    // the numbers the drawing will produce.
+    let spacing = ui.spacing().item_spacing;
+    let mut block = Block::default();
+    {
+        let painter = ui.painter();
+        let head = painter.layout(
+            title.to_owned(),
+            style.title_font.clone(),
+            palette.text,
+            wrap,
+        );
+        let host = painter.layout(retry.what.clone(), label.clone(), palette.dim, wrap);
+        block.row_of(
+            head.size().x + spacing.x + host.size().x,
+            head.size().y.max(host.size().y),
+        );
+        block.row(&painter.layout(
+            line.to_owned(),
+            style.value_font.clone(),
+            palette.text,
+            wrap,
+        ));
+        if roomy && let Some(dir) = &retry.dir {
+            block.row(&painter.layout(
+                format!("reopening in {dir}"),
+                label.clone(),
+                palette.dim,
+                wrap,
+            ));
+        }
+        if roomiest && let Some(why) = &retry.why {
+            block.row(&painter.layout(why.clone(), label.clone(), palette.dim, wrap));
+        }
+        block.row(&painter.layout(FOLD_HINT.to_owned(), label.clone(), palette.dim, wrap));
+        // The way out and the way back, as wide as the widget says they are.
+        let mut buttons = dtr_widgets::Button::measured_width(ui, &skin, "close tab");
+        if matches!(retry.when, crate::pane::When::At(_)) {
+            buttons += spacing.x + dtr_widgets::Button::measured_width(ui, &skin, "retry now");
+        }
+        block.row_of(buttons, style.row);
+    }
+    block.gaps(spacing.y);
+    let (width, height) = (block.width.min(wrap).max(120.0), block.height);
+
+    let id = egui::Id::unique(("dtr-reconnect", view.id));
+    prime_area(ui.ctx(), id, egui::Order::Middle, rect, true);
     let mut ask = None;
-    // The card is clamped and centered against the `Ui` it is given, so it is
-    // given the pane: it centers in the pane, and its scrim covers the pane and
-    // nothing else.
-    let mut bounded = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    bounded.set_clip_rect(rect);
-    dtr_widgets::Card::new(egui::Id::unique(("dtr-reconnect", view.id)), title)
+    egui::Area::new(id)
         .order(egui::Order::Middle)
-        .size(340.0, 150.0)
-        .note(&retry.what)
-        .footer(|ui| {
+        .fixed_pos(rect.min)
+        .interactable(true)
+        .constrain(false)
+        .fade_in(false)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_size(rect.size());
+            ui.set_max_size(rect.size());
+            ui.set_clip_rect(rect);
+            // The terminal's own background, not the skin's window: the grid is
+            // cleared with this colour, so the pane reads as empty rather than as
+            // a panel that happens to be the same size.
+            let plate = ui.max_rect();
+            let surface =
+                Color32::from_rgb(look.background[0], look.background[1], look.background[2]);
+            ui.painter().rect_filled(plate, 0.0, surface);
+            // The whole plate is the way to the screen behind it. It is allocated
+            // before the buttons, so a press on one of those is the button's: the
+            // hit test goes to the widget drawn last.
+            // No tooltip here: the hint is already a line of the block, and a
+            // tooltip would be a second copy of it in the accessibility tree.
+            let behind = ui.allocate_rect(plate, egui::Sense::click());
+            // The notice's own words are not text to select: a drag on them is a
+            // drag on the notice, which is what folds it. Only the terminal's text
+            // is selectable, and it is the thing this is uncovering.
+            ui.style_mut().interaction.selectable_labels = false;
+            // The block is placed by its centre rather than by a leading spacer:
+            // it was measured, so its own rectangle can be centred in the pane and
+            // the rows fill it exactly.
+            let block = egui::Rect::from_center_size(
+                plate.center(),
+                egui::vec2(
+                    width,
+                    height.min((plate.height() - 2.0 * NOTICE_MARGIN).max(style.row)),
+                ),
+            );
+            // The block is exactly as wide as its widest row, so it is centred
+            // as a whole and every row inside it starts on the same edge: a tight
+            // column of state, not a line of type floating in the middle.
+            let mut ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(block)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            ui.spacing_mut().item_spacing = spacing;
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .font(style.title_font.clone())
+                        .color(palette.text),
+                );
+                ui.label(
+                    RichText::new(&retry.what)
+                        .font(label.clone())
+                        .color(palette.dim),
+                );
+            });
+            ui.label(
+                RichText::new(line)
+                    .font(style.value_font.clone())
+                    .color(palette.text),
+            );
+            if roomy && let Some(dir) = &retry.dir {
+                ui.label(
+                    RichText::new(format!("reopening in {dir}"))
+                        .font(label.clone())
+                        .color(palette.dim),
+                );
+            }
+            if roomiest && let Some(why) = &retry.why {
+                ui.label(RichText::new(why).font(label.clone()).color(palette.dim));
+            }
             ui.horizontal(|ui| {
                 if matches!(retry.when, crate::pane::When::At(_))
                     && dtr_widgets::Button::new("retry now").show(ui, &skin)
@@ -485,26 +625,185 @@ pub fn reconnect(ui: &mut Ui, view: &Waiting, look: &Look) -> Option<ReconnectAs
                     ask = Some(ReconnectAsk::Close);
                 }
             });
-        })
-        .show(&mut bounded, &skin, |ui, _| {
-            if let Some(dir) = &retry.dir {
-                ui.label(
-                    RichText::new(format!("reopening in {dir}"))
-                        .font(small.clone())
-                        .color(palette.dim),
-                );
-            }
             ui.label(
-                RichText::new(line)
-                    .font(style.value_font.clone())
-                    .color(palette.text),
+                RichText::new(FOLD_HINT)
+                    .font(label.clone())
+                    .color(palette.dim),
             );
-            if let Some(why) = &retry.why {
-                ui.add_space(4.0);
-                ui.label(RichText::new(why).font(small.clone()).color(palette.dim));
+            if behind.clicked() && ask.is_none() {
+                ask = Some(ReconnectAsk::Fold);
             }
         });
     ask
+}
+
+/// The bar: one row of chrome across the top of the pane, and the terminal is
+/// the terminal again underneath it.
+fn folded(
+    ui: &mut Ui,
+    view: &Waiting,
+    rect: egui::Rect,
+    look: &Look,
+    title: &str,
+    line: &str,
+) -> Option<ReconnectAsk> {
+    let retry = &view.retry;
+    let skin = look.skin();
+    let palette = skin.palette;
+    let style = skin.style.clone();
+    let label = egui::FontId::new(style.label_font.size - 1.0, style.label_font.family.clone());
+    if rect.width() < 120.0 {
+        return None;
+    }
+    // One row of the skin's height, which is a button's: the bar has to hold two
+    // of them without the row growing under the pointer.
+    let bar = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), style.row));
+    let id = egui::Id::unique(("dtr-reconnect", view.id));
+    prime_area(ui.ctx(), id, egui::Order::Middle, bar, true);
+    let mut ask = None;
+    egui::Area::new(id)
+        .order(egui::Order::Middle)
+        .fixed_pos(bar.min)
+        .interactable(true)
+        .constrain(false)
+        .fade_in(false)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_size(bar.size());
+            ui.set_max_size(bar.size());
+            ui.set_clip_rect(bar);
+            let plate = ui.max_rect();
+            ui.painter().rect_filled(plate, 0.0, palette.card);
+            // A hairline under it, so the bar reads as chrome over the grid
+            // rather than as the terminal's first row.
+            ui.painter().hline(
+                plate.x_range(),
+                plate.bottom() - 0.5,
+                egui::Stroke::new(1.0, palette.border),
+            );
+            let mut behind = ui.allocate_rect(plate, egui::Sense::click());
+            // Same as the cover: the bar is a button, not a line of text.
+            ui.style_mut().interaction.selectable_labels = false;
+            // What a one-line bar has no room for — the directory the session
+            // will come back in, and what the last attempt said — is one hover
+            // away rather than gone.
+            let detail = detail(view);
+            if !detail.is_empty() {
+                behind = behind.on_hover_text(detail);
+            }
+            let mut ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(plate.shrink2(egui::vec2(10.0, 0.0)))
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            // Right to left: the buttons keep their width and the text gets what
+            // is left, which is the order that lets a narrow pane elide a word
+            // instead of pushing the way out of the pane.
+            if dtr_widgets::Button::new("close tab").show(&mut ui, &skin) {
+                ask = Some(ReconnectAsk::Close);
+            }
+            if matches!(retry.when, crate::pane::When::At(_))
+                && dtr_widgets::Button::new("retry now").show(&mut ui, &skin)
+            {
+                ask = Some(ReconnectAsk::Now);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(title)
+                        .font(style.value_font.clone())
+                        .color(palette.accent),
+                );
+                if plate.width() >= 260.0 {
+                    ui.label(
+                        RichText::new(&retry.what)
+                            .font(label.clone())
+                            .color(palette.dim),
+                    );
+                }
+                if plate.width() >= 380.0 {
+                    ui.label(RichText::new("·").font(label.clone()).color(palette.dim));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(line).font(label.clone()).color(palette.dim),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+            if behind.clicked() && ask.is_none() {
+                ask = Some(ReconnectAsk::Unfold);
+            }
+        });
+    ask
+}
+
+/// What the bar cannot say: where the session will come back, and what the last
+/// attempt said.
+fn detail(view: &Waiting) -> String {
+    let retry = &view.retry;
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(dir) = &retry.dir {
+        lines.push(format!("reopening in {dir}"));
+    }
+    if let Some(why) = &retry.why {
+        lines.push(why.clone());
+    }
+    if view.folded {
+        lines.push(FOLD_HINT.to_owned());
+    }
+    lines.join("\n")
+}
+
+/// The notice's block while it is being measured: the widest row and the height
+/// of all of them, taken from the galleys the labels will lay out.
+///
+/// A block sized by eye is a block whose centring is off by the width of a word,
+/// and the widest row is what its rectangle has to be.
+#[derive(Default)]
+struct Block {
+    width: f32,
+    height: f32,
+    rows: usize,
+}
+
+impl Block {
+    /// One row, measured by its galley.
+    fn row(&mut self, galley: &egui::Galley) {
+        self.row_of(galley.size().x, galley.size().y);
+    }
+
+    /// One row, measured by hand — a row that is a button, not a line of type.
+    fn row_of(&mut self, width: f32, height: f32) {
+        self.width = self.width.max(width);
+        self.height += height;
+        self.rows += 1;
+    }
+
+    /// The gaps between the rows, which the layout will insert.
+    fn gaps(&mut self, gap: f32) {
+        self.height += gap * self.rows.saturating_sub(1) as f32;
+    }
+}
+
+/// The air the notice keeps from the pane's edges, in points. One number,
+/// because both the wrap width and the block's clamp are computed from it.
+const NOTICE_MARGIN: f32 = 28.0;
+
+/// What the cover says about getting it out of the way. In the block, so a person
+/// finds the gesture rather than guessing at it.
+const FOLD_HINT: &str = "press or scroll to see the screen";
+
+/// What the notice calls itself, and what it says it is doing.
+///
+/// A first connection is not a reconnection: the pane quotes the host in both
+/// cases, and the word in front of it is the whole difference between "this is how
+/// it starts" and "this started and then broke".
+fn headings(retry: &crate::pane::Retry) -> (&'static str, String) {
+    let title = if retry.attempt == 0 && retry.when != crate::pane::When::Watching {
+        "connecting"
+    } else {
+        "reconnecting"
+    };
+    (title, retry_line(retry))
 }
 
 /// What the notice says is happening, in one line.
@@ -1586,20 +1885,14 @@ mod kittest_tests {
     /// went back to printing it would have no card for these to find.
     #[test]
     fn a_waiting_pane_draws_a_notice_over_its_own_rectangle() {
-        use crate::pane::{Retry, When};
         let look = Look::default();
         let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = std::rc::Rc::clone(&asked);
         let waiting = Waiting {
             id: 1,
             rect: crate::layout::Rect::new(0.0, 0.0, 640.0, 400.0),
-            retry: Retry {
-                what: "jupyter".to_owned(),
-                dir: Some("/srv/app".to_owned()),
-                attempt: 3,
-                when: When::At(std::time::Instant::now() + std::time::Duration::from_secs(4)),
-                why: None,
-            },
+            retry: waiting_retry(),
+            folded: false,
         };
         let mut harness = Harness::builder()
             .with_size(egui::vec2(640.0, 400.0))
@@ -1613,17 +1906,19 @@ mod kittest_tests {
         // What it is, what it was doing, and where it will be put back.
         assert!(
             harness.query_by_label("reconnecting").is_some(),
-            "the card does not say what it is"
+            "the notice does not say what it is"
         );
         assert!(harness.query_by_label("jupyter").is_some());
         assert!(harness.query_by_label("reopening in /srv/app").is_some());
         let line = harness.get_by_label("attempt 3 · next attempt in 4 s");
         assert!(line.rect().width() > 0.0);
+        // The way out of the way, said rather than guessed at.
+        assert!(harness.query_by_label(FOLD_HINT).is_some());
 
         harness.snapshot("reconnecting");
 
-        // Both answers are reported back to the app, which is the only thing
-        // that can send to a pane or close a tab.
+        // Every answer is reported back to the app, which is the only thing that
+        // can send to a pane, close a tab or remember a fold.
         harness.get_by_label("close tab").click();
         harness.run();
         assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Close]);
@@ -1631,6 +1926,77 @@ mod kittest_tests {
         harness.get_by_label("retry now").click();
         harness.run();
         assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Now]);
+        asked.borrow_mut().clear();
+        // A press on the notice itself, anywhere but a button, folds it.
+        harness.get_by_label("jupyter").click();
+        harness.run();
+        assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Fold]);
+    }
+
+    /// Folded, the notice is one bar at the top of the pane: the state in a line,
+    /// the two answers, and the rest of the rectangle is the terminal's again.
+    #[test]
+    fn a_folded_notice_is_one_bar_over_the_pane() {
+        let look = Look::default();
+        let row = look.skin().style.row;
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = std::rc::Rc::clone(&asked);
+        let waiting = Waiting {
+            id: 1,
+            rect: crate::layout::Rect::new(0.0, 0.0, 640.0, 400.0),
+            retry: waiting_retry(),
+            folded: true,
+        };
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 400.0))
+            .build_ui(move |ui| {
+                if let Some(ask) = reconnect(ui, &waiting, &look) {
+                    sink.borrow_mut().push(ask);
+                }
+            });
+        harness.run();
+
+        for label in ["reconnecting", "jupyter", "attempt 3 · next attempt in 4 s"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "the bar does not say `{label}`"
+            );
+        }
+        // One row, at the top: the bar's own height is a button's, and nothing
+        // below it is claimed, so the grid underneath is the terminal's again.
+        let bar = harness.get_by_label("reconnecting").rect();
+        assert!(bar.height() <= row, "{bar:?}");
+        let pane = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 400.0));
+        assert!(bar.top() < pane.top() + 12.0, "the bar is not at the top");
+        assert!(
+            row < pane.height() / 4.0,
+            "a bar that took a quarter of the pane is not a bar"
+        );
+
+        harness.snapshot("reconnecting_bar");
+
+        asked.borrow_mut().clear();
+        harness.get_by_label("retry now").click();
+        harness.run();
+        assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Now]);
+        asked.borrow_mut().clear();
+        harness.get_by_label("jupyter").click();
+        harness.run();
+        assert_eq!(asked.borrow().as_slice(), [ReconnectAsk::Unfold]);
+    }
+
+    /// The state both shapes are drawn from: a third attempt, four seconds out,
+    /// in a directory on another machine.
+    fn waiting_retry() -> crate::pane::Retry {
+        crate::pane::Retry {
+            what: "jupyter".to_owned(),
+            dir: Some("/srv/app".to_owned()),
+            attempt: 3,
+            when: crate::pane::When::At(
+                std::time::Instant::now() + std::time::Duration::from_secs(4),
+            ),
+            why: None,
+        }
     }
 
     /// The countdown is the reason this is a card and not a line of text: a wait
