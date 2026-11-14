@@ -1,40 +1,20 @@
-//! dtr — a serial-first terminal.
+//! dtr — a serial-first terminal: the binary.
+//!
+//! This file is the shape of one run — arguments, the config and store it opens,
+//! and the order they are set up in. Everything that draws or talks to a device
+//! lives in the library beside it (`src/lib.rs`), because the file picker the
+//! manager work brings is a second frontend over the same browser and a binary
+//! exposes nothing (`docs/manager.md` §2).
 
-mod about;
-mod app;
-mod chrome;
-mod explorer;
-mod fonts;
-mod ime;
-mod input;
-mod keymap;
-mod keys;
-mod layout;
-mod linkmenu;
-mod logbook;
-mod modem;
-mod notify;
-mod pager;
-mod palette;
-mod pane;
-mod profile;
-mod pty;
-mod render;
-mod screenshot;
-mod serial;
-mod serial_dialog;
-mod settings;
-mod sources;
-mod sprite;
-mod system;
-mod terminfo;
-mod theme;
-mod thumb;
-mod tmux;
-mod ui;
-mod uri;
-mod watch;
-mod worker;
+use dtr::app;
+use dtr::input;
+use dtr::logbook;
+use dtr::pane;
+use dtr::pty;
+use dtr::render;
+use dtr::serial;
+use dtr::theme;
+use dtr::ui;
 
 use pane::Transport;
 
@@ -467,7 +447,7 @@ fn main() -> anyhow::Result<()> {
     if args.shells {
         // The same list the `+` menu offers, and the same words: a name is what
         // the row says, and a menu row cannot show the program beside it.
-        for shell in crate::sources::local_shells() {
+        for shell in dtr::sources::local_shells() {
             println!("{}", shell.name);
         }
         return Ok(());
@@ -499,15 +479,15 @@ fn main() -> anyhow::Result<()> {
     // of a second, which is a frozen window if it happens inside the click that
     // opens the card. Start it here, on its own thread, so the click is normally
     // a cache hit.
-    crate::fonts::warm();
+    dtr::fonts::warm();
     // A key table with a typo in it is silent otherwise: the binding simply
     // never fires. Say which names were not understood and which chords are
     // claimed twice, once, at startup.
-    for name in crate::keys::Keymap::unknown_names(&config.keys) {
+    for name in dtr::keys::Keymap::unknown_names(&config.keys) {
         tracing::warn!(%name, "keys: no action by that name");
     }
     {
-        let keymap = crate::keys::Keymap::new(&config.keys);
+        let keymap = dtr::keys::Keymap::new(&config.keys);
         for (sequence, first, second) in keymap.conflicts() {
             tracing::warn!(
                 binding = %sequence,
@@ -532,8 +512,8 @@ fn main() -> anyhow::Result<()> {
     };
     let split = match args.split.as_deref() {
         None => None,
-        Some("h") => Some(crate::layout::Axis::Horizontal),
-        Some("v") => Some(crate::layout::Axis::Vertical),
+        Some("h") => Some(dtr::layout::Axis::Horizontal),
+        Some("v") => Some(dtr::layout::Axis::Vertical),
         Some(other) => anyhow::bail!("expected h or v for --split, got {other:?}"),
     };
     // `DTR_GPU` exists so the packaged binary can be pointed at a card without
@@ -544,7 +524,7 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("DTR_GPU").ok())
         .filter(|name| !name.trim().is_empty());
     if args.fonts {
-        for family in crate::fonts::usable_families() {
+        for family in dtr::fonts::usable_families() {
             println!("{family}");
         }
         return Ok(());
@@ -581,27 +561,27 @@ fn main() -> anyhow::Result<()> {
     // Where the platform's answer came from, and why there is none where there is
     // none: "asked for native and got dtr" with no cause is the log line this pair
     // exists for. The `skin()` above is what performs the read.
-    let native = crate::system::resolution();
+    let native = dtr::system::resolution();
     // The hover the platform's own ladder chose, when there is one: it is the
     // difference between "read the system accent" and "read the system's hover for
     // it", and only one of those is visible without the log.
-    let hover = crate::system::hex(skin.palette.accent_hover);
+    let hover = dtr::system::hex(skin.palette.accent_hover);
     match &native.reason {
         Some(reason) => tracing::debug!(
-            skin = crate::system::describe(&skin),
+            skin = dtr::system::describe(&skin),
             requested = look.choice.preset.as_str(),
             scheme = look.choice.scheme.as_str(),
-            accent = crate::system::accent_hex(&skin),
+            accent = dtr::system::accent_hex(&skin),
             hover = ?hover,
             source = native.source,
             reason = %reason,
             "chrome"
         ),
         None => tracing::debug!(
-            skin = crate::system::describe(&skin),
+            skin = dtr::system::describe(&skin),
             requested = look.choice.preset.as_str(),
             scheme = look.choice.scheme.as_str(),
-            accent = crate::system::accent_hex(&skin),
+            accent = dtr::system::accent_hex(&skin),
             hover = ?hover,
             source = native.source,
             "chrome"
@@ -753,7 +733,7 @@ fn main() -> anyhow::Result<()> {
         let profiler = args
             .cpu_profile
             .as_ref()
-            .and_then(|path| crate::profile::Guard::start(path));
+            .and_then(|path| dtr::profile::Guard::start(path));
 
         let startup = app::Startup {
             transport,
@@ -779,7 +759,7 @@ fn main() -> anyhow::Result<()> {
             preferences: args.preferences,
             keymap: args.keymap,
             serial_dialog: args.serial_dialog.as_deref().map(|port| {
-                crate::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())
+                dtr::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())
             }),
             config: config.clone(),
             config_path: config_path.clone(),
@@ -796,7 +776,7 @@ fn main() -> anyhow::Result<()> {
     let profiler = args
         .cpu_profile
         .as_ref()
-        .and_then(|path| crate::profile::Guard::start(path));
+        .and_then(|path| dtr::profile::Guard::start(path));
 
     let startup = app::Startup {
         transport,
@@ -824,7 +804,7 @@ fn main() -> anyhow::Result<()> {
         serial_dialog: args
             .serial_dialog
             .as_deref()
-            .map(|port| crate::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())),
+            .map(|port| dtr::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())),
         config,
         config_path,
         preedit: args.preedit.clone(),

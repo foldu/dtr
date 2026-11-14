@@ -62,6 +62,12 @@ pub struct Reading {
 /// asked. What they do share is [`Resolution`] — the one way `-v` says which
 /// reader answered — so a platform is a reader plus a palette and the resolution
 /// is written once.
+///
+/// `async fn` in a public trait is discouraged because a caller outside the crate
+/// cannot name the future's auto-trait bounds. There is no such caller: a reader
+/// is awaited in `resolution` and nowhere else, and the alternative — a boxed
+/// future — is an allocation per read to describe one `read_dir`-sized call.
+#[allow(async_fn_in_trait)]
 pub trait Platform {
     /// Where the answer came from, for `-v`: `windows-registry`, `portal`.
     fn source(&self) -> &'static str;

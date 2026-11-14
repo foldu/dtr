@@ -235,7 +235,7 @@ tag mirroring on.
   a split or a close unzooms first or the change happens off screen. `fit_panes` asks the
   same `visible`, so a hidden pane is not resized behind the one on screen.
 - **`O` and `0` look identical in egui's default monospace**, so `OK` looks like `0K` in a
-  screenshot; run `cargo test -p dtr --bin dtr the_vt_core` first — if it passes the cells
+  screenshot; run `cargo test -p dtr the_vt_core` first — if it passes the cells
   are right and you are looking at a font ambiguity.
 - **A duty the core publishes and dtr never answers is a program talking to a wall**:
   `pane.rs` registers the `Effects` dtr can serve, and a duty that changes no cell — a
