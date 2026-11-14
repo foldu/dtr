@@ -295,6 +295,12 @@ pub struct Browser {
     /// press asks them back. Two calculations from one snapshot instead of two
     /// snapshots.
     frame: Cell<Option<Frame>>,
+    /// The breadcrumb's targets, as the last frame drew them.
+    ///
+    /// The header is painted, so a crumb is not a widget: the draw records where
+    /// each segment landed and the press asks that record back — the same bargain
+    /// `frame` makes for the tiles.
+    crumbs: RefCell<Vec<(egui::Rect, PathBuf)>>,
     /// The pictures the grid draws, and the theme they come from. Keyed by entry
     /// path, read through a per-frame budget, and replaceable with an empty set
     /// by a test whose baseline may not depend on the machine's icon theme.
@@ -372,6 +378,7 @@ impl Browser {
             view: View::default(),
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
+            crumbs: RefCell::new(Vec::new()),
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
@@ -438,6 +445,28 @@ impl Browser {
     }
 
     /// What this pane is sorted by and what it hides.
+    /// The breadcrumb segment under a point, and where it goes.
+    ///
+    /// The record the last draw left: the header is painted, so there is no
+    /// widget to hit-test and the geometry is the draw's to remember.
+    pub fn crumb_at(&self, point: egui::Pos2) -> Option<PathBuf> {
+        self.crumbs
+            .borrow()
+            .iter()
+            .find(|(rect, _)| rect.contains(point))
+            .map(|(_, path)| path.clone())
+    }
+
+    /// Go to a directory the pane already knows about — a breadcrumb's answer.
+    ///
+    /// A press on the *last* crumb is a press on the directory already open, and
+    /// it does nothing rather than re-reading the directory it is showing.
+    pub fn navigate(&mut self, path: PathBuf) {
+        if path != self.cwd {
+            self.cd(path);
+        }
+    }
+
     /// Which entry the point in this pane is over.
     ///
     /// `None` is a gap, a margin, the header, or past the last entry — the places
@@ -609,6 +638,7 @@ impl Browser {
             view: View::default(),
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
+            crumbs: RefCell::new(Vec::new()),
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
@@ -657,6 +687,11 @@ impl Browser {
             Some(alias) => format!("files  {alias}:{}", display_path(&self.cwd, &self.home)),
             None => format!("files  {}", display_path(&self.cwd, &self.home)),
         }
+    }
+
+    /// The host a remote pane browses, for the breadcrumb's first word.
+    fn header_alias(&self) -> Option<&str> {
+        self.remote.as_ref().map(|remote| remote.alias.as_str())
     }
 
     /// The header text: the path, prefixed with the host when it is remote.
@@ -1091,13 +1126,94 @@ impl Browser {
         let header = header_rect(rect);
         let header_bottom = header.bottom();
         painter.rect_filled(header, 0.0, palette.window);
-        painter.text(
-            egui::pos2(header.left() + 8.0, header.center().y),
-            Align2::LEFT_CENTER,
-            self.header(),
-            body_font.clone(),
-            palette.text,
-        );
+        // The breadcrumb: one segment per component, each a press target. What
+        // does not fit is dropped from the *front*, and an ellipsis says so: the
+        // last segment is the directory being looked at and is never the one to
+        // lose.
+        let mut x = header.left() + 8.0;
+        if let Some(alias) = self.header_alias() {
+            let at = egui::pos2(x, header.center().y);
+            let galley =
+                painter.layout_no_wrap(format!("{alias}:"), body_font.clone(), palette.text);
+            let width = galley.size().x;
+            painter.galley(
+                at - egui::vec2(0.0, galley.size().y / 2.0),
+                galley,
+                palette.text,
+            );
+            // A gap, not a colon and a slash touching: `jupyter:/var/log` reads
+            // as a URL, and the header is not one.
+            x += width + 8.0;
+        }
+        let crumbs = crumbs(&self.cwd, &self.home);
+        let available = (sort_rect(rect).left() - 8.0) - x;
+        let widths: Vec<f32> = crumbs
+            .iter()
+            .map(|(label, _)| {
+                painter
+                    .layout_no_wrap(label.clone(), body_font.clone(), palette.text)
+                    .size()
+                    .x
+            })
+            .collect();
+        let separator = painter
+            .layout_no_wrap("/".to_owned(), body_font.clone(), palette.dim)
+            .size()
+            .x
+            + 6.0;
+        let total = |from: usize| -> f32 {
+            widths[from..].iter().sum::<f32>() + separator * (widths.len() - from - 1) as f32
+        };
+        let mut first = 0;
+        while first + 1 < crumbs.len() && total(first) > available {
+            first += 1;
+        }
+        if first > 0 {
+            let galley = painter.layout_no_wrap("…".to_owned(), body_font.clone(), palette.dim);
+            let width = galley.size().x + 4.0;
+            painter.galley(
+                egui::pos2(x, header.center().y - galley.size().y / 2.0),
+                galley,
+                palette.dim,
+            );
+            x += width;
+        }
+        let hover = ui.ctx().pointer_hover_pos();
+        let mut targets = Vec::new();
+        for (index, (label, target)) in crumbs.iter().enumerate().skip(first) {
+            if index > first {
+                painter.text(
+                    egui::pos2(x, header.center().y),
+                    Align2::LEFT_CENTER,
+                    "/",
+                    body_font.clone(),
+                    palette.dim,
+                );
+                x += separator;
+            }
+            let width = widths[index];
+            let hit = egui::Rect::from_min_size(
+                egui::pos2(x, header.top()),
+                egui::vec2(width, header.height()),
+            );
+            // A crumb under the pointer says so in colour and not with a box: the
+            // header is one band, and a second fill in it reads as a control the
+            // row has no room for.
+            let colour = match hover.is_some_and(|point| hit.contains(point)) {
+                true => palette.accent,
+                false => palette.text,
+            };
+            painter.text(
+                egui::pos2(x, header.center().y),
+                Align2::LEFT_CENTER,
+                label.clone(),
+                body_font.clone(),
+                colour,
+            );
+            targets.push((hit, target.clone()));
+            x += width;
+        }
+        *self.crumbs.borrow_mut() = targets;
         let count = self
             .entries
             .iter()
@@ -1893,6 +2009,34 @@ pub fn first_visible(selected: usize, scroll: usize, visible: usize) -> usize {
     }
 }
 
+/// The breadcrumb's segments: a label and where a press on it goes.
+///
+/// One segment per component, so `~/src/dtr/docs` is four targets and a press on
+/// `dtr` is two levels up — the whole point of a breadcrumb over a path string.
+/// The root is a segment of its own, because "go to `/`" is otherwise only
+/// reachable by pressing the parent several times.
+pub fn crumbs(path: &Path, home: &Path) -> Vec<(String, PathBuf)> {
+    let mut segments = Vec::new();
+    if let Ok(rest) = path.strip_prefix(home) {
+        segments.push(("~".to_owned(), home.to_path_buf()));
+        let mut at = home.to_path_buf();
+        for part in rest.components() {
+            at.push(part);
+            segments.push((part.as_os_str().to_string_lossy().into_owned(), at.clone()));
+        }
+        return segments;
+    }
+    segments.push(("/".to_owned(), PathBuf::from("/")));
+    let mut at = PathBuf::from("/");
+    for part in path.components() {
+        if let std::path::Component::Normal(name) = part {
+            at.push(name);
+            segments.push((name.to_string_lossy().into_owned(), at.clone()));
+        }
+    }
+    segments
+}
+
 /// A path for display: `$HOME` and everything below it becomes `~…`.
 pub fn display_path(path: &Path, home: &Path) -> String {
     if home.as_os_str().is_empty() {
@@ -1934,7 +2078,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Browser, Entry, Key, Mode, Sort, View, arrange, clamp_selection, display_join,
+        Browser, Entry, Key, Mode, Sort, View, arrange, clamp_selection, crumbs, display_join,
         display_path, first_visible, human_size, parent_of,
     };
 
@@ -1964,6 +2108,10 @@ mod tests {
             reverse,
             ..View::default()
         }
+    }
+
+    fn names_of(trail: &[(String, PathBuf)]) -> Vec<&str> {
+        trail.iter().map(|(label, _)| label.as_str()).collect()
     }
 
     fn names(entries: &[Entry]) -> Vec<&str> {
@@ -2064,6 +2212,29 @@ mod tests {
         );
         // And the same mtime does not re-list a second time.
         assert!(!browser.refresh_if_changed(), "nothing changed again");
+    }
+
+    /// The breadcrumb is one target per component, and the home directory is a
+    /// segment of its own — the whole point of it over a path string.
+    #[test]
+    fn a_breadcrumb_is_one_target_per_component() {
+        let home = Path::new("/home/ada");
+        let trail = crumbs(Path::new("/home/ada/src/dtr/docs"), home);
+        assert_eq!(
+            names_of(&trail),
+            vec!["~", "src", "dtr", "docs"],
+            "the labels are the components"
+        );
+        assert_eq!(trail[0].1, PathBuf::from("/home/ada"));
+        assert_eq!(trail[2].1, PathBuf::from("/home/ada/src/dtr"));
+        // A path outside home starts at the root, which is a target too: "go to
+        // /" is otherwise only reachable by pressing the parent four times.
+        let elsewhere = crumbs(Path::new("/var/log"), home);
+        assert_eq!(names_of(&elsewhere), vec!["/", "var", "log"]);
+        assert_eq!(elsewhere[0].1, PathBuf::from("/"));
+        assert_eq!(elsewhere[2].1, PathBuf::from("/var/log"));
+        // Home itself is one segment and goes nowhere surprising.
+        assert_eq!(names_of(&crumbs(home, home)), vec!["~"]);
     }
 
     /// `Ctrl+H` is a redraw, not a walk: the hidden entries are kept beside the
@@ -2854,6 +3025,58 @@ mod kittest_tests {
         assert_eq!(browser.selected, selected);
     }
 
+    /// A crumb is a press target, and the draw is what remembers where it landed:
+    /// the header is painted, so there is no widget to hit-test.
+    #[test]
+    fn a_crumb_knows_where_it_is() {
+        let skin = skin();
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        {
+            let browser = std::rc::Rc::clone(&browser);
+            let drawn = skin.clone();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(WIDTH, HEIGHT))
+                .build_ui(move |ui| {
+                    let browser = browser.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-crumb"),
+                        pane_rect(),
+                        &browser,
+                        &drawn,
+                        true,
+                    );
+                });
+            harness.run();
+        }
+        let browser = browser.borrow();
+        // Scan the header strip: the remote fixture browses `/var/log`, so the
+        // crumbs are `jupyter:` then `/`, `var`, `log` — three targets, in that
+        // order, and nothing between them.
+        let mut found: Vec<PathBuf> = Vec::new();
+        let y = HEADER_HEIGHT / 2.0;
+        let mut x = pane_rect().left() + 8.0;
+        while x < pane_rect().right() - 8.0 {
+            if let Some(path) = browser.crumb_at(egui::pos2(x, y)) {
+                if found.last() != Some(&path) {
+                    found.push(path);
+                }
+            }
+            x += 2.0;
+        }
+        assert_eq!(
+            found,
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from("/var"),
+                PathBuf::from("/var/log")
+            ],
+            "one target per component, in the order the path reads"
+        );
+        // The body is not the header.
+        assert_eq!(browser.crumb_at(pane_rect().center()), None);
+    }
+
     /// The order's own control: a name, a direction, and a menu that is the same
     /// four keys and two switches the keyboard has.
     ///
@@ -2887,7 +3110,14 @@ mod kittest_tests {
         harness.run();
         // The menu names every key the pane can be ordered by, and the two
         // switches under them.
-        for label in ["name", "modified", "size", "type", "reverse", "folders first"] {
+        for label in [
+            "name",
+            "modified",
+            "size",
+            "type",
+            "reverse",
+            "folders first",
+        ] {
             assert!(
                 harness.query_by_label(label).is_some(),
                 "{label} is missing from the menu"

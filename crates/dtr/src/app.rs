@@ -2682,6 +2682,20 @@ impl App {
         let Some(point) = self.file_pane_point(at) else {
             return false;
         };
+        // The breadcrumb first: the header sits above the listing, and a press on
+        // a crumb is a navigation rather than a selection.
+        if let Some(path) = self
+            .focused_browser()
+            .and_then(|browser| browser.crumb_at(point))
+        {
+            if let Some(browser) = self.focused_browser_mut() {
+                browser.navigate(path);
+            }
+            self.dragging = false;
+            self.drag_moved = false;
+            self.repaint("file pane breadcrumb");
+            return true;
+        }
         let clicks = self.count_clicks(at);
         let chosen = self
             .focused_browser_mut()
