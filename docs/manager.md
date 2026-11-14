@@ -85,7 +85,10 @@ other painted thing (`AGENTS.md`, "Do not hand-roll a widget").
 - **Thumbnails, not just icons.** `crates/dtr/src/thumb.rs` already decodes a picture off the drawing
   thread with the caps that matter (16 MiB source, 8192 px a side, 256 MiB decode) and caches by
   `{ machine, path }`. A grid cell is where that cache finally pays for itself: images and video get
-  real previews, everything else gets its type icon.
+  real previews, everything else gets its type icon. *Landed as:* the decode moved to
+  `dtr_files::thumb` (one decoder, two callers: the terminal's one large hover preview and a grid's
+  screenful of small textures, which is the difference in what each caches), and a cell asks for at
+  most four decodes at a time and never blocks — the type icon is drawn until the picture lands.
 - **The size ladder.** `in_theme` currently asks for 64 px first because a menu row is 18 points. A
   grid wants 96 or 128, so the ladder becomes a parameter with the same first-match rule.
 - **The list view ships in the same milestone, not later.** A pane is often 450 points wide, where a
@@ -96,9 +99,14 @@ other painted thing (`AGENTS.md`, "Do not hand-roll a widget").
   open, wheel to scroll, drag to select, `Ctrl`/`Shift` to extend, a right-click menu (open, open with,
   copy path, reveal), `Ctrl+H`, a breadcrumb that navigates, and a places **popup** — the sidebar is
   window chrome (§6), a pane is too narrow for one. Sorting and the selector are below.
-- **A local directory is watched** (`Caps::watch` already exists): `notify` on the directory in view,
-  coalesced into one re-list per burst. The ssh backend keeps saying it cannot, and the UI keeps hiding
-  what a backend cannot do.
+- **A local directory is polled, twice a second** — `notify` was the plan and the hundred lines below
+  are why it is not. A directory's own mtime changes when an entry is created, removed or renamed,
+  which is exactly what a listing shows, so the poll is one `stat` of a path the pane already holds,
+  and it is the same bargain the config file's 250 ms poll already makes (`docs/compio.md` §5). The
+  ssh backend is never polled: `Caps::watch` is false there and the stat would be a round trip on a
+  timer. What a poll cannot see is a file's *contents* changing, and a listing does not show contents.
+  The refresh keeps the selection as a **promise** rather than a lookup, because the walk is streamed
+  and a position found when the re-read starts is a position in an empty listing.
 
 ### Streamed
 
@@ -190,6 +198,22 @@ while a walk is still running, and a directory whose `readdir` order matters is 
   (`AGENTS.md`, "a new key is a key a reload applies"). Per **folder** memory — Nautilus remembers
   that you sort `~/Downloads` by date and `~/src` by name — is a store schema and a second writer, so
   it is deliberately not in F1.
+
+### What the machine taught
+
+Two things the design above did not predict, both found by drawing it:
+
+- **The icons on this desktop are SVG.** Its `Adwaita` carries `16x16` raster and `scalable/` — nothing
+  at 48 or 96 — so a PNG-only lookup answers a 96-point request with a 16-point file and the picture is
+  soft. `image` cannot rasterise SVG, but `egui_extras` already can (it is what the Lucide icons use),
+  so a tile takes `Icon::Bytes { uri, bytes }` and egui's own loader decodes and caches it. The
+  candidate ranking is by *pixels*, not by theme order: a raster at least as large as the request,
+  then a scalable one, then the largest raster below it. Deriving `Ord` over `(size, …)` compares
+  16 < 64 and picks the smallest picture every time.
+- **A kittest pane sits at the origin**, so a hit test that subtracts the pane's own corner is
+  identical there to one that does not — and the pane is handed an `egui::Rect` in *absolute* points,
+  so subtracting is exactly the bug. The click test passed and the click selected nothing in the
+  window. `file_pane_point` now converts the pointer to window points and says why.
 
 ## 4. Pick mode
 
@@ -463,6 +487,22 @@ streamed listing, the `facts` pass, and `Local::list` with no runtime around it)
 not extracted yet: it has no second caller until the daemon exists, and a multi-window loop shaped
 against one window is the refactor the paragraph above warns about. The two measurements F0 owes are
 therefore still owed — §10 has the slots and one of them is now half-filled.
+
+**F1b so far.** `76e6df8` (`IconTile`), `4caa78d` (the grid is the default view; `View::mode`,
+`columns`/`page` as frame-written cells, a signed row in `cell_rect`), `74ab692` (`[files] view`,
+`Ctrl+1`/`Ctrl+2`, and the write-back), `25a277f` (icons: `dtr-files::{icons,theme}`, the SVG finding
+above), `2cd0e55` (thumbnails, one decoder for both callers), `38ce835` (2-D keys, `Backspace`/`Alt+Up`
+for the parent), `e3c2ef5` (a press selects and the second press opens, the wheel is the view's, and
+`reveal` separates the two), `376347d` (`Ctrl+H`, and `arrange_split` so a filter is not a listing),
+`80fbcda` (the polled directory refresh), `7cacf3c` (`[files] sort`/`reverse`/`folders-first` and the
+footer that says so).
+
+**Still owed in F1b**, in the order worth doing it: the sort **control** in the header (a glyph and a
+popup — today the order is changed by key or by file and shown in the footer, which is honest but not
+a file manager), the **breadcrumb** and the **places popup**, the **right-click menu**, and
+**multi-select**. Multi-select is deliberately last: nothing takes a set yet — copy, move and delete
+are F5 and F6 — and a selection nobody can act on is a highlight with no verb. Measurement 7 is still
+owed for the same reason it exists: it needs a real 10 000-entry directory and a frame counter.
 
 F1 is split in two because the listing is where the correctness lives and the grid is where the look
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with
