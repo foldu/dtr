@@ -218,6 +218,9 @@ pub struct Browser {
     cwd: PathBuf,
     home: PathBuf,
     entries: Vec<Entry>,
+    /// The entries the view hides, sorted by the same key. Kept rather than
+    /// dropped so `Ctrl+H` is a redraw: see [`arrange_split`].
+    hidden: Vec<Entry>,
     selected: usize,
     /// First row the user scrolled to. The drawing code raises it if the
     /// selection would otherwise be off-screen, so this is a hint rather than
@@ -335,6 +338,7 @@ impl Browser {
             cwd: path,
             home: PathBuf::from("."),
             entries: Vec::new(),
+            hidden: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
             columns: Cell::new(1),
@@ -402,7 +406,7 @@ impl Browser {
         remote.awaiting = None;
         self.cwd = path;
         self.message = None;
-        self.entries = arrange(entries, &self.cwd, &self.view);
+        self.adopt(entries);
         self.selected = clamp_selection(self.selected, self.entries.len());
     }
 
@@ -484,6 +488,17 @@ impl Browser {
         self.reveal.set(false);
     }
 
+    /// Show or hide hidden entries, without touching the order.
+    ///
+    /// A filter, not a reload: the listing carries every entry it was given and
+    /// the view decides what is on screen, so toggling costs a sort.
+    pub fn set_hidden(&mut self, hidden: bool) {
+        if self.view.show_hidden != hidden {
+            self.view.show_hidden = hidden;
+            self.rearrange();
+        }
+    }
+
     /// Change the layout without touching the order.
     ///
     /// `Ctrl+1`/`Ctrl+2` and `[files] view` are the two writers, and neither
@@ -559,6 +574,7 @@ impl Browser {
             cwd: PathBuf::from("."),
             home,
             entries: Vec::new(),
+            hidden: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
             columns: Cell::new(1),
@@ -843,14 +859,8 @@ impl Browser {
         // with one name next to each other, so one pass makes them one row, and
         // the later facts win. The **kind** never does: a symlink resolved into a
         // directory in the first batch stays a directory.
-        self.entries.dedup_by(|later, earlier| {
-            if later.name != earlier.name {
-                return false;
-            }
-            earlier.size = later.size.or(earlier.size);
-            earlier.modified = later.modified.or(earlier.modified);
-            true
-        });
+        patch_duplicates(&mut self.entries);
+        patch_duplicates(&mut self.hidden);
 
         if let Some(name) = selected
             && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
@@ -868,11 +878,17 @@ impl Browser {
     /// Sort and filter what is here. `..` is synthetic, so it is dropped before
     /// `arrange` and put back by it.
     fn rearrange(&mut self) {
-        let rows: Vec<Entry> = std::mem::take(&mut self.entries)
-            .into_iter()
-            .filter(|entry| !entry.is_parent())
-            .collect();
-        self.entries = arrange(rows, &self.cwd, &self.view);
+        let mut rows: Vec<Entry> = std::mem::take(&mut self.entries);
+        rows.extend(std::mem::take(&mut self.hidden));
+        rows.retain(|entry| !entry.is_parent());
+        self.adopt(rows);
+    }
+
+    /// Sort a complete listing and split what the view hides.
+    fn adopt(&mut self, entries: Vec<Entry>) {
+        let (shown, hidden) = arrange_split(entries, &self.cwd, &self.view);
+        self.entries = shown;
+        self.hidden = hidden;
     }
 
     /// Ask for the sizes and times the current sort needs.
@@ -1482,17 +1498,44 @@ fn close_button(
 /// `..` row prepended when there is a parent. Hidden entries are dropped unless
 /// asked for. No filesystem access: the entries are already read.
 pub fn arrange(entries: Vec<Entry>, cwd: &Path, view: &View) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = entries
+    arrange_split(entries, cwd, view).0
+}
+
+/// The same, keeping what the view hides instead of dropping it.
+///
+/// **A filter is not a listing.** Hidden entries are in the directory whether or
+/// not they are on screen, and `Ctrl+H` has to be able to show them without
+/// reading the directory again: so the sort partitions instead of discarding, and
+/// the browser keeps the other half. Dropping them made the key a reload, and a
+/// reload is a walk somebody did not ask for.
+pub fn arrange_split(entries: Vec<Entry>, cwd: &Path, view: &View) -> (Vec<Entry>, Vec<Entry>) {
+    let (mut shown, hidden): (Vec<Entry>, Vec<Entry>) = entries
         .into_iter()
-        .filter(|entry| view.show_hidden || !entry.name.starts_with('.'))
-        .collect();
-    entries.sort_by_cached_key(|entry| SortKey::of(entry, view));
+        .partition(|entry| view.show_hidden || !entry.name.starts_with('.'));
+    shown.sort_by_cached_key(|entry| SortKey::of(entry, view));
     // After the sort and before nothing else: `..` is synthetic, and it is first
     // whatever the key and whatever the direction.
     if parent_of(cwd).is_some() {
-        entries.insert(0, Entry::parent());
+        shown.insert(0, Entry::parent());
     }
-    entries
+    (shown, hidden)
+}
+
+/// Collapse rows a backend sent twice, keeping the later facts.
+///
+/// A backend may name a row it already sent and refine it (the metadata pass is
+/// one). `arrange` puts two rows with one name next to each other, so one pass
+/// makes them one row and the later facts win. The **kind** never does: a symlink
+/// resolved into a directory in the first batch stays a directory.
+fn patch_duplicates(rows: &mut Vec<Entry>) {
+    rows.dedup_by(|later, earlier| {
+        if later.name != earlier.name {
+            return false;
+        }
+        earlier.size = later.size.or(earlier.size);
+        earlier.modified = later.modified.or(earlier.modified);
+        true
+    });
 }
 
 /// The key one entry sorts by, built once per entry.
@@ -1757,6 +1800,39 @@ mod tests {
             },
         );
         assert_eq!(names(&shown), ["..", ".git", ".bashrc", "visible"]);
+    }
+
+    /// `Ctrl+H` is a redraw, not a walk: the hidden entries are kept beside the
+    /// shown ones, so showing them and hiding them again costs a sort each way
+    /// and no directory read at all.
+    #[test]
+    fn showing_hidden_files_is_a_redraw_and_not_a_reload() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("a.txt"), b"x").expect("file");
+        std::fs::write(root.join(".bashrc"), b"x").expect("hidden file");
+        std::fs::create_dir(root.join(".config")).expect("hidden directory");
+
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        assert!(!names(&browser.entries).contains(&".bashrc"));
+        assert!(!names(&browser.entries).contains(&".config"));
+        assert_eq!(browser.hidden.len(), 2, "the two are kept beside the shown");
+
+        browser.set_hidden(true);
+        assert!(names(&browser.entries).contains(&".bashrc"));
+        assert!(names(&browser.entries).contains(&".config"));
+        assert!(browser.hidden.is_empty());
+
+        browser.set_hidden(false);
+        assert!(!names(&browser.entries).contains(&".bashrc"));
+        assert_eq!(
+            browser.hidden.len(),
+            2,
+            "and still kept, so it can come back"
+        );
+        // The listing was never re-read: the files are the same ones.
+        assert!(names(&browser.entries).contains(&"a.txt"));
     }
 
     #[test]

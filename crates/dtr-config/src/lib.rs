@@ -85,12 +85,16 @@ impl FilesView {
 pub struct Files {
     /// Which view a pane opens in, and what `Ctrl+1`/`Ctrl+2` write back.
     pub view: FilesView,
+    /// Whether dot-files are listed. Off by default, as in every file manager;
+    /// `Ctrl+H` flips it and writes the answer back.
+    pub hidden: bool,
 }
 
 impl Default for Files {
     fn default() -> Self {
         Self {
             view: FilesView::Grid,
+            hidden: false,
         }
     }
 }
@@ -558,6 +562,11 @@ impl Config {
         }
 
         if let Some(section) = document.get("files").and_then(Item::as_table) {
+            if let Some(hidden) = section.get("hidden") {
+                config.files.hidden = hidden
+                    .as_bool()
+                    .ok_or_else(|| Error::Value("files.hidden must be true or false".into()))?;
+            }
             if let Some(view) = section.get("view") {
                 let text = view
                     .as_str()
@@ -788,6 +797,8 @@ scheme = "system"
 # size column — the escape hatch for a pane too narrow for tiles. Ctrl+1 and
 # Ctrl+2 switch between them and write the choice back here.
 view = "grid"
+# Whether dot-files are listed. Ctrl+H flips it and remembers the answer.
+hidden = false
 
 [terminal]
 # Bytes of scrollback a tab keeps before the oldest pages are dropped. There is
@@ -908,6 +919,19 @@ mod tests {
         // And the word written back is the one that reads.
         assert_eq!(FilesView::Grid.as_str(), "grid");
         assert_eq!(FilesView::parse("list"), Some(FilesView::List));
+
+        // Hidden files are off unless the file says otherwise, and a string is
+        // not a bool.
+        assert!(!Config::parse("").unwrap().files.hidden);
+        assert!(
+            Config::parse("[files]\nhidden = true\n")
+                .unwrap()
+                .files
+                .hidden
+        );
+        let error =
+            Config::parse("[files]\nhidden = \"yes\"\n").expect_err("a string is not a bool");
+        assert!(format!("{error}").contains("files.hidden"), "{error}");
     }
 
     #[test]

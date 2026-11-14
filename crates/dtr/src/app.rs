@@ -1015,6 +1015,15 @@ fn files_view_of(mode: FileMode) -> dtr_config::FilesView {
     }
 }
 
+/// The view `[files]` asks for: the layout and what it hides.
+fn file_view(config: &dtr_config::Config) -> dtr_files::View {
+    dtr_files::View {
+        mode: file_mode(config.files.view),
+        show_hidden: config.files.hidden,
+        ..dtr_files::View::default()
+    }
+}
+
 /// A browser carrying the configured view.
 ///
 /// Every pane is built through one of these two functions, so a pane opened five
@@ -1023,14 +1032,14 @@ fn files_view_of(mode: FileMode) -> dtr_config::FilesView {
 /// order of events.
 fn file_browser(config: &dtr_config::Config, start: Option<PathBuf>) -> Browser {
     let mut browser = Browser::new(start);
-    browser.set_mode(file_mode(config.files.view));
+    browser.set_view(file_view(config));
     browser
 }
 
 /// The same, for a pane over another machine.
 fn remote_file_browser(config: &dtr_config::Config, alias: &str, path: PathBuf) -> Browser {
     let mut browser = Browser::remote_at(alias, path);
-    browser.set_mode(file_mode(config.files.view));
+    browser.set_view(file_view(config));
     browser
 }
 
@@ -2941,6 +2950,30 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Show or hide dot-files in every file pane, and remember the answer.
+    ///
+    /// Every pane, not the focused one: a desktop has one "show hidden files"
+    /// setting, and two panes that disagreed about it would look broken. The
+    /// listing already carries the entries — a hidden file is filtered by the
+    /// sort, not left out of the walk — so this is a redraw and not a reload.
+    fn toggle_hidden_files(&mut self) -> bool {
+        let hidden = !self.config.files.hidden;
+        self.config.files.hidden = hidden;
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                if let Pane::Files(browser) = pane {
+                    browser.set_hidden(hidden);
+                }
+            }
+        }
+        let written = if hidden { "true" } else { "false" };
+        if let Err(err) = dtr_config::set_value(&self.config_path, "files.hidden", written) {
+            tracing::warn!(%err, "could not save files.hidden");
+        }
+        self.repaint("files hidden");
+        true
+    }
+
     /// Switch the focused file pane's view, and remember it.
     ///
     /// Remembered by writing the config file, because that is what "the choice
@@ -3071,6 +3104,7 @@ impl App {
             }
             Action::FilesGrid => self.set_file_mode(FileMode::Grid),
             Action::FilesList => self.set_file_mode(FileMode::List),
+            Action::FilesHidden => self.toggle_hidden_files(),
             Action::ZoomPane => {
                 self.toggle_zoom();
                 true
@@ -3317,14 +3351,15 @@ impl App {
             self.notifier = crate::notify::system(config.notifications.os);
         }
         self.config = config;
-        // The mode is a thing a person can see, so a reload has to reach the
+        // The view is a thing a person can see, so a reload has to reach the
         // panes that are already on screen: a `files.view` that only applied to
         // the next pane would look like a setting that did nothing.
-        let mode = file_mode(self.config.files.view);
+        let view = file_view(&self.config);
         for tab in &mut self.tabs {
             for pane in tab.leaves.values_mut() {
                 if let Pane::Files(browser) = pane {
-                    browser.set_mode(mode);
+                    browser.set_mode(view.mode);
+                    browser.set_hidden(view.show_hidden);
                 }
             }
         }

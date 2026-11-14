@@ -37,6 +37,10 @@ pub enum Action {
     /// A file pane's grid of tiles, and its dense one-row-per-entry view.
     FilesGrid,
     FilesList,
+    /// Dot-files in a file pane. A window-wide answer, not a per-pane one: a
+    /// desktop has one "show hidden files" setting and two panes that disagreed
+    /// would look broken.
+    FilesHidden,
     Copy,
     Paste,
     ScrollPageUp,
@@ -80,6 +84,7 @@ impl Action {
             Self::ZoomPane => "zoom-pane",
             Self::FilesGrid => "files-grid",
             Self::FilesList => "files-list",
+            Self::FilesHidden => "files-hidden",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll-page-up",
@@ -124,6 +129,7 @@ impl Action {
             Self::ZoomPane => "zoom this pane",
             Self::FilesGrid => "file grid view",
             Self::FilesList => "file list view",
+            Self::FilesHidden => "hidden files",
             Self::Copy => "copy selection",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll a page up",
@@ -159,7 +165,8 @@ impl Action {
             | Self::ResizeDown
             | Self::ZoomPane
             | Self::FilesGrid
-            | Self::FilesList => Group::Panes,
+            | Self::FilesList
+            | Self::FilesHidden => Group::Panes,
             Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
@@ -216,7 +223,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 33] = [
+pub const ALL: [Action; 34] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -236,6 +243,7 @@ pub const ALL: [Action; 33] = [
     Action::ZoomPane,
     Action::FilesGrid,
     Action::FilesList,
+    Action::FilesHidden,
     Action::Copy,
     Action::Paste,
     Action::ScrollPageUp,
@@ -284,6 +292,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // every other file manager.
     ("files-grid", "ctrl-1"),
     ("files-list", "ctrl-2"),
+    ("files-hidden", "ctrl-h"),
     ("copy", "ctrl-shift-c"),
     ("paste", "ctrl-shift-v"),
     ("scroll-page-up", "shift-pageup"),
