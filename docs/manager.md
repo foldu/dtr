@@ -9,7 +9,7 @@ They are one project because they are one widget. The browser in a terminal pane
 daemon's picker, and the browser in a manager window of its own are the same `dtr-files` view with a
 different chrome and a different footer.
 
-**F0, F1a and F1b are built; F2…F7 are not.** §12 is the order — stages **F0…F7**, with F1 split as F1a and F1b —
+**F0, F1a, F1b and F2 are built; F3…F7 are not.** §12 is the order — stages **F0…F7**, with F1 split as F1a and F1b —
 and these are this programme's numbers, not the project's `M` milestones. `PLAN.md` §3 (`M4`) is the
 same programme in a paragraph; the rest of this is the reasoning, the facts it rests on, and the things
 worth measuring before anyone promises a number.
@@ -220,15 +220,42 @@ Two things the design above did not predict, both found by drawing it:
 The same browser with a different footer, and it is the *reason* the read-only milestone is worth
 shipping on its own: a picker only ever reads.
 
-- `Mode::Pick(Pick)` where `Pick` carries what the caller asked for: files or a directory, one or many,
-  a suggested name for save, the filters, the accept label, the starting folder.
-- The footer is `Cancel` / `<accept_label>`, with the name field in save mode and an overwrite
-  confirmation — not a silent replace.
-- Filters are the portal's `a(sa(us))` (`*.[ch]`, `*.png`, MIME patterns) matched against the name, and
-  the chosen filter decides the extension appended in save mode.
-- Refusals are said out loud in the footer: a directory that cannot be read, a save whose parent is not
-  writable. A picker whose button does nothing is the one outcome that must not happen (`docs/files.md`
-  §8 is the same rule for the platform dialog).
+**Built** (`d96c812`, `5255ea0`). `dtr_files::Mode::{Manage, Pick}` on the browser, and — because the
+grid-or-list question had the name first — that question is now the `Layout` (`ff3c918`).
+
+- `Request` is the whole of what the caller asked for: `Select::{File, Files, Directory, Save}`, the
+  accept label, the starting folder, the filters, and a save's starting name. `Pick` holds what has
+  been typed or chosen since, and `Outcome` is the answer.
+- **The footer is its own area**, and that is the one structural fact: the pane's area is
+  `interactable(false)`, so a button or a text field drawn inside it would be a picture. Its height is
+  the skin's row plus a gap — an Adwaita footer is taller than dtr's — and its controls are measured
+  and placed from the right inwards, so a longer accept label narrows the field instead of covering
+  it. In save mode the field is in the space left and takes the keyboard once, when it opens.
+- **A refusal is an `Outcome`, not silence**: the footer says it in the accent colour, and the button
+  stays armed. `Refused("only PNG images can be picked")`, `Refused("type a name")`,
+  `Refused("this folder cannot be written to")`.
+- **An existing name is a question**: the first press returns `Replace(path)` and the button relabels
+  to `replace`; the second press answers. Cancel closes the question before the picker — one button,
+  one word, two depths.
+- **The chosen filter decides the extension** and is a promise about the answer. A save with no
+  extension gains the filter's (`report` + `*.png` → `report.png`); a name whose extension is a
+  different kind is refused rather than silently given a second one. For an open, a file the filter
+  would not show is refused too, because the pane does not hide non-matching rows: making the listing
+  a filtered one needs `View` to stop being `Copy`, which is a change this stage did not want to pay
+  for. The portal's `*.[ch]` shape is supported — the glob is `*`, `?` and `[…]`, whole-name,
+  case-insensitive, hand-written because the patterns arrive from a D-Bus dictionary.
+- **A folder pressed in a file picker is a way in** (`Outcome::Navigate`), which is what every
+  desktop's Open button does with a folder selected: the question stays open one level down. A
+  picker also starts on the first *real* row and not on `..`, or its first Enter refuses something
+  that looks highlighted.
+- Filters are the portal's `a(sa(us))` matched against the name; MIME patterns are not matched by a
+  name and are treated as "cannot tell", which is why the first caller passes none.
+
+**The caller F2 has, before F3 exists**: `ctrl-alt-p` (`files-pick`) opens a picker in the focused
+pane's directory and puts the answer on the tab's command line — a terminal's own file picker, which
+is the honest demonstration of the widget. The other modes are what the portal will ask for and each
+is drawn and tested here; what F3 adds is the D-Bus request, `current_folder`/`current_name`, the
+`uris` encoding, and a save caller that writes rather than inserts.
 
 ## 5. The daemon
 
@@ -526,6 +553,13 @@ defaults would lie the first time somebody rebound one. What it deliberately doe
 F5 and F6 will bring, because a menu of things that do nothing is worse than no menu.
 
 That closes F1b: everything the milestone gates is done and measurement 7 is taken (§10).
+
+**F2 so far.** `ff3c918` (the view's grid-or-list `Mode` became `Layout`, freeing the word), `b865c91`
+(`pick.rs`: `Request`, `Pick`, `Outcome`, the glob, and twenty tests with no window in them), `d96c812`
+(the pane's footer, the filter control, `Mode::{Manage, Pick}`, and `ctrl-alt-p`), and `5255ea0` — the
+three things only the live window showed: a menu row fills the width it is offered (600 points for two
+words), a picker that opens on `..` refuses its own first press, and a folder pressed in a file picker
+is a way in rather than an answer. §4 is the account.
 
 F1 is split in two because the listing is where the correctness lives and the grid is where the look
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with
