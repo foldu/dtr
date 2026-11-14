@@ -28,3 +28,9 @@ dtr-widgets = { path = "../dtr-widgets" }
 [dev-dependencies]
 egui_kittest.workspace = true
 tempfile.workspace = true
+
+# `access(W_OK)`, for one question a save has to ask: may anything be written
+# here? The permission bit alone answers `0644` about a file an ACL forbids, and
+# `/usr/bin` is not marked read-only either.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

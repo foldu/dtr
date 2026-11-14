@@ -1195,6 +1195,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "image",
+ "libc",
  "tempfile",
 ]
 

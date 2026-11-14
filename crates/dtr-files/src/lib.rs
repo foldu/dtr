@@ -23,6 +23,7 @@
 mod browser;
 mod grid;
 pub mod icons;
+pub mod pick;
 pub mod theme;
 pub mod thumb;
 
@@ -33,4 +34,5 @@ pub use browser::{
 };
 pub use grid::{cell_rect, columns, first_row, index_at, rows, visible_rows};
 pub use icons::{Places, desktop_icon, type_icon};
+pub use pick::{Filter, Mode, Outcome, Pick, Request, Select, glob};
 pub use theme::{Category, IconSet, Picture, Theme};
