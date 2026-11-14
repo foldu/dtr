@@ -256,3 +256,6 @@ Checked in the live window at 1× and at 2×: the cross is where the header puts
 it closes the pane (`request redraw why="file pane closed"`), the terminal takes the width and
 keeps the focus, and a press on the pane's body still moves the focus to the listing (the
 terminal's cursor stops being drawn, which is how the screenshot says who has it).
+
+What the pane *is* — a grid of icons, places, writes, and the same browser serving as the
+desktop's file picker — is planned in `docs/manager.md`, and `PLAN.md` §3 (M4) is the order.

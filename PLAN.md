@@ -56,6 +56,8 @@ renderer is deliberately a throwaway layer behind a trait.
 | D19 | **The child's tty keeps the kernel's line discipline** (`pty::set_sane`), and a program that wants raw sets it itself | A raw pty loses the LF → CR LF conversion, so `ls`, `cat`, a script or Ubuntu's motd staircase. Worse, `ssh` sends the local tty's modes in its `pty-req`, so a raw local pty is a raw *remote* shell: no echo and no `ONLCR`, which reads as a broken terminal until `reset` runs `tcsetattr(sane)` over there. Reversed 2026-11-08 from "the VT core *is* the line discipline"; the cost (the kernel rewrites each newline) is what every other terminal pays |
 | D20 | **`xterm-ghostty` is copied to the ssh host** over a connection of its own, as `tic` source compiled there | The honest terminal name is useless on a host that has no entry for it: `clear`, `tput` and `reset` all fail, and a person cannot be asked to install ncurses-term first (what `kitten ssh` does, and why). Source rather than a compiled entry, because terminfo binaries are byte-order dependent and every distro has `tic`; derived from `Config::ssh`'s own arguments so it reaches the same host by the same config |
 | D21 | **compio replaces tokio, everything of ours** (reverses D16) | One runtime per pane thread and one worker thread; the pty and serial readers stay threads because compio has no pty; `russh-sftp` was replaced by our own SFTP v3 codec, which was the last tokio dependent, so `cargo tree -i tokio` is empty. Not a performance decision — §3.3 of `docs/compio.md` says the runtime never decided the serial bug — and `docs/compio.md` §10 is the as-built record and the traps |
+| D22 | **The file browser is a crate with three windows**: the pane, a manager window, and the picker | One implementation of the widget instead of three: `dtr-files` (model, grid, icons, operations) on `dtr-frame` (window, surface, egui, multi-window), used by the `dtr` pane and by `crates/dtr-portal`. The daemon must not link the VT core or a shell, and the browser must be testable without a terminal |
+| D23 | **dtr ships its own portal `FileChooser` backend**, in a separate daemon | The GNOME backend links GTK — GDK, the accessibility bridge, a file-chooser widget built for the request; a resident window of ours is one frame. `portals.conf` selects a backend **per interface**, so `FileChooser=dtr` costs the rest of the desktop nothing. Details and limits: `docs/manager.md` §5 |
 
 Pinned upstream: ghostty commit **`0b8b9984ee560456194262d190aa850224edb1f4`** (2026-10-28) — the
 commit `libghostty-vt-sys`' bindings are generated against at the `libghostty-rs` rev `Cargo.toml`
@@ -939,6 +941,45 @@ it is opened with.
   `kitty-graphics` crate feature dtr compiles out with `default-features = false`.
   Both are UI and renderer work now; the ordered list is `docs/ghostty.md`.
 - Quake mode (quick terminal), tray, taskbar progress (`OSC 9;4`), single-instance CLI.
+
+### M4 — a real file manager, and the desktop's file picker (planned)
+
+Two asks, one implementation: the file pane becomes a **manager** (a grid of large icons, places,
+multi-select, and eventually writes) and the same browser becomes the desktop's file picker, as an
+`org.freedesktop.impl.portal.FileChooser` backend in a daemon of its own. `docs/manager.md` is the
+memo: the interface read from the installed 1.22.1 XML, the three packaging files, the measured
+starting points, and what is deliberately not here.
+
+The shape is a crate split, which is also the first milestone: `crates/dtr` becomes lib + bin,
+**`dtr-files`** holds the browser (model, grid and list views, icons, thumbnails, operations,
+`Mode::{Manage, Pick}`), **`dtr-frame`** holds the window/surface/egui plumbing and is multi-window
+because the daemon opens one window per request, and **`dtr-portal`** is the daemon — which is also the
+manager window's process, so `dtr-files [PATH]` asks it for a window instead of being a third binary.
+
+The order, each gated by what it makes checkable — the stages are `F0`…`F6`, this programme's own
+numbers, so that an `M` never names two things:
+
+1. **F0** the split, with every existing test and snapshot green and unchanged, plus the two
+   measurements nobody has taken: the GNOME picker's time-to-dialog, and ours cold and warm.
+2. **F1** the grid, read-only, in the pane: `IconTile` in `dtr-widgets` with a gallery snapshot, grid
+   geometry as pure functions, icons (type, packaging, `user-dirs.dirs` decorations), thumbnails
+   through the existing `thumb.rs` cap-and-cache, multi-select, 2-D keys, breadcrumb, places *popup*,
+   sort, `Ctrl+H`, a local `notify` watch, and the list view **kept** as a toggle — a half-pane is
+   narrow, and grid-first is a preference, not an excuse to lose the dense view.
+3. **F2** pick mode in the same widget: a footer, multiple, directory, save-with-name, filters,
+   overwrite confirmation. A picker only reads, which is why it can ship before writes.
+4. **F3** the daemon: zbus (`async-io`, already in the tree), activation, a hidden window kept warm,
+   the three packaging files, a `nixosModules.dtr-portal`, and a private-bus test that answers a real
+   `OpenFile`.
+5. **F4** the manager window: toolbar, sidebar (user directories, mounts, **the session's ssh hosts**),
+   status bar, over a private `org.dtr.Files.OpenWindow`.
+6. **F5/F6** writes, local before remote: `Backend` grows `create_dir`/`rename`/`remove`/`copy`/`move`
+   and `Caps` grows `write`/`trash`; trash-always, ask-on-overwrite, one conflict `Card`; then
+   `dtr-sftp` grows mkdir/rmdir/rename/setstat/upload for the same verbs over ssh.
+
+Known limits, stated rather than flag-flipped: on Wayland `parent_window` is opaque and winit has no
+xdg-foreign, so the picker is not transient there; and applications that never ask the portal — GTK4
+without `GTK_USE_PORTAL`, most Qt — cannot be served by any backend.
 
 ---
 
