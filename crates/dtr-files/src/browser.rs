@@ -157,19 +157,19 @@ impl Sort {
 /// fit in the same height. Grid-first is a preference, not an excuse to lose the
 /// dense view (`docs/manager.md` §3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
+pub enum Layout {
     #[default]
     Grid,
     List,
 }
 
-impl Mode {
-    pub const ALL: [Mode; 2] = [Mode::Grid, Mode::List];
+impl Layout {
+    pub const ALL: [Layout; 2] = [Layout::Grid, Layout::List];
 
     pub fn label(self) -> &'static str {
         match self {
-            Mode::Grid => "grid",
-            Mode::List => "list",
+            Layout::Grid => "grid",
+            Layout::List => "list",
         }
     }
 }
@@ -181,7 +181,7 @@ impl Mode {
 /// two places is two answers to "what is on screen".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct View {
-    pub mode: Mode,
+    pub layout: Layout,
     pub sort: Sort,
     /// Reverses the **key**, not the grouping: under `modified ↓` folders stay
     /// on top and only the order inside each group turns around.
@@ -209,7 +209,7 @@ impl View {
 impl Default for View {
     fn default() -> Self {
         Self {
-            mode: Mode::Grid,
+            layout: Layout::Grid,
             sort: Sort::Name,
             reverse: false,
             folders_first: true,
@@ -221,7 +221,7 @@ impl Default for View {
 /// One frame's layout, recorded for the press that comes after it.
 #[derive(Clone, Copy, Debug)]
 struct Frame {
-    mode: Mode,
+    layout: Layout,
     /// The listing's own rectangle, in the pane's points.
     body: egui::Rect,
     /// Where the grid's first cell starts, unscrolled, and how wide a cell is.
@@ -610,8 +610,8 @@ impl Browser {
         if !frame.body.contains(point) {
             return None;
         }
-        match frame.mode {
-            Mode::Grid => index_at(
+        match frame.layout {
+            Layout::Grid => index_at(
                 point,
                 frame.across,
                 frame.cell,
@@ -620,7 +620,7 @@ impl Browser {
                 frame.first,
                 self.entries.len(),
             ),
-            Mode::List => {
+            Layout::List => {
                 let row = ((point.y - frame.body.top()) / ROW_HEIGHT).floor();
                 if row < 0.0 || row as usize >= frame.visible {
                     return None;
@@ -781,9 +781,9 @@ impl Browser {
             return;
         };
         let step = lines.abs().round().max(1.0) as usize;
-        let rows = match frame.mode {
-            Mode::Grid => rows(self.entries.len(), frame.across),
-            Mode::List => self.entries.len(),
+        let rows = match frame.layout {
+            Layout::Grid => rows(self.entries.len(), frame.across),
+            Layout::List => self.entries.len(),
         };
         let last = rows.saturating_sub(frame.visible);
         // From the *current* first row, not from the frame's: a wheel notch that
@@ -814,10 +814,10 @@ impl Browser {
     /// Change the layout without touching the order.
     ///
     /// `Ctrl+1`/`Ctrl+2` and `[files] view` are the two writers, and neither
-    /// means "re-sort": a mode change is what a person asked for, and a sort
+    /// means "re-sort": a layout change is what a person asked for, and a sort
     /// they chose a moment ago must survive it.
-    pub fn set_mode(&mut self, mode: Mode) {
-        self.view.mode = mode;
+    pub fn set_layout(&mut self, layout: Layout) {
+        self.view.layout = layout;
     }
 
     /// Draw drawn glyphs instead of the machine's icons.
@@ -969,7 +969,7 @@ impl Browser {
     /// Handle one key. Returns a path when the user asked for a file to be put
     /// on the terminal's command line.
     pub fn handle(&mut self, key: Key) -> Option<PathBuf> {
-        let grid = self.view.mode == Mode::Grid;
+        let grid = self.view.layout == Layout::Grid;
         // One row is `columns` cells in a grid and one cell in a list, and one
         // page is what the last frame said it could show.
         let row = if grid { self.columns.get().max(1) } else { 1 };
@@ -1521,9 +1521,9 @@ impl Browser {
             egui::pos2(rect.left(), header_bottom + 1.0),
             egui::pos2(rect.right(), footer_top),
         );
-        match self.view.mode {
-            Mode::Grid => self.draw_grid(ui, skin, body),
-            Mode::List => self.draw_list(ui, skin, body),
+        match self.view.layout {
+            Layout::Grid => self.draw_grid(ui, skin, body),
+            Layout::List => self.draw_list(ui, skin, body),
         }
 
         // Footer: a filesystem problem, the selected path, or a quiet hint.
@@ -1633,7 +1633,7 @@ impl Browser {
         };
         self.scroll.set(first);
         self.frame.set(Some(Frame {
-            mode: Mode::List,
+            layout: Layout::List,
             body,
             content: body,
             cell: egui::vec2(body.width(), ROW_HEIGHT),
@@ -1749,7 +1749,7 @@ impl Browser {
         self.scroll.set(first);
 
         self.frame.set(Some(Frame {
-            mode: Mode::Grid,
+            layout: Layout::Grid,
             body,
             content,
             cell,
@@ -2525,7 +2525,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Browser, Entry, Key, Mode, Sort, View, arrange, clamp_selection, crumbs, display_join,
+        Browser, Entry, Key, Layout, Sort, View, arrange, clamp_selection, crumbs, display_join,
         display_path, first_visible, human_size, parent_of,
     };
 
@@ -3260,7 +3260,7 @@ mod tests {
         let mut browser = Browser::new(Some(root));
         settle(&mut browser);
         let mut view = browser.view();
-        view.mode = Mode::List;
+        view.layout = Layout::List;
         browser.set_view(view);
         // A stale column count from the grid must not leak into a list.
         browser.columns.set(8);
@@ -3498,7 +3498,7 @@ mod kittest_tests {
         let skin = skin();
         let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
         let mut view = browser.borrow().view();
-        view.mode = Mode::List;
+        view.layout = Layout::List;
         browser.borrow_mut().set_view(view);
         {
             let browser = std::rc::Rc::clone(&browser);
@@ -3554,7 +3554,7 @@ mod kittest_tests {
         {
             let mut browser = browser.borrow_mut();
             let mut view = browser.view();
-            view.mode = Mode::List;
+            view.layout = Layout::List;
             browser.set_view(view);
         }
         {
@@ -3647,7 +3647,7 @@ mod kittest_tests {
             let mut browser = browser.borrow_mut();
             browser.apply_listing(PathBuf::from("/var/log"), names);
             let mut view = browser.view();
-            view.mode = Mode::List;
+            view.layout = Layout::List;
             browser.set_view(view);
         }
         {
@@ -3880,7 +3880,7 @@ mod kittest_tests {
         let skin = skin();
         let mut browser = pane();
         let mut view = browser.view();
-        view.mode = Mode::List;
+        view.layout = Layout::List;
         browser.set_view(view);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(WIDTH, HEIGHT))
@@ -3950,7 +3950,7 @@ mod kittest_tests {
         {
             let mut browser = browser.borrow_mut();
             let mut view = browser.view();
-            view.mode = Mode::List;
+            view.layout = Layout::List;
             browser.set_view(view);
         }
         let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
@@ -3986,7 +3986,7 @@ mod kittest_tests {
         {
             let mut browser = browser.borrow_mut();
             let mut view = browser.view();
-            view.mode = Mode::List;
+            view.layout = Layout::List;
             browser.set_view(view);
         }
         let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
@@ -4046,7 +4046,7 @@ mod kittest_tests {
         {
             let mut browser = browser.borrow_mut();
             let mut view = browser.view();
-            view.mode = Mode::List;
+            view.layout = Layout::List;
             browser.set_view(view);
         }
         let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));

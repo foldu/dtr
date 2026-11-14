@@ -47,7 +47,7 @@ pub struct Config {
 
 /// How a file pane lays its listing out. `[files] view`.
 ///
-/// The browser's own `Mode` lives in `dtr-files`, which pulls in egui; this crate
+/// The browser's own `Layout` lives in `dtr-files`, which pulls in egui; this crate
 /// parses text and pulls in nothing but `toml_edit` and a key parser. So the two
 /// are separate values and the window is where they meet — the same shape
 /// `[ui] widgets` has with `dtr_widgets::Preset`.
@@ -84,7 +84,7 @@ impl FilesView {
 ///
 /// Four keys, spelled the way the sort control spells them. The browser's own
 /// `Sort` is the value; this is the word in the file, and the window is where
-/// they meet — the same shape [`FilesView`] has with `dtr_files::Mode`.
+/// they meet — the same shape [`FilesView`] has with `dtr_files::Layout`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FilesSort {
     #[default]

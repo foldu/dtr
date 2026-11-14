@@ -20,7 +20,7 @@ use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
 use crate::ui::Status;
-use dtr_files::{Browser, Mode as FileMode, PaneView as FilePaneView, Sort as FileSort};
+use dtr_files::{Browser, Layout as FileLayout, PaneView as FilePaneView, Sort as FileSort};
 
 pub enum UserEvent {
     Frame,
@@ -1001,25 +1001,25 @@ fn cell_of(
 /// The config crate parses text and the browser paints, so neither knows the
 /// other's value and this is the one line that joins them — the same shape
 /// `[ui] widgets` has with `dtr_widgets::Preset`.
-fn file_mode(view: dtr_config::FilesView) -> FileMode {
+fn file_layout(view: dtr_config::FilesView) -> FileLayout {
     match view {
-        dtr_config::FilesView::Grid => FileMode::Grid,
-        dtr_config::FilesView::List => FileMode::List,
+        dtr_config::FilesView::Grid => FileLayout::Grid,
+        dtr_config::FilesView::List => FileLayout::List,
     }
 }
 
-/// The config's spelling of a mode, for writing it back.
-fn files_view_of(mode: FileMode) -> dtr_config::FilesView {
-    match mode {
-        FileMode::Grid => dtr_config::FilesView::Grid,
-        FileMode::List => dtr_config::FilesView::List,
+/// The config's spelling of a layout, for writing it back.
+fn files_view_of(layout: FileLayout) -> dtr_config::FilesView {
+    match layout {
+        FileLayout::Grid => dtr_config::FilesView::Grid,
+        FileLayout::List => dtr_config::FilesView::List,
     }
 }
 
 /// The view `[files]` asks for: the layout, the order, and what it hides.
 fn file_view(config: &dtr_config::Config) -> dtr_files::View {
     dtr_files::View {
-        mode: file_mode(config.files.view),
+        layout: file_layout(config.files.view),
         show_hidden: config.files.hidden,
         sort: file_sort(config.files.sort),
         reverse: config.files.reverse,
@@ -3247,7 +3247,7 @@ impl App {
     /// the window would be forgotten at exit, and the file that called it a
     /// preference would not have one in it. The watcher sees the write and
     /// reloads, which is how the other panes learn the same thing.
-    fn set_file_mode(&mut self, mode: FileMode) -> bool {
+    fn set_file_layout(&mut self, layout: FileLayout) -> bool {
         if self.focused_browser().is_none() {
             self.toast = Some((
                 "no file pane is focused".to_owned(),
@@ -3257,9 +3257,9 @@ impl App {
             return true;
         }
         if let Some(browser) = self.focused_browser_mut() {
-            browser.set_mode(mode);
+            browser.set_layout(layout);
         }
-        let view = files_view_of(mode);
+        let view = files_view_of(layout);
         if let Err(err) = dtr_config::set_value(&self.config_path, "files.view", view.as_str()) {
             tracing::warn!(%err, "could not save files.view");
         } else {
@@ -3368,8 +3368,8 @@ impl App {
                 self.resize_pane(crate::layout::Direction::Down);
                 true
             }
-            Action::FilesGrid => self.set_file_mode(FileMode::Grid),
-            Action::FilesList => self.set_file_mode(FileMode::List),
+            Action::FilesGrid => self.set_file_layout(FileLayout::Grid),
+            Action::FilesList => self.set_file_layout(FileLayout::List),
             Action::FilesHidden => self.toggle_hidden_files(),
             Action::FilesCopyPath => self.copy_file_path(),
             Action::FilesSelectAll => self.select_all_files(),
@@ -3636,7 +3636,7 @@ impl App {
         for tab in &mut self.tabs {
             for pane in tab.leaves.values_mut() {
                 if let Pane::Files(browser) = pane {
-                    browser.set_mode(view.mode);
+                    browser.set_layout(view.layout);
                     browser.set_hidden(view.show_hidden);
                 }
             }
