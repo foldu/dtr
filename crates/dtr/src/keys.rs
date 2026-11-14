@@ -56,6 +56,11 @@ pub enum Action {
     FilesSortKind,
     FilesReverse,
     FilesFoldersFirst,
+    /// A picker in the focused pane's directory: the same browser asking a
+    /// question instead of browsing (`docs/manager.md` §4). Until the portal
+    /// daemon exists (F3) the answer goes to the tab's terminal, which is what
+    /// a terminal's own file picker is for.
+    FilesPick,
     Copy,
     Paste,
     ScrollPageUp,
@@ -108,6 +113,7 @@ impl Action {
             Self::FilesSortKind => "files-sort-kind",
             Self::FilesReverse => "files-reverse",
             Self::FilesFoldersFirst => "files-folders-first",
+            Self::FilesPick => "files-pick",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll-page-up",
@@ -161,6 +167,7 @@ impl Action {
             Self::FilesSortKind => "sort by type",
             Self::FilesReverse => "reverse the order",
             Self::FilesFoldersFirst => "folders first",
+            Self::FilesPick => "pick a file for the shell",
             Self::Copy => "copy selection",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll a page up",
@@ -205,7 +212,8 @@ impl Action {
             | Self::FilesSortSize
             | Self::FilesSortKind
             | Self::FilesReverse
-            | Self::FilesFoldersFirst => Group::Files,
+            | Self::FilesFoldersFirst
+            | Self::FilesPick => Group::Files,
             Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
@@ -282,7 +290,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 42] = [
+pub const ALL: [Action; 43] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -311,6 +319,7 @@ pub const ALL: [Action; 42] = [
     Action::FilesSortKind,
     Action::FilesReverse,
     Action::FilesFoldersFirst,
+    Action::FilesPick,
     Action::Copy,
     Action::Paste,
     Action::ScrollPageUp,
@@ -370,6 +379,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("files-sort-kind", "ctrl-alt-t"),
     ("files-reverse", "ctrl-alt-r"),
     ("files-folders-first", "ctrl-alt-f"),
+    // `p` for pick, and beside the other `[files]` verbs rather than next to
+    // the pane chords: it opens a question inside a pane, not a pane.
+    ("files-pick", "ctrl-alt-p"),
     ("copy", "ctrl-shift-c"),
     ("paste", "ctrl-shift-v"),
     ("scroll-page-up", "shift-pageup"),

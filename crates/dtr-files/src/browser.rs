@@ -27,6 +27,7 @@ use dtr_vfs::{Backend as _, Local};
 use dtr_widgets::{ContextMenu, Glyph, Icon, IconTile, MenuRow, Skin, icon_tile, tile_height};
 
 use crate::grid::{cell_rect, columns, first_row, index_at, row_of, rows, visible_rows};
+use crate::pick::{Mode, Outcome, Pick, Request};
 use crate::theme::IconSet;
 use crate::thumb::{Thumbs, looks_like_image};
 
@@ -38,6 +39,10 @@ const TILE_GAP: f32 = 6.0;
 const TILE_PAD: f32 = 4.0;
 const HEADER_HEIGHT: f32 = 26.0;
 const FOOTER_HEIGHT: f32 = 18.0;
+/// The picker's footer: a row of controls, with this much air above and below
+/// the skin's own row height. The two footers are two things — a line of text
+/// and a row of controls — so they do not share a height.
+const PICK_FOOTER_GAP: f32 = 8.0;
 /// The header's close button: a square that fits inside the header, so a press
 /// on its top edge is still a press on the header.
 const CLOSE_SIDE: f32 = 20.0;
@@ -238,6 +243,8 @@ struct Frame {
 pub struct Browser {
     cwd: PathBuf,
     home: PathBuf,
+    /// What the pane is for: browsing, or answering a picker's question.
+    mode: Mode,
     entries: Vec<Entry>,
     /// The entries the view hides, sorted by the same key. Kept rather than
     /// dropped so `Ctrl+H` is a redraw: see [`arrange_split`].
@@ -387,6 +394,7 @@ impl Browser {
         let mut browser = Self {
             cwd: path,
             home: PathBuf::from("."),
+            mode: Mode::Manage,
             entries: Vec::new(),
             hidden: Vec::new(),
             selected: 0,
@@ -423,6 +431,11 @@ impl Browser {
     /// The alias this pane browses, when it browses one.
     pub fn alias(&self) -> Option<&str> {
         self.remote.as_ref().map(|remote| remote.alias.as_str())
+    }
+
+    /// The directory on screen, which is also what a folder chooser answers.
+    pub fn directory(&self) -> &Path {
+        &self.cwd
     }
 
     /// The directory the worker should list now, if the pane is waiting.
@@ -730,6 +743,11 @@ impl Browser {
     /// one of four chosen files must not throw the other three away, because the
     /// menu is about to act on all four.
     pub fn menu_at(&mut self, point: egui::Pos2) -> bool {
+        // A picker's rows are answers, not files: a menu of `open` and
+        // `copy path` over a question would be a way to answer the wrong thing.
+        if self.is_picking() {
+            return false;
+        }
         let Some(index) = self.entry_at(point) else {
             return false;
         };
@@ -770,6 +788,73 @@ impl Browser {
             0 => MenuChoice::Open,
             _ => MenuChoice::CopyPath,
         })
+    }
+
+    /// Whether this pane is answering a picker's question (`docs/manager.md` §4).
+    pub fn is_picking(&self) -> bool {
+        self.mode.pick().is_some()
+    }
+
+    /// The question this pane is asking, when it is picking.
+    pub fn picking(&self) -> Option<&Pick> {
+        self.mode.pick()
+    }
+
+    /// Turn this pane into a picker: go where it was asked to start, then put the
+    /// question in front of the listing.
+    ///
+    /// A folder that cannot be read is a message in the pane and not a failure:
+    /// the picker still opens, and the footer says why the listing is empty.
+    pub fn set_pick(&mut self, request: Request) {
+        if let Some(folder) = request.folder.clone() {
+            self.navigate(folder);
+        }
+        self.mode = Mode::Pick(Pick::new(request));
+    }
+
+    /// Back to browsing, after an answer.
+    pub fn finish_pick(&mut self) {
+        self.mode = Mode::Manage;
+    }
+
+    /// The cancel button, and Escape.
+    ///
+    /// A name waiting to be replaced is a question *inside* the picker, so the
+    /// first cancel closes the question and the second closes the picker — which
+    /// is what one button with one word has to mean.
+    pub fn cancel_pick(&mut self) {
+        let asking = self.picking().is_some_and(|pick| pick.asking().is_some());
+        if asking {
+            if let Some(pick) = self.picking() {
+                pick.clear_asking();
+            }
+            return;
+        }
+        self.mode = Mode::Manage;
+    }
+
+    /// The accept button, with this listing's answer folded in.
+    pub fn accept_pick(&self) -> Option<Outcome> {
+        let pick = self.picking()?;
+        // The `..` row is a place, not a file: it can be travelled to and not
+        // picked, so the cursor is `None` when it is the cursor.
+        let cursor = self
+            .selected_entry()
+            .and_then(|entry| match entry.is_parent() {
+                true => None,
+                false => Some(self.cwd.join(&entry.name)),
+            });
+        // The pick, in listing order, without the parent row: a picker that
+        // handed back the parent's path would answer with a directory nobody
+        // chose.
+        let picked: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| self.is_selected(*index) && !entry.is_parent())
+            .map(|(_, entry)| self.cwd.join(&entry.name))
+            .collect();
+        Some(pick.accept(&self.cwd, cursor, &picked))
     }
 
     /// Scroll the view by `lines`: positive is up, the way a wheel notch is.
@@ -889,6 +974,7 @@ impl Browser {
         let mut browser = Self {
             cwd: PathBuf::from("."),
             home,
+            mode: Mode::Manage,
             entries: Vec::new(),
             hidden: Vec::new(),
             selected: 0,
@@ -1516,7 +1602,8 @@ impl Browser {
             Stroke::new(style.border, palette.divider),
         );
 
-        let footer_top = (rect.bottom() - FOOTER_HEIGHT).max(header_bottom);
+        let footer = footer_rect(rect, skin, self.is_picking());
+        let footer_top = footer.top();
         let body = egui::Rect::from_min_max(
             egui::pos2(rect.left(), header_bottom + 1.0),
             egui::pos2(rect.right(), footer_top),
@@ -1526,11 +1613,23 @@ impl Browser {
             Layout::List => self.draw_list(ui, skin, body),
         }
 
+        if self.is_picking() {
+            // The picker's footer is a control surface, not a line of text: the
+            // band and the rule are the drawing's, and every control in it is
+            // `pane_ui`'s, where an area can take a press.
+            painter.rect_filled(footer, 0.0, palette.window);
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), footer_top),
+                    egui::pos2(rect.right(), footer_top),
+                ],
+                Stroke::new(style.border, palette.divider),
+            );
+            draw_border(ui, skin, rect, focused);
+            return;
+        }
+
         // Footer: a filesystem problem, the selected path, or a quiet hint.
-        let footer = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), footer_top),
-            egui::pos2(rect.right(), rect.bottom()),
-        );
         if let Some(message) = &self.message {
             painter.text(
                 egui::pos2(footer.left() + 8.0, footer.center().y),
@@ -1589,24 +1688,7 @@ impl Browser {
             );
         }
 
-        let border = if focused {
-            palette.accent
-        } else {
-            palette.border
-        };
-        painter.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(
-                if focused {
-                    style.border * 1.5
-                } else {
-                    style.border
-                },
-                border,
-            ),
-            egui::StrokeKind::Inside,
-        );
+        draw_border(ui, skin, rect, focused);
     }
     /// The dense view: one row per entry, a name on the left and a size on the
     /// right.
@@ -1869,11 +1951,45 @@ fn header_rect(rect: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), bottom))
 }
 
-/// The close button's target, in the pane's points.
+/// The footer band: the bottom of the pane, as tall as the mode needs.
 ///
-/// One function for the painter, the widget and the test: the count is placed
-/// against its left edge and the cross is placed *at* it, and two calculations
-/// would drift apart the first time the header's inset changed.
+/// Two heights because the two footers are two things: a line of text (the path,
+/// a count, a refusal) and a row of controls on a picker. The controls read their
+/// height from the skin's row, so an Adwaita footer is taller than dtr's — the
+/// same rule every other control in the tree follows.
+fn footer_rect(rect: egui::Rect, skin: &Skin, picking: bool) -> egui::Rect {
+    let height = match picking {
+        true => skin.style.row + PICK_FOOTER_GAP,
+        false => FOOTER_HEIGHT,
+    };
+    let top = (rect.bottom() - height).max(header_rect(rect).bottom());
+    egui::Rect::from_min_max(egui::pos2(rect.left(), top), rect.max)
+}
+
+/// The pane's outline: the accent when it has focus, the border otherwise.
+///
+/// One function for both paths — a browse frame and a picker's — so the two
+/// cannot disagree about how thick a focused pane's edge is.
+fn draw_border(ui: &egui::Ui, skin: &Skin, rect: egui::Rect, focused: bool) {
+    let palette = skin.palette;
+    let style = &skin.style;
+    let colour = match focused {
+        true => palette.accent,
+        false => palette.border,
+    };
+    let width = match focused {
+        true => style.border * 1.5,
+        false => style.border,
+    };
+    ui.painter().with_clip_rect(rect).rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(width, colour),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// The close button's target, in the pane's points.
 fn close_rect(rect: egui::Rect) -> egui::Rect {
     let header = header_rect(rect);
     // Inset from the pane's right edge by the same gap the path has on the
@@ -1901,6 +2017,11 @@ pub struct PaneOutcome {
     pub navigate: Option<PathBuf>,
     /// The right-press menu chose a row.
     pub menu: Option<MenuChoice>,
+    /// The picker's accept button: what the question came back as.
+    pub pick: Option<Outcome>,
+    /// The picker's cancel button was pressed. What that closes is the browser's
+    /// rule, not the app's: a `replace` question goes first, the picker second.
+    pub pick_cancel: bool,
 }
 
 /// What the right-press menu asked for.
@@ -2026,11 +2147,36 @@ pub fn pane_ui(
     // The right-press menu is drawn last and at the context's level, so it sits
     // over every pane in the window rather than inside the one that opened it.
     let menu = browser.menu_ui(&ctx, skin, id.with("menu"));
+    // A picker's footer: its own area, because the pane's is not interactable and
+    // a footer of buttons and a text field is the one part of it that must be.
+    let mut pick = None;
+    let mut pick_cancel = false;
+    if browser.is_picking() {
+        let answer = pick_footer(
+            &ctx,
+            id.with("pick"),
+            footer_rect(rect, skin, true),
+            skin,
+            browser,
+        );
+        if answer.accept {
+            pick = browser.accept_pick();
+        }
+        // The filter is the picker's own state, not the app's: it narrows a
+        // question that is already open, and nothing outside the pane needs to
+        // know it changed.
+        if let (Some(index), Some(session)) = (answer.filter, browser.picking()) {
+            session.set_filter(index);
+        }
+        pick_cancel = answer.cancel;
+    }
     PaneOutcome {
         close,
         sort,
         navigate,
         menu,
+        pick,
+        pick_cancel,
     }
 }
 
@@ -2093,6 +2239,243 @@ fn places_button(
                 dtr_widgets::menu_tip(&popup.response, skin, rect);
             }
         });
+    chosen
+}
+
+/// What a picker's footer was asked to do this frame.
+///
+/// The buttons report, the app decides: the same rule every control in
+/// `dtr-widgets` follows, and the reason a footer can be tested without a picker
+/// behind it.
+#[derive(Clone, Copy, Debug, Default)]
+struct FooterAnswer {
+    cancel: bool,
+    accept: bool,
+    filter: Option<usize>,
+}
+
+/// The picker's footer: a name field in save mode, the filter, and the two
+/// buttons — in one area of its own.
+///
+/// A second area because the pane's own is `interactable(false)`: any control
+/// drawn inside it would be a picture. Everything here is laid out from the
+/// buttons' measured widths inwards, so a longer accept label pushes the field
+/// narrower instead of overlapping it.
+fn pick_footer(
+    ctx: &egui::Context,
+    id: egui::Id,
+    band: egui::Rect,
+    skin: &Skin,
+    browser: &Browser,
+) -> FooterAnswer {
+    let Some(pick) = browser.picking() else {
+        return FooterAnswer::default();
+    };
+    let style = &skin.style;
+    let mut answer = FooterAnswer::default();
+    egui::Area::new(id)
+        // The pane's order, and after it, so the controls are above the band the
+        // pane painted.
+        .order(egui::Order::Background)
+        .fixed_pos(band.min)
+        .constrain(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            ui.set_min_size(band.size());
+            ui.set_max_size(band.size());
+            ui.spacing_mut().interact_size.y = style.row;
+            let gap = 6.0;
+            let inner = egui::Rect::from_min_max(
+                egui::pos2(band.left() + gap, band.center().y - style.row / 2.0),
+                egui::pos2(band.right() - gap, band.center().y + style.row / 2.0),
+            );
+            let label = pick.accept_label().to_owned();
+            let accept_width = dtr_widgets::Button::measured_width(ui, skin, &label);
+            let cancel_width = dtr_widgets::Button::measured_width(ui, skin, "cancel");
+            let accept = egui::Rect::from_min_size(
+                egui::pos2(inner.right() - accept_width, inner.top()),
+                egui::vec2(accept_width, style.row),
+            );
+            let cancel = egui::Rect::from_min_size(
+                egui::pos2(accept.left() - gap - cancel_width, inner.top()),
+                egui::vec2(cancel_width, style.row),
+            );
+            let mut slab_right = cancel.left() - gap;
+            if !pick.filters().is_empty() {
+                let width = 104.0;
+                let slot = egui::Rect::from_min_size(
+                    egui::pos2(slab_right - width, inner.top()),
+                    egui::vec2(width, style.row),
+                );
+                slab_right = slot.left() - gap;
+                answer.filter = filter_button(ui, skin, slot, pick);
+            }
+            let slab = egui::Rect::from_min_max(
+                inner.min,
+                egui::pos2(slab_right.max(inner.left()), inner.bottom()),
+            );
+            match pick.select() {
+                crate::pick::Select::Save => {
+                    // The draft is the pick's own cell: the pane is drawn from a
+                    // `&Browser`, and a field that cannot be typed into is the
+                    // one thing a picker cannot be.
+                    let mut draft = pick.draft_mut();
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(slab), |ui| {
+                        let response = ui.add_sized(
+                            egui::vec2(slab.width(), style.row),
+                            egui::TextEdit::singleline(&mut *draft)
+                                .id(id.with("name"))
+                                .hint_text("a name")
+                                .desired_width(slab.width()),
+                        );
+                        // Typing is the point of a save picker, so the field takes
+                        // the keyboard once, when it opens.
+                        if pick.take_focus() {
+                            response.request_focus();
+                        }
+                    });
+                }
+                _ => footer_text(ui, skin, slab, pick),
+            }
+            ui.scope_builder(egui::UiBuilder::new().max_rect(cancel), |ui| {
+                if dtr_widgets::Button::new("cancel").show(ui, skin) {
+                    answer.cancel = true;
+                }
+            });
+            ui.scope_builder(egui::UiBuilder::new().max_rect(accept), |ui| {
+                if dtr_widgets::Button::new(&label).primary().show(ui, skin) {
+                    answer.accept = true;
+                }
+            });
+        });
+    answer
+}
+
+/// The line the picker is saying, where a save mode puts its field.
+///
+/// The refusal and the replace question come first because they are the answer to
+/// the last press; failing both, the selection is what the press will use.
+fn footer_text(ui: &egui::Ui, skin: &Skin, slab: egui::Rect, pick: &Pick) {
+    let palette = skin.palette;
+    let style = &skin.style;
+    let small = egui::FontId::new(style.label_font.size - 1.5, style.label_font.family.clone());
+    let (said, colour) = match (pick.asking(), pick.problem()) {
+        (Some(target), _) => {
+            let name = target
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| target.display().to_string());
+            (format!("replace {name}?"), palette.accent)
+        }
+        (None, Some(problem)) => (problem, palette.accent),
+        (None, None) => (hint(pick), palette.dim),
+    };
+    let width = slab.width().max(8.0);
+    let mut job = egui::text::LayoutJob::simple(said, small, colour, width);
+    job.wrap = egui::text::TextWrapping {
+        max_width: width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        egui::pos2(slab.left() + 2.0, slab.center().y - galley.size().y / 2.0),
+        galley,
+        colour,
+    );
+}
+
+/// What the picker would do with the press, before anybody presses.
+fn hint(pick: &Pick) -> String {
+    match pick.select() {
+        crate::pick::Select::Directory => match pick.chosen_filter() {
+            Some(filter) => format!("this folder · {}", filter.name),
+            None => "this folder".to_owned(),
+        },
+        crate::pick::Select::File => "the selected file".to_owned(),
+        crate::pick::Select::Files => "every selected file".to_owned(),
+        // A save shows its field instead, so this is only reached when there is
+        // no room for one.
+        crate::pick::Select::Save => "type a name".to_owned(),
+    }
+}
+
+/// The filter's slot: its name, a triangle, and the list of filters.
+///
+/// The same shape as the sort control, because it is the same kind of control —
+/// a menu button that shows the value it is set to — and the same reason it is
+/// not a `Popup` on a widget: the pane has no widgets, only painted rows.
+fn filter_button(ui: &mut egui::Ui, skin: &Skin, slot: egui::Rect, pick: &Pick) -> Option<usize> {
+    let palette = skin.palette;
+    let style = &skin.style;
+    let small = egui::FontId::new(style.label_font.size - 1.5, style.label_font.family.clone());
+    let mut chosen = None;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(slot), |ui| {
+        let (rect, response) = ui.allocate_exact_size(slot.size(), egui::Sense::click());
+        let response = response.on_hover_text("the filter");
+        let open = egui::Popup::is_id_open(ui.ctx(), response.id);
+        if response.hovered() || open {
+            ui.painter().rect_filled(
+                rect.shrink(2.0),
+                style.control_radius,
+                palette.control_hover,
+            );
+        }
+        let name = pick
+            .chosen_filter()
+            .map(|filter| filter.name.as_str())
+            .unwrap_or("any");
+        let width = (rect.width() - 22.0).max(8.0);
+        let mut job =
+            egui::text::LayoutJob::simple(name.to_owned(), small.clone(), palette.text, width);
+        job.wrap = egui::text::TextWrapping {
+            max_width: width,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(
+            egui::pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            palette.text,
+        );
+        // A triangle, not an arrow: egui's faces have none (`AGENTS.md`, glyphs).
+        let centre = egui::pos2(rect.right() - 9.0, rect.center().y);
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(centre.x - 3.5, centre.y - 1.3),
+                egui::pos2(centre.x + 3.5, centre.y - 1.3),
+                egui::pos2(centre.x, centre.y + 2.6),
+            ],
+            palette.dim,
+            egui::Stroke::NONE,
+        ));
+        // Named with the value, not the row: two nodes called "filter" cannot be
+        // told apart by a test or a screen reader.
+        let label = format!("filter {name}");
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        if response.has_focus() {
+            response.surrender_focus();
+        }
+        let mut popup = egui::Popup::menu(&response).width(190.0);
+        if let Some(tip) = style.tip_height {
+            popup = dtr_widgets::point_at(ui, popup, rect, tip);
+        }
+        let popup = popup.show(|ui| {
+            ui.set_min_width(190.0);
+            for (index, filter) in pick.filters().iter().enumerate() {
+                if dtr_widgets::menu_row(ui, skin, &filter.name, index == pick.filter()) {
+                    chosen = Some(index);
+                    ui.close();
+                }
+            }
+        });
+        if let Some(popup) = popup {
+            dtr_widgets::menu_tip(&popup.response, skin, rect);
+        }
+    });
     chosen
 }
 
@@ -4069,5 +4452,182 @@ mod kittest_tests {
             !browser.borrow().menu_open(),
             "a new listing is new rows, and the menu was about the old ones"
         );
+    }
+
+    /// A pane drawn with a picker in it, and the two answers it can give.
+    fn pick_harness(
+        browser: std::rc::Rc<std::cell::RefCell<Browser>>,
+        answer: std::rc::Rc<std::cell::RefCell<Option<Outcome>>>,
+        cancelled: std::rc::Rc<std::cell::Cell<bool>>,
+    ) -> Harness<'static> {
+        let skin = skin();
+        let drawn = std::rc::Rc::clone(&browser);
+        Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                let outcome = {
+                    let browser = drawn.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-pick"),
+                        pane_rect(),
+                        &browser,
+                        &skin,
+                        true,
+                    )
+                };
+                if let Some(chosen) = outcome.pick {
+                    *answer.borrow_mut() = Some(chosen);
+                }
+                if outcome.pick_cancel {
+                    cancelled.set(true);
+                }
+            })
+    }
+
+    /// The picker's footer is the mode's own: the answer's word, the way out, and
+    /// — in save mode — a field instead of a line of text.
+    ///
+    /// Four pictures, because the four footers are the four things F2 promises: a
+    /// file, a folder, a name, and the filter the answer is narrowed by.
+    #[test]
+    fn a_picker_footer_names_what_its_button_does() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        browser
+            .borrow_mut()
+            .set_pick(Request::open().accept_label("insert"));
+        let mut harness = pick_harness(
+            std::rc::Rc::clone(&browser),
+            std::rc::Rc::clone(&answer),
+            std::rc::Rc::clone(&cancelled),
+        );
+        harness.run();
+        for label in ["insert", "cancel"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from the picker's footer"
+            );
+        }
+        harness.snapshot("file_pane_pick_file");
+        harness.get_by_label("insert").click();
+        harness.run();
+        assert_eq!(
+            *answer.borrow(),
+            Some(Outcome::Chosen(vec![PathBuf::from("/var/log/syslog")])),
+            "the cursor's file is the answer, and it is the one the fixture picked"
+        );
+    }
+
+    #[test]
+    fn a_folder_picker_answers_with_the_folder_it_shows() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        browser.borrow_mut().set_pick(Request::folder());
+        let mut harness = pick_harness(
+            std::rc::Rc::clone(&browser),
+            std::rc::Rc::clone(&answer),
+            std::rc::Rc::clone(&cancelled),
+        );
+        harness.run();
+        harness.snapshot("file_pane_pick_folder");
+        harness.get_by_label("select").click();
+        harness.run();
+        assert_eq!(
+            *answer.borrow(),
+            Some(Outcome::Chosen(vec![PathBuf::from("/var/log")]))
+        );
+    }
+
+    /// A save mode has a field, and the filter's extension is what the answer
+    /// gains — the two halves of "the chosen filter decides the suffix".
+    #[test]
+    fn a_save_picker_has_a_name_and_a_kind() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        browser.borrow_mut().set_pick(
+            Request::save("report").with([crate::pick::Filter::of("PNG images", "*.png")]),
+        );
+        let mut harness = pick_harness(
+            std::rc::Rc::clone(&browser),
+            std::rc::Rc::clone(&answer),
+            std::rc::Rc::clone(&cancelled),
+        );
+        harness.run();
+        assert!(
+            harness.query_by_label("filter PNG images").is_some(),
+            "the filter is a control of its own"
+        );
+        harness.snapshot("file_pane_pick_save");
+    }
+
+    /// The filter is a promise about the answer: choosing one narrows what the
+    /// accept button will hand back, and says so when the cursor is not its kind.
+    #[test]
+    fn a_filter_narrows_what_the_answer_may_be() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        browser.borrow_mut().set_pick(Request::open().with([
+            crate::pick::Filter::of("PNG images", "*.png"),
+            crate::pick::Filter::of("any file", "*"),
+        ]));
+        let mut harness = pick_harness(
+            std::rc::Rc::clone(&browser),
+            std::rc::Rc::clone(&answer),
+            std::rc::Rc::clone(&cancelled),
+        );
+        harness.run();
+        harness.snapshot("file_pane_pick_filter");
+        // The cursor is `syslog`, which is neither: the refusal is the answer,
+        // and the footer says which filter refused it.
+        harness.get_by_label("open").click();
+        harness.run();
+        assert!(
+            matches!(&*answer.borrow(), Some(Outcome::Refused(why)) if why == "only PNG images can be picked"),
+            "a refusal comes back as a refusal: {:?}",
+            answer.borrow()
+        );
+        assert_eq!(
+            browser.borrow().picking().and_then(|pick| pick.problem()),
+            Some("only PNG images can be picked".to_owned()),
+            "the footer says which filter refused it"
+        );
+        // Choosing the kind it *is* makes the same press an answer.
+        harness.get_by_label("filter PNG images").click();
+        harness.run();
+        harness.get_by_label("any file").click();
+        harness.run();
+        harness.get_by_label("open").click();
+        harness.run();
+        assert_eq!(
+            *answer.borrow(),
+            Some(Outcome::Chosen(vec![PathBuf::from("/var/log/syslog")]))
+        );
+    }
+
+    /// The cancel button closes the question and the picker, and the browser says
+    /// which: one button, one word, two depths.
+    #[test]
+    fn cancel_closes_the_question_then_the_picker() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        browser.borrow_mut().set_pick(Request::open());
+        let mut harness = pick_harness(
+            std::rc::Rc::clone(&browser),
+            std::rc::Rc::clone(&answer),
+            std::rc::Rc::clone(&cancelled),
+        );
+        harness.run();
+        harness.get_by_label("cancel").click();
+        harness.run();
+        assert!(cancelled.get(), "the app is told the button was pressed");
+        // The app's answer to that, which is the browser's rule.
+        browser.borrow_mut().cancel_pick();
+        assert!(!browser.borrow().is_picking(), "the picker is gone");
     }
 }

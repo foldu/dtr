@@ -1838,6 +1838,19 @@ impl App {
                 // A file pane has focus: it gets navigation keys, and
                 // everything terminal-only is ignored.
                 if !self.palette.open {
+                    // A picker's keys are its footer's: `Enter` accepts, `Escape`
+                    // cancels, and the rest belong to the text field egui is
+                    // already feeding — a listing's movement keys must not move a
+                    // grid behind a question.
+                    if self
+                        .focused_browser()
+                        .is_some_and(|browser| browser.is_picking())
+                    {
+                        if pressed {
+                            self.pick_key(&stroke.key);
+                        }
+                        return;
+                    }
                     if let Some(key) = browser_key(&stroke.key, stroke.mods) {
                         let chosen = self
                             .focused_browser_mut()
@@ -3383,6 +3396,10 @@ impl App {
             Action::FilesFoldersFirst => {
                 self.change_file_view(|view| view.folders_first = !view.folders_first)
             }
+            Action::FilesPick => {
+                self.start_pick();
+                true
+            }
             Action::ZoomPane => {
                 self.toggle_zoom();
                 true
@@ -4411,14 +4428,116 @@ impl App {
     /// no terminal in the tab there is nowhere to put it, so the pane is inert
     /// rather than destructive.
     fn insert_path_into_terminal(&mut self, path: PathBuf) {
+        self.insert_text_into_terminal(path.to_string_lossy().into_owned());
+    }
+
+    /// The bytes of the same rule, for a picker that answered with several paths
+    /// at once: one write, so the shell sees one line rather than two half-typed
+    /// ones.
+    fn insert_text_into_terminal(&mut self, text: String) {
         let tab = &self.tabs[self.active];
         let Some(id) = tab.first_terminal() else {
             return;
         };
         if let Some(Pane::Terminal(session)) = self.tabs[self.active].leaves.get(&id) {
-            session
-                .pane
-                .write(path.to_string_lossy().into_owned().into_bytes());
+            session.pane.write(text.into_bytes());
+        }
+    }
+
+    /// Open a picker in the focused pane's directory, for the terminal beside it.
+    ///
+    /// The first caller the picker has, and the honest one until F3's daemon
+    /// exists: a terminal's own "choose a file and put its path on the command
+    /// line". The modes the widget carries and this chord does not use — a
+    /// folder, several files, a save name — are what the portal will ask for, and
+    /// each is drawn and tested in the pane already.
+    fn start_pick(&mut self) {
+        let folder = self
+            .focused_browser()
+            .map(|browser| browser.directory().to_path_buf())
+            .or_else(|| self.session().and_then(|session| session.pane.cwd()))
+            .or_else(|| std::env::current_dir().ok());
+        let mut request = dtr_files::Request::open().accept_label("insert");
+        if let Some(folder) = folder {
+            request = request.at(folder);
+        }
+        self.split_pick(request);
+        self.repaint("pick opened");
+    }
+
+    /// A picker as a pane of its own, beside whatever is focused.
+    ///
+    /// Its own function rather than a flag on `split_files`, because the two say
+    /// different things: a file pane is a place to look, and a picker is a
+    /// question that will close itself.
+    fn split_pick(&mut self, request: dtr_files::Request) {
+        self.unzoom();
+        let id = self.next_leaf;
+        self.next_leaf += 1;
+        let tab = &mut self.tabs[self.active];
+        let target = tab.focus;
+        if !tab
+            .layout
+            .split(target, crate::layout::Axis::Horizontal, id, false)
+        {
+            return;
+        }
+        let mut browser = file_browser(&self.config, None);
+        browser.set_pick(request);
+        tab.leaves.insert(id, Pane::Files(browser));
+        tab.focus = id;
+    }
+
+    /// Act on what a picker answered.
+    ///
+    /// `Chosen` is the only one that ends it: a `Replace` question and a
+    /// `Refused` sentence are both still on screen, and the footer is where they
+    /// are said — a picker whose button did nothing is the outcome the memo
+    /// forbids.
+    fn apply_pick(&mut self, id: crate::layout::LeafId, outcome: dtr_files::Outcome) {
+        match outcome {
+            dtr_files::Outcome::Chosen(paths) => {
+                let text = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.insert_text_into_terminal(text);
+                if let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) {
+                    browser.finish_pick();
+                }
+                self.repaint("picked a path");
+            }
+            dtr_files::Outcome::Replace(_) | dtr_files::Outcome::Refused(_) => {
+                self.repaint("the picker asked again");
+            }
+        }
+    }
+
+    /// The picker's own two keys, while it has focus.
+    ///
+    /// Enter is the accept button and Escape the cancel one; everything else is
+    /// the text field's, so a listing's movement keys must not also run while
+    /// somebody is typing a name.
+    fn pick_key(&mut self, key: &winit::keyboard::Key) {
+        use winit::keyboard::{Key, NamedKey};
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                if let Some(browser) = self.focused_browser_mut() {
+                    browser.cancel_pick();
+                }
+                self.repaint("pick cancelled");
+            }
+            Key::Named(NamedKey::Enter) => {
+                let answer = self
+                    .focused_browser()
+                    .and_then(|browser| browser.accept_pick());
+                if let Some(outcome) = answer {
+                    let id = self.tabs[self.active].focus;
+                    self.apply_pick(id, outcome);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5990,6 +6109,8 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut sort_change = None;
                     let mut place_choice = None;
                     let mut file_menu = None;
+                    let mut pick_answer = None;
+                    let mut pick_cancel = None;
                     let mut keymap_event = None;
                     let mut about_close = false;
                     let rendered = gpu.render(
@@ -6038,6 +6159,8 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut sort_change,
                         &mut place_choice,
                         &mut file_menu,
+                        &mut pick_answer,
+                        &mut pick_cancel,
                     );
                     // The keyboard map's answers. Its Escape and its captured
                     // key are handled where the keys are; a click has to come back
@@ -6101,6 +6224,20 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if let Some((id, choice)) = file_menu {
                         self.file_menu_choice(id, choice);
+                    }
+                    if let Some((id, outcome)) = pick_answer {
+                        self.apply_pick(id, outcome);
+                    }
+                    if let Some(id) = pick_cancel {
+                        // A cancel inside a `replace` question closes the
+                        // question, not the picker, and that is the browser's
+                        // rule: one button, one word, two depths.
+                        if let Some(Pane::Files(browser)) =
+                            self.tabs[self.active].leaves.get_mut(&id)
+                        {
+                            browser.cancel_pick();
+                        }
+                        self.repaint("pick cancelled");
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -6697,6 +6834,11 @@ impl Gpu {
         // the verb. It lives on the pane, so the answer comes back with the id
         // that owns it rather than with whoever happens to be focused.
         file_menu: &mut Option<(crate::layout::LeafId, dtr_files::MenuChoice)>,
+        // A picker's answer, and the pane whose cancel button was pressed. Both
+        // carry the id for the same reason: a picker answers a question that
+        // belonged to the pane it was asked in.
+        pick_answer: &mut Option<(crate::layout::LeafId, dtr_files::Outcome)>,
+        pick_cancel: &mut Option<crate::layout::LeafId>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -6946,6 +7088,12 @@ impl Gpu {
                 }
                 if let Some(choice) = outcome.menu {
                     *file_menu = Some((file.id, choice));
+                }
+                if let Some(outcome) = outcome.pick {
+                    *pick_answer = Some((file.id, outcome));
+                }
+                if outcome.pick_cancel {
+                    *pick_cancel = Some(file.id);
                 }
             }
             // The composition box goes over the grid and under the

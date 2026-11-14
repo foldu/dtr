@@ -207,6 +207,13 @@ pub struct Pick {
     problem: RefCell<Option<String>>,
     /// The name waiting for a confirmation.
     asking: RefCell<Option<PathBuf>>,
+    /// Whether the footer has still to ask for the keyboard.
+    ///
+    /// A save picker exists to be typed into, and a field that needs a click
+    /// first is a picker whose first keystroke goes somewhere else. The request
+    /// is made once and then taken, so a later frame does not steal focus back
+    /// from a listing somebody is scrolling.
+    focus: Cell<bool>,
 }
 
 impl Pick {
@@ -218,6 +225,7 @@ impl Pick {
             filter: Cell::new(0),
             problem: RefCell::new(None),
             asking: RefCell::new(None),
+            focus: Cell::new(true),
         }
     }
 
@@ -257,12 +265,20 @@ impl Pick {
         self.request.filters.get(self.filter())
     }
 
-    pub fn draft(&self) -> std::cell::Ref<'_, String> {
-        self.draft.borrow()
+    /// The name being typed, for a field that writes it back in place.
+    pub fn draft_mut(&self) -> std::cell::RefMut<'_, String> {
+        self.draft.borrow_mut()
     }
 
     pub fn set_draft(&self, text: String) {
         *self.draft.borrow_mut() = text;
+    }
+
+    /// Is there still a request for the keyboard? Answered once per picker.
+    pub fn take_focus(&self) -> bool {
+        let wanted = self.focus.get();
+        self.focus.set(false);
+        wanted
     }
 
     /// The refusal to say, if the last answer was refused.
@@ -273,6 +289,12 @@ impl Pick {
     /// The name being confirmed, if a save is asking.
     pub fn asking(&self) -> Option<PathBuf> {
         self.asking.borrow().clone()
+    }
+
+    /// Give up on the question, not on the picker: the footer's cancel inside a
+    /// `replace` confirmation returns to the form.
+    pub fn clear_asking(&self) {
+        *self.asking.borrow_mut() = None;
     }
 
     /// The accept button, with the listing's answer folded in.
