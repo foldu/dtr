@@ -163,6 +163,16 @@ impl Places {
             .map(|(_, icon)| *icon)
     }
 
+    /// The places as pairs: a directory and the icon that decorates it.
+    ///
+    /// In the order the file lists them, which is the order a desktop's own
+    /// "places" menu shows.
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, &'static str)> {
+        self.entries
+            .iter()
+            .map(|(path, icon)| (path.as_path(), *icon))
+    }
+
     /// How many places were read, for a test that wants to know the file parsed.
     pub fn len(&self) -> usize {
         self.entries.len()

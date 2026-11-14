@@ -5859,6 +5859,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // a leaf out of the layout.
                     let mut close_file = None;
                     let mut sort_change = None;
+                    let mut place_choice = None;
                     let mut keymap_event = None;
                     let mut about_close = false;
                     let rendered = gpu.render(
@@ -5905,6 +5906,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut reconnect_ask,
                         &mut close_file,
                         &mut sort_change,
+                        &mut place_choice,
                     );
                     // The keyboard map's answers. Its Escape and its captured
                     // key are handled where the keys are; a click has to come back
@@ -5955,6 +5957,16 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((id, change)) = sort_change {
                         self.apply_sort_change(id, change);
                         self.repaint("files sorted");
+                    }
+                    if let Some((id, path)) = place_choice {
+                        // The places popup chose a directory: the pane that owns
+                        // the button goes there, which may be another machine.
+                        if let Some(Pane::Files(browser)) =
+                            self.tabs[self.active].leaves.get_mut(&id)
+                        {
+                            browser.navigate(path);
+                        }
+                        self.repaint("files place");
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -6546,6 +6558,7 @@ impl Gpu {
         // the layout is the app's, exactly like a tab's cross.
         close_file: &mut Option<crate::layout::LeafId>,
         sort_change: &mut Option<(crate::layout::LeafId, dtr_files::SortChange)>,
+        place_choice: &mut Option<(crate::layout::LeafId, std::path::PathBuf)>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -6789,6 +6802,9 @@ impl Gpu {
                 }
                 if let Some(change) = outcome.sort {
                     *sort_change = Some((file.id, change));
+                }
+                if let Some(path) = outcome.navigate {
+                    *place_choice = Some((file.id, path));
                 }
             }
             // The composition box goes over the grid and under the

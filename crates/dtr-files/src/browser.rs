@@ -47,6 +47,8 @@ const CLOSE_SIDE: f32 = 20.0;
 /// `name` and `modified` share one slot, and the label elides inside it. The
 /// count sits to its left and grows leftwards, so the control never moves.
 const SORT_WIDTH: f32 = 72.0;
+/// The places button's slot at the header's left: a glyph, not a word.
+const PLACES_WIDTH: f32 = 22.0;
 
 /// One line in the listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -445,6 +447,29 @@ impl Browser {
     }
 
     /// What this pane is sorted by and what it hides.
+    /// The places a popup offers: home, the desktop's decorated directories, and
+    /// the root of the filesystem.
+    ///
+    /// Built on demand and owned, so the popup holds no borrow of the icon set
+    /// while it draws: a `RefCell` borrow across a closure that calls back into
+    /// the same browser is a panic waiting for a slow frame.
+    pub fn place_list(&self) -> Vec<(String, PathBuf)> {
+        let mut places = vec![("home".to_owned(), self.home.clone())];
+        for (path, _icon) in self.icons.borrow().places().iter() {
+            // A place equal to home is the row above it.
+            if path != self.home {
+                places.push((display_path(path, &self.home), path.to_path_buf()));
+            }
+        }
+        places.push(("filesystem".to_owned(), PathBuf::from("/")));
+        places
+    }
+
+    /// Whether a directory is the one this pane is showing, for a tick in a menu.
+    pub fn showing(&self, path: &Path) -> bool {
+        path == self.cwd
+    }
+
     /// The breadcrumb segment under a point, and where it goes.
     ///
     /// The record the last draw left: the header is painted, so there is no
@@ -1130,7 +1155,7 @@ impl Browser {
         // does not fit is dropped from the *front*, and an ellipsis says so: the
         // last segment is the directory being looked at and is never the one to
         // lose.
-        let mut x = header.left() + 8.0;
+        let mut x = places_rect(rect).right() + 6.0;
         if let Some(alias) = self.header_alias() {
             let at = egui::pos2(x, header.center().y);
             let galley =
@@ -1599,12 +1624,14 @@ fn close_rect(rect: egui::Rect) -> egui::Rect {
 /// The pane is painted from a `&Browser` and cannot change it, so an answer
 /// travels the way a clicked tab's does: the drawing knows what was pressed and
 /// the app knows what it means.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaneOutcome {
     /// The close cross was pressed.
     pub close: bool,
     /// The sort control asked for something.
     pub sort: Option<SortChange>,
+    /// The places popup chose a directory.
+    pub navigate: Option<PathBuf>,
 }
 
 /// What the sort control asked for: one of the four keys, or one of the two
@@ -1615,6 +1642,16 @@ pub enum SortChange {
     /// Flip the direction; the caller keeps the state.
     Reverse,
     FoldersFirst,
+}
+
+/// The places button's target: the header's left-hand end, before the path.
+fn places_rect(rect: egui::Rect) -> egui::Rect {
+    let header = header_rect(rect);
+    let height = (header.height() - 6.0).max(0.0);
+    egui::Rect::from_min_size(
+        egui::pos2(header.left() + 4.0, header.center().y - height / 2.0),
+        egui::vec2(PLACES_WIDTH, height),
+    )
 }
 
 /// The sort control's target: the header's right-hand end, beside the cross.
@@ -1687,7 +1724,131 @@ pub fn pane_ui(
             close = close_button(&ctx, close_id, target, skin, &label);
         });
     let sort = sort_button(&ctx, sort_id, sort_target, skin, browser.view());
-    PaneOutcome { close, sort }
+    let places_id = id.with("places");
+    let places_target = places_rect(rect);
+    dtr_widgets::prime_area(
+        &ctx,
+        places_id,
+        egui::Order::Background,
+        places_target,
+        true,
+    );
+    let navigate = places_button(
+        &ctx,
+        places_id,
+        places_target,
+        skin,
+        browser.place_list(),
+        browser,
+    );
+    PaneOutcome {
+        close,
+        sort,
+        navigate,
+    }
+}
+
+/// The places button: a house, and a menu of the directories a desktop calls
+/// places.
+///
+/// A pane is too narrow for the sidebar the manager window will have
+/// (`docs/manager.md` §6), so the same list is a popup — and it earns its header
+/// space because the breadcrumb can reach every place only by way of home.
+///
+/// The mark is drawn, not borrowed: a house is six strokes, and an SVG would put
+/// an image loader between a harness and a snapshot (§The grid, icons).
+fn places_button(
+    ctx: &egui::Context,
+    id: egui::Id,
+    target: egui::Rect,
+    skin: &Skin,
+    places: Vec<(String, PathBuf)>,
+    browser: &Browser,
+) -> Option<PathBuf> {
+    let palette = skin.palette;
+    let style = &skin.style;
+    let mut chosen = None;
+    egui::Area::new(id)
+        .order(egui::Order::Background)
+        .fixed_pos(target.min)
+        .constrain(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(target.size(), egui::Sense::click());
+            let open = egui::Popup::is_id_open(ctx, response.id);
+            if response.hovered() || open {
+                ui.painter().rect_filled(
+                    rect.shrink(2.0),
+                    style.control_radius,
+                    palette.control_hover,
+                );
+            }
+            house(ui.painter(), rect.shrink(5.0), palette.dim, style.border);
+            let name = "places";
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
+            if response.has_focus() {
+                response.surrender_focus();
+            }
+
+            let mut popup = egui::Popup::menu(&response).width(210.0);
+            if let Some(tip) = style.tip_height {
+                popup = dtr_widgets::point_at(ui, popup, rect, tip);
+            }
+            let popup = popup.show(|ui| {
+                ui.set_min_width(210.0);
+                for (label, path) in &places {
+                    if dtr_widgets::menu_row(ui, skin, label, browser.showing(path)) {
+                        chosen = Some(path.clone());
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(popup) = popup {
+                dtr_widgets::menu_tip(&popup.response, skin, rect);
+            }
+        });
+    chosen
+}
+
+/// A house, in six strokes: two roof slopes, two walls, a floor and a door.
+fn house(painter: &egui::Painter, rect: egui::Rect, colour: egui::Color32, border: f32) {
+    let stroke = egui::Stroke::new(border.max(1.2), colour);
+    let width = rect.width();
+    let height = rect.height();
+    let left = rect.left() + width * 0.1;
+    let right = rect.right() - width * 0.1;
+    let roof = rect.top() + height * 0.12;
+    let shoulders = rect.top() + height * 0.46;
+    let floor = rect.bottom() - height * 0.1;
+    let apex = egui::pos2(rect.center().x, roof);
+    painter.line_segment([apex, egui::pos2(left, shoulders)], stroke);
+    painter.line_segment([apex, egui::pos2(right, shoulders)], stroke);
+    painter.line_segment(
+        [egui::pos2(left, shoulders), egui::pos2(left, floor)],
+        stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(right, shoulders), egui::pos2(right, floor)],
+        stroke,
+    );
+    painter.line_segment([egui::pos2(left, floor), egui::pos2(right, floor)], stroke);
+    // The door, from the floor up: a house without one is a tent.
+    let door = rect.center().x;
+    let half = width * 0.11;
+    painter.line_segment(
+        [
+            egui::pos2(door - half, floor),
+            egui::pos2(door - half, floor - height * 0.22),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(door + half, floor),
+            egui::pos2(door + half, floor - height * 0.22),
+        ],
+        stroke,
+    );
 }
 
 /// The sort control: the order's name, a drawn triangle for its direction, and
@@ -2212,6 +2373,27 @@ mod tests {
         );
         // And the same mtime does not re-list a second time.
         assert!(!browser.refresh_if_changed(), "nothing changed again");
+    }
+
+    /// The places popup starts at home and ends at the filesystem root, and it
+    /// holds no borrow of the icon set: the list is owned before the popup draws.
+    #[test]
+    fn a_place_list_starts_at_home_and_ends_at_the_root() {
+        let mut browser = Browser::new(Some(PathBuf::from("/tmp")));
+        browser.without_icons();
+        let places = browser.place_list();
+        assert_eq!(
+            places.first().map(|(label, _)| label.as_str()),
+            Some("home")
+        );
+        assert_eq!(
+            places.last().map(|(label, _)| label.as_str()),
+            Some("filesystem")
+        );
+        assert_eq!(
+            places.last().map(|(_, path)| path.clone()),
+            Some(PathBuf::from("/"))
+        );
     }
 
     /// The breadcrumb is one target per component, and the home directory is a
@@ -3075,6 +3257,47 @@ mod kittest_tests {
         );
         // The body is not the header.
         assert_eq!(browser.crumb_at(pane_rect().center()), None);
+    }
+
+    /// The places button opens a menu of the directories a desktop calls places,
+    /// and answers with one.
+    #[test]
+    fn the_places_button_answers_with_a_directory() {
+        let skin = skin();
+        let browser = pane();
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let seen = std::rc::Rc::clone(&answer);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                let outcome = pane_ui(
+                    ui,
+                    egui::Id::unique("dtr-files-places"),
+                    pane_rect(),
+                    &browser,
+                    &skin,
+                    true,
+                );
+                if outcome.navigate.is_some() {
+                    *seen.borrow_mut() = outcome.navigate.clone();
+                }
+            });
+        harness.run();
+        harness.get_by_label("places").click();
+        harness.run();
+        for label in ["home", "filesystem"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from the places menu"
+            );
+        }
+        harness.get_by_label("filesystem").click();
+        harness.run();
+        assert_eq!(
+            *answer.borrow(),
+            Some(PathBuf::from("/")),
+            "the menu's answer never reached the caller"
+        );
     }
 
     /// The order's own control: a name, a direction, and a menu that is the same
