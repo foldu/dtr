@@ -1128,6 +1128,7 @@ dependencies = [
  "dirs",
  "dtr-complete",
  "dtr-config",
+ "dtr-files",
  "dtr-sftp",
  "dtr-sshconfig",
  "dtr-store",
@@ -1180,6 +1181,17 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "toml_edit 0.23.10+spec-1.0.0",
+]
+
+[[package]]
+name = "dtr-files"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "dtr-widgets",
+ "egui",
+ "egui_kittest",
+ "tempfile",
 ]
 
 [[package]]

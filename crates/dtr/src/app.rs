@@ -16,11 +16,11 @@ use winit::window::{Window, WindowId};
 
 use libghostty_vt::mouse::{Action as MouseAction, Button as MouseButton};
 
-use crate::explorer::{Explorer, PaneView as FilePaneView};
 use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
 use crate::ui::Status;
+use dtr_files::{Browser, PaneView as FilePaneView};
 
 pub enum UserEvent {
     Frame,
@@ -406,7 +406,7 @@ pub fn capture_headless(
     let files = startup
         .files
         .as_ref()
-        .map(|path| Explorer::new(Some(path.clone())));
+        .map(|path| Browser::new(Some(path.clone())));
 
     let settings = startup.preferences.then(|| {
         let mut settings = crate::settings::Settings::new();
@@ -804,7 +804,7 @@ fn sftp_worker(
 
 /// Where a copy lands by default: `~/Downloads`, created if it is missing.
 ///
-/// The file explorer's download and the link menu's "Save as" share it, so a
+/// The file browser's download and the link menu's "Save as" share it, so a
 /// remote file taken two different ways does not end up in two different places.
 /// For "Save as" it is only where the dialog *starts*: the user picks the real
 /// destination, and picking somewhere else is the whole point of asking.
@@ -930,17 +930,20 @@ fn closed(active: usize, count: usize) -> Option<usize> {
     Some(active.min(count - 2))
 }
 
-/// Whether a layer egui found under the pointer is one of its own surfaces — a
-/// card, a popup, a file pane — rather than the window's root.
+/// A pane rectangle in egui's unit.
 ///
-/// `layer_id_at` is never `None` inside the window: the root layer's rect is the
-/// whole content area, so it is found under the pointer wherever the pointer is.
-/// Asking "is there a layer here" therefore answered *yes* over the grid, which
-/// made `over_egui` true everywhere — a link under the pointer never lit its
-/// hand, and a wheel over the `+` menu was read as the grid's because the test
-/// could not tell the two apart. The layer *above* the root is the question.
-pub(crate) fn above_the_root(layer: egui::LayerId) -> bool {
-    layer != egui::LayerId::background()
+/// The layout, the grid and the pty are physical pixels; egui draws in points and
+/// applies the scale itself, exactly once. This is the one conversion, asked by
+/// every place that hands a pane rectangle to an egui surface — the IME's caret
+/// box and the painted file panes.
+pub(crate) fn to_points(rect: crate::layout::Rect, pixels_per_point: f32) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(rect.x / pixels_per_point, rect.y / pixels_per_point),
+        egui::vec2(
+            rect.width / pixels_per_point,
+            rect.height / pixels_per_point,
+        ),
+    )
 }
 
 /// Whether a wheel notch belongs to the terminal.
@@ -992,20 +995,20 @@ fn cell_of(
 /// Translate the keys a file pane understands. Named arrows are
 /// keyboard-layout independent; `h`, `r`, `g` and `G` are the vim-ish ones the
 /// brief asks for. Modifiers are filtered by the caller.
-fn explorer_key(key: &winit::keyboard::Key) -> Option<crate::explorer::Key> {
+fn browser_key(key: &winit::keyboard::Key) -> Option<dtr_files::Key> {
     use winit::keyboard::{Key, NamedKey};
 
     match key {
-        Key::Named(NamedKey::ArrowUp) => Some(crate::explorer::Key::Up),
-        Key::Named(NamedKey::ArrowDown) => Some(crate::explorer::Key::Down),
-        Key::Named(NamedKey::ArrowLeft) => Some(crate::explorer::Key::Left),
-        Key::Named(NamedKey::Enter) => Some(crate::explorer::Key::Enter),
-        Key::Named(NamedKey::Backspace) => Some(crate::explorer::Key::Left),
+        Key::Named(NamedKey::ArrowUp) => Some(dtr_files::Key::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(dtr_files::Key::Down),
+        Key::Named(NamedKey::ArrowLeft) => Some(dtr_files::Key::Left),
+        Key::Named(NamedKey::Enter) => Some(dtr_files::Key::Enter),
+        Key::Named(NamedKey::Backspace) => Some(dtr_files::Key::Left),
         Key::Character(text) => match text.as_str() {
-            "h" => Some(crate::explorer::Key::Left),
-            "r" => Some(crate::explorer::Key::Reload),
-            "g" => Some(crate::explorer::Key::Top),
-            "G" => Some(crate::explorer::Key::Bottom),
+            "h" => Some(dtr_files::Key::Left),
+            "r" => Some(dtr_files::Key::Reload),
+            "g" => Some(dtr_files::Key::Top),
+            "G" => Some(dtr_files::Key::Bottom),
             _ => None,
         },
         _ => None,
@@ -1068,7 +1071,7 @@ struct Session {
 /// rather than a change to the split tree.
 enum Pane {
     Terminal(Session),
-    Files(Explorer),
+    Files(Browser),
 }
 
 impl Pane {
@@ -1086,9 +1089,9 @@ impl Pane {
         }
     }
 
-    fn explorer(&self) -> Option<&Explorer> {
+    fn browser(&self) -> Option<&Browser> {
         match self {
-            Pane::Files(explorer) => Some(explorer),
+            Pane::Files(browser) => Some(browser),
             Pane::Terminal(_) => None,
         }
     }
@@ -1097,7 +1100,7 @@ impl Pane {
 /// One tab: a layout of panes, the panes themselves, and which one has focus.
 ///
 /// The layout knows nothing about what a pane *is*; `leaves` is the map that
-/// decides, which is how a file-explorer pane becomes a new entry in this map
+/// decides, which is how a file-browser pane becomes a new entry in this map
 /// rather than a change to the geometry.
 struct Tab {
     layout: crate::layout::Layout,
@@ -1135,14 +1138,14 @@ impl Tab {
         self.leaves.get_mut(&focus).and_then(Pane::terminal_mut)
     }
 
-    fn focused_explorer(&self) -> Option<&Explorer> {
-        self.leaves.get(&self.focus).and_then(Pane::explorer)
+    fn focused_browser(&self) -> Option<&Browser> {
+        self.leaves.get(&self.focus).and_then(Pane::browser)
     }
 
-    fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
+    fn focused_browser_mut(&mut self) -> Option<&mut Browser> {
         let focus = self.focus;
         match self.leaves.get_mut(&focus) {
-            Some(Pane::Files(explorer)) => Some(explorer),
+            Some(Pane::Files(browser)) => Some(browser),
             _ => None,
         }
     }
@@ -1709,10 +1712,10 @@ impl App {
                 // A file pane has focus: it gets navigation keys, and
                 // everything terminal-only is ignored.
                 if !self.palette.open && !stroke.mods.control_key() && !stroke.mods.alt_key() {
-                    if let Some(key) = explorer_key(&stroke.key) {
+                    if let Some(key) = browser_key(&stroke.key) {
                         let chosen = self
-                            .focused_explorer_mut()
-                            .and_then(|explorer| explorer.handle(key));
+                            .focused_browser_mut()
+                            .and_then(|browser| browser.handle(key));
                         if let Some(path) = chosen {
                             self.insert_path_into_terminal(path);
                         }
@@ -1900,7 +1903,7 @@ impl App {
         gpu.egui_state
             .egui_ctx()
             .layer_id_at(points)
-            .is_some_and(above_the_root)
+            .is_some_and(dtr_widgets::above_the_root)
     }
 
     /// The pointer moved: if it entered a different cell, ask the pane what
@@ -2176,7 +2179,7 @@ impl App {
             let note = match outcome {
                 Ok(bytes) => format!(
                     "saved {} to {}",
-                    crate::explorer::human_size(bytes),
+                    dtr_files::human_size(bytes),
                     dest.display()
                 ),
                 Err(err) => format!("could not save {described}: {err:#}"),
@@ -2199,18 +2202,18 @@ impl App {
             tab.layout.leaves().into_iter().find(|id| {
                 matches!(
                     tab.leaves.get(id),
-                    Some(Pane::Files(explorer)) if explorer.alias() == alias.as_deref()
+                    Some(Pane::Files(browser)) if browser.alias() == alias.as_deref()
                 )
             })
         };
-        let explorer = match &alias {
-            Some(alias) => Explorer::remote_at(alias, path),
-            None => Explorer::new(Some(path)),
+        let browser = match &alias {
+            Some(alias) => Browser::remote_at(alias, path),
+            None => Browser::new(Some(path)),
         };
         if let Some(id) = existing {
             self.tabs[self.active]
                 .leaves
-                .insert(id, Pane::Files(explorer));
+                .insert(id, Pane::Files(browser));
             return;
         }
         self.unzoom();
@@ -2224,7 +2227,7 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(id, Pane::Files(explorer));
+        tab.leaves.insert(id, Pane::Files(browser));
     }
 
     /// Where a path on this session lives: this disk, or the host the session is
@@ -2355,7 +2358,9 @@ impl App {
             return None;
         }
         if let Some(pointer) = ctx.pointer_latest_pos()
-            && ctx.layer_id_at(pointer).is_some_and(above_the_root)
+            && ctx
+                .layer_id_at(pointer)
+                .is_some_and(dtr_widgets::above_the_root)
         {
             return None;
         }
@@ -3293,12 +3298,12 @@ impl App {
         self.tabs[self.active].focused_terminal_mut()
     }
 
-    fn focused_explorer(&self) -> Option<&Explorer> {
-        self.tabs[self.active].focused_explorer()
+    fn focused_browser(&self) -> Option<&Browser> {
+        self.tabs[self.active].focused_browser()
     }
 
-    fn focused_explorer_mut(&mut self) -> Option<&mut Explorer> {
-        self.tabs[self.active].focused_explorer_mut()
+    fn focused_browser_mut(&mut self) -> Option<&mut Browser> {
+        self.tabs[self.active].focused_browser_mut()
     }
 
     /// Open a new tab on a local shell, in the focused tab's directory when that
@@ -3758,14 +3763,14 @@ impl App {
         let mut downloads = Vec::new();
         for tab in &mut self.tabs {
             for pane in tab.leaves.values_mut() {
-                let Pane::Files(explorer) = pane else {
+                let Pane::Files(browser) = pane else {
                     continue;
                 };
-                if let Some(request) = explorer.take_request() {
+                if let Some(request) = browser.take_request() {
                     requests.push(request);
                 }
-                if let Some(remote) = explorer.take_download() {
-                    if let Some(alias) = explorer.alias() {
+                if let Some(remote) = browser.take_download() {
+                    if let Some(alias) = browser.alias() {
                         downloads.push((alias.to_owned(), remote));
                     }
                 }
@@ -3790,14 +3795,14 @@ impl App {
     ///
     /// A reply names the directory it answers and two panes can browse one host,
     /// so the match is by host *and* by what the pane asked for.
-    fn explorer_waiting(&mut self, alias: &str, path: &Path) -> Option<&mut Explorer> {
+    fn browser_waiting(&mut self, alias: &str, path: &Path) -> Option<&mut Browser> {
         for tab in &mut self.tabs {
             for pane in tab.leaves.values_mut() {
-                let Pane::Files(explorer) = pane else {
+                let Pane::Files(browser) = pane else {
                     continue;
                 };
-                if explorer.alias() == Some(alias) && explorer.is_waiting_for(path) {
-                    return Some(explorer);
+                if browser.alias() == Some(alias) && browser.is_waiting_for(path) {
+                    return Some(browser);
                 }
             }
         }
@@ -3805,14 +3810,14 @@ impl App {
     }
 
     /// Any pane browsing this host, for a failure that names no directory.
-    fn explorer_on(&mut self, alias: &str) -> Option<&mut Explorer> {
+    fn browser_on(&mut self, alias: &str) -> Option<&mut Browser> {
         for tab in &mut self.tabs {
             for pane in tab.leaves.values_mut() {
-                let Pane::Files(explorer) = pane else {
+                let Pane::Files(browser) = pane else {
                     continue;
                 };
-                if explorer.alias() == Some(alias) {
-                    return Some(explorer);
+                if browser.alias() == Some(alias) {
+                    return Some(browser);
                 }
             }
         }
@@ -3826,16 +3831,16 @@ impl App {
                 path,
                 entries,
             } => {
-                let entries: Vec<crate::explorer::Entry> = entries
+                let entries: Vec<dtr_files::Entry> = entries
                     .into_iter()
-                    .map(|entry| crate::explorer::Entry {
+                    .map(|entry| dtr_files::Entry {
                         name: entry.name,
                         is_dir: entry.dir,
                         size: (!entry.dir).then_some(entry.size),
                     })
                     .collect();
-                if let Some(explorer) = self.explorer_waiting(&alias, &path) {
-                    explorer.apply_listing(path, entries);
+                if let Some(browser) = self.browser_waiting(&alias, &path) {
+                    browser.apply_listing(path, entries);
                 }
             }
             SftpEvent::Downloaded { local, bytes } => {
@@ -3845,8 +3850,8 @@ impl App {
                 ));
             }
             SftpEvent::Failed { alias, message } => {
-                if let Some(explorer) = self.explorer_on(&alias) {
-                    explorer.apply_failure(message);
+                if let Some(browser) = self.browser_on(&alias) {
+                    browser.apply_failure(message);
                 }
             }
         }
@@ -3865,7 +3870,7 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(id, Pane::Files(Explorer::remote(alias)));
+        tab.leaves.insert(id, Pane::Files(Browser::remote(alias)));
         tab.focus = id;
     }
 
@@ -3881,7 +3886,7 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(id, Pane::Files(Explorer::new(path)));
+        tab.leaves.insert(id, Pane::Files(Browser::new(path)));
         tab.focus = id;
     }
 
@@ -4396,7 +4401,7 @@ fn report_loop(app: &App) {
 /// which is the same reason the theme is compiled in. Windows also wants the
 /// icon in the *executable* — that is `build.rs`, and it is what the taskbar
 /// falls back to for a window that has not been shown yet, for a pinned entry,
-/// and for Explorer.
+/// and for Browser.
 fn window_icon() -> Option<winit::window::Icon> {
     let image = image::load_from_memory(include_bytes!("../../../assets/logo/dtr-icon-32.png"))
         .ok()?
@@ -5107,8 +5112,8 @@ impl ApplicationHandler<UserEvent> for App {
                             rx_rate = session.meter.rx_rate;
                             tx_rate = session.meter.tx_rate;
                         }
-                    } else if let Some(explorer) = self.focused_explorer() {
-                        label = explorer.title();
+                    } else if let Some(browser) = self.focused_browser() {
+                        label = browser.title();
                     }
                     let tabs = (self.active + 1, self.tabs.len());
                     let status = Status {
@@ -5300,15 +5305,17 @@ impl ApplicationHandler<UserEvent> for App {
                     // File panes have no cells: they are painted with egui over
                     // the rectangle the grid pass reserved for them.
                     let area = self.pane_area(screen, gpu.scale());
+                    let scale = gpu.scale();
+                    let points = gpu.egui_ctx.pixels_per_point();
                     let file_panes: Vec<FilePaneView<'_>> = tab
                         .layout
-                        .visible(area, crate::ui::SPLIT_GAP * gpu.scale(), tab.zoom)
+                        .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom)
                         .into_iter()
                         .filter_map(|(id, rect)| match tab.leaves.get(&id) {
-                            Some(Pane::Files(explorer)) => Some(FilePaneView {
+                            Some(Pane::Files(browser)) => Some(FilePaneView {
                                 id,
-                                rect,
-                                explorer,
+                                rect: to_points(rect, points),
+                                browser,
                                 focused: id == tab.focus,
                             }),
                             _ => None,
@@ -5388,15 +5395,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 // egui draws in points; the grid is laid out in
                                 // physical pixels. One conversion, here.
                                 let points = gpu.egui_ctx.pixels_per_point();
-                                let to_points = |r: crate::layout::Rect| {
-                                    egui::Rect::from_min_size(
-                                        egui::pos2(r.x / points, r.y / points),
-                                        egui::vec2(r.width / points, r.height / points),
-                                    )
-                                };
                                 ime_anchor = Some(crate::ime::Anchor {
-                                    caret: to_points(cell),
-                                    pane: to_points(rect),
+                                    caret: to_points(cell, points),
+                                    pane: to_points(rect, points),
                                 });
                             }
                         }
@@ -6324,12 +6325,12 @@ impl Gpu {
             // File panes sit over the grid rectangle their leaf owns. They
             // are areas rather than windows: fixed position, no dragging.
             for file in files {
-                if crate::explorer::pane_ui(
+                if dtr_files::pane_ui(
                     ui,
                     egui::Id::unique(("dtr-files", file.id)),
                     file.rect,
-                    file.explorer,
-                    look,
+                    file.browser,
+                    &look.skin(),
                     file.focused,
                 ) {
                     *close_file = Some(file.id);

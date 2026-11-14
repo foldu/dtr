@@ -2414,7 +2414,7 @@ mod kittest_tests {
         let grid = harness.ctx.content_rect().center();
         let under = harness.ctx.layer_id_at(grid).expect("the root layer");
         assert!(
-            !crate::app::above_the_root(under),
+            !dtr_widgets::above_the_root(under),
             "the grid is the window's own layer, not an egui surface: {under:?}"
         );
 
@@ -2424,7 +2424,7 @@ mod kittest_tests {
         let menu = harness.get_by_label("local shell").rect().center();
         let popup = harness.ctx.layer_id_at(menu).expect("the menu's layer");
         assert!(
-            crate::app::above_the_root(popup),
+            dtr_widgets::above_the_root(popup),
             "the menu is above the root layer: {popup:?}"
         );
     }

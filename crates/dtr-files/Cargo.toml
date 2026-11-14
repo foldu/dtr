@@ -1,0 +1,20 @@
+[package]
+name = "dtr-files"
+description = "The file browser: a listing, a selection, and the views over them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `dirs::home_dir`, for the `~` in a displayed path. The browser shows paths, so
+# it needs to know where home is; nothing else about the machine.
+dirs.workspace = true
+egui.workspace = true
+# The look, and the two egui quirks a painted pane has to know about. Not `dtr`:
+# the file picker is a second process and cannot link a terminal.
+dtr-widgets = { path = "../dtr-widgets" }
+
+[dev-dependencies]
+egui_kittest.workspace = true
+tempfile.workspace = true

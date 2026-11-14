@@ -47,7 +47,8 @@ pub use skin::{
 };
 pub use style::{Focus, Footer, Preset, Scheme, Section, Style, Title};
 pub use widgets::{
-    Button, Card, CardOutput, Edit, Editable, Mark, RowSpec, Stripe, check, check_box, cross,
-    cross_at, label_cell, menu_row, menu_row_chord, menu_row_icon, menu_separator, menu_tip,
-    menu_width, plus, point_at, prime_area, row, section, segmented, stripe, tabs,
+    Button, Card, CardOutput, Edit, Editable, Mark, RowSpec, Stripe, above_the_root, check,
+    check_box, cross, cross_at, label_cell, menu_row, menu_row_chord, menu_row_icon,
+    menu_separator, menu_tip, menu_width, plus, point_at, prime_area, row, section, segmented,
+    stripe, tabs,
 };

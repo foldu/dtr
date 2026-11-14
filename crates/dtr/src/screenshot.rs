@@ -73,7 +73,7 @@ pub fn capture(
     look: &crate::ui::Look,
     selection: Option<(usize, usize)>,
     split: Option<crate::layout::Axis>,
-    files: Option<&crate::explorer::Explorer>,
+    files: Option<&dtr_files::Browser>,
     toast: Option<(&str, f32)>,
     settings: Option<&crate::settings::Settings>,
     // The serial connection sheet, when the preview flag asked for one.
@@ -236,14 +236,16 @@ pub fn capture(
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .show(ui, |_ui| {});
-        if let (Some(explorer), Some(rect)) = (files, file_rect) {
-            // The capture draws the button; nothing can press it.
-            let _ = crate::explorer::pane_ui(
+        if let (Some(browser), Some(rect)) = (files, file_rect) {
+            // The capture draws the button; nothing can press it. The pane's
+            // rectangle comes from the split tree in physical pixels and egui
+            // draws in points, which is `App`'s one conversion.
+            let _ = dtr_files::pane_ui(
                 ui,
                 egui::Id::unique("dtr-screenshot-files"),
-                rect,
-                explorer,
-                look,
+                crate::app::to_points(rect, ui.ctx().pixels_per_point()),
+                browser,
+                &look.skin(),
                 true,
             );
         }

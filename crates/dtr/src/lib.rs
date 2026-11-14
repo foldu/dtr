@@ -14,7 +14,6 @@
 pub mod about;
 pub mod app;
 pub mod chrome;
-pub mod explorer;
 pub mod fonts;
 pub mod ime;
 pub mod input;

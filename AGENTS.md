@@ -11,7 +11,8 @@ window, one OS thread per pane. `crates/` holds the workspace:
 
 | crate | what |
 | --- | --- |
-| `dtr` | the binary |
+| `dtr` | the terminal: the window, the panes, and the binary |
+| `dtr-files` | the file browser: a listing, a selection, and the views over them |
 | `dtr-config` | the config file (`toml_edit`) |
 | `dtr-complete` | the palette's completion engine |
 | `dtr-store` | the redb logbook |

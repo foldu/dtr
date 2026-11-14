@@ -1,20 +1,27 @@
-//! A file-manager pane.
+//! The browser itself: a directory listing, a selection, and the rows that paint
+//! them.
 //!
-//! The pane is deliberately small: a directory listing, a selection, and the
-//! one thing a terminal wants from a file manager — "put this path on the
-//! command line". It is not an editor, and it does not shell out to `ls`.
+//! It is deliberately small still: a listing, a selection, and the one thing a
+//! terminal wants from a file manager — "put this path on the command line". It
+//! is not an editor, and it does not shell out to `ls`. The grid, the places
+//! sidebar and the writes are `docs/manager.md`'s F1b and later; this is what
+//! they are built on.
 //!
 //! The filesystem-facing part is a thin layer over [`std::fs::read_dir`]. The
 //! decisions that are easy to get wrong (ordering, selection clamping, what
 //! `..` means, how a path under `$HOME` is shown) live in plain functions that
 //! take values, so their tests never touch a disk.
+//!
+//! Nothing here knows what it is drawn inside: a pane in a terminal tab, a
+//! manager window or the desktop's picker all call [`pane_ui`] with a skin and a
+//! rectangle in points.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use egui::{Align2, Stroke};
 
-use crate::ui::Look;
+use dtr_widgets::Skin;
 
 const ROW_HEIGHT: f32 = 18.0;
 const HEADER_HEIGHT: f32 = 26.0;
@@ -61,7 +68,7 @@ pub enum Key {
 }
 
 /// A file pane: a directory, its entries, and where the selection is.
-pub struct Explorer {
+pub struct Browser {
     cwd: PathBuf,
     home: PathBuf,
     entries: Vec<Entry>,
@@ -96,7 +103,7 @@ pub struct Remote {
     pub download: Option<PathBuf>,
 }
 
-impl Explorer {
+impl Browser {
     /// Open at `start`, or at the process's current directory when there is no
     /// start path. A path that names a file shows its parent directory and
     /// selects the file, which is what `dtr --files some/file` should mean.
@@ -109,7 +116,7 @@ impl Explorer {
     /// The same, opening at `path`. `.` is the home directory, because only the
     /// server knows where that is; a path from a link is already absolute.
     pub fn remote_at(alias: &str, path: PathBuf) -> Self {
-        let mut explorer = Self {
+        let mut browser = Self {
             cwd: path,
             home: PathBuf::from("."),
             entries: Vec::new(),
@@ -124,8 +131,8 @@ impl Explorer {
                 download: None,
             }),
         };
-        explorer.remote_request();
-        explorer
+        browser.remote_request();
+        browser
     }
 
     /// The alias this pane browses, when it browses one.
@@ -194,7 +201,7 @@ impl Explorer {
 
     pub fn new(start: Option<PathBuf>) -> Self {
         let home = dirs::home_dir().unwrap_or_default();
-        let mut explorer = Self {
+        let mut browser = Self {
             cwd: PathBuf::from("."),
             home,
             entries: Vec::new(),
@@ -225,16 +232,16 @@ impl Explorer {
         if let Ok(absolute) = std::fs::canonicalize(&cwd) {
             cwd = absolute;
         }
-        explorer.cwd = cwd;
-        explorer.reload();
+        browser.cwd = cwd;
+        browser.reload();
 
         if let Some(name) = select {
             let name = name.to_string_lossy();
-            if let Some(index) = explorer.entries.iter().position(|entry| entry.name == name) {
-                explorer.selected = index;
+            if let Some(index) = browser.entries.iter().position(|entry| entry.name == name) {
+                browser.selected = index;
             }
         }
-        explorer
+        browser
     }
 
     /// What the status strip calls this pane. A remote pane names the host,
@@ -384,11 +391,10 @@ impl Explorer {
     }
 
     /// Paint the pane. `rect` is in logical points and is also the clip.
-    fn draw(&self, ui: &mut egui::Ui, look: &Look, rect: egui::Rect, focused: bool) {
+    fn draw(&self, ui: &mut egui::Ui, skin: &Skin, rect: egui::Rect, focused: bool) {
         if rect.width() < 8.0 || rect.height() < 8.0 {
             return;
         }
-        let skin = look.skin();
         let palette = skin.palette;
         let style = &skin.style;
         let body_font = style.value_font.clone();
@@ -557,12 +563,12 @@ impl Explorer {
     }
 }
 
-/// One file pane as the renderer sees it: a physical rectangle, the explorer,
-/// and whether it currently has focus.
+/// One file pane as a surface sees it: a rectangle in points, the browser, and
+/// whether it currently has focus.
 pub struct PaneView<'a> {
     pub id: u64,
-    pub rect: crate::layout::Rect,
-    pub explorer: &'a Explorer,
+    pub rect: egui::Rect,
+    pub browser: &'a Browser,
     pub focused: bool,
 }
 
@@ -592,38 +598,31 @@ fn close_rect(rect: egui::Rect) -> egui::Rect {
 
 /// Draw one file pane in an egui area at its leaf's rectangle.
 ///
-/// `rect` is physical pixels; egui works in logical points, so the conversion
-/// is `physical / pixels_per_point`. The area is clipped to the pane so a long
-/// listing cannot spill into the terminal next door.
+/// `rect` is the pane in **points**, which is egui's unit: a surface that lays
+/// panes out in physical pixels divides by its own `pixels_per_point` before
+/// asking, because only the surface knows the scale. The area is clipped to the
+/// pane so a long listing cannot spill into the terminal next door.
 ///
 /// Returns whether the pane's close button was pressed. The drawing code knows
-/// that; only the app can take a leaf out of the layout.
+/// that; only the caller can take a leaf out of a layout.
 pub fn pane_ui(
     ui: &mut egui::Ui,
     id: egui::Id,
-    rect: crate::layout::Rect,
-    explorer: &Explorer,
-    look: &Look,
+    rect: egui::Rect,
+    browser: &Browser,
+    skin: &Skin,
     focused: bool,
 ) -> bool {
-    let pixels_per_point = ui.ctx().pixels_per_point();
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(rect.x / pixels_per_point, rect.y / pixels_per_point),
-        egui::vec2(
-            rect.width / pixels_per_point,
-            rect.height / pixels_per_point,
-        ),
-    );
     let ctx = ui.ctx().clone();
     // Prime the area's size: an unprimed area is invisible in the one frame a
     // `--screenshot` renders.
-    crate::ui::prime_area(&ctx, id, egui::Order::Background, rect, false);
+    dtr_widgets::prime_area(&ctx, id, egui::Order::Background, rect, false);
     // The close button is an area of its own, and it is primed as *interactable*
     // or the first frame after the pane appears would have no target in it.
     let close_id = id.with("close");
     let target = close_rect(rect);
-    crate::ui::prime_area(&ctx, close_id, egui::Order::Background, target, true);
-    let label = format!("close {}", explorer.header());
+    dtr_widgets::prime_area(&ctx, close_id, egui::Order::Background, target, true);
+    let label = format!("close {}", browser.header());
     let mut close = false;
     egui::Area::new(id)
         // Below the palette's foreground layer, but above the root background
@@ -643,8 +642,8 @@ pub fn pane_ui(
             ui.set_min_size(rect.size());
             ui.set_max_size(rect.size());
             ui.set_clip_rect(rect);
-            explorer.draw(ui, look, rect, focused);
-            close = close_button(&ctx, close_id, target, look, &label);
+            browser.draw(ui, skin, rect, focused);
+            close = close_button(&ctx, close_id, target, skin, &label);
         });
     close
 }
@@ -661,7 +660,7 @@ fn close_button(
     ctx: &egui::Context,
     id: egui::Id,
     target: egui::Rect,
-    look: &Look,
+    skin: &Skin,
     label: &str,
 ) -> bool {
     let mut clicked = false;
@@ -677,7 +676,7 @@ fn close_button(
             // there is nothing to place it against. Both declare the same
             // accessibility node and strip the keyboard's synthetic click, so
             // the close button cannot be pressed by typing at the shell.
-            clicked = dtr_widgets::cross(ui, &look.skin(), label, target.height()).clicked();
+            clicked = dtr_widgets::cross(ui, skin, label, target.height()).clicked();
         });
     clicked
 }
@@ -750,9 +749,9 @@ pub fn display_join(dir: &Path, name: &str, home: &Path) -> String {
     display_path(&dir.join(name), home)
 }
 
-/// A byte count a person can read. Shared with the app's toasts, which report a
+/// A byte count a person can read. Shared with a surface's toasts, which report a
 /// save the same way the pane reports a file.
-pub(crate) fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const K: f64 = 1024.0;
     let value = bytes as f64;
     if value < K {
@@ -771,7 +770,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Entry, Explorer, Key, arrange, clamp_selection, display_join, display_path, first_visible,
+        Browser, Entry, Key, arrange, clamp_selection, display_join, display_path, first_visible,
         human_size, parent_of,
     };
 
@@ -898,57 +897,57 @@ mod tests {
         std::fs::create_dir(root.join("sub")).expect("subdir");
         std::fs::write(root.join("note.txt"), b"x").expect("file");
 
-        let mut explorer = Explorer::new(Some(root.clone()));
-        explorer.selected = explorer
+        let mut browser = Browser::new(Some(root.clone()));
+        browser.selected = browser
             .entries
             .iter()
             .position(|entry| entry.name == "note.txt")
             .expect("note.txt in the listing");
-        assert_eq!(explorer.handle(Key::Enter), Some(root.join("note.txt")));
+        assert_eq!(browser.handle(Key::Enter), Some(root.join("note.txt")));
 
-        explorer.selected = explorer
+        browser.selected = browser
             .entries
             .iter()
             .position(|entry| entry.name == "sub")
             .expect("sub in the listing");
-        assert_eq!(explorer.handle(Key::Enter), None);
-        assert_eq!(explorer.cwd, root.join("sub"));
+        assert_eq!(browser.handle(Key::Enter), None);
+        assert_eq!(browser.cwd, root.join("sub"));
 
         // `h` goes back up through the same parent resolution the listing uses.
-        explorer.handle(Key::Left);
-        assert_eq!(explorer.cwd, root);
+        browser.handle(Key::Left);
+        assert_eq!(browser.cwd, root);
     }
 
     #[test]
     fn a_directory_that_cannot_be_read_is_a_message_not_a_blank_pane() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let missing = temporary.path().join("gone");
-        let explorer = Explorer::new(Some(missing));
-        assert!(explorer.entries.is_empty());
-        let message = explorer.message.expect("a message");
+        let browser = Browser::new(Some(missing));
+        assert!(browser.entries.is_empty());
+        let message = browser.message.expect("a message");
         assert!(message.contains("cannot open"), "{message}");
     }
 
     /// A remote pane reads nothing itself: it asks, once, and waits.
     #[test]
     fn a_remote_pane_asks_for_its_directory_once() {
-        let mut explorer = Explorer::remote("jupyter");
+        let mut browser = Browser::remote("jupyter");
         assert_eq!(
-            explorer.take_request(),
+            browser.take_request(),
             Some(("jupyter".to_owned(), PathBuf::from(".")))
         );
-        assert_eq!(explorer.take_request(), None, "one request per navigation");
-        assert!(explorer.entries.is_empty());
+        assert_eq!(browser.take_request(), None, "one request per navigation");
+        assert!(browser.entries.is_empty());
     }
 
     /// A link names a directory, and the pane has to open *there* rather than at
     /// the home directory.
     #[test]
     fn a_remote_pane_can_open_at_a_linked_directory() {
-        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
-        assert_eq!(explorer.alias(), Some("jupyter"));
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        assert_eq!(browser.alias(), Some("jupyter"));
         assert_eq!(
-            explorer.take_request(),
+            browser.take_request(),
             Some(("jupyter".to_owned(), PathBuf::from("/var/log")))
         );
     }
@@ -959,30 +958,30 @@ mod tests {
     /// that then sat on "loading…" for ever.
     #[test]
     fn a_pane_waits_for_the_listing_it_sent() {
-        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
         assert!(
-            !explorer.is_waiting_for(Path::new("/var/log")),
+            !browser.is_waiting_for(Path::new("/var/log")),
             "not sent yet"
         );
-        explorer.take_request();
-        assert!(explorer.is_waiting_for(Path::new("/var/log")));
-        assert!(!explorer.is_waiting_for(Path::new("/etc")));
-        explorer.apply_listing(PathBuf::from("/var/log"), Vec::new());
-        assert!(!explorer.is_waiting_for(Path::new("/var/log")), "answered");
+        browser.take_request();
+        assert!(browser.is_waiting_for(Path::new("/var/log")));
+        assert!(!browser.is_waiting_for(Path::new("/etc")));
+        browser.apply_listing(PathBuf::from("/var/log"), Vec::new());
+        assert!(!browser.is_waiting_for(Path::new("/var/log")), "answered");
         // A local pane waits for nothing: it reads the disk when it is built.
-        let local = Explorer::new(Some(PathBuf::from(".")));
+        let local = Browser::new(Some(PathBuf::from(".")));
         assert!(!local.is_waiting_for(Path::new(".")));
     }
 
     /// A reply for a directory the pane is not waiting on cannot yank it away.
     #[test]
     fn a_reply_for_another_directory_is_ignored() {
-        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
-        explorer.take_request();
-        explorer.apply_listing(PathBuf::from("/etc"), Vec::new());
-        assert_eq!(explorer.cwd, PathBuf::from("/var/log"));
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        browser.take_request();
+        browser.apply_listing(PathBuf::from("/etc"), Vec::new());
+        assert_eq!(browser.cwd, PathBuf::from("/var/log"));
         assert!(
-            explorer.is_waiting_for(Path::new("/var/log")),
+            browser.is_waiting_for(Path::new("/var/log")),
             "still waiting"
         );
     }
@@ -1011,9 +1010,9 @@ mod kittest_tests {
 
     /// A pane whose listing is written down rather than read. A snapshot of a
     /// real `/var/log` would be a snapshot of the machine that ran the test.
-    fn pane() -> Explorer {
-        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
-        explorer.apply_listing(
+    fn pane() -> Browser {
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        browser.apply_listing(
             PathBuf::from("/var/log"),
             vec![
                 entry("apt", true, None),
@@ -1026,38 +1025,51 @@ mod kittest_tests {
                 entry("wtmp.1", false, Some(10_485_760)),
             ],
         );
-        explorer.selected = explorer
+        browser.selected = browser
             .entries
             .iter()
             .position(|entry| entry.name == "syslog")
             .expect("syslog in the fixture");
-        explorer
+        browser
+    }
+
+    /// The skin these snapshots are drawn in: the terminal's own, over the
+    /// built-in theme's colours.
+    ///
+    /// Written out rather than asked of a window, because a baseline is an input:
+    /// a browser test that resolved the desktop's palette would compare against
+    /// whatever machine ran it.
+    fn skin() -> Skin {
+        Skin::dtr(dtr_widgets::Palette::dtr(
+            [0x0b, 0x0f, 0x0e],
+            [0xdc, 0xdf, 0xdd],
+            [0xff, 0xb0, 0x00],
+        ))
     }
 
     /// The header's close button: where it is, that it is the pane's only click
     /// target, and that it reports the press.
     ///
     /// The body being click-through is not an accident of the layout — it is why
-    /// the button is its own area. A press on the listing is the app's (that is
-    /// what moves the focus to the pane), and an area egui can hit-test would
+    /// the button is its own area. A press on the listing is the surface's (that
+    /// is what moves the focus to the pane), and an area egui can hit-test would
     /// take that press before the app ever saw it.
     #[test]
     fn the_header_carries_a_close_button() {
-        let look = Look::default();
-        let explorer = pane();
-        let label = format!("close {}", explorer.header());
+        let skin = skin();
+        let browser = pane();
+        let label = format!("close {}", browser.header());
         let pressed = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let sink = std::rc::Rc::clone(&pressed);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(WIDTH, HEIGHT))
             .build_ui(move |ui| {
-                let rect = crate::layout::Rect::new(0.0, 0.0, WIDTH, HEIGHT);
                 if pane_ui(
                     ui,
                     egui::Id::unique("dtr-files-test"),
-                    rect,
-                    &explorer,
-                    &look,
+                    pane_rect(),
+                    &browser,
+                    &skin,
                     true,
                 ) {
                     sink.set(sink.get() + 1);
@@ -1079,12 +1091,13 @@ mod kittest_tests {
         );
 
         // One square is a target; the listing is not. The window's root layer is
-        // everywhere and is not a surface — `App::over_egui` asks the same
-        // question, which is why it is asked in the same words here.
+        // everywhere and is not a surface, which is the question
+        // `dtr_widgets::above_the_root` answers and the one a surface asks before
+        // handing a press to whatever is behind the pane.
         let over_body = harness
             .ctx
             .layer_id_at(pane_rect().center())
-            .map(crate::app::above_the_root);
+            .map(dtr_widgets::above_the_root);
         assert_eq!(
             over_body,
             Some(false),
@@ -1093,7 +1106,7 @@ mod kittest_tests {
         let over_cross = harness
             .ctx
             .layer_id_at(target.center())
-            .map(crate::app::above_the_root);
+            .map(dtr_widgets::above_the_root);
         assert_eq!(over_cross, Some(true), "the cross has no target");
 
         harness.snapshot("file_pane_close");

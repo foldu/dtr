@@ -55,3 +55,37 @@ pub(crate) fn pointer_only(mut response: egui::Response) -> egui::Response {
         .remove(egui::response::Flags::FAKE_PRIMARY_CLICKED);
     response
 }
+
+/// Whether a layer egui found under the pointer is one of its own surfaces — a
+/// card, a popup, a file pane — rather than the window's root.
+///
+/// `Context::layer_id_at` is never `None` inside the window: the root layer's
+/// rect is the whole content area, so it is found under the pointer wherever the
+/// pointer is. Asking "is there a layer here" therefore answers *yes* over
+/// anything that is painted rather than made of widgets, which made "the pointer
+/// is over egui" true everywhere — a link under the pointer never lit its hand,
+/// and a wheel over a menu was read as the text behind it. The layer *above* the
+/// root is the question, and this is the one spelling of it: the window asks
+/// before handing a wheel or a preview to the thing underneath, and a painted
+/// pane asks in its own test that its body is click-through.
+pub fn above_the_root(layer: egui::LayerId) -> bool {
+    layer != egui::LayerId::background()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::above_the_root;
+
+    #[test]
+    fn the_root_layer_is_not_a_surface() {
+        assert!(!above_the_root(egui::LayerId::background()));
+    }
+
+    #[test]
+    fn anything_above_the_root_is_a_surface() {
+        // A painted pane is a `Background`-order area of its own, which is the
+        // case the predicate exists for: same order as the root, different id.
+        let area = egui::LayerId::new(egui::Order::Background, egui::Id::new("file pane"));
+        assert!(above_the_root(area));
+    }
+}
