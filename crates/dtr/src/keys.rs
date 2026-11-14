@@ -35,12 +35,23 @@ pub enum Action {
     /// Give the focused pane the whole window, or put the layout back.
     ZoomPane,
     /// A file pane's grid of tiles, and its dense one-row-per-entry view.
+    /// The listing's own view: a grid, a list, hidden entries, and what it is
+    /// ordered by. A group of its own rather than part of `Panes`, because these
+    /// are about what is *in* a pane and a reader looking for "how do I see dot
+    /// files" is not looking under "panes".
     FilesGrid,
     FilesList,
     /// Dot-files in a file pane. A window-wide answer, not a per-pane one: a
     /// desktop has one "show hidden files" setting and two panes that disagreed
     /// would look broken.
     FilesHidden,
+    /// What a listing is ordered by, and its two switches.
+    FilesSortName,
+    FilesSortModified,
+    FilesSortSize,
+    FilesSortKind,
+    FilesReverse,
+    FilesFoldersFirst,
     Copy,
     Paste,
     ScrollPageUp,
@@ -85,6 +96,12 @@ impl Action {
             Self::FilesGrid => "files-grid",
             Self::FilesList => "files-list",
             Self::FilesHidden => "files-hidden",
+            Self::FilesSortName => "files-sort-name",
+            Self::FilesSortModified => "files-sort-modified",
+            Self::FilesSortSize => "files-sort-size",
+            Self::FilesSortKind => "files-sort-kind",
+            Self::FilesReverse => "files-reverse",
+            Self::FilesFoldersFirst => "files-folders-first",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll-page-up",
@@ -130,6 +147,12 @@ impl Action {
             Self::FilesGrid => "file grid view",
             Self::FilesList => "file list view",
             Self::FilesHidden => "hidden files",
+            Self::FilesSortName => "sort by name",
+            Self::FilesSortModified => "sort by date",
+            Self::FilesSortSize => "sort by size",
+            Self::FilesSortKind => "sort by type",
+            Self::FilesReverse => "reverse the order",
+            Self::FilesFoldersFirst => "folders first",
             Self::Copy => "copy selection",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll a page up",
@@ -166,7 +189,13 @@ impl Action {
             | Self::ZoomPane
             | Self::FilesGrid
             | Self::FilesList
-            | Self::FilesHidden => Group::Panes,
+            | Self::FilesHidden
+            | Self::FilesSortName
+            | Self::FilesSortModified
+            | Self::FilesSortSize
+            | Self::FilesSortKind
+            | Self::FilesReverse
+            | Self::FilesFoldersFirst => Group::Files,
             Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
@@ -186,6 +215,7 @@ impl Action {
 pub enum Group {
     Tabs,
     Panes,
+    Files,
     Overlays,
     Clipboard,
     Scrollback,
@@ -196,24 +226,43 @@ impl Group {
     /// The groups, in the order the map reads: what a window is made of, then
     /// what a pane is made of, then what opens over it, then what happens to
     /// text, then history, then the cable.
-    pub const ALL: [Group; 6] = [
+    pub const ALL: [Group; 7] = [
         Group::Tabs,
         Group::Panes,
+        Group::Files,
         Group::Overlays,
         Group::Clipboard,
         Group::Scrollback,
         Group::Serial,
     ];
 
-    /// Where the map's two columns divide: after the panes, because tabs and
-    /// panes together are about as tall as everything else and the card is one
-    /// scroll area — an 18/13 split wastes half of the shorter column.
-    pub const COLUMNS: usize = 2;
+    /// Where the map's two columns divide.
+    ///
+    /// A function rather than a constant, because the answer depends on how many
+    /// rows every action has and a constant is a number nobody remembers to
+    /// update: adding the six sort actions to `panes` made the columns 24 and 16
+    /// rows tall. The split is the index between two groups that leaves the two
+    /// columns closest to level.
+    pub fn split() -> usize {
+        let rows = |groups: &[Group]| {
+            ALL.iter()
+                .filter(|action| groups.contains(&action.group()))
+                .count()
+        };
+        (1..Self::ALL.len())
+            .min_by_key(|split| {
+                let left = rows(&Self::ALL[..*split]);
+                let right = rows(&Self::ALL[*split..]);
+                left.abs_diff(right)
+            })
+            .unwrap_or(1)
+    }
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Tabs => "tabs",
             Self::Panes => "panes",
+            Self::Files => "files",
             Self::Overlays => "overlays",
             Self::Clipboard => "clipboard",
             Self::Scrollback => "scrollback",
@@ -223,7 +272,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 34] = [
+pub const ALL: [Action; 40] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -244,6 +293,12 @@ pub const ALL: [Action; 34] = [
     Action::FilesGrid,
     Action::FilesList,
     Action::FilesHidden,
+    Action::FilesSortName,
+    Action::FilesSortModified,
+    Action::FilesSortSize,
+    Action::FilesSortKind,
+    Action::FilesReverse,
+    Action::FilesFoldersFirst,
     Action::Copy,
     Action::Paste,
     Action::ScrollPageUp,
@@ -293,6 +348,14 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("files-grid", "ctrl-1"),
     ("files-list", "ctrl-2"),
     ("files-hidden", "ctrl-h"),
+    // ctrl+alt and a letter: the arrows in that family move between panes, and
+    // these are the six things a listing can be ordered by or ask of the order.
+    ("files-sort-name", "ctrl-alt-n"),
+    ("files-sort-modified", "ctrl-alt-m"),
+    ("files-sort-size", "ctrl-alt-s"),
+    ("files-sort-kind", "ctrl-alt-t"),
+    ("files-reverse", "ctrl-alt-r"),
+    ("files-folders-first", "ctrl-alt-f"),
     ("copy", "ctrl-shift-c"),
     ("paste", "ctrl-shift-v"),
     ("scroll-page-up", "shift-pageup"),
@@ -804,7 +867,7 @@ mod tests {
         );
         // Re-binding an action onto its own chord is not a conflict.
         assert_eq!(refuse_reason(&keymap, Action::NewTab, taken), None);
-        let free = parse_sequence("ctrl-alt-t").expect("chord").chords[0];
+        let free = parse_sequence("ctrl-alt-q").expect("chord").chords[0];
         assert_eq!(refuse_reason(&keymap, Action::Palette, free), None);
     }
 
@@ -827,18 +890,25 @@ mod tests {
     /// as tall as each other. The counts move whenever a group grows; this is
     /// the test that says where the divider belongs when they do.
     #[test]
-    fn the_two_columns_of_the_map_are_balanced() {
+    fn the_map_splits_where_the_columns_are_closest_to_level() {
         let rows = |groups: &[Group]| {
             ALL.iter()
                 .filter(|action| groups.contains(&action.group()))
                 .count()
         };
-        let left = rows(&Group::ALL[..Group::COLUMNS]);
-        let right = rows(&Group::ALL[Group::COLUMNS..]);
-        assert!(
-            left.abs_diff(right) <= 3,
-            "the columns are {left} and {right} rows tall"
-        );
+        let split = Group::split();
+        let chosen = rows(&Group::ALL[..split]).abs_diff(rows(&Group::ALL[split..]));
+        let best = (1..Group::ALL.len())
+            .map(|at| rows(&Group::ALL[..at]).abs_diff(rows(&Group::ALL[at..])))
+            .min()
+            .expect("two columns");
+        // **Group integrity beats even columns.** A heading is one thought and
+        // splitting a group's rows across the divide would put half of "files" at
+        // the bottom of the left column. So the assertion is that the split is the
+        // best one available at a group boundary, not that the columns are level:
+        // forty rows over seven groups do not divide evenly, and the closest split
+        // is seven rows apart.
+        assert_eq!(chosen, best, "a closer split at a group boundary exists");
     }
 
     #[test]

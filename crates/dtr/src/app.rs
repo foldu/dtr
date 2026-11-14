@@ -20,7 +20,7 @@ use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
 use crate::ui::Status;
-use dtr_files::{Browser, Mode as FileMode, PaneView as FilePaneView};
+use dtr_files::{Browser, Mode as FileMode, PaneView as FilePaneView, Sort as FileSort};
 
 pub enum UserEvent {
     Frame,
@@ -1016,12 +1016,33 @@ fn files_view_of(mode: FileMode) -> dtr_config::FilesView {
     }
 }
 
-/// The view `[files]` asks for: the layout and what it hides.
+/// The view `[files]` asks for: the layout, the order, and what it hides.
 fn file_view(config: &dtr_config::Config) -> dtr_files::View {
     dtr_files::View {
         mode: file_mode(config.files.view),
         show_hidden: config.files.hidden,
-        ..dtr_files::View::default()
+        sort: file_sort(config.files.sort),
+        reverse: config.files.reverse,
+        folders_first: config.files.folders_first,
+    }
+}
+
+/// The config's spelling of a sort key, and back.
+fn file_sort(sort: dtr_config::FilesSort) -> FileSort {
+    match sort {
+        dtr_config::FilesSort::Name => FileSort::Name,
+        dtr_config::FilesSort::Modified => FileSort::Modified,
+        dtr_config::FilesSort::Size => FileSort::Size,
+        dtr_config::FilesSort::Kind => FileSort::Kind,
+    }
+}
+
+fn files_sort(sort: FileSort) -> dtr_config::FilesSort {
+    match sort {
+        FileSort::Name => dtr_config::FilesSort::Name,
+        FileSort::Modified => dtr_config::FilesSort::Modified,
+        FileSort::Size => dtr_config::FilesSort::Size,
+        FileSort::Kind => dtr_config::FilesSort::Kind,
     }
 }
 
@@ -2966,6 +2987,54 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Change what the focused listing is ordered by, and remember it.
+    ///
+    /// The three config keys behind one call, because they are one decision: a
+    /// sort change that forgot its direction, or a direction that applied to a
+    /// different key, is how a `[files]` table ends up describing a listing
+    /// nobody asked for.
+    fn change_file_view(&mut self, change: impl FnOnce(&mut dtr_files::View)) -> bool {
+        let Some(before) = self.focused_browser().map(|browser| browser.view()) else {
+            self.toast = Some((
+                "no file pane is focused".to_owned(),
+                std::time::Instant::now(),
+            ));
+            self.repaint("files sort");
+            return true;
+        };
+        let mut view = before;
+        change(&mut view);
+        if let Some(browser) = self.focused_browser_mut() {
+            browser.set_view(view);
+        }
+        // Written only when it moved, so asking for the order it already has does
+        // not rewrite the file.
+        if view.sort != before.sort {
+            self.write_config("files.sort", view.sort.label());
+            self.config.files.sort = files_sort(view.sort);
+        }
+        if view.reverse != before.reverse {
+            self.write_config("files.reverse", if view.reverse { "true" } else { "false" });
+            self.config.files.reverse = view.reverse;
+        }
+        if view.folders_first != before.folders_first {
+            self.write_config(
+                "files.folders-first",
+                if view.folders_first { "true" } else { "false" },
+            );
+            self.config.files.folders_first = view.folders_first;
+        }
+        self.repaint("files sorted");
+        true
+    }
+
+    /// One key of the config file, written the way every other writer here does.
+    fn write_config(&self, key: &str, value: &str) {
+        if let Err(err) = dtr_config::set_value(&self.config_path, key, value) {
+            tracing::warn!(%err, key, "could not save a file-pane setting");
+        }
+    }
+
     /// Show or hide dot-files in every file pane, and remember the answer.
     ///
     /// Every pane, not the focused one: a desktop has one "show hidden files"
@@ -3121,6 +3190,16 @@ impl App {
             Action::FilesGrid => self.set_file_mode(FileMode::Grid),
             Action::FilesList => self.set_file_mode(FileMode::List),
             Action::FilesHidden => self.toggle_hidden_files(),
+            Action::FilesSortName => self.change_file_view(|view| view.sort = FileSort::Name),
+            Action::FilesSortModified => {
+                self.change_file_view(|view| view.sort = FileSort::Modified)
+            }
+            Action::FilesSortSize => self.change_file_view(|view| view.sort = FileSort::Size),
+            Action::FilesSortKind => self.change_file_view(|view| view.sort = FileSort::Kind),
+            Action::FilesReverse => self.change_file_view(|view| view.reverse = !view.reverse),
+            Action::FilesFoldersFirst => {
+                self.change_file_view(|view| view.folders_first = !view.folders_first)
+            }
             Action::ZoomPane => {
                 self.toggle_zoom();
                 true

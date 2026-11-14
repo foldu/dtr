@@ -62,7 +62,8 @@ pub fn ui(ui: &mut Ui, look: &Look, keymap: &Keymap, overlay: &Overlay) -> Optio
     // Two columns, so the whole map is on one screen: a cheat sheet you have to
     // scroll is one you cannot glance at. The split follows `Group::ALL`, which
     // is the order a reader expects, rather than restating it here.
-    let columns: [&[Group]; 2] = [&Group::ALL[..Group::COLUMNS], &Group::ALL[Group::COLUMNS..]];
+    let split = Group::split();
+    let columns: [&[Group]; 2] = [&Group::ALL[..split], &Group::ALL[split..]];
 
     let out = dtr_widgets::Card::new(egui::Id::new("dtr-keymap"), "keys")
         .size(WIDTH, HEIGHT)

@@ -80,6 +80,49 @@ impl FilesView {
     }
 }
 
+/// What a file pane orders by. `[files] sort`.
+///
+/// Four keys, spelled the way the sort control spells them. The browser's own
+/// `Sort` is the value; this is the word in the file, and the window is where
+/// they meet — the same shape [`FilesView`] has with `dtr_files::Mode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilesSort {
+    #[default]
+    Name,
+    Modified,
+    Size,
+    /// The extension, which is what a file manager means by "type".
+    Kind,
+}
+
+impl FilesSort {
+    pub const ALL: [FilesSort; 4] = [
+        FilesSort::Name,
+        FilesSort::Modified,
+        FilesSort::Size,
+        FilesSort::Kind,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Modified => "modified",
+            Self::Size => "size",
+            Self::Kind => "type",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "name" => Some(Self::Name),
+            "modified" => Some(Self::Modified),
+            "size" => Some(Self::Size),
+            "type" | "kind" => Some(Self::Kind),
+            _ => None,
+        }
+    }
+}
+
 /// How a file pane looks and is ordered. `[files]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Files {
@@ -88,6 +131,12 @@ pub struct Files {
     /// Whether dot-files are listed. Off by default, as in every file manager;
     /// `Ctrl+H` flips it and writes the answer back.
     pub hidden: bool,
+    /// What the listing is ordered by.
+    pub sort: FilesSort,
+    /// Whether that key runs backwards. Folders stay on top either way.
+    pub reverse: bool,
+    /// Whether folders come before files.
+    pub folders_first: bool,
 }
 
 impl Default for Files {
@@ -95,6 +144,9 @@ impl Default for Files {
         Self {
             view: FilesView::Grid,
             hidden: false,
+            sort: FilesSort::Name,
+            reverse: false,
+            folders_first: true,
         }
     }
 }
@@ -567,6 +619,26 @@ impl Config {
                     .as_bool()
                     .ok_or_else(|| Error::Value("files.hidden must be true or false".into()))?;
             }
+            if let Some(sort) = section.get("sort") {
+                let text = sort
+                    .as_str()
+                    .ok_or_else(|| Error::Value("files.sort must be a string".into()))?;
+                config.files.sort = FilesSort::parse(text).ok_or_else(|| {
+                    Error::Value(format!(
+                        "files.sort is {text:?}; it must be \"name\", \"modified\", \"size\" or \"type\""
+                    ))
+                })?;
+            }
+            if let Some(reverse) = section.get("reverse") {
+                config.files.reverse = reverse
+                    .as_bool()
+                    .ok_or_else(|| Error::Value("files.reverse must be true or false".into()))?;
+            }
+            if let Some(first) = section.get("folders-first") {
+                config.files.folders_first = first.as_bool().ok_or_else(|| {
+                    Error::Value("files.folders-first must be true or false".into())
+                })?;
+            }
             if let Some(view) = section.get("view") {
                 let text = view
                     .as_str()
@@ -799,6 +871,14 @@ scheme = "system"
 view = "grid"
 # Whether dot-files are listed. Ctrl+H flips it and remembers the answer.
 hidden = false
+# What the listing is ordered by: "name", "modified", "size" or "type". A
+# modified or size sort reads every entry's metadata, which is the one order
+# that costs more than the directory read; the pane says so while it works.
+sort = "name"
+# Whether that key runs backwards, and whether folders stay above files (they
+# do by default, and a reverse sort does not move them).
+reverse = false
+folders-first = true
 
 [terminal]
 # Bytes of scrollback a tab keeps before the oldest pages are dropped. There is

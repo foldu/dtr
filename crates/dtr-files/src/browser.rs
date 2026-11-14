@@ -185,6 +185,19 @@ pub struct View {
     pub show_hidden: bool,
 }
 
+impl View {
+    /// The order in words, for a footer or a selector.
+    ///
+    /// Words and not arrows: egui's faces have none, and a `↓` in a label panics
+    /// the harness and draws an empty box in the window (`AGENTS.md`, glyphs).
+    pub fn sort_label(&self) -> String {
+        match self.reverse {
+            true => format!("{} reversed", self.sort.label()),
+            false => self.sort.label().to_owned(),
+        }
+    }
+}
+
 impl Default for View {
     fn default() -> Self {
         Self {
@@ -1161,6 +1174,17 @@ impl Browser {
                 palette.dim,
             );
         }
+
+        // The order, always: a *modified* sort with no visible dates is a
+        // mystery, and the footer is the one line that can say what the list is
+        // ordered by while the header holds the path.
+        painter.text(
+            egui::pos2(footer.right() - 8.0, footer.center().y),
+            Align2::RIGHT_CENTER,
+            self.view.sort_label(),
+            small.clone(),
+            palette.dim,
+        );
 
         let border = if focused {
             palette.accent
