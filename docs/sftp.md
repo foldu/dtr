@@ -2,13 +2,21 @@
 
 Status: research, 2026-10-27 · Scope: *how* SFTP gets into `dtr`, not the implementation.
 
-**Implemented as recommended.** `crates/dtr-sftp` spawns `ssh -s <alias>` and drives
-`russh-sftp` over the child's stdio — §1's choice, and neither runner-up. This memo stays
-the place to read for *why*, because the measurements in §3 are what decided it.
-
 Question: dtr needs file transfer over SSH, sharing authentication with the SSH terminal
 session where possible, without breaking the Windows single-`.exe` rule (PLAN §7) or the
 cross-build (§5.3). This memo picks an approach and records what was actually measured.
+
+**Implemented as recommended, with one swap inside it.** `crates/dtr-sftp` spawns
+`ssh -s <alias>` and speaks SFTP over the child's stdio — §1's choice, and neither runner-up.
+The *client* that drives it is our own v3 codec rather than `russh-sftp` (PLAN D21); the
+transport decision, which is what §3 measured, is unchanged. This memo stays the place to read
+for *why*.
+
+**Later decisions this memo did not consider.** It compares five ways to *speak* the protocol and
+never asks whether to *mount* one. The answer, taken in 2026-11-14, is no mount: see PLAN D24 and
+`docs/manager.md` §8, where the transfer queue is the layer a mount would have been. Worth knowing
+here too: GVfs's own sftp backend is not a libssh2 client either — it spawns the user's `ssh` with
+`-oControlMaster`/`-oControlPath`, i.e. the same §1 decision and the same §3.4 multiplexing.
 
 ---
 
@@ -45,6 +53,7 @@ UI and transfer code do not change.
 | 5a | `openssh-sftp-client` over the same spawned `ssh` | same as (2) | same as (2) | MIT, pure Rust; takes `(stdin, stdout)` as separate halves | same as (2) | ~3–5 d | Viable **swap** for the protocol layer inside (2); see §3.7 |
 | 5b | `ControlMaster` multiplexing | — | — | — | — | — | **Not an approach — a complement to (2).** Adopt on Unix, unavailable on Windows |
 | 5c | Separate helper binary | — | — | — | violates "no bundled external binaries" | — | **Reject** on the single-`.exe` rule |
+| 6 | **Mount it** — GVfs/FUSE on Linux, WinFsp or macFUSE elsewhere, then use paths | The desktop's or the driver's, not ours | n/a (the mount *is* the share) | a **per-OS kernel driver**: free on Linux, a WinFsp install on Windows, an approved system extension on macOS | **Fails** — the one thing the single-`.exe` rule exists to prevent | — | **Reject** (decided 2026-11-14, PLAN D24). A mount hands out stateful paths that block `stat` when a host goes away, and it is a second connection manager beside the user's ssh. `docs/manager.md` §8 is the queue that replaces it |
 
 Effort figures are for a working, tested M3 slice with progress and cancel — not for polish.
 

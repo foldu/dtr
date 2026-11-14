@@ -58,6 +58,7 @@ renderer is deliberately a throwaway layer behind a trait.
 | D21 | **compio replaces tokio, everything of ours** (reverses D16) | One runtime per pane thread and one worker thread; the pty and serial readers stay threads because compio has no pty; `russh-sftp` was replaced by our own SFTP v3 codec, which was the last tokio dependent, so `cargo tree -i tokio` is empty. Not a performance decision — §3.3 of `docs/compio.md` says the runtime never decided the serial bug — and `docs/compio.md` §10 is the as-built record and the traps |
 | D22 | **The file browser is a crate with three windows**: the pane, a manager window, and the picker | One implementation of the widget instead of three: `dtr-files` (model, grid, icons, operations) on `dtr-frame` (window, surface, egui, multi-window), used by the `dtr` pane and by `crates/dtr-portal`. The daemon must not link the VT core or a shell, and the browser must be testable without a terminal |
 | D23 | **dtr ships its own portal `FileChooser` backend**, in a separate daemon | The GNOME backend links GTK — GDK, the accessibility bridge, a file-chooser widget built for the request; a resident window of ours is one frame. `portals.conf` selects a backend **per interface**, so `FileChooser=dtr` costs the rest of the desktop nothing. Details and limits: `docs/manager.md` §5 |
+| D24 | **No filesystem mount; a transfer queue is the layer a mount would have been** | A mount is a per-OS kernel dependency (FUSE is free on Linux, WinFsp + SSHFS-Win on Windows, macFUSE on macOS), it hands out stateful paths that block `stat` when a host goes away, and it is a second connection manager beside the user's ssh. The terminal case replaces it: `ssh host vim …` edits a remote file where it is local. GVfs, for the record, spawns the user's `ssh -s sftp` with `ControlMaster` too — we already have that layer, and only its FUSE layer is missing. `docs/manager.md` §8 has the queue's design and the per-alias constraint |
 
 Pinned upstream: ghostty commit **`0b8b9984ee560456194262d190aa850224edb1f4`** (2026-10-28) — the
 commit `libghostty-vt-sys`' bindings are generated against at the `libghostty-rs` rev `Cargo.toml`
@@ -956,7 +957,7 @@ The shape is a crate split, which is also the first milestone: `crates/dtr` beco
 because the daemon opens one window per request, and **`dtr-portal`** is the daemon — which is also the
 manager window's process, so `dtr-files [PATH]` asks it for a window instead of being a third binary.
 
-The order, each gated by what it makes checkable — the stages are `F0`…`F6`, this programme's own
+The order, each gated by what it makes checkable — the stages are `F0`…`F7`, this programme's own
 numbers, so that an `M` never names two things:
 
 1. **F0** the split, with every existing test and snapshot green and unchanged, plus the two
@@ -973,9 +974,13 @@ numbers, so that an `M` never names two things:
    `OpenFile`.
 5. **F4** the manager window: toolbar, sidebar (user directories, mounts, **the session's ssh hosts**),
    status bar, over a private `org.dtr.Files.OpenWindow`.
-6. **F5/F6** writes, local before remote: `Backend` grows `create_dir`/`rename`/`remove`/`copy`/`move`
-   and `Caps` grows `write`/`trash`; trash-always, ask-on-overwrite, one conflict `Card`; then
-   `dtr-sftp` grows mkdir/rmdir/rename/setstat/upload for the same verbs over ssh.
+6. **F5** the transfer queue, with local copies as its first user: jobs owned by the window, progress,
+   cancel, retry, `.part` then publish, the tab's own stripe. Segmenting is not optional — one mutex
+   per alias means a whole-file copy would block every listing on that host while it runs.
+7. **F6** writes on this machine, then **F7** writes over ssh: `Backend` grows
+   `create_dir`/`rename`/`remove`/`copy`/`move` and `Caps` grows `write`/`trash`; trash-always,
+   ask-on-overwrite, one conflict `Card`; then `dtr-sftp` grows the writing packets,
+   `posix-rename`/`statvfs`, upload, and a cross-host copy streamed through dtr.
 
 Known limits, stated rather than flag-flipped: on Wayland `parent_window` is opaque and winit has no
 xdg-foreign, so the picker is not transient there; and applications that never ask the portal — GTK4

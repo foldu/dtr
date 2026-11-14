@@ -9,7 +9,7 @@ They are one project because they are one widget. The browser in a terminal pane
 daemon's picker, and the browser in a manager window of its own are the same `dtr-files` view with a
 different chrome and a different footer.
 
-**Nothing in this memo is built.** §11 is the order — stages **F0…F6**, which are this programme's
+**Nothing in this memo is built.** §12 is the order — stages **F0…F7**, which are this programme's
 numbers and not the project's `M` milestones — and `PLAN.md` §3 (`M4`) is the programme in a paragraph.
 The rest is the reasoning, the facts it rests on, and the things worth measuring before anyone promises
 a number.
@@ -171,7 +171,7 @@ bridge, the theme and settings machinery, and its own file-chooser widget, which
 request. The frontend D-Bus-activates that process, so the first picker of a session pays for all of
 it and the ones after it pay for the dialog. Ours does none of that: no GTK, no GVfs, no Nautilus
 model, no thumbnailer daemons, no chooser widget tree built per request, and the listing is read on a
-worker so the window never waits for the disk. Measured cold starts and the comparison are §9 — until
+worker so the window never waits for the disk. Measured cold starts and the comparison are §10 — until
 they exist, "faster" is a hypothesis.
 
 ## 6. The manager window
@@ -204,14 +204,78 @@ The half that can lose data, so it comes last and with rules rather than default
   dialogs.
 - **`dtr-sftp` grows mkdir/rmdir/rename/setstat/upload** before any remote write appears; a remote
   "delete" that cannot be undone is refused with a toast instead of emulated.
-- Copy and move inside one machine are streaming (`dtr-vfs` `fetch` writes to a destination already);
-  cross-machine drag is a stream with progress and cancel, on the same worker that lists.
+- Copy and move — inside one machine or across two — go through the queue in §8 rather than through
+  a second mechanism that happens to know a byte count.
 - Undo is worth having for trash, rename and move — a stack of the last N operations — and is *not* in
   the milestone that first makes destroying possible.
 
-## 8. What this is not
+## 8. The transfer queue, and no mount
 
-- **Not GTK, and not a GVfs front end.** No network mounts, no MTP, no smb; browsing another machine is
+**Decided: dtr does not mount a remote filesystem, and the transfer queue is the layer that
+replaces what a mount would have given.** No FUSE, no WinFsp, no macFUSE. Four reasons, in the order
+they matter:
+
+- A mount is a **per-OS kernel dependency**: FUSE is in the Linux kernel and free, Windows needs
+  WinFsp (a driver install) plus SSHFS-Win, and macOS needs macFUSE as a system extension the user
+  approves. dtr's single-`.exe` rule (PLAN §7) exists to avoid exactly that; the file manager must not
+  be the thing that breaks it.
+- A mount is **stateful in the file manager's face**: a stale mount blocks `stat` for seconds, the
+  path (`$XDG_RUNTIME_DIR/gvfs/sftp:host=…,user=…/path`) leaks into anything handed to another app,
+  and there is now a second connection manager beside the user's ssh.
+- **The owner's experience of GVfs is that it is buggy**, which is a reason to own the layer rather
+  than delegate it, not a reason to rebuild it.
+- **A terminal already has the other program at the far end.** The mount's headline benefit is "other
+  apps can open the remote file as a path"; `ssh host vim /srv/x.conf` edits it where it is local,
+  while a mount downloads it, lets a local editor write a snapshot and uploads it back.
+
+What GVfs actually is, since the comparison is worth being exact about: a `GFile` D-Bus layer, one
+`gvfsd-<scheme>` daemon per protocol, and `gvfsd-fuse`, which exposes the result as a path for
+programs that are not GIO. **We already have the middle layer.** The installed backend (`gvfs`
+1.62) is not a libssh2 client either — it spawns the user's `ssh` with the `sftp` subsystem and
+`-oControlMaster`/`-oControlPath`, i.e. the same transport decision as `docs/sftp.md` §1 and the same
+multiplexing trick as its §3.4. The only layer we lack is the FUSE one, and it is the one that does
+not port.
+
+### The queue
+
+One queue **per window** — the window a pane is in, or the manager window — owned by the app rather
+than by a pane: a job outlives the pane that started it, and closing a pane must not silently abandon
+a transfer. What Nautilus calls its file-operations
+window is not a mount feature; it is a copy/retry/cancel feature, and local copies need it just as
+much as remote ones.
+
+- **A job** is: the sources (`Location`), the destination (`Location`), the direction
+  (upload/download/local copy/move), the byte total where `stat` knows it, the bytes done, the state,
+  and the answers it already has (replace / keep both / skip, from the one conflict `Card` §7 names).
+- **Per-alias serialisation is by construction**: `crates/dtr-vfs/src/ssh.rs` keeps one thread, one
+  `ssh` child and one `async_lock::Mutex<Option<Session>>` per alias, and an operation holds that
+  mutex for its whole duration. So a whole-file `fetch` of a big file **stalls browsing that host**
+  for as long as it runs, and a cancel can only land when the operation ends. The transfer therefore
+  has to be **a sequence of segments** — open, read or write one chunk, close or keep — each taking
+  the mutex, so a listing interleaves and a cancel is answered between chunks. Chunk size is bounded
+  by the codec's 30 s per-answer deadline, not by taste.
+- **Across aliases it is parallel, within one it is serial.** Two hosts in one queue run at once; ten
+  files to one host are one stream, which is what the protocol is.
+- **A cross-host copy streams through dtr**: SFTP v3 has no server-to-server copy, and OpenSSH's
+  `copy-data` extension copies within one server only, so A → B is read A, write B, in one job with
+  one progress figure.
+- **A cancelled or failed transfer leaves no half file under the real name.** Write to
+  `<name>.part` (or a temp in the destination directory), then publish with
+  `posix-rename@openssh.com` where the server has it and a plain rename otherwise; on cancel, remove
+  the part. A file that *looks* complete but is a truncated copy is worse than a failure.
+- **UI**: a card listing jobs with a progress stripe, cancel and retry, and the tab's own stripe
+  driven by the same figure — `dtr_widgets::Stripe` and `ActivityState.percent` already do exactly
+  this for a tab's build, so the queue reuses the control instead of painting a second kind of bar.
+- **What the codec still needs**, none of it v4: `SSH_FXP_WRITE`, `OPEN` with
+  `FXF_WRITE|FXF_CREAT|FXF_TRUNC`, `MKDIR`, `RMDIR`, `REMOVE`, `RENAME`, `SETSTAT`, and optionally
+  `FXF_APPEND` for resuming a `.part`; `posix-rename@openssh.com` and `statvfs@openssh.com` (free
+  space, for the "not enough room" that a mount would have failed on by itself) as extensions.
+- **No trash over ssh.** `Caps::trash` stays false for a remote backend and the UI hides the verb:
+  a delete that cannot be undone needs the permanent-delete confirmation, not a fake trash.
+
+## 9. What this is not
+
+- **Not GTK, and not a GVfs front end.** No mounts (§8), no MTP, no smb; browsing another machine is
   the ssh session you already have.
 - **Not an indexer.** Search filters the directory in view; a recursive search is a terminal's `find`
   and can wait until someone misses it.
@@ -221,7 +285,7 @@ The half that can lose data, so it comes last and with rules rather than default
 - **No portal on Windows.** `rfd`'s `IFileDialog` is the platform's answer and the single-exe story has
   no D-Bus; the manager window can still be built there.
 
-## 9. The measurements to take first
+## 10. The measurements to take first
 
 1. **The GNOME picker's time-to-dialog.** A fake "app" calls
    `org.freedesktop.portal.FileChooser.OpenFile` on the real desktop and times the moment a window
@@ -233,11 +297,20 @@ The half that can lose data, so it comes last and with rules rather than default
    `docs/bench.md`'s harness is the place.
 4. **A grid frame's icon cost**: how many theme lookups a screenful asks for, and what the cache does to
    the second frame. The 11 ms / 0.5 ms figures in §1 are the order of magnitude to expect.
+5. **A transfer against browsing**: how long a `stat` on the same alias waits while a 100 MB copy is
+   running, before and after the transfer is segmented (§8). That number is what decides the segment
+   size, and whether a second connection per transfer is worth having on Windows, where `ControlMaster`
+   does not exist.
 
-## 10. Risks
+## 11. Risks
 
-- **Losing data** is the one that matters: trash-always, ask-on-overwrite, and never a verb whose
-  failure is silent. §7 is the rule list.
+- **Losing data** is the one that matters: trash-always, ask-on-overwrite, never a verb whose failure
+  is silent, and a cancelled transfer that leaves `.part` rather than a short file with the real name.
+  §7 and §8 are the rule lists.
+- **A transfer that starves its own host**: one session and one mutex per alias means a whole-file
+  copy blocks every `stat` and listing on that machine for its duration if the queue is not
+  segmented (§8, measurement 5). This is the design detail most likely to be skipped and most likely
+  to be felt.
 - **A resident daemon's memory**: a wgpu device and an egui context per window, held while hidden. The
   idle timeout is the answer; it is also the reason the window is hidden rather than destroyed.
 - **Multi-window in egui** is where a new class of bug lives (a context per window, DPI per window,
@@ -250,7 +323,7 @@ The half that can lose data, so it comes last and with rules rather than default
 - **Apps that never ask** — GTK4 without `GTK_USE_PORTAL`, most Qt — cannot be served by any backend.
   Worth saying in the README before someone measures the wrong thing.
 
-## 11. The order
+## 12. The order
 
 | | | the gate |
 |---|---|---|
@@ -259,8 +332,9 @@ The half that can lose data, so it comes last and with rules rather than default
 | **F2** | pick mode: footer, multiple, directory, save-with-name, filters, overwrite confirmation | a snapshot per mode; the picker's answers unit-tested without a window |
 | **F3** | `dtr-portal`: zbus backend, activation, resident hidden window, the three packaging files, the NixOS module, private-bus test | a real `OpenFile` answered over a private bus; measurement 3 |
 | **F4** | the manager window: `dtr-files [PATH]`, private `org.dtr.Files.OpenWindow`, toolbar, sidebar with places and ssh hosts, status bar | the same browser in a third window, and a snapshot of the window |
-| **F5** | writes on this machine: VFS verbs and caps, trash, mkdir, rename, copy/move, the conflict card | tests that a delete goes to the trash and an overwrite asks |
-| **F6** | writes over ssh: `dtr-sftp` mkdir/rmdir/rename/upload, cross-machine copy with progress and cancel | the codec's own tests, against the corpus host |
+| **F5** | the transfer queue (§8): jobs, per-alias segments, progress, cancel, retry, `.part` then publish, the tab stripe, the queue card — with local copies as its first user | a cancelled copy leaves nothing under the real name; a listing on the same alias answers while a transfer runs (measurement 5) |
+| **F6** | writes on this machine: VFS verbs and caps, trash, mkdir, rename, the conflict card | tests that a delete goes to the trash and an overwrite asks |
+| **F7** | writes over ssh: `dtr-sftp` writing packets and the rename/statvfs extensions, upload, a cross-host copy streamed through dtr | the codec's own tests, against the corpus host |
 
 F0's gate is the important one: if the split cannot leave every test and snapshot untouched, the rest
 of this is being built on a refactor nobody can trust.
