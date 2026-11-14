@@ -1550,6 +1550,7 @@ impl App {
             || self.about_open
             || self.pager.is_open()
             || self.link_menu.is_open()
+            || self.file_menu_open()
             || self.tmux_chooser.is_open()
             || self.serial_dialog.is_some()
     }
@@ -1781,6 +1782,21 @@ impl App {
             );
             self.link_menu.close();
             self.repaint("link menu closed");
+            if escape {
+                return;
+            }
+        }
+
+        // The pane's right-press menu owns the keyboard for as long and in the
+        // same way: any key closes it and then goes where it was going, except
+        // Escape, which was aimed at the menu.
+        if self.file_menu_open() && pressed {
+            let escape = matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+            );
+            self.close_file_menu();
+            self.repaint("file menu closed");
             if escape {
                 return;
             }
@@ -2124,6 +2140,22 @@ impl App {
         });
     }
 
+    /// Whether a file pane's right-press menu is up.
+    ///
+    /// A menu is an overlay like the link menu's: it owns the keyboard while it
+    /// is open, keeps the preview off the pane behind it, and is dismissed by a
+    /// press that is not inside it.
+    fn file_menu_open(&self) -> bool {
+        self.focused_browser()
+            .is_some_and(|browser| browser.menu_open())
+    }
+
+    fn close_file_menu(&mut self) {
+        if let Some(browser) = self.focused_browser_mut() {
+            browser.close_menu();
+        }
+    }
+
     /// The DPI factor, which the window holds and the GPU knows how to ask for.
     ///
     /// egui works in points and winit's pointer arrives in physical pixels, so
@@ -2142,6 +2174,19 @@ impl App {
         // pane, and a right-click in a split is a right-click on *that* pane.
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
+        }
+        // A right-press on a listing is the pane's own menu: it selects the row
+        // under it and opens the two verbs the pane has. A press on nothing in a
+        // file pane is still consumed — a menu that did not open is not a reason
+        // to hand the press to whatever is behind.
+        if let Some(point) = self.file_pane_point(at) {
+            let opened = self
+                .focused_browser_mut()
+                .is_some_and(|browser| browser.menu_at(point));
+            if opened {
+                self.repaint("file menu");
+            }
+            return;
         }
         // A program that asked for the mouse gets the right button too. A menu
         // about a link is this terminal's idea, and it is not the program's.
@@ -2206,6 +2251,19 @@ impl App {
             if !self.link_menu.contains(points) {
                 self.link_menu.close();
                 self.repaint("link menu dismissed");
+            }
+            return;
+        }
+        // The other menu on a pane, dismissed the same way: a press outside it
+        // closes it and goes nowhere else. A press *inside* it is the menu's own
+        // and is left to egui, which is one frame behind this event.
+        if self.file_menu_open() {
+            let inside = self
+                .focused_browser()
+                .is_some_and(|browser| browser.menu_contains(points));
+            if !inside {
+                self.close_file_menu();
+                self.repaint("file menu dismissed");
             }
             return;
         }
@@ -3039,6 +3097,35 @@ impl App {
         self.toast = Some((format!("copied {text}"), std::time::Instant::now()));
         self.repaint("files copy path");
         true
+    }
+
+    /// Apply what a file pane's right-press menu chose.
+    ///
+    /// The pane's id and not "the focused one": the menu belongs to the pane that
+    /// was right-pressed, and although opening it moves the focus there, saying
+    /// which pane it was is what keeps the two from having to agree.
+    ///
+    /// Both rows are the verbs the pane already has — `Enter` and `ctrl-alt-c` —
+    /// so this is a second way to the same call and not a second implementation
+    /// of it.
+    fn file_menu_choice(&mut self, id: crate::layout::LeafId, choice: dtr_files::MenuChoice) {
+        match choice {
+            dtr_files::MenuChoice::Open => {
+                let chosen = match self.tabs[self.active].leaves.get_mut(&id) {
+                    Some(Pane::Files(browser)) => browser.handle(dtr_files::Key::Enter),
+                    _ => None,
+                };
+                if let Some(path) = chosen {
+                    self.insert_path_into_terminal(path);
+                }
+                self.repaint("file menu open");
+            }
+            // The clipboard and the toast are the chord's own path, so a copy
+            // from the menu and a copy from `ctrl-alt-c` cannot drift apart.
+            dtr_files::MenuChoice::CopyPath => {
+                self.copy_file_path();
+            }
+        }
     }
 
     /// Apply what a pane's own sort control asked for, and remember it.
@@ -5902,6 +5989,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut close_file = None;
                     let mut sort_change = None;
                     let mut place_choice = None;
+                    let mut file_menu = None;
                     let mut keymap_event = None;
                     let mut about_close = false;
                     let rendered = gpu.render(
@@ -5949,6 +6037,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut close_file,
                         &mut sort_change,
                         &mut place_choice,
+                        &mut file_menu,
                     );
                     // The keyboard map's answers. Its Escape and its captured
                     // key are handled where the keys are; a click has to come back
@@ -6009,6 +6098,9 @@ impl ApplicationHandler<UserEvent> for App {
                             browser.navigate(path);
                         }
                         self.repaint("files place");
+                    }
+                    if let Some((id, choice)) = file_menu {
+                        self.file_menu_choice(id, choice);
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -6601,6 +6693,10 @@ impl Gpu {
         close_file: &mut Option<crate::layout::LeafId>,
         sort_change: &mut Option<(crate::layout::LeafId, dtr_files::SortChange)>,
         place_choice: &mut Option<(crate::layout::LeafId, std::path::PathBuf)>,
+        // A file pane's right-press menu: the pane says which row, the app does
+        // the verb. It lives on the pane, so the answer comes back with the id
+        // that owns it rather than with whoever happens to be focused.
+        file_menu: &mut Option<(crate::layout::LeafId, dtr_files::MenuChoice)>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -6847,6 +6943,9 @@ impl Gpu {
                 }
                 if let Some(path) = outcome.navigate {
                     *place_choice = Some((file.id, path));
+                }
+                if let Some(choice) = outcome.menu {
+                    *file_menu = Some((file.id, choice));
                 }
             }
             // The composition box goes over the grid and under the

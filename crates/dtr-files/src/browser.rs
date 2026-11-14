@@ -24,7 +24,7 @@ use std::time::SystemTime;
 use egui::{Align2, Stroke};
 
 use dtr_vfs::{Backend as _, Local};
-use dtr_widgets::{Glyph, Icon, IconTile, Skin, icon_tile, tile_height};
+use dtr_widgets::{ContextMenu, Glyph, Icon, IconTile, MenuRow, Skin, icon_tile, tile_height};
 
 use crate::grid::{cell_rect, columns, first_row, index_at, row_of, rows, visible_rows};
 use crate::theme::IconSet;
@@ -312,6 +312,13 @@ pub struct Browser {
     /// each segment landed and the press asks that record back — the same bargain
     /// `frame` makes for the tiles.
     crumbs: RefCell<Vec<(egui::Rect, PathBuf)>>,
+    /// The right-press menu, and where it was drawn.
+    ///
+    /// The pane is drawn from a `&Browser`, so the one piece of interaction state
+    /// that outlives a frame without being in the caller is a cell — the same
+    /// bargain `frame` and `crumbs` make. The *choice* still leaves through
+    /// [`PaneOutcome`], because acting on it is the caller's.
+    menu: RefCell<ContextMenu>,
     /// The pictures the grid draws, and the theme they come from. Keyed by entry
     /// path, read through a per-frame budget, and replaceable with an empty set
     /// by a test whose baseline may not depend on the machine's icon theme.
@@ -392,6 +399,7 @@ impl Browser {
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
             crumbs: RefCell::new(Vec::new()),
+            menu: RefCell::new(ContextMenu::default()),
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
@@ -711,6 +719,59 @@ impl Browser {
         None
     }
 
+    /// Open the right-press menu at `point`, selecting the row under it first.
+    ///
+    /// Returns whether a menu opened: a right-press on a gap, the header or past
+    /// the last entry is a press on nothing, and a menu about nothing is worse
+    /// than no menu.
+    ///
+    /// The row under the press is selected unless it is already part of the
+    /// pick — Nautilus's rule, and the useful one: a right-press on a file that is
+    /// one of four chosen files must not throw the other three away, because the
+    /// menu is about to act on all four.
+    pub fn menu_at(&mut self, point: egui::Pos2) -> bool {
+        let Some(index) = self.entry_at(point) else {
+            return false;
+        };
+        if !self.is_selected(index) {
+            self.select_only(index);
+        }
+        self.menu.borrow_mut().open_at(point);
+        true
+    }
+
+    pub fn menu_open(&self) -> bool {
+        self.menu.borrow().is_open()
+    }
+
+    /// Is `point` inside the menu as the last frame drew it?
+    pub fn menu_contains(&self, point: egui::Pos2) -> bool {
+        self.menu.borrow().contains(point)
+    }
+
+    pub fn close_menu(&mut self) {
+        self.menu.borrow_mut().close();
+    }
+
+    /// Draw the right-press menu, if it is open, and report the row chosen.
+    ///
+    /// The rows are the two things a read-only browser can actually do, and
+    /// neither says its chord: the chords are `[keys]`' business, and a menu that
+    /// printed the default would lie the first time somebody rebound one. They
+    /// are the same two verbs the pane already has — `Enter` and `ctrl-alt-c` —
+    /// rather than a menu that promises the rows F5 and F6 will bring.
+    fn menu_ui(&self, ctx: &egui::Context, skin: &Skin, id: egui::Id) -> Option<MenuChoice> {
+        if !self.menu.borrow().is_open() {
+            return None;
+        }
+        let rows = [MenuRow::new("open"), MenuRow::new("copy path")];
+        let chosen = self.menu.borrow_mut().ui(ctx, skin, id, &rows);
+        chosen.map(|index| match index {
+            0 => MenuChoice::Open,
+            _ => MenuChoice::CopyPath,
+        })
+    }
+
     /// Scroll the view by `lines`: positive is up, the way a wheel notch is.
     ///
     /// The view moves and the selection does not: a page down and a page up are
@@ -840,6 +901,7 @@ impl Browser {
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
             crumbs: RefCell::new(Vec::new()),
+            menu: RefCell::new(ContextMenu::default()),
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
@@ -985,6 +1047,10 @@ impl Browser {
     }
 
     fn cd(&mut self, path: PathBuf) {
+        // A menu is about the rows under it, and those are about to be other
+        // rows: navigating away dismisses it rather than leaving a menu over a
+        // listing it never described.
+        self.close_menu();
         self.cwd = path;
         // Whatever was picked belonged to the directory that is going away.
         self.chosen.clear();
@@ -1199,6 +1265,8 @@ impl Browser {
 
     /// Sort a complete listing and split what the view hides.
     fn adopt(&mut self, entries: Vec<Entry>) {
+        // A new listing is new rows: the menu was about the old ones.
+        self.close_menu();
         let (shown, hidden) = arrange_split(entries, &self.cwd, &self.view);
         self.entries = shown;
         self.hidden = hidden;
@@ -1831,6 +1899,21 @@ pub struct PaneOutcome {
     pub sort: Option<SortChange>,
     /// The places popup chose a directory.
     pub navigate: Option<PathBuf>,
+    /// The right-press menu chose a row.
+    pub menu: Option<MenuChoice>,
+}
+
+/// What the right-press menu asked for.
+///
+/// Two verbs, both of which the pane already had a key for: this is a second way
+/// to the same two calls, never a second implementation of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuChoice {
+    /// The row `Enter` acts on: put a file's path on the command line, or go into
+    /// a directory.
+    Open,
+    /// Every selected path, one per line, on the clipboard — `ctrl-alt-c`.
+    CopyPath,
 }
 
 /// What the sort control asked for: one of the four keys, or one of the two
@@ -1940,10 +2023,14 @@ pub fn pane_ui(
         browser.place_list(),
         browser,
     );
+    // The right-press menu is drawn last and at the context's level, so it sits
+    // over every pane in the window rather than inside the one that opened it.
+    let menu = browser.menu_ui(&ctx, skin, id.with("menu"));
     PaneOutcome {
         close,
         sort,
         navigate,
+        menu,
     }
 }
 
@@ -3809,5 +3896,178 @@ mod kittest_tests {
             });
         harness.run();
         harness.snapshot("file_pane_list");
+    }
+
+    /// A row in the list view, in the pane's own points.
+    ///
+    /// The list and not the grid, because a row's rectangle is arithmetic — a
+    /// header, a footer and `ROW_HEIGHT` — where a tile's depends on fonts and a
+    /// cell width, and a test that wanted to right-press the third entry should
+    /// not have to re-derive the layout to do it.
+    fn list_point(row: usize) -> egui::Pos2 {
+        let body_top = HEADER_HEIGHT + 1.0;
+        egui::pos2(24.0, body_top + row as f32 * 18.0 + 9.0)
+    }
+
+    /// A pane drawn from a `&Browser` and pressed from behind it: the drawing
+    /// records the layout, the press asks it back, and the menu is the leavings.
+    fn menu_harness(
+        browser: std::rc::Rc<std::cell::RefCell<Browser>>,
+        answer: std::rc::Rc<std::cell::RefCell<Option<MenuChoice>>>,
+    ) -> Harness<'static> {
+        let skin = skin();
+        let drawn = std::rc::Rc::clone(&browser);
+        Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                let outcome = {
+                    let browser = drawn.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-menu"),
+                        pane_rect(),
+                        &browser,
+                        &skin,
+                        true,
+                    )
+                };
+                if let Some(choice) = outcome.menu {
+                    *answer.borrow_mut() = Some(choice);
+                }
+            })
+    }
+
+    /// A right-press on a row opens the menu with the two verbs the pane already
+    /// has, and choosing one comes back as an answer.
+    ///
+    /// Two rows and no more is the point of the milestone: for a read-only
+    /// browser the honest menu is `open` and `copy path`, and a menu that promised
+    /// the rows F5 and F6 bring would be a menu of things that do nothing.
+    #[test]
+    fn the_right_press_menu_offers_the_two_verbs_the_pane_has() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        {
+            let mut browser = browser.borrow_mut();
+            let mut view = browser.view();
+            view.mode = Mode::List;
+            browser.set_view(view);
+        }
+        let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
+        harness.run();
+        assert!(
+            browser.borrow_mut().menu_at(list_point(2)),
+            "a press on a row must open a menu"
+        );
+        harness.run();
+        for label in ["open", "copy path"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from the menu"
+            );
+        }
+        harness.snapshot("file_pane_menu");
+        harness.get_by_label("copy path").click();
+        harness.run();
+        assert_eq!(*answer.borrow(), Some(MenuChoice::CopyPath));
+        assert!(
+            !browser.borrow().menu_open(),
+            "choosing a row closes the menu"
+        );
+    }
+
+    /// The row under the press is selected, unless it is already part of the
+    /// pick — a menu about four chosen files must not throw three of them away
+    /// on its way to the fourth.
+    #[test]
+    fn a_right_press_selects_the_row_it_is_over() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        {
+            let mut browser = browser.borrow_mut();
+            let mut view = browser.view();
+            view.mode = Mode::List;
+            browser.set_view(view);
+        }
+        let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
+        harness.run();
+
+        // A row that was not picked: the press selects it and nothing else.
+        assert!(browser.borrow_mut().menu_at(list_point(3)));
+        assert_eq!(browser.borrow().selected, 3, "the press moved the cursor");
+        assert_eq!(
+            browser.borrow().selection_label(),
+            None,
+            "one row is not a count"
+        );
+
+        // Two rows chosen, then a right-press on one of them: both stay.
+        browser.borrow_mut().select_only(1);
+        browser.borrow_mut().pick(5, true, false);
+        assert_eq!(
+            browser.borrow().selection_label().as_deref(),
+            Some("2 selected")
+        );
+        assert!(browser.borrow_mut().menu_at(list_point(5)));
+        assert_eq!(browser.borrow().selected, 5);
+        assert_eq!(
+            browser.borrow().selection_label().as_deref(),
+            Some("2 selected"),
+            "a right-press on a picked row keeps the pick"
+        );
+    }
+
+    /// A press on the header, the footer or past the last row is a press on
+    /// nothing: no menu, and no selection moved by accident.
+    #[test]
+    fn a_right_press_on_nothing_opens_nothing() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
+        harness.run();
+        let was = browser.borrow().selected;
+        assert!(
+            !browser.borrow_mut().menu_at(egui::pos2(24.0, 4.0)),
+            "header"
+        );
+        assert!(
+            !browser.borrow_mut().menu_at(egui::pos2(24.0, HEIGHT - 5.0)),
+            "footer"
+        );
+        assert!(!browser.borrow().menu_open());
+        assert_eq!(browser.borrow().selected, was, "the cursor stayed put");
+    }
+
+    /// Escape is the menu's own, and a new directory is a new menu: both close it.
+    #[test]
+    fn a_menu_does_not_outlive_what_it_describes() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        {
+            let mut browser = browser.borrow_mut();
+            let mut view = browser.view();
+            view.mode = Mode::List;
+            browser.set_view(view);
+        }
+        let mut harness = menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
+        harness.run();
+        assert!(browser.borrow_mut().menu_at(list_point(1)));
+        harness.run();
+        assert!(browser.borrow().menu_open());
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(!browser.borrow().menu_open(), "Escape closes the menu");
+        assert_eq!(*answer.borrow(), None, "Escape is not a row");
+
+        // And a listing that changes takes the menu with it: the rows it was
+        // drawn over are gone.
+        assert!(browser.borrow_mut().menu_at(list_point(1)));
+        browser
+            .borrow_mut()
+            .apply_listing(PathBuf::from("/var/log"), Vec::new());
+        assert!(
+            !browser.borrow().menu_open(),
+            "a new listing is new rows, and the menu was about the old ones"
+        );
     }
 }

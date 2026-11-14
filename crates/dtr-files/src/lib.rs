@@ -27,7 +27,7 @@ pub mod theme;
 pub mod thumb;
 
 pub use browser::{
-    Browser, Entry, Key, Mode, PaneOutcome, PaneView, Sort, SortChange, View, arrange,
+    Browser, Entry, Key, MenuChoice, Mode, PaneOutcome, PaneView, Sort, SortChange, View, arrange,
     clamp_selection, crumbs, display_join, display_path, first_visible, human_size, pane_ui,
     parent_of,
 };
