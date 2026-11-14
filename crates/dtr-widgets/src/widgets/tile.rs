@@ -53,13 +53,24 @@ pub enum Glyph {
 
 /// The picture in a tile: drawn here, or resolved by the caller.
 ///
-/// A thumbnail and a theme icon arrive the same way — a texture — because the
-/// pane decodes both off the drawing thread and this crate must not learn what
-/// a video is. The texture is fitted into the icon's square keeping its aspect
-/// ratio: a 16:9 frame letterboxed into a square cell reads as a broken image.
+/// Two ways to hand over a picture, because there are two kinds of caller and
+/// they differ in who owns the pixels:
+///
+/// - [`Icon::Image`] is a texture the caller already decoded — a thumbnail, which
+///   takes a decode with caps and a cache keyed by machine and path.
+/// - [`Icon::Bytes`] is a file the *theme* provided, which egui's own loaders
+///   decode and cache. That path exists here rather than in the pane because the
+///   icons on a Linux desktop are as likely to be SVG as PNG, and `egui_extras`
+///   already knows how to rasterise both.
 pub enum Icon<'a> {
     Glyph(Glyph),
     Image(&'a egui::TextureHandle),
+    /// Loaded by egui, cached by egui, keyed by a URI that ends in the file's
+    /// extension — that suffix is how the loader picks a decoder.
+    Bytes {
+        uri: &'a str,
+        bytes: &'a egui::load::Bytes,
+    },
 }
 
 /// One cell.
@@ -116,6 +127,19 @@ pub fn icon_tile(ui: &Ui, skin: &Skin, rect: Rect, tile: &IconTile<'_>) {
     match tile.icon {
         Icon::Glyph(glyph) => paint_glyph(painter, picture, glyph, style.border, palette, tile.dim),
         Icon::Image(texture) => paint_image(painter, picture, texture, tile.dim),
+        Icon::Bytes { uri, bytes } => {
+            // The caller's cache has the bytes; egui has the texture. `paint_at`
+            // fills the rect exactly, which is why the rect is square: a theme
+            // icon is drawn at the size the style asked for and no aspect is
+            // invented for it.
+            let image = egui::Image::from_bytes(uri.to_owned(), bytes.clone());
+            let image = if tile.dim {
+                image.tint(Color32::from_white_alpha(150))
+            } else {
+                image
+            };
+            image.paint_at(ui, picture);
+        }
     }
 
     // The name: two rows, centred, elided at the cell's width.

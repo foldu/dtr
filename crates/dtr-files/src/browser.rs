@@ -16,7 +16,7 @@
 //! manager window or the desktop's picker all call [`pane_ui`] with a skin and a
 //! rectangle in points.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -27,6 +27,7 @@ use dtr_vfs::{Backend as _, Local};
 use dtr_widgets::{Glyph, Icon, IconTile, Skin, icon_tile, tile_height};
 
 use crate::grid::{cell_rect, columns, first_row, index_at, row_of, rows, visible_rows};
+use crate::theme::IconSet;
 
 const ROW_HEIGHT: f32 = 18.0;
 /// The gap between two grid cells, and the inset of the grid inside the body:
@@ -232,6 +233,10 @@ pub struct Browser {
     /// The directory whose sizes and times are all known: a re-sort re-uses them
     /// rather than asking again.
     facts_for: Option<PathBuf>,
+    /// The pictures the grid draws, and the theme they come from. Keyed by entry
+    /// path, read through a per-frame budget, and replaceable with an empty set
+    /// by a test whose baseline may not depend on the machine's icon theme.
+    icons: RefCell<IconSet>,
     /// A name to select once the listing that carries it arrives.
     ///
     /// `dtr --files some/file` names a file the walk has not sent yet, so the
@@ -299,6 +304,7 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            icons: RefCell::new(IconSet::system()),
             message: None,
             remote: Some(Remote {
                 alias: alias.to_owned(),
@@ -371,6 +377,15 @@ impl Browser {
         self.view.mode = mode;
     }
 
+    /// Draw drawn glyphs instead of the machine's icons.
+    ///
+    /// A baseline is an input and must not depend on which icon theme the machine
+    /// that ran the test has — nor on whether its raster set stops at 16 points.
+    /// The pane snapshots use this; the app never does.
+    pub fn without_icons(&mut self) {
+        self.icons = RefCell::new(IconSet::empty());
+    }
+
     pub fn view(&self) -> View {
         self.view
     }
@@ -433,6 +448,7 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            icons: RefCell::new(IconSet::system()),
             message: None,
             remote: None,
             local: Local::new(),
@@ -1110,6 +1126,17 @@ impl Browser {
                 )
             });
 
+        // The pictures: the theme first, the drawn glyph when it has none. One
+        // frame may read only so many files, so a directory of forty asks for
+        // another frame rather than stalling this one.
+        let icons = self.icons.borrow();
+        icons.start_frame();
+        // The size the theme is asked for, in *physical* pixels: a 48-point tile
+        // on a 2× screen wants a 96-point picture or it is soft.
+        let px = (style.tile_icon * ui.ctx().pixels_per_point())
+            .ceil()
+            .max(1.0) as u32;
+
         for index in start..end {
             let entry = &self.entries[index];
             let glyph = if entry.is_parent() {
@@ -1119,6 +1146,19 @@ impl Browser {
             } else {
                 Glyph::File
             };
+            // The parent row is not a file and has no picture to ask about.
+            let picture = if entry.is_parent() {
+                None
+            } else {
+                icons.picture_for(&self.cwd.join(&entry.name), &entry.name, entry.is_dir, px)
+            };
+            let icon = match &picture {
+                Some(picture) => Icon::Bytes {
+                    uri: picture.uri(),
+                    bytes: picture.bytes(),
+                },
+                None => Icon::Glyph(glyph),
+            };
             icon_tile(
                 ui,
                 skin,
@@ -1127,7 +1167,7 @@ impl Browser {
                     // A folder is not spelled with a slash here: the glyph is
                     // what says it, and a name is a name.
                     label: &entry.name,
-                    icon: Icon::Glyph(glyph),
+                    icon,
                     selected: index == self.selected,
                     hovered: hovered == Some(index),
                     // Hidden entries only reach this list when `Ctrl+H` is on,
@@ -1136,6 +1176,9 @@ impl Browser {
                     dim: false,
                 },
             );
+        }
+        if icons.wants_a_frame() {
+            ui.ctx().request_repaint();
         }
     }
 }
@@ -2047,6 +2090,9 @@ mod kittest_tests {
             .iter()
             .position(|entry| entry.name == "syslog")
             .expect("syslog in the fixture");
+        // A baseline may not depend on the icon theme of the machine that made
+        // it, so these panes draw the glyphs this crate carries.
+        browser.without_icons();
         browser
     }
 
