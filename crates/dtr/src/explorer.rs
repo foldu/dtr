@@ -19,6 +19,9 @@ use crate::ui::Look;
 const ROW_HEIGHT: f32 = 18.0;
 const HEADER_HEIGHT: f32 = 26.0;
 const FOOTER_HEIGHT: f32 = 18.0;
+/// The header's close button: a square that fits inside the header, so a press
+/// on its top edge is still a press on the header.
+const CLOSE_SIDE: f32 = 20.0;
 
 /// One line in the listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -394,9 +397,12 @@ impl Explorer {
 
         painter.rect_filled(rect, 0.0, palette.card);
 
-        // Header: the path, and how many real entries the listing has.
-        let header_bottom = (rect.top() + HEADER_HEIGHT).min(rect.bottom());
-        let header = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), header_bottom));
+        // Header: the path, how many real entries the listing has, and the close
+        // button. The count stops where the button starts — it is placed from
+        // the button's own rectangle, so the two cannot be drawn on top of each
+        // other when either moves.
+        let header = header_rect(rect);
+        let header_bottom = header.bottom();
         painter.rect_filled(header, 0.0, palette.window);
         painter.text(
             egui::pos2(header.left() + 8.0, header.center().y),
@@ -411,7 +417,7 @@ impl Explorer {
             .filter(|entry| !entry.is_parent())
             .count();
         painter.text(
-            egui::pos2(header.right() - 8.0, header.center().y),
+            egui::pos2(close_rect(rect).left() - 6.0, header.center().y),
             Align2::RIGHT_CENTER,
             count.to_string(),
             small.clone(),
@@ -560,11 +566,38 @@ pub struct PaneView<'a> {
     pub focused: bool,
 }
 
+/// The header band: the top of the pane down to [`HEADER_HEIGHT`], or the whole
+/// pane when it is shorter than that.
+fn header_rect(rect: egui::Rect) -> egui::Rect {
+    let bottom = (rect.top() + HEADER_HEIGHT).min(rect.bottom());
+    egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), bottom))
+}
+
+/// The close button's target, in the pane's points.
+///
+/// One function for the painter, the widget and the test: the count is placed
+/// against its left edge and the cross is placed *at* it, and two calculations
+/// would drift apart the first time the header's inset changed.
+fn close_rect(rect: egui::Rect) -> egui::Rect {
+    let header = header_rect(rect);
+    // Inset from the pane's right edge by the same gap the path has on the
+    // left, and as tall as the header allows — a pane too short for the full
+    // square gets a smaller one rather than a target outside itself.
+    let side = CLOSE_SIDE.min(header.height());
+    egui::Rect::from_center_size(
+        egui::pos2(header.right() - 8.0 - side / 2.0, header.center().y),
+        egui::vec2(side, side),
+    )
+}
+
 /// Draw one file pane in an egui area at its leaf's rectangle.
 ///
 /// `rect` is physical pixels; egui works in logical points, so the conversion
 /// is `physical / pixels_per_point`. The area is clipped to the pane so a long
 /// listing cannot spill into the terminal next door.
+///
+/// Returns whether the pane's close button was pressed. The drawing code knows
+/// that; only the app can take a leaf out of the layout.
 pub fn pane_ui(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -572,7 +605,7 @@ pub fn pane_ui(
     explorer: &Explorer,
     look: &Look,
     focused: bool,
-) {
+) -> bool {
     let pixels_per_point = ui.ctx().pixels_per_point();
     let rect = egui::Rect::from_min_size(
         egui::pos2(rect.x / pixels_per_point, rect.y / pixels_per_point),
@@ -585,6 +618,13 @@ pub fn pane_ui(
     // Prime the area's size: an unprimed area is invisible in the one frame a
     // `--screenshot` renders.
     crate::ui::prime_area(&ctx, id, egui::Order::Background, rect, false);
+    // The close button is an area of its own, and it is primed as *interactable*
+    // or the first frame after the pane appears would have no target in it.
+    let close_id = id.with("close");
+    let target = close_rect(rect);
+    crate::ui::prime_area(&ctx, close_id, egui::Order::Background, target, true);
+    let label = format!("close {}", explorer.header());
+    let mut close = false;
     egui::Area::new(id)
         // Below the palette's foreground layer, but above the root background
         // the panels and the grid live in.
@@ -592,7 +632,10 @@ pub fn pane_ui(
         .fixed_pos(rect.min)
         .constrain(false)
         // The pane is painted, not clicked: focus and selection are winit's
-        // business, so the area must not swallow the pointer.
+        // business, so the area must not swallow the pointer. egui skips a
+        // non-interactable area in its hit test, which is also why the close
+        // button below is an area of its own — a widget in here would never see
+        // a press.
         .interactable(false)
         // A capture is one frame; a fade-in would make the whole pane faint.
         .fade_in(false)
@@ -601,7 +644,42 @@ pub fn pane_ui(
             ui.set_max_size(rect.size());
             ui.set_clip_rect(rect);
             explorer.draw(ui, look, rect, focused);
+            close = close_button(&ctx, close_id, target, look, &label);
         });
+    close
+}
+
+/// The pane's close button: a cross in the header's right-hand corner.
+///
+/// It is one small interactable area over one corner rather than a widget in
+/// the pane's own area, because egui skips a non-interactable area in its hit
+/// test and the pane is painted rather than clicked on purpose — a press on its
+/// body is the app's business, and that is what moves the focus to it. This is
+/// the whole of the pane's click surface: a press here closes the pane and does
+/// not move the focus to it first.
+fn close_button(
+    ctx: &egui::Context,
+    id: egui::Id,
+    target: egui::Rect,
+    look: &Look,
+    label: &str,
+) -> bool {
+    let mut clicked = false;
+    egui::Area::new(id)
+        // The pane's order, and after it, so the cross is above the header it
+        // sits on.
+        .order(egui::Order::Background)
+        .fixed_pos(target.min)
+        .constrain(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            // `cross`, not `cross_at`: this area exists for this one square, so
+            // there is nothing to place it against. Both declare the same
+            // accessibility node and strip the keyboard's synthetic click, so
+            // the close button cannot be pressed by typing at the shell.
+            clicked = dtr_widgets::cross(ui, &look.skin(), label, target.height()).clicked();
+        });
+    clicked
 }
 
 /// Directories first, then case-insensitive name order, with the synthetic
@@ -907,5 +985,121 @@ mod tests {
             explorer.is_waiting_for(Path::new("/var/log")),
             "still waiting"
         );
+    }
+}
+
+#[cfg(test)]
+mod kittest_tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    const WIDTH: f32 = 640.0;
+    const HEIGHT: f32 = 240.0;
+
+    fn pane_rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(WIDTH, HEIGHT))
+    }
+
+    fn entry(name: &str, is_dir: bool, size: Option<u64>) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            is_dir,
+            size,
+        }
+    }
+
+    /// A pane whose listing is written down rather than read. A snapshot of a
+    /// real `/var/log` would be a snapshot of the machine that ran the test.
+    fn pane() -> Explorer {
+        let mut explorer = Explorer::remote_at("jupyter", PathBuf::from("/var/log"));
+        explorer.apply_listing(
+            PathBuf::from("/var/log"),
+            vec![
+                entry("apt", true, None),
+                entry("nginx", true, None),
+                entry("auth.log", false, Some(1536)),
+                entry("btmp", false, Some(0)),
+                entry("dpkg.log", false, Some(2_621_440)),
+                entry("kern.log", false, Some(933_888)),
+                entry("syslog", false, Some(4_194_304)),
+                entry("wtmp.1", false, Some(10_485_760)),
+            ],
+        );
+        explorer.selected = explorer
+            .entries
+            .iter()
+            .position(|entry| entry.name == "syslog")
+            .expect("syslog in the fixture");
+        explorer
+    }
+
+    /// The header's close button: where it is, that it is the pane's only click
+    /// target, and that it reports the press.
+    ///
+    /// The body being click-through is not an accident of the layout — it is why
+    /// the button is its own area. A press on the listing is the app's (that is
+    /// what moves the focus to the pane), and an area egui can hit-test would
+    /// take that press before the app ever saw it.
+    #[test]
+    fn the_header_carries_a_close_button() {
+        let look = Look::default();
+        let explorer = pane();
+        let label = format!("close {}", explorer.header());
+        let pressed = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let sink = std::rc::Rc::clone(&pressed);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                let rect = crate::layout::Rect::new(0.0, 0.0, WIDTH, HEIGHT);
+                if pane_ui(
+                    ui,
+                    egui::Id::unique("dtr-files-test"),
+                    rect,
+                    &explorer,
+                    &look,
+                    true,
+                ) {
+                    sink.set(sink.get() + 1);
+                }
+            });
+        harness.run();
+
+        // The button is in the header, inside the pane, and to the right of
+        // everything else the header draws.
+        let target = close_rect(pane_rect());
+        assert!(
+            pane_rect().contains_rect(target),
+            "the target escapes the pane"
+        );
+        assert!(header_rect(pane_rect()).contains_rect(target));
+        assert!(
+            target.left() > pane_rect().left() + WIDTH / 2.0,
+            "the cross belongs at the right-hand end"
+        );
+
+        // One square is a target; the listing is not. The window's root layer is
+        // everywhere and is not a surface — `App::over_egui` asks the same
+        // question, which is why it is asked in the same words here.
+        let over_body = harness
+            .ctx
+            .layer_id_at(pane_rect().center())
+            .map(crate::app::above_the_root);
+        assert_eq!(
+            over_body,
+            Some(false),
+            "the pane's body must stay click-through"
+        );
+        let over_cross = harness
+            .ctx
+            .layer_id_at(target.center())
+            .map(crate::app::above_the_root);
+        assert_eq!(over_cross, Some(true), "the cross has no target");
+
+        harness.snapshot("file_pane_close");
+
+        harness.get_by_label(&label).click();
+        harness.run();
+        assert_eq!(pressed.get(), 1, "the cross did not report the press");
     }
 }

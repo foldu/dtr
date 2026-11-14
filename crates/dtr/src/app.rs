@@ -3512,20 +3512,35 @@ impl App {
         self.repaint("tab closed");
     }
 
-    /// Close the active tab. The last tab closes the window, because a terminal
-    /// with no sessions has nothing to show.
     /// Close the focused pane; when it is the last pane in its tab, close the
     /// tab; when it is the last tab, close the window.
     fn close_active(&mut self) {
+        let focused = self.tabs[self.active].focus;
+        self.close_pane(focused);
+    }
+
+    /// Close one pane of the active tab.
+    ///
+    /// The last pane in the tab closes the tab, and the last tab the window —
+    /// the rule `close_active` has always had. The focus only moves when the
+    /// pane that went *was* the focused one: a file pane's close button is a
+    /// press in another pane's corner, and a terminal somebody is typing in must
+    /// not lose the keyboard because a listing beside it was dismissed.
+    fn close_pane(&mut self, id: crate::layout::LeafId) {
+        if !self.tabs[self.active].leaves.contains_key(&id) {
+            return;
+        }
         self.unzoom();
         let tab = &mut self.tabs[self.active];
-        if tab.leaves.len() > 1 && tab.layout.remove(tab.focus) {
-            let gone = tab.focus;
-            tab.leaves.remove(&gone);
-            // Focus the first remaining pane: predictable, and never the one
-            // whose geometry just changed under the pointer.
-            if let Some(first) = tab.layout.leaves().first().copied() {
-                tab.focus = first;
+        if tab.leaves.len() > 1 && tab.layout.remove(id) {
+            tab.leaves.remove(&id);
+            // Focus the first remaining pane when the one that went held the
+            // keyboard: predictable, and never the one whose geometry just
+            // changed under the pointer.
+            if tab.focus == id {
+                if let Some(first) = tab.layout.leaves().first().copied() {
+                    tab.focus = first;
+                }
             }
             return;
         }
@@ -5394,6 +5409,10 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut link_menu = std::mem::take(&mut self.link_menu);
                     let mut menu_choice = None;
                     let mut close_window = false;
+                    // The file pane whose close button was pressed, if any: the
+                    // drawing code says *which* pane, and only the app can take
+                    // a leaf out of the layout.
+                    let mut close_file = None;
                     let mut keymap_event = None;
                     let mut about_close = false;
                     let rendered = gpu.render(
@@ -5438,6 +5457,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &mut close_window,
                         &waiting,
                         &mut reconnect_ask,
+                        &mut close_file,
                     );
                     // The keyboard map's answers. Its Escape and its captured
                     // key are handled where the keys are; a click has to come back
@@ -5477,6 +5497,13 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                         self.repaint("a waiting pane was answered");
+                    }
+                    // A file pane's own close button. The pane cannot close
+                    // itself — a leaf is the layout's — so the answer comes back
+                    // here, the same way a clicked tab's does.
+                    if let Some(id) = close_file {
+                        self.close_pane(id);
+                        self.repaint("file pane closed");
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -6064,6 +6091,9 @@ impl Gpu {
         // Panes whose connection is not there, and where the answers go.
         waiting: &[crate::ui::Waiting],
         reconnect_ask: &mut Option<(crate::layout::LeafId, crate::ui::ReconnectAsk)>,
+        // A file pane's close button. The pane draws it; taking the leaf out of
+        // the layout is the app's, exactly like a tab's cross.
+        close_file: &mut Option<crate::layout::LeafId>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -6294,14 +6324,16 @@ impl Gpu {
             // File panes sit over the grid rectangle their leaf owns. They
             // are areas rather than windows: fixed position, no dragging.
             for file in files {
-                crate::explorer::pane_ui(
+                if crate::explorer::pane_ui(
                     ui,
                     egui::Id::unique(("dtr-files", file.id)),
                     file.rect,
                     file.explorer,
                     look,
                     file.focused,
-                );
+                ) {
+                    *close_file = Some(file.id);
+                }
             }
             // The composition box goes over the grid and under the
             // modals: it is part of typing, and a palette a composition

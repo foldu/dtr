@@ -237,7 +237,8 @@ pub fn capture(
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .show(ui, |_ui| {});
         if let (Some(explorer), Some(rect)) = (files, file_rect) {
-            crate::explorer::pane_ui(
+            // The capture draws the button; nothing can press it.
+            let _ = crate::explorer::pane_ui(
                 ui,
                 egui::Id::unique("dtr-screenshot-files"),
                 rect,

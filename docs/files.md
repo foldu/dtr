@@ -221,3 +221,38 @@ menu used to infer "serial" from a leading `/` while the app opened every entry 
 picking a port ran `ssh /dev/ttyUSB0`. A port goes through `Action::Connect`, which remembers
 its baud rate and CR translation; a host is `ssh -t <alias>`; a shell is that program, opened in
 the focused tab's directory when that tab is local.
+
+## 13. A file pane is painted, and its one button is an area of its own
+
+A file pane draws a listing and senses nothing: it is an `Area` with `interactable(false)`,
+because a press anywhere in it is the app's business. `App::pointer_down` turns that press into
+a focus move, which is what makes the arrow keys walk the listing, and an area egui hit-tests
+would take the press before the app ever saw it. The rows are painted, not widgets, for the
+same reason.
+
+So the cross in the header is **an `Area` of its own**, and that is not tidiness — it is the
+only version that works. egui *skips a non-interactable area in its hit test*, so a
+`dtr_widgets::cross_at` drawn inside the pane was a picture of a button that no press could
+reach; the first version of it was exactly that, and it looked right in a snapshot.
+`prime_area(…, interactable = true)` puts the target in place for the pane's first frame as
+well, or a pane that appeared this frame would have a button in the picture and nowhere to
+press.
+
+One 20-point square over the header's right corner is the whole of the pane's click surface. A
+press on it closes the pane and does *not* focus it first, and a press anywhere else in the
+listing still moves the focus exactly as it did before. Its rectangle comes from
+`explorer::close_rect`, which the painter, the widget and the test all call: the entry count
+sits against its left edge, and two calculations would drift apart the first time the inset
+changed.
+
+The answer travels the way a clicked tab's does — the drawing code knows what was pressed, the
+app knows what to do about it. `pane_ui` returns "the close was pressed", `Gpu::render` hands
+back the leaf id, and `App::close_pane` takes it out of the layout. `close_active` is that same
+call with the focused pane as its argument, and `close_pane` moves the focus **only when the
+pane that went held it**: otherwise dismissing a listing beside a shell nobody touched would
+move the keyboard out of that shell.
+
+Checked in the live window at 1× and at 2×: the cross is where the header puts it, a click on
+it closes the pane (`request redraw why="file pane closed"`), the terminal takes the width and
+keeps the focus, and a press on the pane's body still moves the focus to the listing (the
+terminal's cursor stops being drawn, which is how the screenshot says who has it).
