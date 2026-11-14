@@ -4511,6 +4511,14 @@ impl App {
             dtr_files::Outcome::Replace(_) | dtr_files::Outcome::Refused(_) => {
                 self.repaint("the picker asked again");
             }
+            dtr_files::Outcome::Navigate(folder) => {
+                // A folder pressed in a picker that wants a file: the browser's
+                // own gesture, one level down, with the question still open.
+                if let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) {
+                    browser.navigate(folder);
+                }
+                self.repaint("pick browsed");
+            }
         }
     }
 

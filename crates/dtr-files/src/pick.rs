@@ -188,6 +188,12 @@ pub enum Outcome {
     Replace(PathBuf),
     /// Something only the person can fix, said in the footer.
     Refused(String),
+    /// A folder pressed in a mode that wants a file.
+    ///
+    /// The press is the browser's own gesture — open the folder — and not an
+    /// answer, which is what every desktop's Open button does with a folder
+    /// selected. The picker stays open, one level down.
+    Navigate(PathBuf),
 }
 
 /// A picker in progress: the request, and what has been typed or chosen since.
@@ -318,7 +324,7 @@ impl Pick {
                 *self.problem.borrow_mut() = None;
                 *self.asking.borrow_mut() = Some(target.clone());
             }
-            Outcome::Chosen(_) => *self.problem.borrow_mut() = None,
+            Outcome::Chosen(_) | Outcome::Navigate(_) => *self.problem.borrow_mut() = None,
         }
         outcome
     }
@@ -330,6 +336,7 @@ impl Pick {
             // chooser behaves once you stop navigating.
             Select::Directory => Outcome::Chosen(vec![folder.to_path_buf()]),
             Select::File => match cursor {
+                Some(path) if is_dir(&path) => Outcome::Navigate(path),
                 Some(path) if self.passes(&path) => Outcome::Chosen(vec![path]),
                 Some(_) => Outcome::Refused(self.filter_refusal()),
                 None => Outcome::Refused("choose a file".to_owned()),
@@ -337,6 +344,14 @@ impl Pick {
             Select::Files => {
                 if picked.is_empty() {
                     return Outcome::Refused("choose at least one file".to_owned());
+                }
+                // One folder is a way in; a mixture is not an answer a file
+                // picker can give.
+                if picked.len() == 1 && is_dir(&picked[0]) {
+                    return Outcome::Navigate(picked[0].clone());
+                }
+                if picked.iter().any(|path| is_dir(path)) {
+                    return Outcome::Refused("a folder is not a file".to_owned());
                 }
                 if picked.iter().any(|path| !self.passes(path)) {
                     return Outcome::Refused(self.filter_refusal());
@@ -628,6 +643,32 @@ mod tests {
         assert_eq!(
             pick.accept(dir.path(), None, &[]),
             Outcome::Refused("choose at least one file".to_owned())
+        );
+    }
+
+    /// A folder pressed in a file picker is a way in, not an answer — the
+    /// browser's own gesture, with the question still open.
+    #[test]
+    fn a_folder_in_a_file_picker_is_a_way_in() {
+        let dir = scratch();
+        let inside = dir.path().join("sub");
+        std::fs::create_dir(&inside).expect("mkdir");
+        let pick = Pick::new(Request::open());
+        assert_eq!(
+            pick.accept(dir.path(), Some(inside.clone()), &[]),
+            Outcome::Navigate(inside.clone())
+        );
+        // One folder chosen by a multiple picker is the same way in; a mixture
+        // is not an answer a file picker can give.
+        let many = Pick::new(Request::open_many());
+        assert_eq!(
+            many.accept(dir.path(), Some(inside.clone()), &[inside.clone()]),
+            Outcome::Navigate(inside.clone())
+        );
+        let file = dir.path().join("a.txt");
+        assert_eq!(
+            many.accept(dir.path(), Some(inside.clone()), &[file, inside]),
+            Outcome::Refused("a folder is not a file".to_owned())
         );
     }
 

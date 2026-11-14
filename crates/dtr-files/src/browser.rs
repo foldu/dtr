@@ -305,6 +305,8 @@ pub struct Browser {
     /// what you picked, and a listing that yanked itself back would make the
     /// wheel useless in a long directory.
     reveal: Cell<bool>,
+    /// A picker that has still to move its cursor off `..`.
+    preselect: Cell<bool>,
     /// What the last frame drew and where: the hit test's copy of the layout.
     ///
     /// The painter and the press have to agree about which tile is under a
@@ -406,6 +408,7 @@ impl Browser {
             anchor: None,
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
+            preselect: Cell::new(false),
             crumbs: RefCell::new(Vec::new()),
             menu: RefCell::new(ContextMenu::default()),
             frame: Cell::new(None),
@@ -809,6 +812,10 @@ impl Browser {
         if let Some(folder) = request.folder.clone() {
             self.navigate(folder);
         }
+        // The parent row is where a listing starts and where nobody's answer is:
+        // the first real row is the one a press should be about.
+        self.preselect.set(true);
+        self.settle_preselect();
         self.mode = Mode::Pick(Pick::new(request));
     }
 
@@ -986,6 +993,7 @@ impl Browser {
             anchor: None,
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
+            preselect: Cell::new(false),
             crumbs: RefCell::new(Vec::new()),
             menu: RefCell::new(ContextMenu::default()),
             frame: Cell::new(None),
@@ -1137,6 +1145,12 @@ impl Browser {
         // rows: navigating away dismisses it rather than leaving a menu over a
         // listing it never described.
         self.close_menu();
+        // A picker that goes somewhere is still answering: its cursor belongs on
+        // the first real row of the new listing rather than the `..` it came in
+        // by, or every folder costs a second press.
+        if self.is_picking() {
+            self.preselect.set(true);
+        }
         self.cwd = path;
         // Whatever was picked belonged to the directory that is going away.
         self.chosen.clear();
@@ -1338,6 +1352,32 @@ impl Browser {
             self.scroll.set(index);
         }
         self.selected = clamp_selection(self.selected, self.entries.len());
+        self.settle_preselect();
+    }
+
+    /// Give a picker its first real row, once the listing that has one lands.
+    ///
+    /// `..` is a place and not an answer, so a picker whose cursor starts there
+    /// refuses the first press with "choose a file" — true, and the worst possible
+    /// first thing to say. The flag is set when the picker opens and taken when
+    /// there is a row to take.
+    fn settle_preselect(&mut self) {
+        if !self.preselect.get() {
+            return;
+        }
+        // A pane that already has an answer selected — a file named on the
+        // command line, a picker opened over a deliberate selection — keeps it.
+        if self
+            .selected_entry()
+            .is_some_and(|entry| !entry.is_parent())
+        {
+            self.preselect.set(false);
+            return;
+        }
+        if let Some(index) = self.entries.iter().position(|entry| !entry.is_parent()) {
+            self.selected = index;
+            self.preselect.set(false);
+        }
     }
 
     /// Sort and filter what is here. `..` is synthetic, so it is dropped before
@@ -1361,6 +1401,7 @@ impl Browser {
         // paths hand back two.
         self.chosen
             .retain(|picked| self.entries.iter().any(|entry| entry.name == *picked));
+        self.settle_preselect();
     }
 
     /// Ask for the sizes and times the current sort needs.
@@ -2908,8 +2949,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Browser, Entry, Key, Layout, Sort, View, arrange, clamp_selection, crumbs, display_join,
-        display_path, first_visible, human_size, parent_of,
+        Browser, Entry, Key, Layout, Outcome, Request, Sort, View, arrange, clamp_selection,
+        crumbs, display_join, display_path, first_visible, human_size, parent_of,
     };
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -3053,6 +3094,36 @@ mod tests {
         );
         // And the same mtime does not re-list a second time.
         assert!(!browser.refresh_if_changed(), "nothing changed again");
+    }
+
+    /// A picker opens on the first real row, not on `..`: the parent is a place
+    /// and not an answer, and a first `Enter` that says "choose a file" while a
+    /// row is clearly highlighted teaches the wrong thing.
+    #[test]
+    fn a_picker_starts_on_the_first_file() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("a.txt"), b"x").expect("file");
+        std::fs::write(root.join("b.txt"), b"x").expect("file");
+
+        let mut browser = Browser::new(Some(root.clone()));
+        settle(&mut browser);
+        assert_eq!(
+            browser.selected_entry().map(|entry| entry.name.as_str()),
+            Some(".."),
+            "a browser opens on the parent row"
+        );
+        browser.set_pick(Request::open());
+        settle(&mut browser);
+        assert_eq!(
+            browser.selected_entry().map(|entry| entry.name.as_str()),
+            Some("a.txt"),
+            "a picker opens on the first file"
+        );
+        assert_eq!(
+            browser.accept_pick(),
+            Some(Outcome::Chosen(vec![root.join("a.txt")]))
+        );
     }
 
     /// The three press gestures: one row, a ctrl-press that adds a row and takes

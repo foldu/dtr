@@ -136,7 +136,13 @@ impl ContextMenu {
                     .corner_radius(style.control_radius)
                     .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
-                        ui.set_min_width(width(ui, skin, rows));
+                        // Both, not just the minimum: a row fills the width it
+                        // is *offered*, and an area with no ceiling offers the
+                        // window — a two-word menu across a whole build was 600
+                        // points wide.
+                        let width = width(ui, skin, rows);
+                        ui.set_min_width(width);
+                        ui.set_max_width(width);
                         for (index, row) in rows.iter().enumerate() {
                             let hit = match row.chord {
                                 Some(chord) => menu_row_chord(ui, skin, row.label, chord),
