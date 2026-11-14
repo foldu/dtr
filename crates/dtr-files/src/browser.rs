@@ -253,6 +253,13 @@ pub struct Browser {
     /// The directory whose sizes and times are all known: a re-sort re-uses them
     /// rather than asking again.
     facts_for: Option<PathBuf>,
+    /// The directory's own modification time, as the last walk saw it.
+    ///
+    /// A directory's mtime changes when an entry is created, removed or renamed —
+    /// which is exactly what a listing cares about — so it is the whole state a
+    /// poll needs. It does **not** change when a file's contents change, and a
+    /// listing does not show contents.
+    listing_seen: Cell<Option<SystemTime>>,
     /// Whether the next frame should bring the selection into view.
     ///
     /// **The selection and the view are two things.** A key or a press moves the
@@ -344,6 +351,7 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            listing_seen: Cell::new(None),
             reveal: Cell::new(false),
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
@@ -580,6 +588,7 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            listing_seen: Cell::new(None),
             reveal: Cell::new(false),
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
@@ -685,19 +694,7 @@ impl Browser {
             Key::Parent => self.go_up(),
             Key::Top => self.selected = 0,
             Key::Bottom => self.selected = last,
-            Key::Reload => {
-                let selected = self.selected_entry().map(|entry| entry.name.clone());
-                self.reload();
-                if let Some(name) = selected {
-                    if let Some(index) = self
-                        .entries
-                        .iter()
-                        .position(|entry| entry.name == name && !entry.is_parent())
-                    {
-                        self.selected = index;
-                    }
-                }
-            }
+            Key::Reload => self.refresh(),
             Key::Enter => {
                 let entry = self.selected_entry()?.clone();
                 if entry.is_parent() {
@@ -754,6 +751,14 @@ impl Browser {
             self.remote_request();
             return;
         }
+        // Taken *before* the walk, not after: a change during the read is a
+        // change the listing may have missed, and a timestamp from after it
+        // would hide exactly that.
+        self.listing_seen.set(
+            std::fs::metadata(&self.cwd)
+                .and_then(|meta| meta.modified())
+                .ok(),
+        );
         // Streamed, off the drawing thread: the first batch is drawn while the
         // rest of a 10 000-entry directory is still being read, and the footer
         // says `reading…` rather than claiming the directory is empty.
@@ -761,6 +766,51 @@ impl Browser {
             dir: self.cwd.clone(),
             batches: self.local.list(&self.cwd),
         });
+    }
+
+    /// Read the directory again, keeping the selection on its file.
+    ///
+    /// The refresh a poll and `r` both use: a first batch is clearing the pane,
+    /// so a selection that went back to the top would move a person's place in a
+    /// directory that only gained a file.
+    pub fn refresh(&mut self) {
+        let selected = self.selected_entry().map(|entry| entry.name.clone());
+        self.reload();
+        // A **promise**, not a lookup: the walk is streamed and has not sent a row
+        // yet, so a position found now is a position in an empty listing. `wanted`
+        // is applied when the walk ends, which is the same mechanism
+        // `dtr --files some/file` uses.
+        self.wanted = selected.filter(|name| !name.is_empty() && name != "..");
+    }
+
+    /// Re-list if the directory changed on disk, and say whether it did.
+    ///
+    /// Polled rather than watched, for the reason the config file is polled
+    /// (`docs/compio.md` §5): a watch per pane is two resources and a thread for
+    /// one number, and `notify` is not in this tree. One `stat` of a path the
+    /// pane already holds, twice a second, is the cheaper bargain — and a
+    /// directory's mtime is the number that answers the question.
+    ///
+    /// A remote pane is never polled: `Caps::watch` is false there, and the stat
+    /// would be a network round trip on a timer.
+    pub fn refresh_if_changed(&mut self) -> bool {
+        if self.remote.is_some() || self.reading() {
+            return false;
+        }
+        let Ok(modified) = std::fs::metadata(&self.cwd).and_then(|meta| meta.modified()) else {
+            return false;
+        };
+        match self.listing_seen.get() {
+            None => {
+                self.listing_seen.set(Some(modified));
+                false
+            }
+            Some(seen) if seen == modified => false,
+            Some(_) => {
+                self.refresh();
+                true
+            }
+        }
     }
 
     /// Take whatever arrived, and say whether the pane needs a frame because of
@@ -1800,6 +1850,40 @@ mod tests {
             },
         );
         assert_eq!(names(&shown), ["..", ".git", ".bashrc", "visible"]);
+    }
+
+    /// A directory that gained a file is re-listed by the poll, once, and the
+    /// selection stays on the file it was on.
+    #[test]
+    fn a_changed_directory_is_read_again_once() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("a.txt"), b"x").expect("file");
+        std::fs::write(root.join("b.txt"), b"x").expect("file");
+
+        let mut browser = Browser::new(Some(root.clone()));
+        settle(&mut browser);
+        assert!(!browser.refresh_if_changed(), "nothing changed yet");
+        browser.selected = row_of(&browser, "b.txt");
+
+        // A mtime is compared by value, so the change has to be a different
+        // instant: some filesystems have a one-second clock, and this waits for
+        // one tick of the coarser kind rather than depending on the finer one.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("c.txt"), b"x").expect("file");
+        assert!(browser.refresh_if_changed(), "the directory changed");
+        settle(&mut browser);
+        assert!(
+            names(&browser.entries).contains(&"c.txt"),
+            "the new file is listed"
+        );
+        assert_eq!(
+            browser.selected_entry().map(|entry| entry.name.as_str()),
+            Some("b.txt"),
+            "the selection stayed on its file"
+        );
+        // And the same mtime does not re-list a second time.
+        assert!(!browser.refresh_if_changed(), "nothing changed again");
     }
 
     /// `Ctrl+H` is a redraw, not a walk: the hidden entries are kept beside the

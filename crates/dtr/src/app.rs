@@ -568,6 +568,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         bg: None,
         scanning: false,
         scan_due: std::time::Instant::now(),
+        listing_due: std::time::Instant::now() + LISTING_POLL,
         tabs: vec![Tab::new(
             1,
             Pane::Terminal(Session {
@@ -1269,6 +1270,12 @@ struct App {
     /// When the next poll is due. Serial devices have no portable notification,
     /// so they are polled — off the UI thread.
     scan_due: std::time::Instant,
+    /// When the open listings are next asked whether their directory changed.
+    ///
+    /// Polled, not watched: a directory's mtime is one `stat` of a path the pane
+    /// already holds, twice a second, and `notify` in this tree would be two
+    /// resources and a thread per pane for the same number (`docs/compio.md` §5).
+    listing_due: std::time::Instant,
     active: usize,
     next_leaf: crate::layout::LeafId,
     gpu: Option<Gpu>,
@@ -1420,6 +1427,15 @@ struct App {
     /// frame that did not move the caret does not repeat itself.
     ime_caret: Option<[f32; 4]>,
 }
+
+/// How often an open listing is asked whether its directory changed.
+///
+/// Twice a second is the resolution a person notices: a file created by a build
+/// or a `git checkout` appears in half a second, and the cost is a `stat` per
+/// open pane — the same bargain the config file's 250 ms poll already makes, at
+/// half the rate because a directory changes less often than a file being
+/// edited.
+const LISTING_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl App {
     /// Follow the panel the window is on.
@@ -4843,6 +4859,27 @@ impl ApplicationHandler<UserEvent> for App {
                 gpu.window.request_redraw();
             }
         }
+
+        // A directory that gained or lost an entry is a state with no event: no
+        // thread, no port, nothing to wait on. So it is polled, and the answer is
+        // one `stat` of a path the pane already holds.
+        if self.listing_due <= std::time::Instant::now() {
+            self.listing_due = std::time::Instant::now() + LISTING_POLL;
+            let mut changed = false;
+            for tab in &mut self.tabs {
+                for pane in tab.leaves.values_mut() {
+                    if let Pane::Files(browser) = pane {
+                        changed |= browser.refresh_if_changed();
+                    }
+                }
+            }
+            if changed {
+                self.repaint("a directory changed");
+            }
+        }
+        // Set every iteration, because the control flow is sticky: a deadline
+        // left in the past makes every `poll` time out instantly.
+        sooner(self.listing_due, &mut deadline);
 
         // A scan is cheap to *ask* for and expensive to *do*, so asking never
         // blocks the frame: the work goes to the worker runtime and comes back
