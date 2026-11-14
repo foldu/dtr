@@ -23,81 +23,29 @@ use egui::{Pos2, Rect, Stroke, TextureHandle, Vec2};
 
 use crate::ui::Look;
 
-/// What the pointer has to land on to be worth a preview at all. The extension is
-/// only a hint — the decoder sniffs the bytes — but it is what keeps every
-/// non-image link from being opened and read.
-const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg"];
+/// The decode, its caps, and what counts as a picture.
+///
+/// They live in `dtr-files` now, because the grid draws thumbnails too and two
+/// decoders would be two answers to "how big a file may a preview read". The
+/// terminal keeps the half that is a terminal's: a cache of *one* large preview
+/// drawn beside the pointer, keyed by machine and path.
+pub use dtr_files::thumb::{MAX_BYTES, MAX_HEIGHT, MAX_WIDTH, Thumb, looks_like_image};
 
-/// The biggest source file a hover will read.
-pub const MAX_BYTES: u64 = 16 << 20;
-/// The biggest source image, in pixels per side: a 40000x100 limit is still a
-/// decode nobody asked for.
-const MAX_SOURCE: u32 = 8192;
-/// What a single decode may allocate. The decoded image is the expensive half,
-/// and it exists before any downscale can happen.
-const MAX_ALLOC: u64 = 256 << 20;
-/// The size of the preview that is stored: 2× the largest draw size, so it is
-/// sharp on a HiDPI display without being a texture per megapixel.
-pub const MAX_WIDTH: u32 = 480;
-pub const MAX_HEIGHT: u32 = 360;
+/// The size a hover preview is decoded to.
+const PREVIEW: (u32, u32) = (MAX_WIDTH, MAX_HEIGHT);
+
+/// Read one picture, at the size a preview beside the pointer is drawn.
+///
+/// The shared decoder takes the box because a grid cell wants its own: one
+/// function, two callers, and no second opinion about the source caps.
+pub fn load(path: &Path) -> anyhow::Result<Thumb> {
+    dtr_files::thumb::load(path, PREVIEW)
+}
+
 /// How many previews are kept. A directory listing is longer than this, and the
 /// point of the cache is the pointer resting on a row of names, not remembering
 /// yesterday.
 const CAPACITY: usize = 16;
-
-/// A decoded image, already small enough to be a texture.
-#[derive(Clone, Debug)]
-pub struct Thumb {
-    pub width: u32,
-    pub height: u32,
-    /// RGBA8, straight alpha.
-    pub rgba: Vec<u8>,
-}
-
-/// Is this a path a hover should even try?
-pub fn looks_like_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            EXTENSIONS
-                .iter()
-                .any(|wanted| ext.eq_ignore_ascii_case(wanted))
-        })
-}
-
-/// Read and downscale one image, with every limit applied before the expensive
-/// part.
-pub fn load(path: &Path) -> anyhow::Result<Thumb> {
-    let meta = std::fs::metadata(path)?;
-    anyhow::ensure!(meta.is_file(), "not a file");
-    anyhow::ensure!(
-        meta.len() <= MAX_BYTES,
-        "{} bytes is more than a preview is worth",
-        meta.len()
-    );
-    // Guessed, not trusted from the extension: a `.png` that is really a JPEG is
-    // a thing `mv` does, and the decoder knows better than the name.
-    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_SOURCE);
-    limits.max_image_height = Some(MAX_SOURCE);
-    limits.max_alloc = Some(MAX_ALLOC);
-    reader.limits(limits);
-    let image = reader.decode()?;
-    // `thumbnail` enlarges as happily as it shrinks — a 1x1 icon "fits" a 480x360
-    // box at 360x360 — and a preview that invents pixels is worse than none.
-    let scaled = if image.width() > MAX_WIDTH || image.height() > MAX_HEIGHT {
-        image.thumbnail(MAX_WIDTH, MAX_HEIGHT)
-    } else {
-        image
-    };
-    let rgba = scaled.to_rgba8();
-    Ok(Thumb {
-        width: rgba.width(),
-        height: rgba.height(),
-        rgba: rgba.into_raw(),
-    })
-}
 
 /// Which file a preview belongs to.
 ///

@@ -9,9 +9,14 @@ publish.workspace = true
 [dependencies]
 # `dirs::home_dir`, for the `~` in a displayed path. The browser shows paths, so
 # it needs to know where home is; nothing else about the machine.
+anyhow.workspace = true
 async-channel.workspace = true
 dirs.workspace = true
 egui.workspace = true
+# A grid cell shows the picture, not the name, and the decode is the one place
+# the browser touches bytes rather than a listing. `png` and `jpeg` only, as the
+# terminal does: a preview of a RAW file is a build nobody asked for.
+image.workspace = true
 # The listing, batched and off the drawing thread. `dtr-vfs` and not `std::fs`:
 # the same browser draws a remote directory, and a listing whose shape differs by
 # machine is two models.

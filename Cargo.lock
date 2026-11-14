@@ -1187,12 +1187,14 @@ dependencies = [
 name = "dtr-files"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-channel",
  "dirs",
  "dtr-vfs",
  "dtr-widgets",
  "egui",
  "egui_kittest",
+ "image",
  "tempfile",
 ]
 

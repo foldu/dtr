@@ -345,7 +345,7 @@ impl IconSet {
 
     /// Begin a frame: the read budget is per frame, not per set.
     pub fn start_frame(&self) {
-        let mut loaded = self.loaded.borrow_mut();
+        let loaded = self.loaded.borrow();
         loaded.reads.set(0);
         loaded.exhausted.set(false);
     }

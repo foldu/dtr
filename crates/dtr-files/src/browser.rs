@@ -28,6 +28,7 @@ use dtr_widgets::{Glyph, Icon, IconTile, Skin, icon_tile, tile_height};
 
 use crate::grid::{cell_rect, columns, first_row, index_at, row_of, rows, visible_rows};
 use crate::theme::IconSet;
+use crate::thumb::{Thumbs, looks_like_image};
 
 const ROW_HEIGHT: f32 = 18.0;
 /// The gap between two grid cells, and the inset of the grid inside the body:
@@ -237,6 +238,9 @@ pub struct Browser {
     /// path, read through a per-frame budget, and replaceable with an empty set
     /// by a test whose baseline may not depend on the machine's icon theme.
     icons: RefCell<IconSet>,
+    /// The pictures of the images in view, decoded off this thread and uploaded
+    /// when they arrive.
+    thumbs: RefCell<Thumbs>,
     /// A name to select once the listing that carries it arrives.
     ///
     /// `dtr --files some/file` names a file the walk has not sent yet, so the
@@ -305,6 +309,7 @@ impl Browser {
             page: Cell::new(0),
             view: View::default(),
             icons: RefCell::new(IconSet::system()),
+            thumbs: RefCell::new(Thumbs::default()),
             message: None,
             remote: Some(Remote {
                 alias: alias.to_owned(),
@@ -449,6 +454,7 @@ impl Browser {
             page: Cell::new(0),
             view: View::default(),
             icons: RefCell::new(IconSet::system()),
+            thumbs: RefCell::new(Thumbs::default()),
             message: None,
             remote: None,
             local: Local::new(),
@@ -599,6 +605,9 @@ impl Browser {
     /// Read the directory again. A failure is a message in the pane, not a
     /// panic and not an empty pane: the header and the message both stay.
     fn reload(&mut self) {
+        // The pictures belonged to the listing that is going away. A decode
+        // already running finishes and its answer is dropped.
+        self.thumbs.borrow_mut().clear();
         self.entries.clear();
         self.selected = 0;
         self.scroll.set(0);
@@ -1136,6 +1145,10 @@ impl Browser {
         let px = (style.tile_icon * ui.ctx().pixels_per_point())
             .ceil()
             .max(1.0) as u32;
+        // Pictures decoded since the last frame become textures here, because a
+        // texture needs the drawing context, and the tiles below can then use
+        // them in this frame.
+        let mut wanted = self.thumbs.borrow_mut().poll(ui.ctx());
 
         for index in start..end {
             let entry = &self.entries[index];
@@ -1147,17 +1160,32 @@ impl Browser {
                 Glyph::File
             };
             // The parent row is not a file and has no picture to ask about.
+            let path = self.cwd.join(&entry.name);
+            let thumbnail = if entry.is_parent() || entry.is_dir || !looks_like_image(&path) {
+                None
+            } else {
+                // `None` here is "not yet": the type icon is drawn until the
+                // decode lands, and another frame is asked for.
+                let texture = self.thumbs.borrow_mut().texture(&path, px).cloned();
+                if texture.is_none() {
+                    wanted = true;
+                }
+                texture
+            };
             let picture = if entry.is_parent() {
                 None
             } else {
-                icons.picture_for(&self.cwd.join(&entry.name), &entry.name, entry.is_dir, px)
+                icons.picture_for(&path, &entry.name, entry.is_dir, px)
             };
-            let icon = match &picture {
-                Some(picture) => Icon::Bytes {
-                    uri: picture.uri(),
-                    bytes: picture.bytes(),
+            let icon = match &thumbnail {
+                Some(texture) => Icon::Image(texture),
+                None => match &picture {
+                    Some(picture) => Icon::Bytes {
+                        uri: picture.uri(),
+                        bytes: picture.bytes(),
+                    },
+                    None => Icon::Glyph(glyph),
                 },
-                None => Icon::Glyph(glyph),
             };
             icon_tile(
                 ui,
@@ -1177,7 +1205,7 @@ impl Browser {
                 },
             );
         }
-        if icons.wants_a_frame() {
+        if icons.wants_a_frame() || wanted {
             ui.ctx().request_repaint();
         }
     }

@@ -24,6 +24,7 @@ mod browser;
 mod grid;
 pub mod icons;
 pub mod theme;
+pub mod thumb;
 
 pub use browser::{
     Browser, Entry, Key, Mode, PaneView, arrange, clamp_selection, display_join, display_path,
@@ -31,4 +32,4 @@ pub use browser::{
 };
 pub use grid::{cell_rect, columns, first_row, index_at, rows, visible_rows};
 pub use icons::{Places, desktop_icon, type_icon};
-pub use theme::{Category, Theme};
+pub use theme::{Category, IconSet, Picture, Theme};
