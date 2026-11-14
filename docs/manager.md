@@ -434,6 +434,11 @@ much as remote ones.
    take**: the cold case, and an SFTP directory.
 7. **Rows drawn per frame against rows streamed in**: that batches coalesce to one repaint each
    (§3 *Streamed*), i.e. a 157-batch listing produces about a frame's worth of repaints and not 157.
+   **Taken**: 10 000 files in `/tmp/bigdir` (tmpfs), opened with `dtr --files /tmp/bigdir -v`, twice.
+   The walk is 157 batches of 64; `-v`'s once-a-second line reported **33 and 34 frames in the first
+   second** — the 16 ms merge gate holding, at about four and a half batches per frame — and **0 and 0
+   frames** in the second, which is the pane idle. So the stream costs a couple of dozen repaints and
+   not 157, and the gate is what bounds it.
 
 ## 11. Risks
 
@@ -497,12 +502,17 @@ for the parent), `e3c2ef5` (a press selects and the second press opens, the whee
 `80fbcda` (the polled directory refresh), `7cacf3c` (`[files] sort`/`reverse`/`folders-first` and the
 footer that says so).
 
-**Still owed in F1b**, in the order worth doing it: the sort **control** in the header (a glyph and a
-popup — today the order is changed by key or by file and shown in the footer, which is honest but not
-a file manager), the **breadcrumb** and the **places popup**, the **right-click menu**, and
-**multi-select**. Multi-select is deliberately last: nothing takes a set yet — copy, move and delete
-are F5 and F6 — and a selection nobody can act on is a highlight with no verb. Measurement 7 is still
-owed for the same reason it exists: it needs a real 10 000-entry directory and a frame counter.
+Then `8a180b7` (the sort **control** in the header: a name, a drawn triangle for its direction, and a
+popup — which also uncovered that `egui_winit` never asks for a frame on a bare `CursorMoved`, so no
+hover in the chrome had ever appeared on its own), `11001c3` (the **breadcrumb**: one target per
+component, with the root and home as segments), `2cfbc56` (the **places popup**: a drawn house and the
+directories `user-dirs.dirs` decorates), and `d063f54` (`ctrl-alt-c` for the selected path — the one
+thing a context menu would offer that nothing else does).
+
+**Still owed in F1b**: the **right-click menu** and **multi-select**. Both are deliberately last, and
+for the same reason — a menu and a set are verbs, and the verbs they are for (copy, move, delete, a
+transfer queue) are F5 and F6. A menu with two live rows promises the others; a highlight with no
+action is a highlight nobody can use. Measurement 7 is taken (§10).
 
 F1 is split in two because the listing is where the correctness lives and the grid is where the look
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with

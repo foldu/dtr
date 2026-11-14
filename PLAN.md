@@ -958,9 +958,9 @@ because the daemon opens one window per request, and **`dtr-portal`** is the dae
 manager window's process, so `dtr-files [PATH]` asks it for a window instead of being a third binary.
 
 **Implemented:** `F0`, `F1a`, and `F1b` up to the grid being usable — tiles, icons, thumbnails, 2-D
-keys, press and wheel, hidden files, a polled refresh and the order in `[files]`
-(`docs/manager.md` §12 has the commits and names what F1b still owes: the sort *control*, the
-breadcrumb, the places popup, the context menu, and multi-select). Not `dtr-frame`: it has no second
+keys, press and wheel, hidden files, a polled refresh, the order in `[files]` with its control in the
+header, the breadcrumb and the places popup (`docs/manager.md` §12 has the commits and names what F1b
+still owes: the right-click menu and multi-select, both waiting for verbs that F5 and F6 bring). Not `dtr-frame`: it has no second
 caller until the daemon exists, so a multi-window loop would be shaped against one window — the
 refactor F0's own gate is there to prevent.
 
