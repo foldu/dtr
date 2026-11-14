@@ -47,6 +47,8 @@ pub enum Action {
     FilesHidden,
     /// Put the selected entry's path on the clipboard.
     FilesCopyPath,
+    /// Every row in the listing, because `Ctrl+A` belongs to the shell.
+    FilesSelectAll,
     /// What a listing is ordered by, and its two switches.
     FilesSortName,
     FilesSortModified,
@@ -99,6 +101,7 @@ impl Action {
             Self::FilesList => "files-list",
             Self::FilesHidden => "files-hidden",
             Self::FilesCopyPath => "files-copy-path",
+            Self::FilesSelectAll => "files-select-all",
             Self::FilesSortName => "files-sort-name",
             Self::FilesSortModified => "files-sort-modified",
             Self::FilesSortSize => "files-sort-size",
@@ -151,6 +154,7 @@ impl Action {
             Self::FilesList => "file list view",
             Self::FilesHidden => "hidden files",
             Self::FilesCopyPath => "copy the selected path",
+            Self::FilesSelectAll => "select every file",
             Self::FilesSortName => "sort by name",
             Self::FilesSortModified => "sort by date",
             Self::FilesSortSize => "sort by size",
@@ -195,6 +199,7 @@ impl Action {
             | Self::FilesList
             | Self::FilesHidden
             | Self::FilesCopyPath
+            | Self::FilesSelectAll
             | Self::FilesSortName
             | Self::FilesSortModified
             | Self::FilesSortSize
@@ -277,7 +282,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 41] = [
+pub const ALL: [Action; 42] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -299,6 +304,7 @@ pub const ALL: [Action; 41] = [
     Action::FilesList,
     Action::FilesHidden,
     Action::FilesCopyPath,
+    Action::FilesSelectAll,
     Action::FilesSortName,
     Action::FilesSortModified,
     Action::FilesSortSize,
@@ -357,6 +363,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // ctrl+alt and a letter: the arrows in that family move between panes, and
     // these are the six things a listing can be ordered by or ask of the order.
     ("files-copy-path", "ctrl-alt-c"),
+    ("files-select-all", "ctrl-alt-a"),
     ("files-sort-name", "ctrl-alt-n"),
     ("files-sort-modified", "ctrl-alt-m"),
     ("files-sort-size", "ctrl-alt-s"),

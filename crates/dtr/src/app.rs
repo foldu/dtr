@@ -3005,6 +3005,21 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Select every row in the focused listing.
+    fn select_all_files(&mut self) -> bool {
+        let Some(browser) = self.focused_browser_mut() else {
+            self.toast = Some((
+                "no file pane is focused".to_owned(),
+                std::time::Instant::now(),
+            ));
+            self.repaint("files select all");
+            return true;
+        };
+        browser.select_all();
+        self.repaint("files select all");
+        true
+    }
+
     /// Put the focused listing's selected path on the clipboard.
     ///
     /// The one thing a context menu would offer that nothing else does: `open` is
@@ -3270,6 +3285,7 @@ impl App {
             Action::FilesList => self.set_file_mode(FileMode::List),
             Action::FilesHidden => self.toggle_hidden_files(),
             Action::FilesCopyPath => self.copy_file_path(),
+            Action::FilesSelectAll => self.select_all_files(),
             Action::FilesSortName => self.change_file_view(|view| view.sort = FileSort::Name),
             Action::FilesSortModified => {
                 self.change_file_view(|view| view.sort = FileSort::Modified)

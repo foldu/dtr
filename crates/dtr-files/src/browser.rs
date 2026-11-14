@@ -470,6 +470,30 @@ impl Browser {
             .is_some_and(|entry| self.chosen.iter().any(|name| *name == entry.name))
     }
 
+    /// Select every row the listing shows.
+    ///
+    /// The one thing a multi-selection can do that nothing else reaches: `Ctrl+A`
+    /// belongs to the shell, and picking forty rows one press at a time is not a
+    /// gesture. The parent row is not a file and is not in it.
+    pub fn select_all(&mut self) {
+        self.chosen = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_parent())
+            .map(|entry| entry.name.clone())
+            .collect();
+        // The cursor stays where it is when it is inside the pick, and moves to
+        // the first row when it is not — a cursor on `..` after "select all" would
+        // be a cursor on the one row that is not selected.
+        if !self.is_selected(self.selected)
+            && let Some(first) = self.entries.iter().position(|entry| !entry.is_parent())
+        {
+            self.selected = first;
+        }
+        self.anchor = self.chosen.first().cloned();
+        self.reveal.set(true);
+    }
+
     /// Move the cursor to a row and make it the whole selection, without asking
     /// the view to follow.
     ///
@@ -2600,6 +2624,30 @@ mod tests {
             selected_names(&browser),
             vec!["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]
         );
+    }
+
+    /// Select-all picks the files and not the parent row, and it moves the cursor
+    /// into the pick: a cursor left on `..` would be a cursor on the one row that
+    /// is not selected.
+    #[test]
+    fn select_all_takes_every_row_but_the_parent() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(root.join(name), b"x").expect("file");
+        }
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        assert!(browser.entries[0].is_parent(), "the fixture starts on `..`");
+        browser.select_all();
+        assert_eq!(selected_names(&browser), vec!["a.txt", "b.txt", "c.txt"]);
+        assert!(!browser.is_selected(0), "the parent is not a file");
+        assert_eq!(
+            browser.selected, 1,
+            "and the cursor moved into the pick, to its first row"
+        );
+        assert_eq!(browser.selection_label().as_deref(), Some("3 selected"));
+        assert_eq!(browser.selected_paths().len(), 3);
     }
 
     /// A keyboard move is a new selection: there is no chord that says "keep what
