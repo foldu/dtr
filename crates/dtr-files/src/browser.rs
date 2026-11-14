@@ -18,7 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use egui::{Align2, Stroke};
@@ -1026,7 +1026,11 @@ impl Browser {
         // relative path still works when it cannot be canonicalised (the path
         // does not exist, and the error belongs in the pane).
         if let Ok(absolute) = std::fs::canonicalize(&cwd) {
-            cwd = absolute;
+            // Windows answers with a *verbatim* path, and everything below
+            // compares that value with `home` and with the places list: a
+            // `\\?\C:\...` that matches neither loses `~` and the tick as well
+            // as looking wrong (`plain`).
+            cwd = plain(&absolute);
         }
         browser.cwd = cwd;
         browser.reload();
@@ -2884,34 +2888,65 @@ pub fn first_visible(selected: usize, scroll: usize, visible: usize) -> usize {
 ///
 /// One segment per component, so `~/src/dtr/docs` is four targets and a press on
 /// `dtr` is two levels up — the whole point of a breadcrumb over a path string.
-/// The root is a segment of its own, because "go to `/`" is otherwise only
+/// The volume is a segment of its own — `/` on Unix, `C:\` on Windows,
+/// `\\server\share\` for a share — because "go to the top" is otherwise only
 /// reachable by pressing the parent several times.
+///
+/// This used to start at a literal `/` and keep only the normal components,
+/// which on Windows read `// fixture`: no drive, a doubled separator, and a
+/// target of `/fixture` — a Unix path that names something else on that machine.
 pub fn crumbs(path: &Path, home: &Path) -> Vec<(String, PathBuf)> {
     let mut segments = Vec::new();
-    if let Ok(rest) = path.strip_prefix(home) {
+    if !home.as_os_str().is_empty()
+        && let Ok(rest) = path.strip_prefix(home)
+    {
         segments.push(("~".to_owned(), home.to_path_buf()));
         let mut at = home.to_path_buf();
         for part in rest.components() {
-            at.push(part);
-            segments.push((part.as_os_str().to_string_lossy().into_owned(), at.clone()));
+            if let Component::Normal(name) = part {
+                at.push(name);
+                segments.push((name.to_string_lossy().into_owned(), at.clone()));
+            }
         }
         return segments;
     }
-    segments.push(("/".to_owned(), PathBuf::from("/")));
-    let mut at = PathBuf::from("/");
+    let mut at = PathBuf::new();
     for part in path.components() {
-        if let std::path::Component::Normal(name) = part {
-            at.push(name);
-            segments.push((name.to_string_lossy().into_owned(), at.clone()));
+        at.push(part);
+        match part {
+            Component::Prefix(_) => {
+                if segments.is_empty() {
+                    segments.push((at.display().to_string(), at.clone()));
+                }
+            }
+            // A root completes the volume's label: `C:` becomes `C:\`, and a
+            // prefix with no root yet is still one target.
+            Component::RootDir => match segments.len() {
+                1 => {
+                    let label = at.display().to_string();
+                    segments[0] = (label, at.clone());
+                }
+                _ => segments.push((at.display().to_string(), at.clone())),
+            },
+            Component::Normal(name) => {
+                segments.push((name.to_string_lossy().into_owned(), at.clone()));
+            }
+            Component::CurDir | Component::ParentDir => {}
         }
+    }
+    if segments.is_empty() {
+        segments.push((plain(path).display().to_string(), path.to_path_buf()));
     }
     segments
 }
 
 /// A path for display: `$HOME` and everything below it becomes `~…`.
+///
+/// And never the verbatim spelling: what `canonicalize` hands back is right for
+/// the API and wrong for a header (`plain`).
 pub fn display_path(path: &Path, home: &Path) -> String {
     if home.as_os_str().is_empty() {
-        return path.display().to_string();
+        return plain(path).display().to_string();
     }
     if path == home {
         return "~".to_owned();
@@ -2919,7 +2954,29 @@ pub fn display_path(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
+        Err(_) => plain(path).display().to_string(),
+    }
+}
+
+/// The path as a person writes it.
+///
+/// Windows' `canonicalize` answers with a **verbatim** path — `\\?\C:\fixture` —
+/// which is right for the API (it skips `MAX_PATH` parsing) and wrong for
+/// everything a person reads or compares. The first Windows capture showed
+/// `\\?\C:` clipped in the footer and a breadcrumb with no drive in it, and the
+/// same string is why `~` and the places menu's tick never appeared: `home` is
+/// `C:\Users\win`, and a verbatim path is not a prefix-match for it.
+///
+/// `\\?\UNC\server\share` is the other spelling; it is displayed as
+/// `\\server\share`, which is the form a share is written in.
+pub fn plain(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") {
+        return PathBuf::from(format!("\\\\{rest}"));
+    }
+    match text.strip_prefix("\\\\?\\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path.to_path_buf(),
     }
 }
 
@@ -2946,11 +3003,11 @@ pub fn human_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
 
     use super::{
         Browser, Entry, Key, Layout, Outcome, Request, Sort, View, arrange, clamp_selection,
-        crumbs, display_join, display_path, first_visible, human_size, parent_of,
+        crumbs, display_join, display_path, first_visible, human_size, parent_of, plain,
     };
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -3124,6 +3181,47 @@ mod tests {
             browser.accept_pick(),
             Some(Outcome::Chosen(vec![root.join("a.txt")]))
         );
+    }
+
+    /// The verbatim spelling is the API's, not the header's.
+    ///
+    /// Windows' `canonicalize` answers `\\?\C:\fixture`; the first capture of the
+    /// pane there showed `\\?\C:` clipped in the footer and a breadcrumb with no
+    /// drive in it, and the same string is why `~` never appeared (`home` is not a
+    /// prefix of a verbatim path).
+    #[test]
+    fn a_verbatim_path_is_displayed_as_a_person_writes_it() {
+        assert_eq!(
+            plain(Path::new("\\\\?\\C:\\fixture")),
+            PathBuf::from("C:\\fixture")
+        );
+        assert_eq!(
+            plain(Path::new("\\\\?\\UNC\\srv\\share\\dir")),
+            PathBuf::from("\\\\srv\\share\\dir"),
+            "a share is written with two leading slashes, not three"
+        );
+        // A path that is already plain is left alone, whatever it looks like.
+        assert_eq!(plain(Path::new("/var/log")), PathBuf::from("/var/log"));
+        assert_eq!(
+            display_path(Path::new("\\\\?\\C:\\fixture"), Path::new("/home/ada")),
+            "C:\\fixture",
+            "the fallback for a path outside home is plain too"
+        );
+    }
+
+    /// On Windows the breadcrumb starts at the *volume*, not at a Unix root:
+    /// `C:\ fixture`, and a press on the first segment goes to `C:\`.
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_breadcrumb_starts_at_its_drive() {
+        let home = Path::new("C:\\Users\\win");
+        let trail = crumbs(Path::new("C:\\fixture\\sub"), Path::new("D:\\"));
+        assert_eq!(names_of(&trail), vec!["C:\\", "fixture", "sub"]);
+        assert_eq!(trail[0].1, PathBuf::from("C:\\"));
+        assert_eq!(trail[2].1, PathBuf::from("C:\\fixture\\sub"));
+        // Under home it is home's rule, as on every platform.
+        let under = crumbs(&home.join("src"), home);
+        assert_eq!(names_of(&under), vec!["~", "src"]);
     }
 
     /// The three press gestures: one row, a ctrl-press that adds a row and takes

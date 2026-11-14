@@ -449,3 +449,41 @@ status-bar bug's class, but not the status-bar bug itself (that needs a non-1.0 
    it finds? (`dtr --fonts` answers half of this.)
 3. The π artifact — from an interactive program or a script? In the grid or in egui chrome?
    Does it change when the window moves to a 100% display?
+
+---
+
+## 10. The file pane, and the two things only Windows showed
+
+Measured 2026-11-14 on the `winvm` guest at 100 %, from `base`, with the release that shipped
+F1b and F2: `dtr.exe --files C:\fixture --capture … --capture-after 2500`, and a second run
+with `--keys ctrl-alt-p` for the picker. The window is a screenshot of a real D3D12 surface
+(`Microsoft Basic Render Driver`), not the offscreen raster, so what is in it is what a person
+sees.
+
+**It presents only in the console session.** Over ssh, `dtr` dies in `Surface::configure`:
+`DX12 SwapChain creation error 0x887A0022` (DXGI_ERROR_NOT_CURRENTLY_AVAILABLE), because a
+process started over ssh runs in session 0 and has no display to present to. The capture above
+comes from a task registered with `schtasks /create … /it` and run, which puts the process in
+the logged-on console session. That is now the way to run any dtr screenshot here.
+
+What looked right: the Windows skin in light mode (white cards, the accent on the focused pane
+and on the primary button), the Windows caption buttons in the tab strip, Segoe UI everywhere,
+the tiles with their drawn file glyphs — there is no icon theme on this machine, so the crate's
+own glyphs are what the grid draws — the picker's footer (`the selected file`, `cancel`,
+`insert`) and a split with two panes of the same listing.
+
+What did not, and was fixed in one commit:
+
+- **The breadcrumb read `// fixture`.** `crumbs` started at a literal `/` and kept only
+  `Component::Normal`, so on Windows the drive was dropped, the separator doubled, and every
+  target was a Unix path — a press on `fixture` would have navigated to `/fixture`. It now walks
+  the components generally: the volume is the first target (`/`, `C:\`, `\\server\share\`), and
+  a root completes its label (`C:` becomes `C:\`).
+- **The footer showed `\\?\C:` clipped.** `Browser::new` canonicalises, and Windows'
+  `canonicalize` answers with a *verbatim* path. That is right for the API and wrong for a
+  person: `home` is `C:\Users\win`, so `~` never appeared, the places menu never ticked the
+  folder being shown, and the status strip said `\\?\`. `plain()` strips the prefix (and
+  `\\?\UNC\` → `\\`) at the one place a path is canonicalised, and again on the way to a label.
+
+Both are invisible on Linux, which is why the Linux captures of F1b and F2 never showed them:
+a path with a drive letter is not a shape that code had ever been given.

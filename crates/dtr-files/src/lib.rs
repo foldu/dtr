@@ -30,7 +30,7 @@ pub mod thumb;
 pub use browser::{
     Browser, Entry, Key, Layout, MenuChoice, PaneOutcome, PaneView, Sort, SortChange, View,
     arrange, clamp_selection, crumbs, display_join, display_path, first_visible, human_size,
-    pane_ui, parent_of,
+    pane_ui, parent_of, plain,
 };
 pub use grid::{cell_rect, columns, first_row, index_at, rows, visible_rows};
 pub use icons::{Places, desktop_icon, type_icon};
