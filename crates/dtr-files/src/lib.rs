@@ -21,8 +21,10 @@
 //! the order the work lands in.
 
 mod browser;
+mod grid;
 
 pub use browser::{
     Browser, Entry, Key, PaneView, arrange, clamp_selection, display_join, display_path,
     first_visible, human_size, pane_ui, parent_of,
 };
+pub use grid::{cell_rect, columns, first_row, index_at, rows, visible_rows};

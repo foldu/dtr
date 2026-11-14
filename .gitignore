@@ -12,6 +12,7 @@
 # nothing. The failure artefacts stay ignored, below.
 !crates/dtr/tests/snapshots/*.png
 !crates/dtr-widgets/tests/snapshots/*.png
+!crates/dtr-files/tests/snapshots/*.png
 # A fixture is an input too: `the_menu_draws_a_shells_own_mark` reads a shell's
 # package — its desktop entry and the icon theme beside it — out of this tree.
 !crates/dtr/tests/fixtures/**/*.png

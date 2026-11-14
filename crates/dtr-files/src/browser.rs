@@ -24,9 +24,16 @@ use std::time::SystemTime;
 use egui::{Align2, Stroke};
 
 use dtr_vfs::{Backend as _, Local};
-use dtr_widgets::Skin;
+use dtr_widgets::{Glyph, Icon, IconTile, Skin, icon_tile, tile_height};
+
+use crate::grid::{cell_rect, columns, first_row, index_at, row_of, rows, visible_rows};
 
 const ROW_HEIGHT: f32 = 18.0;
+/// The gap between two grid cells, and the inset of the grid inside the body:
+/// two numbers because a gap between tiles and a margin around them are
+/// different things that happened to be equal once.
+const TILE_GAP: f32 = 6.0;
+const TILE_PAD: f32 = 4.0;
 const HEADER_HEIGHT: f32 = 26.0;
 const FOOTER_HEIGHT: f32 = 18.0;
 /// The header's close button: a square that fits inside the header, so a press
@@ -79,11 +86,18 @@ impl Entry {
 pub enum Key {
     Up,
     Down,
+    /// Left is a movement in a grid and "the parent directory" in a list, which
+    /// is why the parent has a key of its own ([`Key::Parent`]) as well.
     Left,
+    Right,
     Enter,
     Reload,
     Top,
     Bottom,
+    PageUp,
+    PageDown,
+    /// The parent directory, whatever the view: `Backspace` and `Alt+Up`.
+    Parent,
 }
 
 /// What a listing is ordered by.
@@ -125,6 +139,31 @@ impl Sort {
     }
 }
 
+/// How a listing is laid out.
+///
+/// **The grid is the default**, as it is in Nautilus, and the list is kept in the
+/// same milestone rather than rewritten later: a pane in a terminal is often 450
+/// points wide, where large tiles give four columns of short names and ten rows
+/// fit in the same height. Grid-first is a preference, not an excuse to lose the
+/// dense view (`docs/manager.md` §3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Grid,
+    List,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 2] = [Mode::Grid, Mode::List];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Grid => "grid",
+            Mode::List => "list",
+        }
+    }
+}
+
 /// How a listing is ordered and filtered.
 ///
 /// One value rather than four arguments, because the order is remembered (the
@@ -132,6 +171,7 @@ impl Sort {
 /// two places is two answers to "what is on screen".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct View {
+    pub mode: Mode,
     pub sort: Sort,
     /// Reverses the **key**, not the grouping: under `modified ↓` folders stay
     /// on top and only the order inside each group turns around.
@@ -146,6 +186,7 @@ pub struct View {
 impl Default for View {
     fn default() -> Self {
         Self {
+            mode: Mode::Grid,
             sort: Sort::Name,
             reverse: false,
             folders_first: true,
@@ -164,6 +205,13 @@ pub struct Browser {
     /// selection would otherwise be off-screen, so this is a hint rather than
     /// an invariant.
     scroll: Cell<usize>,
+    /// How the last frame laid the listing out, in cells across and per page.
+    ///
+    /// Both are the draw's business — only it knows the pane's width — and both
+    /// are needed between frames by a key: `Down` in a grid moves a row, and a
+    /// row is the column count.
+    columns: Cell<usize>,
+    page: Cell<usize>,
     /// What it is sorted by and what it hides. The selector and the config file
     /// are its two writers, and both go through `set_view`.
     view: View,
@@ -248,6 +296,8 @@ impl Browser {
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
+            columns: Cell::new(1),
+            page: Cell::new(0),
             view: View::default(),
             message: None,
             remote: Some(Remote {
@@ -371,6 +421,8 @@ impl Browser {
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
+            columns: Cell::new(1),
+            page: Cell::new(0),
             view: View::default(),
             message: None,
             remote: None,
@@ -431,17 +483,45 @@ impl Browser {
     /// Handle one key. Returns a path when the user asked for a file to be put
     /// on the terminal's command line.
     pub fn handle(&mut self, key: Key) -> Option<PathBuf> {
+        let grid = self.view.mode == Mode::Grid;
+        // One row is `columns` cells in a grid and one cell in a list, and one
+        // page is what the last frame said it could show.
+        let row = if grid { self.columns.get().max(1) } else { 1 };
+        let page = self.page.get().max(1);
+        let last = self.entries.len().saturating_sub(1);
         match key {
             Key::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                self.selected = self.selected.saturating_sub(row);
             }
             Key::Down => {
                 if !self.entries.is_empty() {
-                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                    self.selected = (self.selected + row).min(last);
                 }
             }
+            // In a grid, Left is the cell to the left — so the parent directory
+            // needs a key of its own, which is `Backspace` and `Alt+Up`
+            // (`Key::Parent`). In a list, Left keeps meaning "up a directory",
+            // which is what it has always meant here.
+            Key::Left if grid => {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            Key::Right if grid => {
+                if !self.entries.is_empty() {
+                    self.selected = (self.selected + 1).min(last);
+                }
+            }
+            Key::Left | Key::Right => self.go_up(),
+            Key::PageUp => {
+                self.selected = self.selected.saturating_sub(page);
+            }
+            Key::PageDown => {
+                if !self.entries.is_empty() {
+                    self.selected = (self.selected + page).min(last);
+                }
+            }
+            Key::Parent => self.go_up(),
             Key::Top => self.selected = 0,
-            Key::Bottom => self.selected = self.entries.len().saturating_sub(1),
+            Key::Bottom => self.selected = last,
             Key::Reload => {
                 let selected = self.selected_entry().map(|entry| entry.name.clone());
                 self.reload();
@@ -455,7 +535,6 @@ impl Browser {
                     }
                 }
             }
-            Key::Left => self.go_up(),
             Key::Enter => {
                 let entry = self.selected_entry()?.clone();
                 if entry.is_parent() {
@@ -807,66 +886,9 @@ impl Browser {
             egui::pos2(rect.left(), header_bottom + 1.0),
             egui::pos2(rect.right(), footer_top),
         );
-        let visible = (body.height() / ROW_HEIGHT).floor().max(0.0) as usize;
-        let first = self.first_visible(visible);
-        self.scroll.set(first);
-
-        if !self.entries.is_empty() && visible > 0 {
-            for (offset, index) in (first..self.entries.len().min(first + visible)).enumerate() {
-                let row = egui::Rect::from_min_size(
-                    egui::pos2(body.left(), body.top() + offset as f32 * ROW_HEIGHT),
-                    egui::vec2(body.width(), ROW_HEIGHT),
-                );
-                let selected = index == self.selected;
-                // The highlight goes down first; painting a rectangle after
-                // the text hides the row it was meant to select.
-                if selected {
-                    painter.rect_filled(
-                        row.shrink2(egui::vec2(4.0, 1.0)),
-                        2.0,
-                        palette.control_active,
-                    );
-                }
-
-                let entry = &self.entries[index];
-                let (label, colour) = if entry.is_parent() {
-                    ("../".to_owned(), palette.dim)
-                } else if entry.is_dir {
-                    (
-                        format!("{}/", entry.name),
-                        if selected {
-                            palette.accent
-                        } else {
-                            palette.text
-                        },
-                    )
-                } else {
-                    (
-                        entry.name.clone(),
-                        if selected {
-                            palette.accent
-                        } else {
-                            palette.text
-                        },
-                    )
-                };
-                painter.text(
-                    egui::pos2(row.left() + 8.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    body_font.clone(),
-                    colour,
-                );
-                if let Some(size) = entry.size {
-                    painter.text(
-                        egui::pos2(row.right() - 8.0, row.center().y),
-                        Align2::RIGHT_CENTER,
-                        human_size(size),
-                        small.clone(),
-                        palette.dim,
-                    );
-                }
-            }
+        match self.view.mode {
+            Mode::Grid => self.draw_grid(ui, skin, body),
+            Mode::List => self.draw_list(ui, skin, body),
         }
 
         // Footer: a filesystem problem, the selected path, or a quiet hint.
@@ -940,6 +962,172 @@ impl Browser {
             ),
             egui::StrokeKind::Inside,
         );
+    }
+    /// The dense view: one row per entry, a name on the left and a size on the
+    /// right.
+    ///
+    /// Kept rather than replaced by the grid because a pane in a terminal is
+    /// often 450 points wide, where four tiles of a short name are fewer items
+    /// than ten rows (`docs/manager.md` §3). It is the renderer that shipped
+    /// before the grid and it does not move.
+    fn draw_list(&self, ui: &mut egui::Ui, skin: &Skin, body: egui::Rect) {
+        let palette = skin.palette;
+        let style = &skin.style;
+        let body_font = style.value_font.clone();
+        let small = egui::FontId::new(style.label_font.size - 1.5, style.label_font.family.clone());
+        let painter = ui.painter().with_clip_rect(body);
+
+        let visible = (body.height() / ROW_HEIGHT).floor().max(0.0) as usize;
+        let first = self.first_visible(visible);
+        self.scroll.set(first);
+        // A list is one column wide and one row a page: the two cells a 2-D key
+        // reads are the plain ones.
+        self.columns.set(1);
+        self.page.set(visible.max(1));
+
+        if self.entries.is_empty() || visible == 0 {
+            return;
+        }
+        for (offset, index) in (first..self.entries.len().min(first + visible)).enumerate() {
+            let row = egui::Rect::from_min_size(
+                egui::pos2(body.left(), body.top() + offset as f32 * ROW_HEIGHT),
+                egui::vec2(body.width(), ROW_HEIGHT),
+            );
+            let selected = index == self.selected;
+            // The highlight goes down first; painting a rectangle after
+            // the text hides the row it was meant to select.
+            if selected {
+                painter.rect_filled(
+                    row.shrink2(egui::vec2(4.0, 1.0)),
+                    2.0,
+                    palette.control_active,
+                );
+            }
+
+            let entry = &self.entries[index];
+            let (label, colour) = if entry.is_parent() {
+                ("../".to_owned(), palette.dim)
+            } else if entry.is_dir {
+                (
+                    format!("{}/", entry.name),
+                    if selected {
+                        palette.accent
+                    } else {
+                        palette.text
+                    },
+                )
+            } else {
+                (
+                    entry.name.clone(),
+                    if selected {
+                        palette.accent
+                    } else {
+                        palette.text
+                    },
+                )
+            };
+            painter.text(
+                egui::pos2(row.left() + 8.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                body_font.clone(),
+                colour,
+            );
+            if let Some(size) = entry.size {
+                painter.text(
+                    egui::pos2(row.right() - 8.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    human_size(size),
+                    small.clone(),
+                    palette.dim,
+                );
+            }
+        }
+    }
+
+    /// The default view: a grid of tiles, laid out by [`crate::grid`]'s functions
+    /// and painted by `dtr_widgets::icon_tile`.
+    ///
+    /// The scroll is a **row** here, like everywhere else in the browser, and the
+    /// hit test and the drawer both come from the same `cell_rect`: a grid that
+    /// computes its own columns in two places is the `pane_area` bug with a
+    /// second dimension (`docs/manager.md` §3).
+    fn draw_grid(&self, ui: &mut egui::Ui, skin: &Skin, body: egui::Rect) {
+        let palette = skin.palette;
+        let style = &skin.style;
+        let content = body.shrink2(egui::vec2(TILE_PAD, TILE_PAD));
+        if content.width() <= 0.0 || content.height() <= 0.0 {
+            return;
+        }
+
+        // The row height, measured once from a laid-out line: `Fonts::row_height`
+        // needs `&mut Fonts` and a `Ui` hands out `&Fonts`.
+        let line = ui
+            .painter()
+            .layout_no_wrap("M".to_owned(), style.value_font.clone(), palette.text)
+            .size()
+            .y;
+        let cell = egui::vec2(style.tile_icon * 2.0, tile_height(style.tile_icon, line));
+        let across = columns(content.width(), cell.x, TILE_GAP);
+        let visible = visible_rows(content.height(), cell.y, TILE_GAP);
+        self.columns.set(across.max(1));
+        self.page.set((visible * across).max(1));
+        if across == 0 || visible == 0 {
+            return;
+        }
+
+        // The window: the selection stays on screen, and the rows are clamped so
+        // a listing that shrank cannot leave the grid scrolled past its end.
+        let selected_row = row_of(self.selected, across);
+        let last_row = rows(self.entries.len(), across).saturating_sub(1);
+        let first = first_row(selected_row, self.scroll.get(), visible).min(last_row);
+        self.scroll.set(first);
+
+        let start = first * across;
+        let end = ((first + visible) * across).min(self.entries.len());
+        let hovered = ui
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|point| body.contains(*point))
+            .and_then(|point| {
+                index_at(
+                    point,
+                    across,
+                    cell,
+                    TILE_GAP,
+                    content.min,
+                    first,
+                    self.entries.len(),
+                )
+            });
+
+        for index in start..end {
+            let entry = &self.entries[index];
+            let glyph = if entry.is_parent() {
+                Glyph::Parent
+            } else if entry.is_dir {
+                Glyph::Folder
+            } else {
+                Glyph::File
+            };
+            icon_tile(
+                ui,
+                skin,
+                cell_rect(index, across, cell, TILE_GAP, content.min, first),
+                &IconTile {
+                    // A folder is not spelled with a slash here: the glyph is
+                    // what says it, and a name is a name.
+                    label: &entry.name,
+                    icon: Icon::Glyph(glyph),
+                    selected: index == self.selected,
+                    hovered: hovered == Some(index),
+                    // Hidden entries only reach this list when `Ctrl+H` is on,
+                    // so nothing here is dimmed *for* being hidden; the flag is
+                    // for the filter's own eventual use.
+                    dim: false,
+                },
+            );
+        }
     }
 }
 
@@ -1244,8 +1432,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Browser, Entry, Key, Sort, View, arrange, clamp_selection, display_join, display_path,
-        first_visible, human_size, parent_of,
+        Browser, Entry, Key, Mode, Sort, View, arrange, clamp_selection, display_join,
+        display_path, first_visible, human_size, parent_of,
     };
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -1654,9 +1842,79 @@ mod tests {
         assert_eq!(browser.handle(Key::Enter), None);
         assert_eq!(browser.cwd, root.join("sub"));
 
-        // `h` goes back up through the same parent resolution the listing uses.
-        browser.handle(Key::Left);
+        // `Backspace`/`Alt+Up` go back up through the same parent resolution the
+        // listing uses. `Left` cannot: in a grid it is the cell to the left, and
+        // the parent has a key of its own because of it.
+        browser.handle(Key::Parent);
         assert_eq!(browser.cwd, root);
+    }
+
+    /// A grid moves in two dimensions, and "a row" is the column count the last
+    /// frame measured: nothing in the model may assume a pane's width.
+    #[test]
+    fn a_grid_moves_by_a_row_and_a_cell() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+            std::fs::write(root.join(name), b"x").expect("file");
+        }
+
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        assert_eq!(browser.entries.len(), 6, "five files and the parent row");
+
+        // A pane that fits two cells across. The frame writes this; here it is
+        // written by hand, because there is no frame.
+        browser.columns.set(2);
+        browser.selected = 0;
+        browser.handle(Key::Down);
+        assert_eq!(browser.selected, 2, "down is a row, not a cell");
+        browser.handle(Key::Down);
+        assert_eq!(browser.selected, 4);
+        browser.handle(Key::Down);
+        assert_eq!(browser.selected, 5, "clamped to the last cell, not past it");
+        browser.handle(Key::Right);
+        assert_eq!(browser.selected, 5, "the end of the list is the end");
+        browser.handle(Key::Up);
+        assert_eq!(browser.selected, 3);
+        browser.handle(Key::Left);
+        assert_eq!(browser.selected, 2);
+
+        // Page keys are the frame's answer to "how much fits".
+        browser.page.set(4);
+        browser.selected = 0;
+        browser.handle(Key::PageDown);
+        assert_eq!(browser.selected, 4);
+        browser.handle(Key::PageUp);
+        assert_eq!(browser.selected, 0);
+    }
+
+    /// The list keeps the meaning it always had, because a dense view is what
+    /// the pane shipped with and `Ctrl+2` must not change what a key does as
+    /// well as what the pane looks like.
+    #[test]
+    fn the_list_still_moves_one_row_at_a_time() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(root.join(name), b"x").expect("file");
+        }
+
+        let parent = root.parent().expect("the tempdir has a parent").to_owned();
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        let mut view = browser.view();
+        view.mode = Mode::List;
+        browser.set_view(view);
+        // A stale column count from the grid must not leak into a list.
+        browser.columns.set(8);
+        browser.selected = 0;
+        browser.handle(Key::Down);
+        assert_eq!(browser.selected, 1, "a list row is one cell");
+        // Left is still the parent in a list, which is what a dense view has
+        // always meant here.
+        browser.handle(Key::Left);
+        assert_eq!(browser.cwd, parent);
     }
 
     #[test]
@@ -1740,7 +1998,9 @@ mod kittest_tests {
     use egui_kittest::kittest::Queryable;
 
     const WIDTH: f32 = 640.0;
-    const HEIGHT: f32 = 240.0;
+    // Tall enough for two rows of tiles: a snapshot of a grid that shows one row
+    // proves the arithmetic and nothing about the view.
+    const HEIGHT: f32 = 360.0;
 
     fn pane_rect() -> egui::Rect {
         egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(WIDTH, HEIGHT))
@@ -1862,5 +2122,31 @@ mod kittest_tests {
         harness.get_by_label(&label).click();
         harness.run();
         assert_eq!(pressed.get(), 1, "the cross did not report the press");
+    }
+
+    /// The list view, kept rather than replaced: a dense pane shows eight rows
+    /// where it shows six tiles, and `Ctrl+2` is the escape hatch for a narrow
+    /// pane rather than a matter of taste (`docs/manager.md` §3).
+    #[test]
+    fn the_list_view_is_kept() {
+        let skin = skin();
+        let mut browser = pane();
+        let mut view = browser.view();
+        view.mode = Mode::List;
+        browser.set_view(view);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                pane_ui(
+                    ui,
+                    egui::Id::unique("dtr-files-list"),
+                    pane_rect(),
+                    &browser,
+                    &skin,
+                    true,
+                );
+            });
+        harness.run();
+        harness.snapshot("file_pane_list");
     }
 }
