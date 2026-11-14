@@ -197,6 +197,22 @@ impl Default for View {
     }
 }
 
+/// One frame's layout, recorded for the press that comes after it.
+#[derive(Clone, Copy, Debug)]
+struct Frame {
+    mode: Mode,
+    /// The listing's own rectangle, in the pane's points.
+    body: egui::Rect,
+    /// Where the grid's first cell starts, unscrolled, and how wide a cell is.
+    content: egui::Rect,
+    cell: egui::Vec2,
+    gap: f32,
+    /// Cells across, the first row drawn, and the rows or cells it showed.
+    across: usize,
+    first: usize,
+    visible: usize,
+}
+
 /// A file pane: a directory, its entries, and where the selection is.
 pub struct Browser {
     cwd: PathBuf,
@@ -234,6 +250,22 @@ pub struct Browser {
     /// The directory whose sizes and times are all known: a re-sort re-uses them
     /// rather than asking again.
     facts_for: Option<PathBuf>,
+    /// Whether the next frame should bring the selection into view.
+    ///
+    /// **The selection and the view are two things.** A key or a press moves the
+    /// selection, and the view follows it; a wheel moves the view alone, and it
+    /// may leave the selection off screen — Nautilus lets you scroll away from
+    /// what you picked, and a listing that yanked itself back would make the
+    /// wheel useless in a long directory.
+    reveal: Cell<bool>,
+    /// What the last frame drew and where: the hit test's copy of the layout.
+    ///
+    /// The painter and the press have to agree about which tile is under a
+    /// point, and the pane is painted rather than made of widgets
+    /// (`docs/files.md` §13) — so the draw records the numbers it used and the
+    /// press asks them back. Two calculations from one snapshot instead of two
+    /// snapshots.
+    frame: Cell<Option<Frame>>,
     /// The pictures the grid draws, and the theme they come from. Keyed by entry
     /// path, read through a per-frame budget, and replaceable with an empty set
     /// by a test whose baseline may not depend on the machine's icon theme.
@@ -308,6 +340,8 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            reveal: Cell::new(false),
+            frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
             message: None,
@@ -373,6 +407,83 @@ impl Browser {
     }
 
     /// What this pane is sorted by and what it hides.
+    /// Which entry the point in this pane is over.
+    ///
+    /// `None` is a gap, a margin, the header, or past the last entry — the places
+    /// a press selects nothing and must not clear a selection by accident.
+    pub fn entry_at(&self, point: egui::Pos2) -> Option<usize> {
+        let frame = self.frame.get()?;
+        if !frame.body.contains(point) {
+            return None;
+        }
+        match frame.mode {
+            Mode::Grid => index_at(
+                point,
+                frame.across,
+                frame.cell,
+                frame.gap,
+                frame.content.min,
+                frame.first,
+                self.entries.len(),
+            ),
+            Mode::List => {
+                let row = ((point.y - frame.body.top()) / ROW_HEIGHT).floor();
+                if row < 0.0 || row as usize >= frame.visible {
+                    return None;
+                }
+                let index = frame.first + row as usize;
+                (index < self.entries.len()).then_some(index)
+            }
+        }
+    }
+
+    /// A press at `point`: select what is under it, and open it on the second
+    /// click of the same entry.
+    ///
+    /// The double-click rule is Nautilus's: the second press has to land on the
+    /// same entry, so a press that *moves* the selection never opens anything.
+    /// A file is handed back for the caller to put on a command line, exactly as
+    /// `Enter` does — a middle click or a menu item is a different promise, and
+    /// this is the one the pane has always made.
+    pub fn clicked(&mut self, point: egui::Pos2, clicks: u8) -> Option<PathBuf> {
+        let index = self.entry_at(point)?;
+        let same = index == self.selected;
+        self.selected = index;
+        self.reveal.set(true);
+        if clicks >= 2 && same {
+            return self.handle(Key::Enter);
+        }
+        None
+    }
+
+    /// Scroll the view by `lines`: positive is up, the way a wheel notch is.
+    ///
+    /// The view moves and the selection does not: a page down and a page up are
+    /// how somebody reads a long listing without losing what they had picked.
+    pub fn scroll(&mut self, lines: f64) {
+        let Some(frame) = self.frame.get() else {
+            return;
+        };
+        let step = lines.abs().round().max(1.0) as usize;
+        let rows = match frame.mode {
+            Mode::Grid => rows(self.entries.len(), frame.across),
+            Mode::List => self.entries.len(),
+        };
+        let last = rows.saturating_sub(frame.visible);
+        // From the *current* first row, not from the frame's: a wheel notch that
+        // started from the last drawn frame would be idempotent, and fifty
+        // notches would move the view by one.
+        let from = self.scroll.get();
+        let target = if lines > 0.0 {
+            from.saturating_sub(step)
+        } else {
+            from + step
+        };
+        self.scroll.set(target.min(last));
+        // A wheel is a view change: it does not follow the selection.
+        self.reveal.set(false);
+    }
+
     /// Change the layout without touching the order.
     ///
     /// `Ctrl+1`/`Ctrl+2` and `[files] view` are the two writers, and neither
@@ -453,6 +564,8 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            reveal: Cell::new(false),
+            frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
             message: None,
@@ -585,6 +698,8 @@ impl Browser {
             }
         }
         self.selected = clamp_selection(self.selected, self.entries.len());
+        // A key moved the selection, so the view follows it.
+        self.reveal.set(true);
         None
     }
 
@@ -1015,8 +1130,25 @@ impl Browser {
         let painter = ui.painter().with_clip_rect(body);
 
         let visible = (body.height() / ROW_HEIGHT).floor().max(0.0) as usize;
-        let first = self.first_visible(visible);
+        let first = if self.reveal.replace(false) {
+            self.first_visible(visible)
+        } else {
+            // The wheel moved the view and the selection stayed where it was; the
+            // view must not follow it back.
+            let last = self.entries.len().saturating_sub(visible);
+            self.scroll.get().min(last)
+        };
         self.scroll.set(first);
+        self.frame.set(Some(Frame {
+            mode: Mode::List,
+            body,
+            content: body,
+            cell: egui::vec2(body.width(), ROW_HEIGHT),
+            gap: 0.0,
+            across: 1,
+            first,
+            visible,
+        }));
         // A list is one column wide and one row a page: the two cells a 2-D key
         // reads are the plain ones.
         self.columns.set(1);
@@ -1115,10 +1247,24 @@ impl Browser {
 
         // The window: the selection stays on screen, and the rows are clamped so
         // a listing that shrank cannot leave the grid scrolled past its end.
-        let selected_row = row_of(self.selected, across);
         let last_row = rows(self.entries.len(), across).saturating_sub(1);
-        let first = first_row(selected_row, self.scroll.get(), visible).min(last_row);
+        let first = if self.reveal.replace(false) {
+            first_row(row_of(self.selected, across), self.scroll.get(), visible).min(last_row)
+        } else {
+            self.scroll.get().min(last_row)
+        };
         self.scroll.set(first);
+
+        self.frame.set(Some(Frame {
+            mode: Mode::Grid,
+            body,
+            content,
+            cell,
+            gap: TILE_GAP,
+            across,
+            first,
+            visible,
+        }));
 
         let start = first * across;
         let end = ((first + visible) * across).min(self.entries.len());
@@ -2208,6 +2354,162 @@ mod kittest_tests {
         harness.get_by_label(&label).click();
         harness.run();
         assert_eq!(pressed.get(), 1, "the cross did not report the press");
+    }
+
+    /// A press selects what is under it, and the second press of the *same*
+    /// entry opens it — Nautilus's rule, and the reason a press that moves the
+    /// selection never opens anything.
+    ///
+    /// Drawn first, because the hit test is the last frame's layout: the pane is
+    /// painted, so there is nothing for egui to hit-test and the numbers come
+    /// from the draw that put the rows where they are.
+    #[test]
+    fn a_press_selects_and_the_second_press_opens() {
+        let skin = skin();
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        let mut view = browser.borrow().view();
+        view.mode = Mode::List;
+        browser.borrow_mut().set_view(view);
+        {
+            let browser = std::rc::Rc::clone(&browser);
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(WIDTH, HEIGHT))
+                .build_ui(move |ui| {
+                    let browser = browser.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-press"),
+                        pane_rect(),
+                        &browser,
+                        &skin,
+                        true,
+                    );
+                });
+            harness.run();
+        }
+
+        // The fourth row of a list: `..`, the two directories, then `auth.log`.
+        let body_top = HEADER_HEIGHT + 1.0;
+        let point = egui::pos2(40.0, body_top + 3.0 * ROW_HEIGHT + ROW_HEIGHT / 2.0);
+        assert_eq!(browser.borrow().entry_at(point), Some(3));
+        assert_eq!(browser.borrow().entries[3].name, "auth.log");
+
+        let mut browser = browser.borrow_mut();
+        assert_eq!(browser.clicked(point, 1), None, "a press only selects");
+        assert_eq!(browser.selected, 3);
+        // The second press of the same entry is `Enter`. This fixture is a
+        // *remote* pane, where Enter asks for a copy rather than handing a path
+        // to the shell — the pane has always made that distinction.
+        assert_eq!(browser.clicked(point, 2), None);
+        assert_eq!(
+            browser.take_download(),
+            Some(PathBuf::from("/var/log/auth.log"))
+        );
+        // A press on another entry selects that one and opens nothing.
+        let other = egui::pos2(40.0, body_top + 6.0 * ROW_HEIGHT + ROW_HEIGHT / 2.0);
+        assert_eq!(browser.clicked(other, 2), None);
+        assert_eq!(browser.selected, 6);
+    }
+
+    /// A grid's press lands on the tile under the point and on nothing in the gap
+    /// between two of them — and the drawer and the hit test agree, because both
+    /// ask the layout the draw recorded.
+    #[test]
+    fn a_grid_press_lands_on_a_tile_and_not_in_the_gap() {
+        let skin = skin();
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        {
+            let browser = std::rc::Rc::clone(&browser);
+            let drawn = skin.clone();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(WIDTH, HEIGHT))
+                .build_ui(move |ui| {
+                    let browser = browser.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-grid-press"),
+                        pane_rect(),
+                        &browser,
+                        &drawn,
+                        true,
+                    );
+                });
+            harness.run();
+        }
+        let browser = browser.borrow();
+        // The first cell: the body inset by `TILE_PAD`, half a cell in.
+        let first = egui::pos2(
+            pane_rect().left() + TILE_PAD + skin.style.tile_icon,
+            pane_rect().top() + HEADER_HEIGHT + 1.0 + TILE_PAD + skin.style.tile_icon,
+        );
+        assert_eq!(browser.entry_at(first), Some(0));
+        // The gap between the first and second cells belongs to nobody.
+        let gap = egui::pos2(first.x + skin.style.tile_icon + TILE_GAP / 2.0, first.y);
+        assert_eq!(browser.entry_at(gap), None);
+        // And the header is not the listing.
+        assert_eq!(browser.entry_at(egui::pos2(first.x, 8.0)), None);
+    }
+
+    /// A wheel notch moves the view and not the selection, and cannot scroll past
+    /// the end of the listing.
+    #[test]
+    fn the_wheel_scrolls_the_view_without_moving_the_selection() {
+        let skin = skin();
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        {
+            // Long enough to need scrolling: the fixture's nine entries all fit.
+            let names: Vec<Entry> = (0..40)
+                .map(|index| entry(&format!("file{index:02}.log"), false, Some(index)))
+                .collect();
+            let mut browser = browser.borrow_mut();
+            browser.apply_listing(PathBuf::from("/var/log"), names);
+            let mut view = browser.view();
+            view.mode = Mode::List;
+            browser.set_view(view);
+        }
+        {
+            let browser = std::rc::Rc::clone(&browser);
+            let drawn = skin.clone();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(WIDTH, HEIGHT))
+                .build_ui(move |ui| {
+                    let browser = browser.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-wheel"),
+                        pane_rect(),
+                        &browser,
+                        &drawn,
+                        true,
+                    );
+                });
+            harness.run();
+        }
+        let mut browser = browser.borrow_mut();
+        let selected = browser.selected;
+        let rows = browser.entries.len();
+        assert!(rows > 20, "the fixture is meant to be long: {rows}");
+        assert_eq!(browser.scroll.get(), 0, "a fresh listing starts at the top");
+
+        // A notch down moves the view by a row.
+        browser.scroll(-1.0);
+        assert_eq!(browser.scroll.get(), 1);
+
+        // Many notches stop at the last page: the view never scrolls into blank
+        // space below the listing.
+        for _ in 0..50 {
+            browser.scroll(-3.0);
+        }
+        let visible = browser.frame.get().expect("a frame").visible;
+        assert_eq!(browser.scroll.get(), rows - visible);
+        assert_eq!(browser.selected, selected, "the selection did not move");
+
+        // And up again returns to the top and no further.
+        for _ in 0..50 {
+            browser.scroll(3.0);
+        }
+        assert_eq!(browser.scroll.get(), 0);
+        assert_eq!(browser.selected, selected);
     }
 
     /// The list view, kept rather than replaced: a dense pane shows eight rows

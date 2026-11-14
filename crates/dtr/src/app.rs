@@ -2565,6 +2565,13 @@ impl App {
         if let Some(id) = self.pane_at(at.0, at.1) {
             self.tabs[self.active].focus = id;
         }
+        // A press in a file pane is the listing's: it selects what is under it,
+        // and the second press of the same entry opens it. The pane is painted
+        // rather than made of widgets, so this is the app's hit test — the same
+        // place the divider's lives, and for the same reason.
+        if self.press_in_file_pane(at) {
+            return;
+        }
         // A program that asked for the mouse gets the click. Selection is what is
         // left when nobody did — or when shift says the user meant to select.
         if self.forward_mouse(MouseAction::Press, Some(MouseButton::Left), at) {
@@ -2595,6 +2602,70 @@ impl App {
             session.pane.send(command);
         }
         self.dragging = self.session().is_some();
+    }
+
+    /// Where a press lands on a file pane, in window points.
+    ///
+    /// `None` for a terminal, for the gap between panes, and for the window's
+    /// chrome: a press that is not on a listing's body belongs to somebody else.
+    fn file_pane_point(&self, at: (f64, f64)) -> Option<egui::Pos2> {
+        let gpu = self.gpu.as_ref()?;
+        let tab = &self.tabs[self.active];
+        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        let scale = gpu.scale();
+        let (id, _) = self
+            .pane_views(tab, gpu.metrics(), screen, scale)
+            .into_iter()
+            .find(|(_, view)| view.rect.contains(at.0 as f32, at.1 as f32))?;
+        if !matches!(tab.leaves.get(&id), Some(Pane::Files(_))) {
+            return None;
+        }
+        // The window's point, not the pane's: a pane is handed an `egui::Rect` in
+        // absolute points and records its layout in that same space, so a local
+        // point would be compared against rectangles measured from a different
+        // origin — the bug that made the first click select nothing.
+        let points = gpu.egui_ctx.pixels_per_point();
+        Some(egui::pos2(at.0 as f32 / points, at.1 as f32 / points))
+    }
+
+    /// Hand a press to the listing under it, if there is one.
+    ///
+    /// Returns whether it was a file pane's, because a press that returns here
+    /// must not also start a selection in the terminal behind it.
+    fn press_in_file_pane(&mut self, at: (f64, f64)) -> bool {
+        let Some(point) = self.file_pane_point(at) else {
+            return false;
+        };
+        let clicks = self.count_clicks(at);
+        let chosen = self
+            .focused_browser_mut()
+            .and_then(|browser| browser.clicked(point, clicks));
+        if let Some(path) = chosen {
+            self.insert_path_into_terminal(path);
+        }
+        self.dragging = false;
+        self.drag_moved = false;
+        self.repaint("file pane press");
+        true
+    }
+
+    /// Scroll the listing under the pointer, if that is what the pointer is on.
+    ///
+    /// The pointer's pane, not the focused one: a wheel is aimed by pointing, and
+    /// scrolling a listing nobody is pointing at is a surprise.
+    fn scroll_file_pane(&mut self, lines: f64) -> bool {
+        let Some((x, y)) = self.cursor_position else {
+            return false;
+        };
+        let Some(id) = self.pane_at(x, y) else {
+            return false;
+        };
+        let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) else {
+            return false;
+        };
+        browser.scroll(lines);
+        self.repaint("file pane scrolled");
+        true
     }
 
     /// How many presses in a row this is: one starts a selection, two take the
@@ -5212,7 +5283,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // same motion, so the gesture that was refused hands back the text
                 // it was asking for.
                 let folded = lines != 0.0 && over_grid && self.fold_notice();
-                if lines != 0.0
+                if lines != 0.0 && self.scroll_file_pane(lines) {
+                    // The listing took the notch, and the scrollback behind it
+                    // has nothing to do with the pointer.
+                } else if lines != 0.0
                     && wheel_reaches_the_terminal(
                         self.overlay_open(),
                         over_grid,
