@@ -690,6 +690,19 @@ comma, `+` joins the chords of one binding, and `text:` types characters.
 exercise the real hover-then-press path — and `--drag x1,y1,x2,y2` calls the same
 `pointer_down/move/up`.
 
+**It does not test an egui widget.** `--click` calls `App::pointer_down` with a position; it
+does not move the X pointer, so egui never sees it and a chip, a menu button or a file pane's
+sort control stays inert. Those need a real pointer — `xdotool mousemove X Y; xdotool click 1`
+against the virtual display, with the app running as a background job and the capture at a
+deadline after the click — and that is also the only way to see a hover fill at all.
+
+**A pointer event is worth a frame.** `egui_winit` returns `repaint: false` for a bare
+`CursorMoved`, so a control that only changes on hover is a picture of a control until
+something else draws: under a `ControlFlow::Wait` loop nothing else does, and the hover never
+appears. `App::window_event` requests a redraw for a pointer event by itself, which is the
+same rule as "repaints have to be carried" one layer down — and the bug that hid the file
+pane's sort control had been there as long as the tab strip's chips.
+
 ## How the chrome is tested
 
 **The egui layer is tested with `egui_kittest`, not a window**: `cargo test` drives a

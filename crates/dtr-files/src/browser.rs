@@ -41,6 +41,12 @@ const FOOTER_HEIGHT: f32 = 18.0;
 /// The header's close button: a square that fits inside the header, so a press
 /// on its top edge is still a press on the header.
 const CLOSE_SIDE: f32 = 20.0;
+/// The sort control's width, fixed rather than measured.
+///
+/// A header is a row of things that must not move when a word gets longer:
+/// `name` and `modified` share one slot, and the label elides inside it. The
+/// count sits to its left and grows leftwards, so the control never moves.
+const SORT_WIDTH: f32 = 72.0;
 
 /// One line in the listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1098,7 +1104,7 @@ impl Browser {
             .filter(|entry| !entry.is_parent())
             .count();
         painter.text(
-            egui::pos2(close_rect(rect).left() - 6.0, header.center().y),
+            egui::pos2(sort_rect(rect).left() - 6.0, header.center().y),
             Align2::RIGHT_CENTER,
             count.to_string(),
             small.clone(),
@@ -1174,17 +1180,6 @@ impl Browser {
                 palette.dim,
             );
         }
-
-        // The order, always: a *modified* sort with no visible dates is a
-        // mystery, and the footer is the one line that can say what the list is
-        // ordered by while the header holds the path.
-        painter.text(
-            egui::pos2(footer.right() - 8.0, footer.center().y),
-            Align2::RIGHT_CENTER,
-            self.view.sort_label(),
-            small.clone(),
-            palette.dim,
-        );
 
         let border = if focused {
             palette.accent
@@ -1483,6 +1478,44 @@ fn close_rect(rect: egui::Rect) -> egui::Rect {
     )
 }
 
+/// What a person did to a pane.
+///
+/// The pane is painted from a `&Browser` and cannot change it, so an answer
+/// travels the way a clicked tab's does: the drawing knows what was pressed and
+/// the app knows what it means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneOutcome {
+    /// The close cross was pressed.
+    pub close: bool,
+    /// The sort control asked for something.
+    pub sort: Option<SortChange>,
+}
+
+/// What the sort control asked for: one of the four keys, or one of the two
+/// switches beside them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortChange {
+    Key(Sort),
+    /// Flip the direction; the caller keeps the state.
+    Reverse,
+    FoldersFirst,
+}
+
+/// The sort control's target: the header's right-hand end, beside the cross.
+///
+/// One function for the painter, the area and the test — the count is placed
+/// against its left edge, so two calculations would drift apart the first time
+/// either inset changed (the `close_rect` rule).
+fn sort_rect(rect: egui::Rect) -> egui::Rect {
+    let header = header_rect(rect);
+    let height = (header.height() - 6.0).max(0.0);
+    let right = close_rect(rect).left() - 6.0;
+    egui::Rect::from_min_size(
+        egui::pos2(right - SORT_WIDTH, header.center().y - height / 2.0),
+        egui::vec2(SORT_WIDTH, height),
+    )
+}
+
 /// Draw one file pane in an egui area at its leaf's rectangle.
 ///
 /// `rect` is the pane in **points**, which is egui's unit: a surface that lays
@@ -1490,8 +1523,8 @@ fn close_rect(rect: egui::Rect) -> egui::Rect {
 /// asking, because only the surface knows the scale. The area is clipped to the
 /// pane so a long listing cannot spill into the terminal next door.
 ///
-/// Returns whether the pane's close button was pressed. The drawing code knows
-/// that; only the caller can take a leaf out of a layout.
+/// Returns what was asked for. The drawing code knows that; only the caller can
+/// take a leaf out of a layout or change what a listing is ordered by.
 pub fn pane_ui(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -1499,7 +1532,7 @@ pub fn pane_ui(
     browser: &Browser,
     skin: &Skin,
     focused: bool,
-) -> bool {
+) -> PaneOutcome {
     let ctx = ui.ctx().clone();
     // Prime the area's size: an unprimed area is invisible in the one frame a
     // `--screenshot` renders.
@@ -1509,6 +1542,11 @@ pub fn pane_ui(
     let close_id = id.with("close");
     let target = close_rect(rect);
     dtr_widgets::prime_area(&ctx, close_id, egui::Order::Background, target, true);
+    // The sort control is the second target, for the same reason: a widget inside
+    // a non-interactable area is a picture of a button.
+    let sort_id = id.with("sort");
+    let sort_target = sort_rect(rect);
+    dtr_widgets::prime_area(&ctx, sort_id, egui::Order::Background, sort_target, true);
     let label = format!("close {}", browser.header());
     let mut close = false;
     egui::Area::new(id)
@@ -1532,7 +1570,125 @@ pub fn pane_ui(
             browser.draw(ui, skin, rect, focused);
             close = close_button(&ctx, close_id, target, skin, &label);
         });
-    close
+    let sort = sort_button(&ctx, sort_id, sort_target, skin, browser.view());
+    PaneOutcome { close, sort }
+}
+
+/// The sort control: the order's name, a drawn triangle for its direction, and
+/// the menu the same four keys and two switches are on.
+///
+/// The pane's second pointer target, and the reason it is an area of its own is
+/// the same as the close button's: `interactable(false)` on the pane makes egui
+/// skip it in its hit test, so a widget drawn inside would never see a press.
+///
+/// The direction is a **triangle**, not an arrow: egui's faces have no arrows and
+/// a `↓` in a label panics the harness and draws an empty box in the window
+/// (`AGENTS.md`, glyphs). Two are enough — up is the key's usual direction and
+/// down says it is reversed.
+fn sort_button(
+    ctx: &egui::Context,
+    id: egui::Id,
+    target: egui::Rect,
+    skin: &Skin,
+    view: View,
+) -> Option<SortChange> {
+    let palette = skin.palette;
+    let style = &skin.style;
+    let small = egui::FontId::new(style.label_font.size - 1.5, style.label_font.family.clone());
+    let mut chosen = None;
+    egui::Area::new(id)
+        .order(egui::Order::Background)
+        .fixed_pos(target.min)
+        .constrain(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(target.size(), egui::Sense::click());
+            let open = egui::Popup::is_id_open(ctx, response.id);
+            if response.hovered() || open {
+                ui.painter().rect_filled(
+                    rect.shrink(2.0),
+                    style.control_radius,
+                    palette.control_hover,
+                );
+            }
+
+            // The name, elided in its slot: `modified` and `name` share one width.
+            let width = (rect.width() - 22.0).max(8.0);
+            let mut job = egui::text::LayoutJob::simple(
+                view.sort.label().to_owned(),
+                small.clone(),
+                palette.text,
+                width,
+            );
+            job.wrap = egui::text::TextWrapping {
+                max_width: width,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('…'),
+            };
+            let galley = ui.painter().layout_job(job);
+            ui.painter().galley(
+                egui::pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0),
+                galley,
+                palette.text,
+            );
+
+            // Up for forwards, down for reversed.
+            let centre = egui::pos2(rect.right() - 9.0, rect.center().y);
+            let half = 3.5;
+            let rise = 2.6;
+            let (base, tip) = if view.reverse {
+                (centre.y - rise, centre.y + rise)
+            } else {
+                (centre.y + rise, centre.y - rise)
+            };
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(centre.x - half, base),
+                    egui::pos2(centre.x + half, base),
+                    egui::pos2(centre.x, tip),
+                ],
+                palette.dim,
+                egui::Stroke::NONE,
+            ));
+
+            // Painted, so the node is declared, and named with the value rather
+            // than the row: "sort by" twice is two nodes nothing can address.
+            let name = format!("sort by {}", view.sort_label());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+            if response.has_focus() {
+                response.surrender_focus();
+            }
+
+            let mut popup = egui::Popup::menu(&response).width(190.0);
+            if let Some(tip) = style.tip_height {
+                popup = dtr_widgets::point_at(ui, popup, rect, tip);
+            }
+            let popup = popup.show(|ui| {
+                ui.set_min_width(190.0);
+                let mut pick = |ui: &mut egui::Ui, change: SortChange, label: &str, on: bool| {
+                    if dtr_widgets::menu_row(ui, skin, label, on) {
+                        chosen = Some(change);
+                        ui.close();
+                    }
+                };
+                for sort in Sort::ALL {
+                    pick(ui, SortChange::Key(sort), sort.label(), view.sort == sort);
+                }
+                dtr_widgets::menu_separator(ui, skin);
+                pick(ui, SortChange::Reverse, "reverse", view.reverse);
+                pick(
+                    ui,
+                    SortChange::FoldersFirst,
+                    "folders first",
+                    view.folders_first,
+                );
+            });
+            if let Some(popup) = popup {
+                dtr_widgets::menu_tip(&popup.response, skin, rect);
+            }
+        });
+    chosen
 }
 
 /// The pane's close button: a cross in the header's right-hand corner.
@@ -2495,7 +2651,9 @@ mod kittest_tests {
                     &browser,
                     &skin,
                     true,
-                ) {
+                )
+                .close
+                {
                     sink.set(sink.get() + 1);
                 }
             });
@@ -2694,6 +2852,58 @@ mod kittest_tests {
         }
         assert_eq!(browser.scroll.get(), 0);
         assert_eq!(browser.selected, selected);
+    }
+
+    /// The order's own control: a name, a direction, and a menu that is the same
+    /// four keys and two switches the keyboard has.
+    ///
+    /// Clicked through the accessibility node, which is also the check that the
+    /// control *has* one: a painted button with no node is invisible to a screen
+    /// reader and unaddressable from a test.
+    #[test]
+    fn the_sort_control_opens_its_menu_and_answers() {
+        let skin = skin();
+        let browser = pane();
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let seen = std::rc::Rc::clone(&answer);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                let outcome = pane_ui(
+                    ui,
+                    egui::Id::unique("dtr-files-sort"),
+                    pane_rect(),
+                    &browser,
+                    &skin,
+                    true,
+                );
+                if outcome.sort.is_some() {
+                    *seen.borrow_mut() = outcome.sort;
+                }
+            });
+        harness.run();
+
+        harness.get_by_label("sort by name").click();
+        harness.run();
+        // The menu names every key the pane can be ordered by, and the two
+        // switches under them.
+        for label in ["name", "modified", "size", "type", "reverse", "folders first"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from the menu"
+            );
+        }
+        // A picture of the menu, because a popup is the one thing a pure-function
+        // test cannot check: the ticks, the order of the rows and the separator
+        // are all a drawing.
+        harness.snapshot("file_pane_sort_menu");
+        harness.get_by_label("modified").click();
+        harness.run();
+        assert_eq!(
+            *answer.borrow(),
+            Some(SortChange::Key(Sort::Modified)),
+            "the menu's answer never reached the caller"
+        );
     }
 
     /// The list view, kept rather than replaced: a dense pane shows eight rows

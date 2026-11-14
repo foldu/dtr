@@ -2987,6 +2987,61 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Apply what a pane's own sort control asked for, and remember it.
+    ///
+    /// The pane that was clicked, not the focused one: a sort control is aimed
+    /// by pointing, and a press on it does not move the keyboard focus (the
+    /// pane's body does, and this is the header).
+    fn apply_sort_change(&mut self, id: crate::layout::LeafId, change: dtr_files::SortChange) {
+        let view = {
+            let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) else {
+                return;
+            };
+            let mut view = browser.view();
+            match change {
+                dtr_files::SortChange::Key(sort) => view.sort = sort,
+                dtr_files::SortChange::Reverse => view.reverse = !view.reverse,
+                dtr_files::SortChange::FoldersFirst => view.folders_first = !view.folders_first,
+            }
+            browser.set_view(view);
+            view
+        };
+        self.persist_view(view);
+    }
+
+    /// Remember an order in the config file, which is the other writer of it.
+    ///
+    /// Three keys, written only when they moved: a sort change that rewrote the
+    /// file every time would reset the order of every other pane through the
+    /// watcher's reload.
+    fn persist_view(&mut self, view: dtr_files::View) {
+        // Collected first, then written: holding the config while asking `self`
+        // for the path it is written to is a borrow the compiler is right to
+        // refuse.
+        let mut writes: Vec<(&'static str, &'static str)> = Vec::new();
+        {
+            let files = &mut self.config.files;
+            if files.sort != files_sort(view.sort) {
+                files.sort = files_sort(view.sort);
+                writes.push(("files.sort", view.sort.label()));
+            }
+            if files.reverse != view.reverse {
+                files.reverse = view.reverse;
+                writes.push(("files.reverse", if view.reverse { "true" } else { "false" }));
+            }
+            if files.folders_first != view.folders_first {
+                files.folders_first = view.folders_first;
+                writes.push((
+                    "files.folders-first",
+                    if view.folders_first { "true" } else { "false" },
+                ));
+            }
+        }
+        for (key, value) in writes {
+            self.write_config(key, value);
+        }
+    }
+
     /// Change what the focused listing is ordered by, and remember it.
     ///
     /// The three config keys behind one call, because they are one decision: a
@@ -3007,23 +3062,8 @@ impl App {
         if let Some(browser) = self.focused_browser_mut() {
             browser.set_view(view);
         }
-        // Written only when it moved, so asking for the order it already has does
-        // not rewrite the file.
-        if view.sort != before.sort {
-            self.write_config("files.sort", view.sort.label());
-            self.config.files.sort = files_sort(view.sort);
-        }
-        if view.reverse != before.reverse {
-            self.write_config("files.reverse", if view.reverse { "true" } else { "false" });
-            self.config.files.reverse = view.reverse;
-        }
-        if view.folders_first != before.folders_first {
-            self.write_config(
-                "files.folders-first",
-                if view.folders_first { "true" } else { "false" },
-            );
-            self.config.files.folders_first = view.folders_first;
-        }
+        self.persist_view(view);
+        let _ = before;
         self.repaint("files sorted");
         true
     }
@@ -5273,7 +5313,18 @@ impl ApplicationHandler<UserEvent> for App {
         // the refresh rate forever — which is exactly the CPU burn this cost.
         if !matches!(event, WindowEvent::RedrawRequested) {
             let response = gpu.egui_state.on_window_event(&gpu.window, &event);
-            if response.repaint {
+            // **egui asks for a frame for a click, not for a move**, and every
+            // control that changes on hover — a tab chip, the menu button, a
+            // file pane's sort control — is a picture of a control until
+            // something else draws. So a pointer event is worth a frame by
+            // itself: the pointer moved, and what is under it is the answer.
+            let pointer = matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+            );
+            if response.repaint || pointer {
                 tracing::debug!(why = "egui", "request redraw");
                 gpu.window.request_redraw();
             }
@@ -5793,6 +5844,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // drawing code says *which* pane, and only the app can take
                     // a leaf out of the layout.
                     let mut close_file = None;
+                    let mut sort_change = None;
                     let mut keymap_event = None;
                     let mut about_close = false;
                     let rendered = gpu.render(
@@ -5838,6 +5890,7 @@ impl ApplicationHandler<UserEvent> for App {
                         &waiting,
                         &mut reconnect_ask,
                         &mut close_file,
+                        &mut sort_change,
                     );
                     // The keyboard map's answers. Its Escape and its captured
                     // key are handled where the keys are; a click has to come back
@@ -5884,6 +5937,10 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(id) = close_file {
                         self.close_pane(id);
                         self.repaint("file pane closed");
+                    }
+                    if let Some((id, change)) = sort_change {
+                        self.apply_sort_change(id, change);
+                        self.repaint("files sorted");
                     }
                     // The caption's × is the window's close button. Same exit as
                     // the window manager's, so there is one shutdown path.
@@ -6474,6 +6531,7 @@ impl Gpu {
         // A file pane's close button. The pane draws it; taking the leaf out of
         // the layout is the app's, exactly like a tab's cross.
         close_file: &mut Option<crate::layout::LeafId>,
+        sort_change: &mut Option<(crate::layout::LeafId, dtr_files::SortChange)>,
     ) -> anyhow::Result<()> {
         // The first few frames at debug, then every 120th: enough to see a
         // wedged surface without drowning the log at 60 Hz.
@@ -6704,15 +6762,19 @@ impl Gpu {
             // File panes sit over the grid rectangle their leaf owns. They
             // are areas rather than windows: fixed position, no dragging.
             for file in files {
-                if dtr_files::pane_ui(
+                let outcome = dtr_files::pane_ui(
                     ui,
                     egui::Id::unique(("dtr-files", file.id)),
                     file.rect,
                     file.browser,
                     &look.skin(),
                     file.focused,
-                ) {
+                );
+                if outcome.close {
                     *close_file = Some(file.id);
+                }
+                if let Some(change) = outcome.sort {
+                    *sort_change = Some((file.id, change));
                 }
             }
             // The composition box goes over the grid and under the
