@@ -20,7 +20,7 @@ use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
 use crate::ui::Status;
-use dtr_files::{Browser, PaneView as FilePaneView};
+use dtr_files::{Browser, Mode as FileMode, PaneView as FilePaneView};
 
 pub enum UserEvent {
     Frame,
@@ -406,7 +406,7 @@ pub fn capture_headless(
     let files = startup
         .files
         .as_ref()
-        .map(|path| Browser::new(Some(path.clone())));
+        .map(|path| file_browser(&startup.config, Some(path.clone())));
 
     let settings = startup.preferences.then(|| {
         let mut settings = crate::settings::Settings::new();
@@ -995,6 +995,45 @@ fn cell_of(
 /// Translate the keys a file pane understands. Named arrows are
 /// keyboard-layout independent; `h`, `r`, `g` and `G` are the vim-ish ones the
 /// brief asks for. Modifiers are filtered by the caller.
+/// The mode `[files] view` asks for.
+///
+/// The config crate parses text and the browser paints, so neither knows the
+/// other's value and this is the one line that joins them — the same shape
+/// `[ui] widgets` has with `dtr_widgets::Preset`.
+fn file_mode(view: dtr_config::FilesView) -> FileMode {
+    match view {
+        dtr_config::FilesView::Grid => FileMode::Grid,
+        dtr_config::FilesView::List => FileMode::List,
+    }
+}
+
+/// The config's spelling of a mode, for writing it back.
+fn files_view_of(mode: FileMode) -> dtr_config::FilesView {
+    match mode {
+        FileMode::Grid => dtr_config::FilesView::Grid,
+        FileMode::List => dtr_config::FilesView::List,
+    }
+}
+
+/// A browser carrying the configured view.
+///
+/// Every pane is built through one of these two functions, so a pane opened five
+/// minutes after startup looks like the one opened at startup; a mode applied only
+/// where the pane was first created would be a preference that depended on the
+/// order of events.
+fn file_browser(config: &dtr_config::Config, start: Option<PathBuf>) -> Browser {
+    let mut browser = Browser::new(start);
+    browser.set_mode(file_mode(config.files.view));
+    browser
+}
+
+/// The same, for a pane over another machine.
+fn remote_file_browser(config: &dtr_config::Config, alias: &str, path: PathBuf) -> Browser {
+    let mut browser = Browser::remote_at(alias, path);
+    browser.set_mode(file_mode(config.files.view));
+    browser
+}
+
 fn browser_key(key: &winit::keyboard::Key) -> Option<dtr_files::Key> {
     use winit::keyboard::{Key, NamedKey};
 
@@ -2207,8 +2246,8 @@ impl App {
             })
         };
         let browser = match &alias {
-            Some(alias) => Browser::remote_at(alias, path),
-            None => Browser::new(Some(path)),
+            Some(alias) => remote_file_browser(&self.config, alias, path),
+            None => file_browser(&self.config, Some(path)),
         };
         if let Some(id) = existing {
             self.tabs[self.active]
@@ -2806,6 +2845,35 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Switch the focused file pane's view, and remember it.
+    ///
+    /// Remembered by writing the config file, because that is what "the choice
+    /// is remembered" means in `docs/manager.md` — a value that lived only in
+    /// the window would be forgotten at exit, and the file that called it a
+    /// preference would not have one in it. The watcher sees the write and
+    /// reloads, which is how the other panes learn the same thing.
+    fn set_file_mode(&mut self, mode: FileMode) -> bool {
+        if self.focused_browser().is_none() {
+            self.toast = Some((
+                "no file pane is focused".to_owned(),
+                std::time::Instant::now(),
+            ));
+            self.repaint("files view");
+            return true;
+        }
+        if let Some(browser) = self.focused_browser_mut() {
+            browser.set_mode(mode);
+        }
+        let view = files_view_of(mode);
+        if let Err(err) = dtr_config::set_value(&self.config_path, "files.view", view.as_str()) {
+            tracing::warn!(%err, "could not save files.view");
+        } else {
+            self.config.files.view = view;
+        }
+        self.repaint("files view");
+        true
+    }
+
     fn dispatch(&mut self, action: crate::keys::Action) -> bool {
         use crate::keys::Action;
         match action {
@@ -2905,6 +2973,8 @@ impl App {
                 self.resize_pane(crate::layout::Direction::Down);
                 true
             }
+            Action::FilesGrid => self.set_file_mode(FileMode::Grid),
+            Action::FilesList => self.set_file_mode(FileMode::List),
             Action::ZoomPane => {
                 self.toggle_zoom();
                 true
@@ -3151,6 +3221,17 @@ impl App {
             self.notifier = crate::notify::system(config.notifications.os);
         }
         self.config = config;
+        // The mode is a thing a person can see, so a reload has to reach the
+        // panes that are already on screen: a `files.view` that only applied to
+        // the next pane would look like a setting that did nothing.
+        let mode = file_mode(self.config.files.view);
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                if let Pane::Files(browser) = pane {
+                    browser.set_mode(mode);
+                }
+            }
+        }
         // `[keys]` is a document, not a menu: a rebinding arrives here or not at
         // all, and a keymap that remembered the old chords would leave the file
         // describing a keyboard nobody has.
@@ -3893,7 +3974,10 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(id, Pane::Files(Browser::remote(alias)));
+        tab.leaves.insert(
+            id,
+            Pane::Files(remote_file_browser(&self.config, alias, PathBuf::from("."))),
+        );
         tab.focus = id;
     }
 
@@ -3909,7 +3993,8 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(id, Pane::Files(Browser::new(path)));
+        tab.leaves
+            .insert(id, Pane::Files(file_browser(&self.config, path)));
         tab.focus = id;
     }
 

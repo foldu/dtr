@@ -34,6 +34,9 @@ pub enum Action {
     ResizeDown,
     /// Give the focused pane the whole window, or put the layout back.
     ZoomPane,
+    /// A file pane's grid of tiles, and its dense one-row-per-entry view.
+    FilesGrid,
+    FilesList,
     Copy,
     Paste,
     ScrollPageUp,
@@ -75,6 +78,8 @@ impl Action {
             Self::ResizeUp => "resize-up",
             Self::ResizeDown => "resize-down",
             Self::ZoomPane => "zoom-pane",
+            Self::FilesGrid => "files-grid",
+            Self::FilesList => "files-list",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll-page-up",
@@ -117,6 +122,8 @@ impl Action {
             Self::ResizeUp => "move divider up",
             Self::ResizeDown => "move divider down",
             Self::ZoomPane => "zoom this pane",
+            Self::FilesGrid => "file grid view",
+            Self::FilesList => "file list view",
             Self::Copy => "copy selection",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll a page up",
@@ -150,7 +157,9 @@ impl Action {
             | Self::ResizeRight
             | Self::ResizeUp
             | Self::ResizeDown
-            | Self::ZoomPane => Group::Panes,
+            | Self::ZoomPane
+            | Self::FilesGrid
+            | Self::FilesList => Group::Panes,
             Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
@@ -207,7 +216,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 31] = [
+pub const ALL: [Action; 33] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -225,6 +234,8 @@ pub const ALL: [Action; 31] = [
     Action::ResizeUp,
     Action::ResizeDown,
     Action::ZoomPane,
+    Action::FilesGrid,
+    Action::FilesList,
     Action::Copy,
     Action::Paste,
     Action::ScrollPageUp,
@@ -269,6 +280,10 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("resize-up", "ctrl-alt-shift-up"),
     ("resize-down", "ctrl-alt-shift-down"),
     ("zoom-pane", "ctrl-alt-z"),
+    // One and two, because a file manager's view toggle is a pair of digits in
+    // every other file manager.
+    ("files-grid", "ctrl-1"),
+    ("files-list", "ctrl-2"),
     ("copy", "ctrl-shift-c"),
     ("paste", "ctrl-shift-v"),
     ("scroll-page-up", "shift-pageup"),

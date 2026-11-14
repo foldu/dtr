@@ -41,6 +41,58 @@ pub struct Config {
     pub notifications: Notifications,
     /// Whether an ssh session is put inside a tmux session. `[tmux]`.
     pub tmux: Tmux,
+    /// How a file pane looks. `[files]`.
+    pub files: Files,
+}
+
+/// How a file pane lays its listing out. `[files] view`.
+///
+/// The browser's own `Mode` lives in `dtr-files`, which pulls in egui; this crate
+/// parses text and pulls in nothing but `toml_edit` and a key parser. So the two
+/// are separate values and the window is where they meet — the same shape
+/// `[ui] widgets` has with `dtr_widgets::Preset`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilesView {
+    /// A grid of icon tiles: the default, as it is in Nautilus.
+    #[default]
+    Grid,
+    /// One row per entry, with a size column. Kept for a narrow pane.
+    List,
+}
+
+impl FilesView {
+    pub const ALL: [FilesView; 2] = [FilesView::Grid, FilesView::List];
+
+    /// The word a config file and the preferences card use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::List => "list",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "grid" => Some(Self::Grid),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
+/// How a file pane looks and is ordered. `[files]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Files {
+    /// Which view a pane opens in, and what `Ctrl+1`/`Ctrl+2` write back.
+    pub view: FilesView,
+}
+
+impl Default for Files {
+    fn default() -> Self {
+        Self {
+            view: FilesView::Grid,
+        }
+    }
 }
 
 /// How a program's `OSC 9`/`OSC 777` reaches the person.
@@ -301,6 +353,7 @@ impl Default for Config {
             theme: None,
             terminal: Terminal::default(),
             notifications: Notifications::default(),
+            files: Files::default(),
             tmux: Tmux::default(),
         }
     }
@@ -501,6 +554,19 @@ impl Config {
                 config.tmux.enabled = enabled
                     .as_bool()
                     .ok_or_else(|| Error::Value("tmux.enabled must be true or false".into()))?;
+            }
+        }
+
+        if let Some(section) = document.get("files").and_then(Item::as_table) {
+            if let Some(view) = section.get("view") {
+                let text = view
+                    .as_str()
+                    .ok_or_else(|| Error::Value("files.view must be a string".into()))?;
+                config.files.view = FilesView::parse(text).ok_or_else(|| {
+                    Error::Value(format!(
+                        "files.view is {text:?}; it must be \"grid\" or \"list\""
+                    ))
+                })?;
             }
         }
 
@@ -716,6 +782,13 @@ scheme = "system"
 # the look's own: Adwaita's blue, Windows' accent, egui's link colour.
 # accent = "#3584E4"
 
+[files]
+# How a file pane lays its listing out: "grid" is a wall of icon tiles, as in
+# Nautilus and every other file manager, and "list" is one row per entry with a
+# size column — the escape hatch for a pane too narrow for tiles. Ctrl+1 and
+# Ctrl+2 switch between them and write the choice back here.
+view = "grid"
+
 [terminal]
 # Bytes of scrollback a tab keeps before the oldest pages are dropped. There is
 # no unlimited setting: a program that prints without end would grow the process
@@ -800,6 +873,41 @@ mod tests {
                 "the message should say why: {error}"
             );
         }
+    }
+
+    /// The view is a word in the file and a value in the browser, and a typo is
+    /// an error rather than a silent grid: a setting that quietly ignores what it
+    /// was asked for is the failure mode `[ui] widgets` already refuses.
+    #[test]
+    fn the_file_view_is_grid_unless_the_file_says_list() {
+        use super::FilesView;
+        assert_eq!(
+            Config::parse("").unwrap().files.view,
+            FilesView::Grid,
+            "the grid is the default, as it is in Nautilus"
+        );
+        assert_eq!(
+            Config::parse("[files]\nview = \"list\"\n")
+                .unwrap()
+                .files
+                .view,
+            FilesView::List
+        );
+        // The same word in any case, because it is a name rather than a literal.
+        assert_eq!(
+            Config::parse("[files]\nview = \"LIST\"\n")
+                .unwrap()
+                .files
+                .view,
+            FilesView::List
+        );
+        let error = Config::parse("[files]\nview = \"tiles\"\n").expect_err("not a view");
+        assert!(format!("{error}").contains("files.view"), "{error}");
+        assert!(format!("{error}").contains("grid"), "{error}");
+
+        // And the word written back is the one that reads.
+        assert_eq!(FilesView::Grid.as_str(), "grid");
+        assert_eq!(FilesView::parse("list"), Some(FilesView::List));
     }
 
     #[test]

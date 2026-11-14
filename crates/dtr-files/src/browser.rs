@@ -362,6 +362,15 @@ impl Browser {
     }
 
     /// What this pane is sorted by and what it hides.
+    /// Change the layout without touching the order.
+    ///
+    /// `Ctrl+1`/`Ctrl+2` and `[files] view` are the two writers, and neither
+    /// means "re-sort": a mode change is what a person asked for, and a sort
+    /// they chose a moment ago must survive it.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.view.mode = mode;
+    }
+
     pub fn view(&self) -> View {
         self.view
     }
