@@ -9,10 +9,10 @@ They are one project because they are one widget. The browser in a terminal pane
 daemon's picker, and the browser in a manager window of its own are the same `dtr-files` view with a
 different chrome and a different footer.
 
-**Nothing in this memo is built.** §12 is the order — stages **F0…F7**, which are this programme's
-numbers and not the project's `M` milestones — and `PLAN.md` §3 (`M4`) is the programme in a paragraph.
-The rest is the reasoning, the facts it rests on, and the things worth measuring before anyone promises
-a number.
+**Nothing in this memo is built.** §12 is the order — stages **F0…F7**, with F1 split as F1a and F1b —
+and these are this programme's numbers, not the project's `M` milestones. `PLAN.md` §3 (`M4`) is the
+same programme in a paragraph; the rest of this is the reasoning, the facts it rests on, and the things
+worth measuring before anyone promises a number.
 
 ## 1. What is there now
 
@@ -22,6 +22,8 @@ a number.
 | `crates/dtr-sftp` | `connect`, `list`, `stat`, `home`, `download`, `close` — no mkdir, remove, rename or upload |
 | `crates/dtr/src/explorer.rs` | one selection, keyboard only (arrows, `Enter`, `h`/`l`, `r`, `g`/`G`), 18-point painted rows, name and size, a synthetic `..`, dotfiles filtered with no toggle, no icons, no wheel, no row is a click target |
 | the pane | a leaf in the split tree, so splits, focus, zoom, close and "a shell beside it" came free (`docs/panes.md`) |
+| the local listing | **synchronous on the UI thread and does not use `dtr-vfs`**: `Explorer::reload` calls `std::fs::read_dir`, `metadata()` per entry, then sorts, in one frame. `dtr-vfs`'s batched `list` exists and only the remote path uses it |
+| what a listing carries | `{ name, kind, len }`. The mtime is **dropped in both backends** even though both have it in hand — `Metadata::modified()` locally, `dtr_sftp::Entry.modified` remotely |
 | the first click target | the close cross in the header, `f24ea1f` — and it needed an `Area` of its own *because* the pane is painted rather than clicked (`docs/files.md` §13) |
 | `zbus` | already a dependency (`crates/dtr/src/system/linux.rs`), and `notify.rs`'s test already **serves** a D-Bus interface over a private bus |
 | `rfd` | the workspace builds it with the `xdg-portal` feature, so dtr's own "Save as" is already a portal call |
@@ -56,7 +58,9 @@ daemon warm but means the picker's process is the terminal — 100 MB of scrollb
 dependency on a VT core for a dialog. *A fresh process per window* is the simplest thing that works and
 throws away the only advantage the daemon has: a warm window.
 
-## 3. The grid is the default view
+## 3. The listing, and the grid
+
+### The grid is the default view
 
 The decision is Nautilus's default: a grid of large icons. That makes the view a **control**, not a
 tweak to the row renderer, and the control belongs in `dtr-widgets` with a gallery snapshot, like every
@@ -89,11 +93,102 @@ other painted thing (`AGENTS.md`, "Do not hand-roll a widget").
   rewritten.
 - **Also in F1, because a grid without them is a picture**: click to select, double-click to enter or
   open, wheel to scroll, drag to select, `Ctrl`/`Shift` to extend, a right-click menu (open, open with,
-  copy path, reveal), a sort menu (name/size/modified, directories first), `Ctrl+H`, a breadcrumb that
-  navigates, and a places **popup** — the sidebar is window chrome (§6), a pane is too narrow for one.
+  copy path, reveal), `Ctrl+H`, a breadcrumb that navigates, and a places **popup** — the sidebar is
+  window chrome (§6), a pane is too narrow for one. Sorting and the selector are below.
 - **A local directory is watched** (`Caps::watch` already exists): `notify` on the directory in view,
   coalesced into one re-list per burst. The ssh backend keeps saying it cannot, and the UI keeps hiding
   what a backend cannot do.
+
+### Streamed
+
+**A listing arrives in batches and the browser shows the first batch immediately.** `Backend::list`
+already returns `Batches = Receiver<Result<Vec<Entry>>>` and both backends send 64 at a time, so the
+protocol for this exists and only the pane's local path ignores it (it reads the whole directory and
+sorts inside one frame). Three rules make streaming survivable:
+
+- **The view is a prefix of the arrival order until the walk ends**, and the footer says so
+  (`reading…` with a count) rather than `empty directory`. A streamed listing must never render its
+  emptiness as a fact; the current footer does.
+- **The selection is keyed by name, never by index.** Batches arriving and rows re-sorting while
+  somebody holds an arrow key make `selected: usize` a reference to whatever is at that position
+  *now*. `Explorer::selected` becomes a `Selection` over entry ids (name, and the backend, for two
+  panes on one host) and the same applies to the scroll anchor: scrolling is anchored to the row the
+  reader was looking at, so a batch landing above it cannot scroll the page under their eyes.
+- **One repaint per burst.** Batches coalesce behind a 16 ms gate before the view is published — 157
+  batches of a 10k directory must not be 157 repaints, which is the same rule `publish` already
+  applies to read chunks (`AGENTS.md`, panes).
+
+### Lazy
+
+Lazy here means *lazy metadata*, and it is the difference between one syscall per file and none:
+
+- **A directory read yields names and kinds for free.** `DirEntry::file_type()` reads `d_type` out of
+  the directory entry, with no `stat` — *where the filesystem provides it*: some (network
+  filesystems, notably) return `DT_UNKNOWN` and std then falls back to an `lstat` itself, so the
+  saving is real on ext4/xfs/btrfs and absent elsewhere. `crates/dtr-vfs/src/local.rs`'s `walk`
+  calls `entry.metadata()` for *every* entry today, which is one `stat` per file — 10 000 of them for
+  a 10 000-file directory, and on a cold cache that is the listing's whole cost.
+- **A symlink is resolved in the first batch, not the pass.** `d_type` says "symlink", not what it
+  points at, so a link to a directory would arrive as a file and *change groups* when the metadata
+  pass resolved it — a row jumping from the files group to the folders group is exactly the visible
+  glitch the rest of this section is trying to avoid. One `lstat` per symlink (they are rare) in the
+  first batch, and the kind a row is given is the kind it keeps.
+- **A size and a time are `Option`s, filled later.** `vfs::Entry` grows
+  `len: Option<u64>, modified: Option<SystemTime>` (from `u64` and nothing today), and a backend may
+  send a name it already sent, refined: **a later batch patches a known name rather than duplicating
+  it**, keyed by name. One channel, one type, and the model merges.
+- **The metadata pass runs only when something needs it** — and that is the load-bearing rule. A
+  **name** sort needs no metadata at all, so the common case is a `readdir` and a sort, with stats
+  taken only for rows on screen (about forty) to draw the size and date columns. A modified or size
+  sort needs the whole directory's stats, so it starts a full pass, prioritized to the visible
+  window so the first screen is right immediately.
+- **Remote is the opposite case and worth stating**: SFTP's `READDIR` already carries size and mtime
+  in the same packet (`dtr_sftp::Entry.modified`), so a remote listing is complete as it streams and
+  a remote sort costs no extra round trips. Lazy metadata is a *local* problem, and the code must not
+  grow a second pass that a server already answered.
+
+### Sorted
+
+Four keys — **name, modified, size, type** — and two independent switches: **reverse**, and **folders
+first** (on by default, as in Nautilus). Arrival order is not one of them: it is what the view shows
+while a walk is still running, and a directory whose `readdir` order matters is what a shell is for.
+
+- **Sorting is in the model, not in the view.** `arrange(entries, cwd, &View)` where
+  `View { sort, reverse, folders_first }`; the grid and the list both order from the same `Vec`, so a
+  toggle cannot make them disagree, and it is a pure function the existing tests extend.
+- **Reversing flips the key, not the grouping.** Directories stay first under `modified ↓`; only the
+  order *within* each group reverses. A test for exactly that, because "reverse" that also moves
+  folders to the bottom is the bug everyone ships once.
+- **Unknowns sink, in both directions.** An entry with no mtime — a permission denied, a server that
+  reports none — sorts **last** whether ascending or descending. Sorted descending by date with the
+  unknowns first is a list of the files you cannot read, presented as the newest. Same for a size
+  sort's directories: `Caps::dir_size` is false, so a directory's size key is `None` and it sinks
+  rather than claiming its inode size.
+- **`..` is always first.** It is synthetic and inserted after sorting, which is what the function
+  does today; a reverse sort must not sink it.
+- **The comparator allocates on every comparison.** The current one calls `to_lowercase()` on **both**
+  names per comparison — two `String`s, `O(n log n)` times. On 10 000 generated names that measured
+  **2.77 ms against 1.10 ms** for a precomputed key: real, and gone with `sort_by_cached_key` or a
+  lowercased key computed once per entry. A stable sort still decides the equal-ignoring-case tie.
+- **A metadata sort says it is working.** Choosing *modified* starts the pass and the control reads
+  `modified ↓ (reading…)` until the directory's stats are all in, then the order is applied **once**.
+  Re-sorting as each batch lands would shuffle rows under the pointer continuously, which is worse
+  than a second of the previous order. If the pass was already done for this directory it is cached
+  until a watch event invalidates it.
+- **Show the key you sort by.** A *modified* sort with no visible dates is a mystery: the list view
+  gains a Modified column, the grid shows it in the hover tooltip and the footer, and the footer
+  names the selection's date the way it names its path today.
+- **The selector is a control, twice.** In the manager window it is a toolbar dropdown: the four keys
+  with a tick on the active one, then *Reverse* and *Folders first*. In a pane it cannot be a
+  dropdown in the flow of a painted header — every pointer target there is its own `Area`
+  (`docs/files.md` §13) — so the pane gets **one** sort area in the header (a glyph that opens the
+  same menu as a popup) and the same actions on the keyboard, offered in the palette. One menu
+  builder, two windows.
+- **The order is remembered.** `[files] sort = "modified"`, `reverse = true`, `folders-first = true`,
+  `view = "grid"` in the config file, applied on load and on reload like every other key
+  (`AGENTS.md`, "a new key is a key a reload applies"). Per **folder** memory — Nautilus remembers
+  that you sort `~/Downloads` by date and `~/src` by name — is a store schema and a second writer, so
+  it is deliberately not in F1.
 
 ## 4. Pick mode
 
@@ -301,6 +396,14 @@ much as remote ones.
    running, before and after the transfer is segmented (§8). That number is what decides the segment
    size, and whether a second connection per transfer is worth having on Windows, where `ControlMaster`
    does not exist.
+6. **The lazy pass, measured**: a 10 000-entry directory with `readdir` and `d_type` alone, then with
+   one `stat` per entry — warm and cold — because that is the difference §3's *Lazy* section claims.
+   Then the same directory over SFTP, where the attributes are already in the `READDIR` replies and
+   the pass should cost nothing. Half-taken: the comparator alone was **2.77 ms against 1.10 ms** on
+   10 000 generated names (`to_lowercase` per comparison vs a cached key), so the sort itself is not
+   the cost — the pass is.
+7. **Rows drawn per frame against rows streamed in**: that batches coalesce to one repaint each
+   (§3 *Streamed*), i.e. a 157-batch listing produces about a frame's worth of repaints and not 157.
 
 ## 11. Risks
 
@@ -317,6 +420,13 @@ much as remote ones.
   surface loss per window, focus and IME routing). `dtr-frame` exists so that this is solved once.
 - **Grid density in a narrow pane** — the list toggle is the mitigation, and it must ship together with
   the grid rather than after it.
+- **Index-based selection under a re-sorted stream** is the bug that streaming and sorting combine to
+  create: an index means "whatever is at that position now", so a batch landing or a key changing
+  moves the highlight to a different file, and a rename or a delete acts on the wrong one. The
+  selection must be keyed by name before either ships (§3 *Streamed*).
+- **The metadata pass is the listing's real cost**, not the sort (2.77 → 1.10 ms measured on 10 000
+  names, against 10 000 `stat`s). A design that stats eagerly "because sorting might need it" pays
+  that on every directory, which is why §3 *Lazy* makes the pass conditional on the sort in use.
 - **Portal compatibility in the corners**: `SaveFiles` (whose arguments changed), `choices`, filters
   whose MIME patterns are not globs, and apps that ask for a directory with `multiple`. The private-bus
   test should cover the wired shapes, including a `Close` while the dialog is up.
@@ -328,7 +438,8 @@ much as remote ones.
 | | | the gate |
 |---|---|---|
 | **F0** | `dtr` → lib + bin; `dtr-frame` (multi-window); `dtr-files` skeleton holding today's listing; measurements 1–2 | every existing test and snapshot green, unchanged; two numbers written into this memo |
-| **F1** | the grid, read-only, in the pane: `IconTile` + gallery snapshot, grid geometry, icons, thumbnails, multi-select, 2-D keys, breadcrumb, places popup, sort, `Ctrl+H`, watch, list toggle | kittest snapshots of a grid, a list, a hover and a selection; pure-function tests for columns and hit-testing |
+| **F1a** | the listing: streamed batches from `dtr-vfs` for local too (off the UI thread), a name-keyed selection and scroll anchor, `Option`al `len`/`modified` with patch-on-redirect, the conditional metadata pass, and the four-key sort with reverse and folders-first in `arrange` | pure-function tests: reverse keeps folders first, unknowns sink both ways, `..` stays first, equal-ignoring-case is stable; a test that a second batch patches rather than duplicates; measurement 6 |
+| **F1b** | the grid, read-only, in the pane: `IconTile` + gallery snapshot, grid geometry, icons, thumbnails, multi-select, 2-D keys, breadcrumb, places popup, sort selector, `Ctrl+H`, watch, list toggle | kittest snapshots of a grid, a list, a hover and a selection; pure-function tests for columns and hit-testing; measurement 7 |
 | **F2** | pick mode: footer, multiple, directory, save-with-name, filters, overwrite confirmation | a snapshot per mode; the picker's answers unit-tested without a window |
 | **F3** | `dtr-portal`: zbus backend, activation, resident hidden window, the three packaging files, the NixOS module, private-bus test | a real `OpenFile` answered over a private bus; measurement 3 |
 | **F4** | the manager window: `dtr-files [PATH]`, private `org.dtr.Files.OpenWindow`, toolbar, sidebar with places and ssh hosts, status bar | the same browser in a third window, and a snapshot of the window |
@@ -338,3 +449,8 @@ much as remote ones.
 
 F0's gate is the important one: if the split cannot leave every test and snapshot untouched, the rest
 of this is being built on a refactor nobody can trust.
+
+F1 is split in two because the listing is where the correctness lives and the grid is where the look
+does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with
+nothing new on screen**, which is the only way to test it honestly. F1b may then assume a listing that
+is already complete, ordered and keyed by name.

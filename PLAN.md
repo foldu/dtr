@@ -962,22 +962,30 @@ numbers, so that an `M` never names two things:
 
 1. **F0** the split, with every existing test and snapshot green and unchanged, plus the two
    measurements nobody has taken: the GNOME picker's time-to-dialog, and ours cold and warm.
-2. **F1** the grid, read-only, in the pane: `IconTile` in `dtr-widgets` with a gallery snapshot, grid
+2. **F1a** the listing, before anything draws it: local listings go through `dtr-vfs`'s batched
+   `list` like remote ones instead of `Explorer::reload`'s synchronous `read_dir` on the UI thread; a
+   name-keyed selection and scroll anchor, because an index stops meaning the same file once batches
+   arrive and rows re-sort; `len`/`modified` become `Option`s that a later batch patches (the mtime is
+   in hand in both backends today and thrown away); a metadata pass that runs **only when the sort
+   needs it**, since a `readdir` alone yields names and `d_type` kinds for free; and the sort itself
+   as `arrange(entries, cwd, &View)` — name/modified/size/type, reverse, folders-first, unknowns
+   sinking both ways, `..` first.
+3. **F1b** the grid, read-only, in the pane: `IconTile` in `dtr-widgets` with a gallery snapshot, grid
    geometry as pure functions, icons (type, packaging, `user-dirs.dirs` decorations), thumbnails
    through the existing `thumb.rs` cap-and-cache, multi-select, 2-D keys, breadcrumb, places *popup*,
-   sort, `Ctrl+H`, a local `notify` watch, and the list view **kept** as a toggle — a half-pane is
-   narrow, and grid-first is a preference, not an excuse to lose the dense view.
-3. **F2** pick mode in the same widget: a footer, multiple, directory, save-with-name, filters,
+   the sort selector, `Ctrl+H`, a local `notify` watch, and the list view **kept** as a toggle — a
+   half-pane is narrow, and grid-first is a preference, not an excuse to lose the dense view.
+4. **F2** pick mode in the same widget: a footer, multiple, directory, save-with-name, filters,
    overwrite confirmation. A picker only reads, which is why it can ship before writes.
-4. **F3** the daemon: zbus (`async-io`, already in the tree), activation, a hidden window kept warm,
+5. **F3** the daemon: zbus (`async-io`, already in the tree), activation, a hidden window kept warm,
    the three packaging files, a `nixosModules.dtr-portal`, and a private-bus test that answers a real
    `OpenFile`.
-5. **F4** the manager window: toolbar, sidebar (user directories, mounts, **the session's ssh hosts**),
+6. **F4** the manager window: toolbar, sidebar (user directories, mounts, **the session's ssh hosts**),
    status bar, over a private `org.dtr.Files.OpenWindow`.
-6. **F5** the transfer queue, with local copies as its first user: jobs owned by the window, progress,
+7. **F5** the transfer queue, with local copies as its first user: jobs owned by the window, progress,
    cancel, retry, `.part` then publish, the tab's own stripe. Segmenting is not optional — one mutex
    per alias means a whole-file copy would block every listing on that host while it runs.
-7. **F6** writes on this machine, then **F7** writes over ssh: `Backend` grows
+8. **F6** writes on this machine, then **F7** writes over ssh: `Backend` grows
    `create_dir`/`rename`/`remove`/`copy`/`move` and `Caps` grows `write`/`trash`; trash-always,
    ask-on-overwrite, one conflict `Card`; then `dtr-sftp` grows the writing packets,
    `posix-rename`/`statvfs`, upload, and a cross-host copy streamed through dtr.
