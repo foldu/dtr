@@ -45,6 +45,8 @@ pub enum Action {
     /// desktop has one "show hidden files" setting and two panes that disagreed
     /// would look broken.
     FilesHidden,
+    /// Put the selected entry's path on the clipboard.
+    FilesCopyPath,
     /// What a listing is ordered by, and its two switches.
     FilesSortName,
     FilesSortModified,
@@ -96,6 +98,7 @@ impl Action {
             Self::FilesGrid => "files-grid",
             Self::FilesList => "files-list",
             Self::FilesHidden => "files-hidden",
+            Self::FilesCopyPath => "files-copy-path",
             Self::FilesSortName => "files-sort-name",
             Self::FilesSortModified => "files-sort-modified",
             Self::FilesSortSize => "files-sort-size",
@@ -147,6 +150,7 @@ impl Action {
             Self::FilesGrid => "file grid view",
             Self::FilesList => "file list view",
             Self::FilesHidden => "hidden files",
+            Self::FilesCopyPath => "copy the selected path",
             Self::FilesSortName => "sort by name",
             Self::FilesSortModified => "sort by date",
             Self::FilesSortSize => "sort by size",
@@ -190,6 +194,7 @@ impl Action {
             | Self::FilesGrid
             | Self::FilesList
             | Self::FilesHidden
+            | Self::FilesCopyPath
             | Self::FilesSortName
             | Self::FilesSortModified
             | Self::FilesSortSize
@@ -272,7 +277,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 40] = [
+pub const ALL: [Action; 41] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -293,6 +298,7 @@ pub const ALL: [Action; 40] = [
     Action::FilesGrid,
     Action::FilesList,
     Action::FilesHidden,
+    Action::FilesCopyPath,
     Action::FilesSortName,
     Action::FilesSortModified,
     Action::FilesSortSize,
@@ -350,6 +356,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("files-hidden", "ctrl-h"),
     // ctrl+alt and a letter: the arrows in that family move between panes, and
     // these are the six things a listing can be ordered by or ask of the order.
+    ("files-copy-path", "ctrl-alt-c"),
     ("files-sort-name", "ctrl-alt-n"),
     ("files-sort-modified", "ctrl-alt-m"),
     ("files-sort-size", "ctrl-alt-s"),

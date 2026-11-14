@@ -447,6 +447,18 @@ impl Browser {
     }
 
     /// What this pane is sorted by and what it hides.
+    /// The path the selection names, for a copy or a command line.
+    ///
+    /// The parent row is the directory above, so a press on `..` copies where it
+    /// goes rather than the two characters it shows.
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        let entry = self.selected_entry()?;
+        if entry.is_parent() {
+            return parent_of(&self.cwd);
+        }
+        Some(self.cwd.join(&entry.name))
+    }
+
     /// The places a popup offers: home, the desktop's decorated directories, and
     /// the root of the filesystem.
     ///
@@ -2373,6 +2385,25 @@ mod tests {
         );
         // And the same mtime does not re-list a second time.
         assert!(!browser.refresh_if_changed(), "nothing changed again");
+    }
+
+    /// The selected path is the file's, and on the parent row it is where that
+    /// row goes rather than the two characters it shows.
+    #[test]
+    fn the_selected_path_is_the_one_a_command_line_wants() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("a.txt"), b"x").expect("file");
+        let mut browser = Browser::new(Some(root.clone()));
+        settle(&mut browser);
+        browser.selected = row_of(&browser, "a.txt");
+        assert_eq!(browser.selected_path(), Some(root.join("a.txt")));
+        browser.selected = 0;
+        assert!(browser.entries[0].is_parent(), "the fixture starts on `..`");
+        assert_eq!(
+            browser.selected_path(),
+            root.parent().map(Path::to_path_buf)
+        );
     }
 
     /// The places popup starts at home and ends at the filesystem root, and it

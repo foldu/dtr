@@ -3001,6 +3001,27 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Put the focused listing's selected path on the clipboard.
+    ///
+    /// The one thing a context menu would offer that nothing else does: `open` is
+    /// `Enter`, `reveal` is opening a pane at the path, and the path itself is
+    /// what a terminal wants on its command line.
+    fn copy_file_path(&mut self) -> bool {
+        let Some(path) = self
+            .focused_browser()
+            .and_then(|browser| browser.selected_path())
+        else {
+            self.toast = Some(("nothing is selected".to_owned(), std::time::Instant::now()));
+            self.repaint("files copy path");
+            return true;
+        };
+        let text = path.display().to_string();
+        self.set_clipboard(&text);
+        self.toast = Some((format!("copied {text}"), std::time::Instant::now()));
+        self.repaint("files copy path");
+        true
+    }
+
     /// Apply what a pane's own sort control asked for, and remember it.
     ///
     /// The pane that was clicked, not the focused one: a sort control is aimed
@@ -3244,6 +3265,7 @@ impl App {
             Action::FilesGrid => self.set_file_mode(FileMode::Grid),
             Action::FilesList => self.set_file_mode(FileMode::List),
             Action::FilesHidden => self.toggle_hidden_files(),
+            Action::FilesCopyPath => self.copy_file_path(),
             Action::FilesSortName => self.change_file_view(|view| view.sort = FileSort::Name),
             Action::FilesSortModified => {
                 self.change_file_view(|view| view.sort = FileSort::Modified)
