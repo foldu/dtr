@@ -9,8 +9,13 @@ publish.workspace = true
 [dependencies]
 # `dirs::home_dir`, for the `~` in a displayed path. The browser shows paths, so
 # it needs to know where home is; nothing else about the machine.
+async-channel.workspace = true
 dirs.workspace = true
 egui.workspace = true
+# The listing, batched and off the drawing thread. `dtr-vfs` and not `std::fs`:
+# the same browser draws a remote directory, and a listing whose shape differs by
+# machine is two models.
+dtr-vfs = { path = "../dtr-vfs" }
 # The look, and the two egui quirks a painted pane has to know about. Not `dtr`:
 # the file picker is a second process and cannot link a terminal.
 dtr-widgets = { path = "../dtr-widgets" }

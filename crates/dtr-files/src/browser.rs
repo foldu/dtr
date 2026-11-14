@@ -23,6 +23,7 @@ use std::time::SystemTime;
 
 use egui::{Align2, Stroke};
 
+use dtr_vfs::{Backend as _, Local};
 use dtr_widgets::Skin;
 
 const ROW_HEIGHT: f32 = 18.0;
@@ -44,6 +45,17 @@ pub struct Entry {
     /// permission denied, a backend that does not carry a time — and it sorts
     /// last in both directions rather than pretending to be the newest.
     pub modified: Option<SystemTime>,
+}
+
+impl From<dtr_vfs::Entry> for Entry {
+    fn from(entry: dtr_vfs::Entry) -> Self {
+        Self {
+            name: entry.name,
+            is_dir: entry.kind.is_dir(),
+            size: entry.len,
+            modified: entry.modified,
+        }
+    }
 }
 
 impl Entry {
@@ -159,8 +171,45 @@ pub struct Browser {
     /// and its header stays visible; it never goes blank.
     message: Option<String>,
     /// Set when this pane browses another machine over SFTP. `None` is the
-    /// local filesystem, which is the only case that reads `std::fs`.
+    /// local filesystem.
     remote: Option<Remote>,
+    /// Where a local listing comes from. One per browser: the backend is
+    /// stateless, and `list` starts its own thread, so no runtime is needed to
+    /// ask for a directory.
+    local: Local,
+    /// The walk in flight, if any.
+    incoming: Option<Incoming>,
+    /// The metadata pass in flight, if any.
+    refining: Option<Refining>,
+    /// The directory whose sizes and times are all known: a re-sort re-uses them
+    /// rather than asking again.
+    facts_for: Option<PathBuf>,
+    /// A name to select once the listing that carries it arrives.
+    ///
+    /// `dtr --files some/file` names a file the walk has not sent yet, so the
+    /// selection is a promise rather than a lookup.
+    wanted: Option<String>,
+}
+
+/// A listing on its way in.
+struct Incoming {
+    /// The directory it lists. A batch for another one is a reply to a request
+    /// this pane has moved on from, and is dropped.
+    dir: PathBuf,
+    batches: dtr_vfs::Batches,
+}
+
+/// A metadata pass on its way in.
+///
+/// The rows do not move while it runs: the order is applied **once**, when the
+/// pass ends. Re-sorting as each batch lands would shuffle rows under the
+/// pointer continuously, which is worse than a second of the previous order.
+struct Refining {
+    batches: dtr_vfs::Refinements,
+    /// Name to row, built once for the pass.
+    rows: std::collections::HashMap<String, usize>,
+    total: usize,
+    answered: usize,
 }
 
 /// What a remote pane needs from the SFTP worker.
@@ -207,6 +256,11 @@ impl Browser {
                 awaiting: None,
                 download: None,
             }),
+            local: Local::new(),
+            incoming: None,
+            refining: None,
+            facts_for: None,
+            wanted: None,
         };
         browser.remote_request();
         browser
@@ -320,6 +374,11 @@ impl Browser {
             view: View::default(),
             message: None,
             remote: None,
+            local: Local::new(),
+            incoming: None,
+            refining: None,
+            facts_for: None,
+            wanted: None,
         };
 
         let (mut cwd, select) = match start {
@@ -345,12 +404,9 @@ impl Browser {
         browser.cwd = cwd;
         browser.reload();
 
-        if let Some(name) = select {
-            let name = name.to_string_lossy();
-            if let Some(index) = browser.entries.iter().position(|entry| entry.name == name) {
-                browser.selected = index;
-            }
-        }
+        // The listing is streamed, so the file a caller names may not have
+        // arrived yet: the promise is kept when its batch lands.
+        browser.wanted = select.map(|name| name.to_string_lossy().into_owned());
         browser
     }
 
@@ -439,65 +495,254 @@ impl Browser {
     /// Read the directory again. A failure is a message in the pane, not a
     /// panic and not an empty pane: the header and the message both stay.
     fn reload(&mut self) {
-        if self.remote.is_some() {
-            let selected = self.selected_entry().map(|entry| entry.name.clone());
-            let _ = selected;
-            self.entries.clear();
-            self.selected = 0;
-            self.scroll.set(0);
-            self.remote_request();
-            return;
-        }
-        self.message = None;
         self.entries.clear();
         self.selected = 0;
         self.scroll.set(0);
+        self.message = None;
+        self.incoming = None;
+        self.refining = None;
+        self.facts_for = None;
 
-        let read = match std::fs::read_dir(&self.cwd) {
-            Ok(read) => read,
-            Err(err) => {
-                self.message = Some(format!(
-                    "cannot open {}: {err}",
-                    display_path(&self.cwd, &self.home)
-                ));
-                return;
-            }
+        if self.remote.is_some() {
+            self.remote_request();
+            return;
+        }
+        // Streamed, off the drawing thread: the first batch is drawn while the
+        // rest of a 10 000-entry directory is still being read, and the footer
+        // says `reading…` rather than claiming the directory is empty.
+        self.incoming = Some(Incoming {
+            dir: self.cwd.clone(),
+            batches: self.local.list(&self.cwd),
+        });
+    }
+
+    /// Take whatever arrived, and say whether the pane needs a frame because of
+    /// it.
+    ///
+    /// Called once per frame by whoever draws this pane. Every available batch is
+    /// merged **once** — a burst of 157 batches of a 10 000-entry directory must
+    /// not be 157 sorts, the same rule `publish` applies to read chunks.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = self.poll_listing();
+        changed |= self.poll_facts();
+        // The pass starts here rather than in the two places that can make it
+        // necessary — a finished walk, and a sort the reader just chose — because
+        // that is the one question: is anything arriving, and does the order need
+        // what the listing did not carry?
+        if !self.reading()
+            && self.view.sort.needs_facts()
+            && self.facts_for.as_deref() != Some(self.cwd.as_path())
+        {
+            self.start_facts();
+            changed = true;
+        }
+        if self.reading() {
+            // A streamed listing is the one state that has no event to wake it.
+            changed = true;
+        }
+        changed
+    }
+
+    fn poll_listing(&mut self) -> bool {
+        let Some(incoming) = self.incoming.as_mut() else {
+            return false;
         };
-
-        let mut unreadable = 0usize;
-        let mut entries = Vec::new();
-        for item in read {
-            match item {
-                Ok(item) => {
-                    let name = item.file_name().to_string_lossy().into_owned();
-                    let is_dir = item.file_type().is_ok_and(|kind| kind.is_dir());
-                    let meta = item.metadata().ok();
-                    // A directory has no length of its own (`Caps::dir_size` is
-                    // false everywhere), but it does have a modification time,
-                    // and that is what `ls -t` sorts a folder by.
-                    let size = (!is_dir)
-                        .then(|| meta.as_ref().map(std::fs::Metadata::len))
-                        .flatten();
-                    let modified = meta.as_ref().and_then(|meta| meta.modified().ok());
-                    entries.push(Entry {
-                        name,
-                        is_dir,
-                        size,
-                        modified,
-                    });
+        let dir = incoming.dir.clone();
+        let mut arrived: Vec<Entry> = Vec::new();
+        let mut done = false;
+        let mut failure = None;
+        loop {
+            match incoming.batches.try_recv() {
+                Ok(Ok(batch)) => arrived.extend(batch.into_iter().map(Entry::from)),
+                Ok(Err(err)) => {
+                    failure = Some(format!("{err:#}"));
+                    done = true;
+                    break;
                 }
-                Err(_) => unreadable += 1,
+                Err(async_channel::TryRecvError::Empty) => break,
+                Err(async_channel::TryRecvError::Closed) => {
+                    done = true;
+                    break;
+                }
             }
         }
+        if done {
+            self.incoming = None;
+        }
+        if let Some(message) = failure {
+            self.message = Some(message);
+        }
+        if !arrived.is_empty() {
+            self.merge(arrived);
+        } else if !done {
+            return false;
+        }
+        if done {
+            // A name the caller asked for outlives the walk that carries it.
+            if let Some(name) = self.wanted.take()
+                && let Some(index) = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.name == name && !entry.is_parent())
+            {
+                self.selected = index;
+            }
+        }
+        let _ = dir;
+        true
+    }
 
-        self.entries = arrange(entries, &self.cwd, &self.view);
-        if unreadable > 0 {
-            self.message = Some(format!(
-                "{unreadable} entr{} could not be read",
-                if unreadable == 1 { "y" } else { "ies" }
-            ));
+    /// Merge one burst into the view, keeping the reader on the same file.
+    ///
+    /// A **name** is the identity and an index is the position: a batch landing
+    /// above the selection re-sorts the rows under somebody's arrow key, so both
+    /// the selection and the first visible row are remembered by name and found
+    /// again afterwards.
+    fn merge(&mut self, arrived: Vec<Entry>) {
+        let selected = self.selected_entry().map(|entry| entry.name.clone());
+        let top = self
+            .entries
+            .get(self.scroll.get())
+            .map(|entry| entry.name.clone());
+
+        self.entries.extend(arrived);
+        self.rearrange();
+        // A batch may name a row the listing already has — a backend refining what
+        // it sent is the case `docs/manager.md` §3 allows. `arrange` puts two rows
+        // with one name next to each other, so one pass makes them one row, and
+        // the later facts win. The **kind** never does: a symlink resolved into a
+        // directory in the first batch stays a directory.
+        self.entries.dedup_by(|later, earlier| {
+            if later.name != earlier.name {
+                return false;
+            }
+            earlier.size = later.size.or(earlier.size);
+            earlier.modified = later.modified.or(earlier.modified);
+            true
+        });
+
+        if let Some(name) = selected
+            && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
+        {
+            self.selected = index;
+        }
+        if let Some(name) = top
+            && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
+        {
+            self.scroll.set(index);
         }
         self.selected = clamp_selection(self.selected, self.entries.len());
+    }
+
+    /// Sort and filter what is here. `..` is synthetic, so it is dropped before
+    /// `arrange` and put back by it.
+    fn rearrange(&mut self) {
+        let rows: Vec<Entry> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .filter(|entry| !entry.is_parent())
+            .collect();
+        self.entries = arrange(rows, &self.cwd, &self.view);
+    }
+
+    /// Ask for the sizes and times the current sort needs.
+    ///
+    /// Only a `modified` or a `size` sort asks: a name sort of a directory needs
+    /// no `stat` at all, which is the whole point of a listing that carries names
+    /// and kinds. A remote listing never asks, because SFTP's `READDIR` already
+    /// said.
+    fn start_facts(&mut self) {
+        if self.remote.is_some() || self.refining.is_some() {
+            return;
+        }
+        if self.facts_for.as_deref() == Some(self.cwd.as_path()) {
+            return;
+        }
+        let names: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_parent() && entry.size.is_none() && entry.modified.is_none())
+            .map(|entry| entry.name.clone())
+            .collect();
+        if names.is_empty() {
+            self.facts_for = Some(self.cwd.clone());
+            return;
+        }
+        let rows = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_parent())
+            .map(|(index, entry)| (entry.name.clone(), index))
+            .collect();
+        self.refining = Some(Refining {
+            total: names.len(),
+            answered: 0,
+            rows,
+            batches: self.local.facts(&self.cwd, names),
+        });
+    }
+
+    fn poll_facts(&mut self) -> bool {
+        let Some(refining) = self.refining.as_mut() else {
+            return false;
+        };
+        let mut done = false;
+        let mut touched = false;
+        loop {
+            match refining.batches.try_recv() {
+                Ok(Ok(batch)) => {
+                    for facts in batch {
+                        refining.answered += 1;
+                        let Some(&row) = refining.rows.get(&facts.name) else {
+                            continue;
+                        };
+                        let Some(entry) = self.entries.get_mut(row) else {
+                            continue;
+                        };
+                        entry.size = facts.len;
+                        entry.modified = facts.modified;
+                        touched = true;
+                    }
+                }
+                Ok(Err(_)) => {
+                    done = true;
+                    break;
+                }
+                Err(async_channel::TryRecvError::Empty) => break,
+                Err(async_channel::TryRecvError::Closed) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if done {
+            // The order is applied **once**, here: re-sorting as each batch
+            // landed would move rows under the pointer continuously.
+            self.refining = None;
+            self.facts_for = Some(self.cwd.clone());
+            let selected = self.selected_entry().map(|entry| entry.name.clone());
+            self.rearrange();
+            if let Some(name) = selected
+                && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
+            {
+                self.selected = index;
+            }
+            self.selected = clamp_selection(self.selected, self.entries.len());
+            touched = true;
+        }
+        touched
+    }
+
+    /// Whether something is still arriving.
+    pub fn reading(&self) -> bool {
+        self.incoming.is_some() || self.refining.is_some()
+    }
+
+    /// How far a metadata pass has got, for a control that says `(reading…)`.
+    fn pass_progress(&self) -> Option<(usize, usize)> {
+        self.refining
+            .as_ref()
+            .map(|refining| (refining.answered, refining.total))
     }
 
     /// The first row to draw. Keeps the selection on screen and never returns
@@ -636,6 +881,21 @@ impl Browser {
                 message,
                 small.clone(),
                 palette.accent,
+            );
+        } else if self.reading() {
+            // **A streamed listing must never render its emptiness as a fact.**
+            // `empty directory` while the walk is running is a claim the pane
+            // cannot make yet; the count is what it does know.
+            let said = match self.pass_progress() {
+                Some((answered, total)) => format!("reading sizes… {answered}/{total}"),
+                None => format!("reading… {} so far", self.entries.len().saturating_sub(1)),
+            };
+            painter.text(
+                egui::pos2(footer.left() + 8.0, footer.center().y),
+                Align2::LEFT_CENTER,
+                said,
+                small.clone(),
+                palette.dim,
             );
         } else if let Some(entry) = self.selected_entry() {
             let path = if entry.is_parent() {
@@ -1020,6 +1280,33 @@ mod tests {
         entries.iter().map(|entry| entry.name.as_str()).collect()
     }
 
+    /// Wait for a local listing to finish.
+    ///
+    /// The walk is on a thread of its own and the pane is drawn from whatever has
+    /// arrived, so a test that asserts about a directory has to let it land — the
+    /// same thing a frame does, with a deadline so a broken walk fails instead of
+    /// hanging.
+    fn settle(browser: &mut Browser) {
+        for _ in 0..2_000 {
+            browser.poll();
+            if !browser.reading() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the listing never finished");
+    }
+
+    /// The row whose name is `name`, as an index — the selection is an index, and
+    /// the names are how a test says which one it means.
+    fn row_of(browser: &Browser, name: &str) -> usize {
+        browser
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} in {:?}", names(&browser.entries)))
+    }
+
     #[test]
     fn directories_come_first_and_names_sort_case_insensitively() {
         let entries = vec![
@@ -1201,6 +1488,76 @@ mod tests {
         );
     }
 
+    /// A batch that names a row the listing already has refines it: one row, and
+    /// the later facts win. A streamed listing that forgets it is one list draws
+    /// the same file twice.
+    #[test]
+    fn a_later_batch_patches_its_row_instead_of_duplicating_it() {
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        browser.apply_listing(PathBuf::from("/var/log"), vec![entry("syslog", false)]);
+        assert_eq!(browser.entries[1].size, None);
+
+        browser.merge(vec![fact("syslog", 4_096, Some(2_000))]);
+        assert_eq!(
+            names(&browser.entries),
+            ["..", "syslog"],
+            "one row, not two"
+        );
+        assert_eq!(browser.entries[1].size, Some(4_096));
+        assert!(browser.entries[1].modified.is_some());
+    }
+
+    /// A local directory streams: the first batch is drawn while the rest is
+    /// still being read, and the pane says it is reading rather than claiming to
+    /// be empty.
+    #[test]
+    fn a_local_listing_arrives_in_batches_and_ends() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for index in 0..200 {
+            std::fs::write(root.join(format!("file_{index:03}.log")), b"x").expect("file");
+        }
+
+        let mut browser = Browser::new(Some(root.clone()));
+        assert!(browser.reading(), "the walk has started");
+        settle(&mut browser);
+        assert!(!browser.reading(), "and finished");
+        // 200 files, the synthetic parent, and no duplicates: one row per name.
+        assert_eq!(browser.entries.len(), 201);
+        assert_eq!(names(&browser.entries).first().copied(), Some(".."));
+        // A name sort asks for no metadata at all, which is the point of a listing
+        // that carries names and kinds.
+        assert!(
+            browser.entries.iter().all(|entry| entry.size.is_none()),
+            "a name sort took a stat it did not need"
+        );
+    }
+
+    /// A size sort is the case that *does* need a stat per file, and the pane says
+    /// so while it takes them.
+    #[test]
+    fn a_size_sort_reads_the_sizes_and_then_orders_by_them() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        std::fs::write(root.join("small"), b"x").expect("small");
+        std::fs::write(root.join("large"), vec![0u8; 4096]).expect("large");
+
+        let mut browser = Browser::new(Some(root.clone()));
+        settle(&mut browser);
+        browser.set_view(View {
+            sort: Sort::Size,
+            ..View::default()
+        });
+        // The next frame is what starts the pass, because the sort is what makes
+        // it necessary.
+        browser.poll();
+        assert!(browser.reading(), "the pass started on the view change");
+        settle(&mut browser);
+        assert_eq!(names(&browser.entries), ["..", "small", "large"]);
+        assert_eq!(browser.entries[1].size, Some(1));
+        assert_eq!(browser.entries[2].size, Some(4_096));
+    }
+
     /// A selector re-sorts what is already there, and keeps the reader on the same
     /// file while doing it.
     #[test]
@@ -1289,18 +1646,11 @@ mod tests {
         std::fs::write(root.join("note.txt"), b"x").expect("file");
 
         let mut browser = Browser::new(Some(root.clone()));
-        browser.selected = browser
-            .entries
-            .iter()
-            .position(|entry| entry.name == "note.txt")
-            .expect("note.txt in the listing");
+        settle(&mut browser);
+        browser.selected = row_of(&browser, "note.txt");
         assert_eq!(browser.handle(Key::Enter), Some(root.join("note.txt")));
 
-        browser.selected = browser
-            .entries
-            .iter()
-            .position(|entry| entry.name == "sub")
-            .expect("sub in the listing");
+        browser.selected = row_of(&browser, "sub");
         assert_eq!(browser.handle(Key::Enter), None);
         assert_eq!(browser.cwd, root.join("sub"));
 
@@ -1313,10 +1663,15 @@ mod tests {
     fn a_directory_that_cannot_be_read_is_a_message_not_a_blank_pane() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let missing = temporary.path().join("gone");
-        let browser = Browser::new(Some(missing));
+        let mut browser = Browser::new(Some(missing));
+        // The failure arrives the way the listing does: as a batch.
+        settle(&mut browser);
         assert!(browser.entries.is_empty());
         let message = browser.message.expect("a message");
-        assert!(message.contains("cannot open"), "{message}");
+        assert!(
+            message.contains("list "),
+            "the path is in the message: {message}"
+        );
     }
 
     /// A remote pane reads nothing itself: it asks, once, and waits.

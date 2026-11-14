@@ -172,10 +172,16 @@ async fn serve(alias: &str, session: &Rc<async_lock::Mutex<Option<dtr_sftp::Sess
                 Ok(entries) => {
                     let mut batch = Vec::with_capacity(BATCH);
                     for entry in entries {
+                        // `READDIR` carries the size and the time in the same
+                        // packet, so a remote listing is complete as it streams:
+                        // no metadata pass, and a remote sort is free.
                         batch.push(Entry {
                             name: entry.name,
                             kind: if entry.dir { Kind::Dir } else { Kind::File },
-                            len: entry.size,
+                            len: Some(entry.size),
+                            modified: entry.modified.map(|secs| {
+                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+                            }),
                         });
                         if batch.len() >= BATCH
                             && batches.send(Ok(std::mem::take(&mut batch))).await.is_err()

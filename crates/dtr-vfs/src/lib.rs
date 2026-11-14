@@ -110,17 +110,42 @@ pub struct Meta {
 }
 
 /// One row of a listing.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// The file name alone, not a path: the directory is the request's.
     pub name: String,
     pub kind: Kind,
-    pub len: u64,
+    /// The size, when the listing already knows it.
+    ///
+    /// `None` means **ask**, not "there is none": a local `readdir` yields a name
+    /// and a `d_type` for free and a size only for a `stat` per file, while
+    /// SFTP's `READDIR` carries the size and the time in the same packet. So a
+    /// backend that answers in full fills these, and a backend that does not can
+    /// be asked afterwards with [`Backend::facts`].
+    pub len: Option<u64>,
+    /// When it last changed, on the same terms as `len`.
+    pub modified: Option<SystemTime>,
+}
+
+/// What a listing did not say, matched back to it by name.
+///
+/// Deliberately *not* an `Entry`: a refinement cannot carry a [`Kind`], so the
+/// metadata pass can never move a row between groups. A symlink resolved into a
+/// directory stays where the first batch put it, which is the whole reason the
+/// resolution happens there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Facts {
+    pub name: String,
+    pub len: Option<u64>,
+    pub modified: Option<SystemTime>,
 }
 
 /// A batch of a listing, or the error that ended it. A dropped receiver
 /// cancels the walk.
 pub type Batches = async_channel::Receiver<Result<Vec<Entry>>>;
+
+/// A batch of [`Facts`], with the same shape and the same cancellation.
+pub type Refinements = async_channel::Receiver<Result<Vec<Facts>>>;
 
 /// Where futures come from. Spelled out rather than using a macro so the trait
 /// stays object-safe without pulling in a proc macro.
@@ -150,6 +175,19 @@ pub trait Backend: Send + Sync {
     /// directory that fails halfway is a list *and* an error, never a silently
     /// short listing.
     fn list(&self, path: &Path) -> Batches;
+
+    /// Fill in the size and the time for `names`, in the order given.
+    ///
+    /// The default sends nothing, and that is the right answer twice over: a
+    /// backend whose `list` already answered has nothing to add, and asking a
+    /// network for what it just said is a round trip per name. A caller that
+    /// wants the answer is a sort that needs it, or a column on screen.
+    fn facts(&self, _dir: &Path, _names: Vec<String>) -> Refinements {
+        // A receiver whose sender is already gone: the caller sees a finished,
+        // empty pass rather than a special case.
+        let (_tx, rx) = async_channel::bounded(1);
+        rx
+    }
 }
 
 /// The backends this app can reach, by machine.
@@ -300,6 +338,14 @@ mod tests {
         out
     }
 
+    async fn drain_facts(batches: Refinements) -> Vec<Facts> {
+        let mut out = Vec::new();
+        while let Ok(batch) = batches.recv().await {
+            out.extend(batch.expect("batch"));
+        }
+        out
+    }
+
     #[compio::test]
     async fn a_local_directory_streams_its_entries() {
         let dir = tempfile::tempdir().unwrap();
@@ -326,6 +372,49 @@ mod tests {
             .unwrap();
         assert_eq!(copied, 5);
         assert_eq!(std::fs::read_to_string(dest).unwrap(), "hello");
+    }
+
+    /// A listing carries names and kinds; the size and the time are a second
+    /// question, asked only by something that needs them.
+    ///
+    /// This is the difference between one syscall per file and none, and it is
+    /// why a name sort of a 10 000-file directory reads the directory and sorts.
+    #[compio::test]
+    async fn a_local_listing_has_to_be_asked_for_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("a.txt"), dir.path().join("link")).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let backend = Local::new();
+        let listed = drain(backend.list(dir.path())).await;
+        assert!(
+            listed.iter().all(|entry| entry.len.is_none()),
+            "the walk must not stat: {listed:?}"
+        );
+        // A symlink's kind is resolved in the walk, not by the pass: a link that
+        // arrived as "other" and became a directory later would change groups.
+        let kind = |name: &str| {
+            listed
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.kind)
+        };
+        assert_eq!(kind("a.txt"), Some(Kind::File));
+        assert_eq!(kind("link"), Some(Kind::File), "a link to a file is a file");
+        assert_eq!(kind("sub"), Some(Kind::Dir));
+
+        let facts = drain_facts(backend.facts(dir.path(), vec!["a.txt".to_owned()])).await;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].name, "a.txt");
+        assert_eq!(facts[0].len, Some(5));
+        assert!(facts[0].modified.is_some(), "a real file has a time");
+
+        // A name that vanished between the listing and the pass still answers:
+        // dropping it would leave a row saying "reading" for ever.
+        let gone = drain_facts(backend.facts(dir.path(), vec!["gone".to_owned()])).await;
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].len, None);
     }
 
     #[compio::test]

@@ -106,7 +106,10 @@ impl Backend for Memory {
                     entries.push(Entry {
                         name: file_name.to_string_lossy().into_owned(),
                         kind: Kind::File,
-                        len: bytes.len() as u64,
+                        len: Some(bytes.len() as u64),
+                        // An in-memory file has no time, and `None` says so
+                        // rather than claiming 1970.
+                        modified: None,
                     });
                 }
             }
@@ -118,7 +121,8 @@ impl Backend for Memory {
                         entries.push(Entry {
                             name: file_name.to_string_lossy().into_owned(),
                             kind: Kind::Dir,
-                            len: 0,
+                            len: None,
+                            modified: None,
                         });
                     }
                 }

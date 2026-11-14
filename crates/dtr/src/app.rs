@@ -3752,6 +3752,24 @@ impl App {
         self.sftp.as_ref().expect("worker started")
     }
 
+    /// Take whatever every file pane's listing has delivered, then ask for
+    /// whatever a remote one is waiting on.
+    ///
+    /// Here rather than in the draw path because a browser is drawn through
+    /// `&self`: merging a batch is a change to the model, and the model is only
+    /// `&mut` before the frame starts. Every leaf in every tab, not the focused
+    /// one: a pane nobody is typing in still has to fill in.
+    fn pump_files(&mut self) {
+        for tab in &mut self.tabs {
+            for pane in tab.leaves.values_mut() {
+                if let Pane::Files(browser) = pane {
+                    browser.poll();
+                }
+            }
+        }
+        self.pump_sftp();
+    }
+
     /// Ask for whatever any remote pane is waiting on, and start any download it
     /// asked for.
     ///
@@ -4570,6 +4588,27 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // A listing on its way in is the other state with no event to announce
+        // it: the walk is on its own thread and its batches arrive whenever they
+        // do. Sixteen milliseconds is the gate that turns a burst into one frame —
+        // a 10 000-entry directory is 157 batches, and 157 repaints is 157
+        // pictures nobody sees (`docs/manager.md` §3).
+        let listing = self.tabs.iter().any(|tab| {
+            tab.leaves
+                .values()
+                .any(|pane| matches!(pane, Pane::Files(browser) if browser.reading()))
+        });
+        if listing {
+            self.repaint("a file listing is arriving");
+            sooner(
+                std::time::Instant::now() + std::time::Duration::from_millis(16),
+                &mut deadline,
+            );
+            if let Some(gpu) = &self.gpu {
+                gpu.window.request_redraw();
+            }
+        }
+
         // A pane waiting for its connection is a state that changes with the
         // clock: the notice counts the wait down, and a countdown that only
         // moved when the pointer did would be a still picture claiming to be a
@@ -5222,7 +5261,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if std::mem::take(&mut self.fonts_dirty) {
                         gpu.rebuild_grid(&self.look);
                     }
-                    self.pump_sftp();
+                    self.pump_files();
                     self.log_strip_geometry(scale);
                     self.fit_panes(gpu.metrics(), screen, scale);
                     // Before the borrows below: uploading a texture needs `&mut self`
