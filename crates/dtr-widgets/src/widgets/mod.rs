@@ -28,6 +28,7 @@ mod menu;
 mod segmented;
 mod stripe;
 mod tabs;
+mod tile;
 
 pub use block::{label_cell, row, section};
 pub use button::Button;
@@ -42,6 +43,7 @@ pub use menu::{
 pub use segmented::segmented;
 pub use stripe::{Stripe, stripe};
 pub use tabs::tabs;
+pub use tile::{Glyph, Icon, IconTile, LABEL_ROWS, icon_tile, tile_height};
 
 /// Make a response pointer-only, so its `clicked()` cannot have come from Enter.
 ///
@@ -85,7 +87,7 @@ mod tests {
     fn anything_above_the_root_is_a_surface() {
         // A painted pane is a `Background`-order area of its own, which is the
         // case the predicate exists for: same order as the root, different id.
-        let area = egui::LayerId::new(egui::Order::Background, egui::Id::new("file pane"));
+        let area = egui::LayerId::new(egui::Order::Background, egui::Id::unique("file pane"));
         assert!(above_the_root(area));
     }
 }

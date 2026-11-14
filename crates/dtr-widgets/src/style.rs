@@ -220,6 +220,15 @@ pub struct Style {
     /// denser and asks for 16, which is also the smallest size the tick inside
     /// it stays legible at.
     pub check_size: f32,
+    /// The side of a grid tile's picture, in points: what the browser's icon
+    /// ladder is asked for, doubled so a theme icon is rasterised at 2× and the
+    /// picture stays sharp where the pill is not.
+    ///
+    /// It is a style token because it is a density decision, like [`Style::row`]:
+    /// a dense terminal pane and a GNOME file window disagree about how large a
+    /// folder should be, and a number inside the pane would make that
+    /// disagreement invisible.
+    pub tile_icon: f32,
     /// Border width in points; the platform's hairline is 1.
     pub border: f32,
     pub card_margin: Margin,
@@ -266,6 +275,7 @@ impl Style {
             chip_radius: 4,
             check_radius: 4,
             check_size: 16.0,
+            tile_icon: 48.0,
             border: 1.0,
             card_margin: Margin::symmetric(20, 18),
             menu_margin: Margin::same(6),
@@ -305,6 +315,7 @@ impl Style {
             // 6px }`, against `radio { border-radius: 100% }` a few lines later.
             check_radius: 6,
             check_size: 20.0,
+            tile_icon: 64.0,
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
             menu_margin: Margin::same(6),
@@ -348,6 +359,7 @@ impl Style {
             chip_radius: 4,
             check_radius: 4,
             check_size: 20.0,
+            tile_icon: 48.0,
             border: 1.0,
             card_margin: Margin::symmetric(24, 20),
             menu_margin: Margin::same(6),
@@ -394,6 +406,7 @@ impl Style {
             chip_radius: 6,
             check_radius: 6,
             check_size: 14.0,
+            tile_icon: 48.0,
             border: 1.0,
             card_margin: Margin::same(12),
             menu_margin: Margin::same(6),
