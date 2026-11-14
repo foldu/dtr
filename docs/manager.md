@@ -509,10 +509,17 @@ component, with the root and home as segments), `2cfbc56` (the **places popup**:
 directories `user-dirs.dirs` decorates), and `d063f54` (`ctrl-alt-c` for the selected path — the one
 thing a context menu would offer that nothing else does).
 
-**Still owed in F1b**: the **right-click menu** and **multi-select**. Both are deliberately last, and
-for the same reason — a menu and a set are verbs, and the verbs they are for (copy, move, delete, a
-transfer queue) are F5 and F6. A menu with two live rows promises the others; a highlight with no
-action is a highlight nobody can use. Measurement 7 is taken (§10).
+**The selection is a set** (`cf36b9c`): ctrl-press adds a row and takes it away again, shift-press
+takes the range from the anchor, `ctrl-alt-a` takes every row, and the footer counts when there is
+more than one. The separation that makes it work is **cursor ≠ selection** — with "the focus is always
+selected", a ctrl-press on the row the cursor was on could only ever add it, so "deselect this one" had
+no gesture. The pick is kept by *name*, like the cursor, so a sort or a batch cannot move it to another
+file. `ctrl-alt-c` copies all of it, one path per line.
+
+**Still owed in F1b**: the **right-click menu**, and only that. It is deliberately last: for a read-only
+milestone it would have two live rows (`open`, which is `Enter`, and `copy path`, which is
+`ctrl-alt-c`), and a menu that promises the rows F5 and F6 will bring is worse than no menu. Everything
+else the milestone gates is done; measurement 7 is taken (§10).
 
 F1 is split in two because the listing is where the correctness lives and the grid is where the look
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with
