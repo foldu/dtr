@@ -541,7 +541,10 @@ impl Browser {
                     self.selected = (self.selected + 1).min(last);
                 }
             }
-            Key::Left | Key::Right => self.go_up(),
+            // Only `Left` goes up in a list: a right arrow that did the same
+            // thing would be a key that lies about its direction.
+            Key::Left => self.go_up(),
+            Key::Right => {}
             Key::PageUp => {
                 self.selected = self.selected.saturating_sub(page);
             }

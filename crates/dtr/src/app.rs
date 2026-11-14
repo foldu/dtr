@@ -1034,17 +1034,42 @@ fn remote_file_browser(config: &dtr_config::Config, alias: &str, path: PathBuf) 
     browser
 }
 
-fn browser_key(key: &winit::keyboard::Key) -> Option<dtr_files::Key> {
+fn browser_key(
+    key: &winit::keyboard::Key,
+    mods: winit::keyboard::ModifiersState,
+) -> Option<dtr_files::Key> {
     use winit::keyboard::{Key, NamedKey};
+
+    // One chord with a modifier, and it is the one every file manager has: the
+    // parent directory is `Alt+Up`, because in a grid `Left` is a movement and
+    // "up a level" needed somewhere to live.
+    if mods.alt_key() || mods.control_key() || mods.super_key() {
+        return match key {
+            Key::Named(NamedKey::ArrowUp) if mods.alt_key() && !mods.control_key() => {
+                Some(dtr_files::Key::Parent)
+            }
+            _ => None,
+        };
+    }
 
     match key {
         Key::Named(NamedKey::ArrowUp) => Some(dtr_files::Key::Up),
         Key::Named(NamedKey::ArrowDown) => Some(dtr_files::Key::Down),
         Key::Named(NamedKey::ArrowLeft) => Some(dtr_files::Key::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(dtr_files::Key::Right),
+        Key::Named(NamedKey::PageUp) => Some(dtr_files::Key::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(dtr_files::Key::PageDown),
+        Key::Named(NamedKey::Home) => Some(dtr_files::Key::Top),
+        Key::Named(NamedKey::End) => Some(dtr_files::Key::Bottom),
         Key::Named(NamedKey::Enter) => Some(dtr_files::Key::Enter),
-        Key::Named(NamedKey::Backspace) => Some(dtr_files::Key::Left),
+        // `Backspace` is the parent in both views; `h` is vim's left, which is
+        // the parent in a list and a movement in a grid.
+        Key::Named(NamedKey::Backspace) => Some(dtr_files::Key::Parent),
         Key::Character(text) => match text.as_str() {
             "h" => Some(dtr_files::Key::Left),
+            "j" => Some(dtr_files::Key::Down),
+            "k" => Some(dtr_files::Key::Up),
+            "l" => Some(dtr_files::Key::Right),
             "r" => Some(dtr_files::Key::Reload),
             "g" => Some(dtr_files::Key::Top),
             "G" => Some(dtr_files::Key::Bottom),
@@ -1750,8 +1775,8 @@ impl App {
             if self.session().is_none() {
                 // A file pane has focus: it gets navigation keys, and
                 // everything terminal-only is ignored.
-                if !self.palette.open && !stroke.mods.control_key() && !stroke.mods.alt_key() {
-                    if let Some(key) = browser_key(&stroke.key) {
+                if !self.palette.open {
+                    if let Some(key) = browser_key(&stroke.key, stroke.mods) {
                         let chosen = self
                             .focused_browser_mut()
                             .and_then(|browser| browser.handle(key));
@@ -6724,9 +6749,65 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::{
-        BELL_FLASH, bell_alpha, cell_of, closed, copy_to, cycled, mouse_goes_to_program, save_name,
-        tab_name, wheel_reaches_the_terminal,
+        BELL_FLASH, bell_alpha, browser_key, cell_of, closed, copy_to, cycled,
+        mouse_goes_to_program, save_name, tab_name, wheel_reaches_the_terminal,
     };
+
+    /// A file pane's keys are its own, and the one with a modifier is the one
+    /// every file manager has. The traps are the chords around it: `ctrl-alt-up`
+    /// moves the *focus* between panes, so stealing it for the parent directory
+    /// would make a window command stop working inside a listing.
+    #[test]
+    fn a_file_pane_gets_two_dimensional_keys_and_alt_up() {
+        use dtr_files::Key as PaneKey;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let none = ModifiersState::empty();
+        for (named, wanted) in [
+            (NamedKey::ArrowRight, PaneKey::Right),
+            (NamedKey::ArrowLeft, PaneKey::Left),
+            (NamedKey::ArrowUp, PaneKey::Up),
+            (NamedKey::ArrowDown, PaneKey::Down),
+            (NamedKey::PageUp, PaneKey::PageUp),
+            (NamedKey::PageDown, PaneKey::PageDown),
+            (NamedKey::Home, PaneKey::Top),
+            (NamedKey::End, PaneKey::Bottom),
+            (NamedKey::Backspace, PaneKey::Parent),
+        ] {
+            assert_eq!(
+                browser_key(&Key::Named(named.clone()), none),
+                Some(wanted),
+                "{named:?} is not the key it should be"
+            );
+        }
+        for (text, wanted) in [
+            ("h", PaneKey::Left),
+            ("j", PaneKey::Down),
+            ("k", PaneKey::Up),
+            ("l", PaneKey::Right),
+        ] {
+            assert_eq!(
+                browser_key(&Key::Character(text.into()), none),
+                Some(wanted),
+                "{text} is not the key it should be"
+            );
+        }
+
+        // Alt+Up is the parent; ctrl+alt+Up belongs to the window.
+        let alt = ModifiersState::ALT;
+        assert_eq!(
+            browser_key(&Key::Named(NamedKey::ArrowUp), alt),
+            Some(PaneKey::Parent)
+        );
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert_eq!(browser_key(&Key::Named(NamedKey::ArrowUp), ctrl_alt), None);
+        // And no other chord with a modifier is the pane's: ctrl+c is a copy, not
+        // a directory listing's business.
+        assert_eq!(
+            browser_key(&Key::Character("c".into()), ModifiersState::CONTROL),
+            None
+        );
+    }
 
     /// A bell is a flash that fades and then stops: `Some` while it rings, `None`
     /// once it is over, and never a fixed alpha that the window could leave on
