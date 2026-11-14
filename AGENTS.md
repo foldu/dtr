@@ -177,9 +177,8 @@ tag mirroring on.
   And `ssh` sends *this* tty's modes in its `pty-req`, so a raw local pty is a raw
   **remote** one — no `ONLCR` and no `ECHO`, so a fresh ssh session shows a garbled screen
   and does not echo the typing, until `reset` runs `tcsetattr(sane)` at the other end
-  (which is why the fix looks like it did nothing). The cost is real and paid on purpose:
-  `n_tty` rewrites each newline, 3.9 s against 37 ms on a 32 MiB flood of two-byte lines
-  (`docs/windows.md` §4.2).
+  (which is why the fix looks like it did nothing). The cost is paid on purpose: `n_tty`
+  rewrites each newline (`docs/windows.md` §4.2).
 - **`publish` gates on change, not on arrival**: it skips `Dirty::Clean`, so the first
   publish after a session starts is forced. **A cursor is not a dirty cell** — hiding or
   restyling it changes no cell, so `publish` compares the `Cursor` (position plus DECSCUSR
@@ -324,10 +323,8 @@ wrong, and the measurement that settled it.
   so the walk accepted it and drew nothing — `has_ink` rasterises the candidate and skips
   an empty box. **No grid face is not an empty grid, it is Emoji**: `GRID_CANDIDATES` was
   all Linux families with `"monospace"` last, a *generic* family rather than a name, so
-  `family_by_name` never resolved it; on a fresh Windows the grid had no face, `face_for`
-  fell through to the first fallback with a glyph, and Latin was drawn by Segoe UI Emoji
-  at 1.6× the advance — `Microsoft` came out `M crosoft` and an SGR sequence arrived as
-  literal `[0m`. Then the platform is asked
+  `family_by_name` never resolved it and a fresh Windows drew Latin in Segoe UI Emoji at
+  1.6× the advance. The platform is asked instead
   (`generic_families(GenericFamily::Monospace)`); adding a family to `GRID_CANDIDATES` or
   `fonts::FALLBACK` is how a new OS gets its faces, and `--font-report` in the `winvm`
   guest checks it (`docs/cjk.md` §5, M7). A *pictograph* (U+1F000–1FAFF, no script) also
@@ -436,8 +433,7 @@ second connection, and what each of these failures looked like.
   wrapper this and the reconnect command share. Best effort by design: its own thread (the
   pane must not wait, and closing the tab must not wait either), 15 s deadline, one log
   line (`terminfo entry copied` / `could not copy …`), once per host per run,
-  `DTR_TERMINFO=0` to switch it off. Its two gaps — a password for the extra connection, and
-  `tput` in the milliseconds before both handshakes finish — are in the memo.
+  `DTR_TERMINFO=0` to switch it off. Its two gaps are in the memo.
 - **Retries are bounded in rate, not in number**: waits go 1, 2, 4, 8, 16, 30, 30, …
   seconds, forever, because closing the tab is how a person gives up and a cap would turn
   a laptop shut for a day into "closed while you were not looking". The reset needs ten
@@ -807,10 +803,9 @@ window means nothing, and what the two payloads that are ours are for.
 - `docs/ttl-gaps.md` — what the TTL interpreter still does not do, and the order worth
   doing it in.
 - `docs/sftp.md` — measured decision memo for the SFTP idea.
-- `docs/compio.md` — the compio port: one runtime a thread, why tokio went, and its
-  traps.
-- `docs/ghostty.md` — what Ghostty has that dtr does not: the core's duties, the
-  renderer and window gaps, and the order worth closing them in.
+- `docs/manager.md` — the file manager and the picker: the split, the grid, the listing.
+- `docs/compio.md` — the compio port: one runtime a thread, and its traps.
+- `docs/ghostty.md` — what Ghostty has that dtr does not, and the order to close.
 - `docs/cjk.md` — measured memo and plan for everything outside the grid face: Han/kana,
   fullwidth punctuation, Nerd Font icons, emoji. Read it before changing `prepare_pane`'s
   placement rules.
