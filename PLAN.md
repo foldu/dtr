@@ -957,6 +957,10 @@ The shape is a crate split, which is also the first milestone: `crates/dtr` beco
 because the daemon opens one window per request, and **`dtr-portal`** is the daemon — which is also the
 manager window's process, so `dtr-files [PATH]` asks it for a window instead of being a third binary.
 
+**Implemented:** `F0` and `F1a` (`docs/manager.md` §12 has the commits). Not `dtr-frame`: it has no
+second caller until the daemon exists, so a multi-window loop would be shaped against one window — the
+refactor F0's own gate is there to prevent.
+
 The order, each gated by what it makes checkable — the stages are `F0`…`F7`, this programme's own
 numbers, so that an `M` never names two things:
 

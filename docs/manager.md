@@ -20,10 +20,11 @@ worth measuring before anyone promises a number.
 |---|---|
 | `crates/dtr-vfs` | `stat` / `fetch` / `list`, and `Caps { watch, dir_size }`. **Read-only.** Local, in-memory, ssh. |
 | `crates/dtr-sftp` | `connect`, `list`, `stat`, `home`, `download`, `close` — no mkdir, remove, rename or upload |
-| `crates/dtr/src/explorer.rs` | one selection, keyboard only (arrows, `Enter`, `h`/`l`, `r`, `g`/`G`), 18-point painted rows, name and size, a synthetic `..`, dotfiles filtered with no toggle, no icons, no wheel, no row is a click target |
+| `crates/dtr-files` | the browser, a crate of its own since F0: one selection, keyboard only (arrows, `Enter`, `h`/`l`, `r`, `g`/`G`), 18-point painted rows, name and size, a synthetic `..`, dotfiles filtered with no toggle, no icons, no wheel, no row is a click target |
 | the pane | a leaf in the split tree, so splits, focus, zoom, close and "a shell beside it" came free (`docs/panes.md`) |
-| the local listing | **synchronous on the UI thread and does not use `dtr-vfs`**: `Explorer::reload` calls `std::fs::read_dir`, `metadata()` per entry, then sorts, in one frame. `dtr-vfs`'s batched `list` exists and only the remote path uses it |
-| what a listing carries | `{ name, kind, len }`. The mtime is **dropped in both backends** even though both have it in hand — `Metadata::modified()` locally, `dtr_sftp::Entry.modified` remotely |
+| the local listing | **streamed and off the UI thread since F1a**: `Browser::reload` asks `dtr-vfs`'s batched `list`, `poll` merges a burst per frame, and the footer says `reading… n so far` rather than `empty directory` |
+| what a listing carries | `{ name, kind, len: Option, modified: Option }`. The walk takes no `stat` at all — `read_dir` gives the name and `d_type`, and a symlink is resolved once — so a name sort is a `readdir` and a sort, and the sizes and times arrive from a second pass that only a sort needing them starts (§3) |
+| the order | `arrange(entries, cwd, &View)` with four keys, reverse, folders-first and hidden in one value; reversing flips the key and not the grouping, unknowns sink both ways, `..` is inserted after the sort |
 | the first click target | the close cross in the header, `f24ea1f` — and it needed an `Area` of its own *because* the pane is painted rather than clicked (`docs/files.md` §13) |
 | `zbus` | already a dependency (`crates/dtr/src/system/linux.rs`), and `notify.rs`'s test already **serves** a D-Bus interface over a private bus |
 | `rfd` | the workspace builds it with the `xdg-portal` feature, so dtr's own "Save as" is already a portal call |
@@ -399,9 +400,14 @@ much as remote ones.
 6. **The lazy pass, measured**: a 10 000-entry directory with `readdir` and `d_type` alone, then with
    one `stat` per entry — warm and cold — because that is the difference §3's *Lazy* section claims.
    Then the same directory over SFTP, where the attributes are already in the `READDIR` replies and
-   the pass should cost nothing. Half-taken: the comparator alone was **2.77 ms against 1.10 ms** on
-   10 000 generated names (`to_lowercase` per comparison vs a cached key), so the sort itself is not
-   the cost — the pass is.
+   the pass should cost nothing. **Taken for the warm case**: 10 000 empty files in `/tmp/bigdir`
+   (tmpfs), `Local::list` drained — names and `d_type`, no `stat` — **2.5 ms**, and
+   `Local::facts` for all 10 000 — one `stat` each — **4.2 ms**, best of five runs in-process. So on
+   a cached filesystem the pass is 1.7× the walk, not 10×; the walk is what puts the first rows on
+   screen, and it is the stats that a cold cache or a network makes expensive, which is the whole
+   reason they are deferred. The comparator alone was **2.77 ms against 1.10 ms** on 10 000 generated
+   names (`to_lowercase` per comparison vs a key built once), so the sort is not the cost. **Still to
+   take**: the cold case, and an SFTP directory.
 7. **Rows drawn per frame against rows streamed in**: that batches coalesce to one repaint each
    (§3 *Streamed*), i.e. a 157-batch listing produces about a frame's worth of repaints and not 157.
 
@@ -449,6 +455,14 @@ much as remote ones.
 
 F0's gate is the important one: if the split cannot leave every test and snapshot untouched, the rest
 of this is being built on a refactor nobody can trust.
+
+**Landed so far.** F0: `fbfd816` (the library and the binary), `c447d5e` (`dtr-files`, painting from a
+`Skin` in points and asking `dtr_widgets::above_the_root`), `d9322d9` (this file in the index, which
+needed the surrounding trim). F1a: `e18c824` (the sort as a model function) and `9123831` (the
+streamed listing, the `facts` pass, and `Local::list` with no runtime around it). `dtr-frame` is
+not extracted yet: it has no second caller until the daemon exists, and a multi-window loop shaped
+against one window is the refactor the paragraph above warns about. The two measurements F0 owes are
+therefore still owed — §10 has the slots and one of them is now half-filled.
 
 F1 is split in two because the listing is where the correctness lives and the grid is where the look
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with
