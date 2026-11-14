@@ -2697,9 +2697,13 @@ impl App {
             return true;
         }
         let clicks = self.count_clicks(at);
+        // Read the modifiers first: the browser is borrowed mutably for the call,
+        // and `self.modifiers` is not part of it.
+        let additive = self.modifiers.control_key();
+        let extend = self.modifiers.shift_key();
         let chosen = self
             .focused_browser_mut()
-            .and_then(|browser| browser.clicked(point, clicks));
+            .and_then(|browser| browser.clicked(point, clicks, additive, extend));
         if let Some(path) = chosen {
             self.insert_path_into_terminal(path);
         }

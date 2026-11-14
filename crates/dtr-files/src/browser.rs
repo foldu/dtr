@@ -274,6 +274,15 @@ pub struct Browser {
     /// The directory whose sizes and times are all known: a re-sort re-uses them
     /// rather than asking again.
     facts_for: Option<PathBuf>,
+    /// The rows picked *beside* the focus, by name.
+    ///
+    /// By name and not by index for the reason `selected` is restored by name: a
+    /// batch arriving and rows re-sorting make an index point at a different
+    /// file. The focus is never in here — it is always selected, and this is what
+    /// ctrl- and shift-presses add to it.
+    chosen: Vec<String>,
+    /// Where a shift-press starts: the last row picked on its own.
+    anchor: Option<String>,
     /// The directory's own modification time, as the last walk saw it.
     ///
     /// A directory's mtime changes when an entry is created, removed or renamed —
@@ -378,6 +387,8 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            chosen: Vec::new(),
+            anchor: None,
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
             crumbs: RefCell::new(Vec::new()),
@@ -447,6 +458,60 @@ impl Browser {
     }
 
     /// What this pane is sorted by and what it hides.
+    /// Whether a row is part of the selection.
+    ///
+    /// **The focus is not the selection.** The cursor and what is highlighted are
+    /// two things — a ctrl-press on the row the cursor is on takes it out of the
+    /// pick and leaves the cursor there, which is what "deselect this one" has to
+    /// mean — so this asks `chosen` and nothing else.
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.entries
+            .get(index)
+            .is_some_and(|entry| self.chosen.iter().any(|name| *name == entry.name))
+    }
+
+    /// Move the cursor to a row and make it the whole selection, without asking
+    /// the view to follow.
+    ///
+    /// The version a batch needs: restoring the selection by name after a merge
+    /// must not scroll the page to it on every batch of a stream.
+    fn focus(&mut self, index: usize) {
+        self.selected = index;
+        self.chosen = match self.entries.get(index) {
+            Some(entry) => vec![entry.name.clone()],
+            None => Vec::new(),
+        };
+        self.anchor = self.entries.get(index).map(|entry| entry.name.clone());
+    }
+
+    /// Select exactly one row and bring it into view: what a plain press, a
+    /// keyboard move, and a caller that starts from a selection all do.
+    pub fn select_only(&mut self, index: usize) {
+        self.focus(index);
+        self.reveal.set(true);
+    }
+
+    /// How the selection reads in a footer: one selection is the path's job, and
+    /// several are a number.
+    pub fn selection_label(&self) -> Option<String> {
+        let total = self.chosen.len();
+        (total > 1).then(|| format!("{total} selected"))
+    }
+
+    /// Every selected path, in the order the listing shows them.
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.is_selected(*index))
+            .filter_map(|(_, entry)| match entry.is_parent() {
+                // The parent row is where it goes, not `cwd/..`.
+                true => parent_of(&self.cwd),
+                false => Some(self.cwd.join(&entry.name)),
+            })
+            .collect()
+    }
+
     /// The path the selection names, for a copy or a command line.
     ///
     /// The parent row is the directory above, so a press on `..` copies where it
@@ -534,6 +599,70 @@ impl Browser {
         }
     }
 
+    /// Pick a row the way a press does.
+    ///
+    /// Three gestures, and they are the three every file manager has:
+    ///
+    /// - a **plain** press selects one row and forgets the rest;
+    /// - **ctrl** adds the row to the selection or takes it out again, and the row
+    ///   that had the focus stays picked;
+    /// - **shift** takes everything from the anchor — the last row picked on its
+    ///   own — to this one.
+    ///
+    /// The focus always follows the press, even when the press un-picked the row:
+    /// it is the row `Enter` acts on, and a cursor that could not be moved to an
+    /// unselected row would make "deselect this one" a gesture with no way back.
+    fn pick(&mut self, index: usize, additive: bool, extend: bool) {
+        if index >= self.entries.len() {
+            return;
+        }
+        let name = self.entries[index].name.clone();
+        if extend {
+            let anchor = self
+                .anchor
+                .clone()
+                .unwrap_or_else(|| self.entries[self.selected].name.clone());
+            let from = self
+                .entries
+                .iter()
+                .position(|entry| entry.name == anchor)
+                .unwrap_or(self.selected);
+            let (low, high) = if from <= index {
+                (from, index)
+            } else {
+                (index, from)
+            };
+            self.chosen = self.entries[low..=high]
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect();
+            self.selected = index;
+            self.reveal.set(true);
+            return;
+        }
+        if additive {
+            if let Some(at) = self.chosen.iter().position(|picked| *picked == name) {
+                // Taking a row out of the pick does not move the cursor: the row
+                // `Enter` acts on stays where it was, which is the only way back to
+                // it.
+                self.chosen.remove(at);
+                return;
+            }
+            let was = self.entries[self.selected].name.clone();
+            if !self.chosen.iter().any(|picked| *picked == was) {
+                self.chosen.push(was);
+            }
+            if !self.chosen.iter().any(|picked| *picked == name) {
+                self.chosen.push(name.clone());
+            }
+            self.selected = index;
+            self.anchor = Some(name);
+            self.reveal.set(true);
+            return;
+        }
+        self.select_only(index);
+    }
+
     /// A press at `point`: select what is under it, and open it on the second
     /// click of the same entry.
     ///
@@ -542,11 +671,16 @@ impl Browser {
     /// A file is handed back for the caller to put on a command line, exactly as
     /// `Enter` does — a middle click or a menu item is a different promise, and
     /// this is the one the pane has always made.
-    pub fn clicked(&mut self, point: egui::Pos2, clicks: u8) -> Option<PathBuf> {
+    pub fn clicked(
+        &mut self,
+        point: egui::Pos2,
+        clicks: u8,
+        additive: bool,
+        extend: bool,
+    ) -> Option<PathBuf> {
         let index = self.entry_at(point)?;
-        let same = index == self.selected;
-        self.selected = index;
-        self.reveal.set(true);
+        let same = index == self.selected && !additive && !extend;
+        self.pick(index, additive, extend);
         if clicks >= 2 && same {
             return self.handle(Key::Enter);
         }
@@ -637,8 +771,12 @@ impl Browser {
         if let Some(name) = selected
             && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
         {
+            // The cursor moves back to its file; the *pick* is kept as it was, so
+            // a sort under a multi-selection does not collapse it to one row.
             self.selected = index;
         }
+        self.chosen
+            .retain(|name| self.entries.iter().any(|entry| entry.name == *name));
         self.selected = clamp_selection(self.selected, self.entries.len());
     }
 
@@ -673,6 +811,8 @@ impl Browser {
             columns: Cell::new(1),
             page: Cell::new(0),
             view: View::default(),
+            chosen: Vec::new(),
+            anchor: None,
             listing_seen: Cell::new(None),
             reveal: Cell::new(false),
             crumbs: RefCell::new(Vec::new()),
@@ -802,8 +942,11 @@ impl Browser {
             }
         }
         self.selected = clamp_selection(self.selected, self.entries.len());
-        // A key moved the selection, so the view follows it.
-        self.reveal.set(true);
+        // A key moved the cursor and the selection with it: there is no chord
+        // that says "keep what the pointer picked", so keeping it would be a
+        // selection nobody could see the end of.
+        let focus = self.selected;
+        self.select_only(focus);
         None
     }
 
@@ -819,6 +962,9 @@ impl Browser {
 
     fn cd(&mut self, path: PathBuf) {
         self.cwd = path;
+        // Whatever was picked belonged to the directory that is going away.
+        self.chosen.clear();
+        self.anchor = None;
         self.selected = 0;
         self.scroll.set(0);
         self.reload();
@@ -973,7 +1119,9 @@ impl Browser {
                     .iter()
                     .position(|entry| entry.name == name && !entry.is_parent())
             {
-                self.selected = index;
+                // A caller's promise is a selection, not just a cursor:
+                // `dtr --files some/file` means that file is the one selected.
+                self.select_only(index);
             }
         }
         let _ = dir;
@@ -1006,7 +1154,7 @@ impl Browser {
         if let Some(name) = selected
             && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
         {
-            self.selected = index;
+            self.focus(index);
         }
         if let Some(name) = top
             && let Some(index) = self.entries.iter().position(|entry| entry.name == name)
@@ -1030,6 +1178,11 @@ impl Browser {
         let (shown, hidden) = arrange_split(entries, &self.cwd, &self.view);
         self.entries = shown;
         self.hidden = hidden;
+        // A picked file that was deleted while the pane was open is not part of
+        // the selection any more, and keeping its name would make a copy of three
+        // paths hand back two.
+        self.chosen
+            .retain(|picked| self.entries.iter().any(|entry| entry.name == *picked));
     }
 
     /// Ask for the sizes and times the current sort needs.
@@ -1309,6 +1462,16 @@ impl Browser {
                 small.clone(),
                 palette.dim,
             );
+        } else if let Some(label) = self.selection_label() {
+            // Several selected rows are a number and not a path: the footer has one
+            // line, and the path of the third of five answers nothing.
+            painter.text(
+                egui::pos2(footer.left() + 8.0, footer.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                small.clone(),
+                palette.dim,
+            );
         } else if let Some(entry) = self.selected_entry() {
             let path = if entry.is_parent() {
                 parent_of(&self.cwd)
@@ -1400,7 +1563,7 @@ impl Browser {
                 egui::pos2(body.left(), body.top() + offset as f32 * ROW_HEIGHT),
                 egui::vec2(body.width(), ROW_HEIGHT),
             );
-            let selected = index == self.selected;
+            let selected = self.is_selected(index);
             // The highlight goes down first; painting a rectangle after
             // the text hides the row it was meant to select.
             if selected {
@@ -1583,7 +1746,7 @@ impl Browser {
                     // what says it, and a name is a name.
                     label: &entry.name,
                     icon,
-                    selected: index == self.selected,
+                    selected: self.is_selected(index),
                     hovered: hovered == Some(index),
                     // Hidden entries only reach this list when `Ctrl+H` is on,
                     // so nothing here is dimmed *for* being hidden; the flag is
@@ -2283,6 +2446,17 @@ mod tests {
         }
     }
 
+    /// The selected names in listing order: the focus is always one of them.
+    fn selected_names(browser: &Browser) -> Vec<&str> {
+        browser
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| browser.is_selected(*index))
+            .map(|(_, entry)| entry.name.as_str())
+            .collect()
+    }
+
     fn names_of(trail: &[(String, PathBuf)]) -> Vec<&str> {
         trail.iter().map(|(label, _)| label.as_str()).collect()
     }
@@ -2385,6 +2559,100 @@ mod tests {
         );
         // And the same mtime does not re-list a second time.
         assert!(!browser.refresh_if_changed(), "nothing changed again");
+    }
+
+    /// The three press gestures: one row, a ctrl-press that adds a row and takes
+    /// it away again, and a shift-press that takes everything from the anchor.
+    #[test]
+    fn a_press_picks_one_row_and_two_modifiers_extend_it() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+            std::fs::write(root.join(name), b"x").expect("file");
+        }
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        let at = |browser: &Browser, name: &str| row_of(browser, name);
+
+        // One press selects one row.
+        let a = at(&browser, "a.txt");
+        browser.pick(a, false, false);
+        assert_eq!(selected_names(&browser), vec!["a.txt"]);
+
+        // Ctrl adds, and the row that had the focus stays picked.
+        let c = at(&browser, "c.txt");
+        browser.pick(c, true, false);
+        assert_eq!(selected_names(&browser), vec!["a.txt", "c.txt"]);
+        assert_eq!(browser.selected, c, "the focus follows the press");
+
+        // Ctrl on a picked row takes it out again — and the focus stays there,
+        // because the row `Enter` acts on has to be a row somebody can see.
+        browser.pick(c, true, false);
+        assert_eq!(selected_names(&browser), vec!["a.txt"]);
+        assert_eq!(browser.selected, c);
+
+        // Shift takes the range from the anchor: `a.txt` was the last plain pick.
+        let e = at(&browser, "e.txt");
+        browser.pick(e, false, false);
+        browser.pick(at(&browser, "a.txt"), false, false);
+        browser.pick(e, false, true);
+        assert_eq!(
+            selected_names(&browser),
+            vec!["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]
+        );
+    }
+
+    /// A keyboard move is a new selection: there is no chord that says "keep what
+    /// the pointer picked", so keeping it would be a selection with no visible
+    /// end.
+    #[test]
+    fn a_key_move_drops_what_the_pointer_picked() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(root.join(name), b"x").expect("file");
+        }
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        let b = row_of(&browser, "b.txt");
+        browser.pick(b, false, false);
+        browser.pick(row_of(&browser, "c.txt"), true, false);
+        assert_eq!(selected_names(&browser).len(), 2);
+        browser.handle(Key::Up);
+        assert_eq!(
+            selected_names(&browser).len(),
+            1,
+            "one row, the focus's own"
+        );
+        assert_eq!(browser.selection_label(), None, "one row is not a count");
+    }
+
+    /// The pick is kept by **name**, so a sort or a new batch cannot move it to a
+    /// different file.
+    #[test]
+    fn a_sort_keeps_the_pick_on_its_files() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let root = temporary.path().canonicalize().expect("canonical root");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(root.join(name), b"x").expect("file");
+        }
+        let mut browser = Browser::new(Some(root));
+        settle(&mut browser);
+        browser.pick(row_of(&browser, "a.txt"), false, false);
+        browser.pick(row_of(&browser, "c.txt"), true, false);
+        let mut view = browser.view();
+        view.reverse = true;
+        browser.set_view(view);
+        settle(&mut browser);
+        // The listing is reversed, so the selected rows are reported in its order
+        // now: the pick followed the *names*, which is the whole point.
+        assert_eq!(selected_names(&browser), vec!["c.txt", "a.txt"]);
+        assert_eq!(
+            browser.selected_paths().len(),
+            2,
+            "and the paths follow the names"
+        );
+        assert_eq!(browser.selection_label().as_deref(), Some("2 selected"));
     }
 
     /// The selected path is the file's, and on the parent row it is where that
@@ -2986,11 +3254,12 @@ mod kittest_tests {
                 entry("wtmp.1", false, Some(10_485_760)),
             ],
         );
-        browser.selected = browser
+        let at = browser
             .entries
             .iter()
             .position(|entry| entry.name == "syslog")
             .expect("syslog in the fixture");
+        browser.select_only(at);
         // A baseline may not depend on the icon theme of the machine that made
         // it, so these panes draw the glyphs this crate carries.
         browser.without_icons();
@@ -3121,20 +3390,73 @@ mod kittest_tests {
         assert_eq!(browser.borrow().entries[3].name, "auth.log");
 
         let mut browser = browser.borrow_mut();
-        assert_eq!(browser.clicked(point, 1), None, "a press only selects");
+        assert_eq!(
+            browser.clicked(point, 1, false, false),
+            None,
+            "a press only selects"
+        );
         assert_eq!(browser.selected, 3);
         // The second press of the same entry is `Enter`. This fixture is a
         // *remote* pane, where Enter asks for a copy rather than handing a path
         // to the shell — the pane has always made that distinction.
-        assert_eq!(browser.clicked(point, 2), None);
+        assert_eq!(browser.clicked(point, 2, false, false), None);
         assert_eq!(
             browser.take_download(),
             Some(PathBuf::from("/var/log/auth.log"))
         );
         // A press on another entry selects that one and opens nothing.
         let other = egui::pos2(40.0, body_top + 6.0 * ROW_HEIGHT + ROW_HEIGHT / 2.0);
-        assert_eq!(browser.clicked(other, 2), None);
+        assert_eq!(browser.clicked(other, 2, false, false), None);
         assert_eq!(browser.selected, 6);
+    }
+
+    /// The pointer path carries the modifiers through: ctrl adds a row and a
+    /// plain press forgets the rest.
+    #[test]
+    fn a_control_press_on_the_pointer_picks_a_second_row() {
+        let skin = skin();
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(pane()));
+        {
+            let mut browser = browser.borrow_mut();
+            let mut view = browser.view();
+            view.mode = Mode::List;
+            browser.set_view(view);
+        }
+        {
+            let browser = std::rc::Rc::clone(&browser);
+            let drawn = skin.clone();
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(WIDTH, HEIGHT))
+                .build_ui(move |ui| {
+                    let browser = browser.borrow();
+                    pane_ui(
+                        ui,
+                        egui::Id::unique("dtr-files-pick"),
+                        pane_rect(),
+                        &browser,
+                        &drawn,
+                        true,
+                    );
+                });
+            harness.run();
+        }
+        let row = |index: usize| {
+            let top = HEADER_HEIGHT + 1.0;
+            egui::pos2(40.0, top + index as f32 * ROW_HEIGHT + ROW_HEIGHT / 2.0)
+        };
+        let mut browser = browser.borrow_mut();
+        assert_eq!(browser.clicked(row(2), 1, false, false), None);
+        assert!(browser.is_selected(2));
+        assert_eq!(browser.clicked(row(4), 1, true, false), None);
+        assert!(
+            browser.is_selected(2) && browser.is_selected(4),
+            "the pick is both rows"
+        );
+        assert_eq!(browser.selection_label().as_deref(), Some("2 selected"));
+        // A plain press is a new selection, not an addition.
+        assert_eq!(browser.clicked(row(6), 1, false, false), None);
+        assert!(!browser.is_selected(2) && browser.is_selected(6));
+        assert_eq!(browser.selection_label(), None);
     }
 
     /// A grid's press lands on the tile under the point and on nothing in the gap
@@ -3329,6 +3651,31 @@ mod kittest_tests {
             Some(PathBuf::from("/")),
             "the menu's answer never reached the caller"
         );
+    }
+
+    /// Two picked tiles and a footer that counts them: the state ctrl-press is
+    /// for, and the only place it is seen.
+    #[test]
+    fn two_picked_tiles_read_as_a_count() {
+        let skin = skin();
+        let mut browser = pane();
+        browser.select_only(3);
+        browser.pick(5, true, false);
+        assert_eq!(browser.selection_label().as_deref(), Some("2 selected"));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                pane_ui(
+                    ui,
+                    egui::Id::unique("dtr-files-picked"),
+                    pane_rect(),
+                    &browser,
+                    &skin,
+                    true,
+                );
+            });
+        harness.run();
+        harness.snapshot("file_pane_picked");
     }
 
     /// The order's own control: a name, a direction, and a menu that is the same

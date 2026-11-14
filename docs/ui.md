@@ -696,6 +696,12 @@ sort control stays inert. Those need a real pointer — `xdotool mousemove X Y; 
 against the virtual display, with the app running as a background job and the capture at a
 deadline after the click — and that is also the only way to see a hover fill at all.
 
+**Without a window manager the X input focus is `PointerRoot`**, so a synthetic *key* goes
+nowhere: `xdotool key ctrl+shift+p` is dropped and `XGetInputFocus` complains. `xdotool
+windowfocus $(xdotool search --class dtr | tail -1)` first, and a chord — or a `ctrl` held
+across a click — arrives. Pointer events need no focus, which is why a plain click works
+without it and a ctrl-press looks like a plain one until it does.
+
 **A pointer event is worth a frame.** `egui_winit` returns `repaint: false` for a bare
 `CursorMoved`, so a control that only changes on hover is a picture of a control until
 something else draws: under a `ControlFlow::Wait` loop nothing else does, and the hover never
