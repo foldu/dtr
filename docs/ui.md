@@ -208,6 +208,16 @@ what makes them testable and what lets a caller `--send` into them.
   (`align(Align2::LEFT_CENTER)`). Without that the accent's `#RRGGBB` sat against the top of
   a 34-point Adwaita field while the dropdowns beside it were centred, and the serial
   sheet's profile and baud fields had the same tilt.
+- `ContextMenu` — a menu that opens where a press was, with `Row`s. **A `Popup`
+  belongs to a widget**: the sort selector and the places button each hang their
+  menu off their own response, and a right-press has no control, only a point —
+  so the body is an `Area` at the press, in the foreground layer and constrained
+  to the window like every other menu. Its rows are `menu_row`'s, so a
+  right-click menu and a dropdown are one row; its rectangle is recorded because
+  a press outside it must close it and go nowhere else, and the caller is the
+  only thing that sees a press before egui does. **A menu owns the keyboard
+  briefly**: any key closes it and then goes where it was going, except Escape,
+  which was aimed at the menu (the link menu's rule, and now the pane's).
 - `label_cell`, `row`, `section` — the layout of a sheet: a fixed label column,
   a row of one control, and the two ways a group announces itself.
 - `check` — a 16- or 20-point box with the tick drawn from two strokes, because

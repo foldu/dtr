@@ -9,7 +9,7 @@ They are one project because they are one widget. The browser in a terminal pane
 daemon's picker, and the browser in a manager window of its own are the same `dtr-files` view with a
 different chrome and a different footer.
 
-**Nothing in this memo is built.** §12 is the order — stages **F0…F7**, with F1 split as F1a and F1b —
+**F0, F1a and F1b are built; F2…F7 are not.** §12 is the order — stages **F0…F7**, with F1 split as F1a and F1b —
 and these are this programme's numbers, not the project's `M` milestones. `PLAN.md` §3 (`M4`) is the
 same programme in a paragraph; the rest of this is the reasoning, the facts it rests on, and the things
 worth measuring before anyone promises a number.
@@ -506,8 +506,8 @@ Then `8a180b7` (the sort **control** in the header: a name, a drawn triangle for
 popup — which also uncovered that `egui_winit` never asks for a frame on a bare `CursorMoved`, so no
 hover in the chrome had ever appeared on its own), `11001c3` (the **breadcrumb**: one target per
 component, with the root and home as segments), `2cfbc56` (the **places popup**: a drawn house and the
-directories `user-dirs.dirs` decorates), and `d063f54` (`ctrl-alt-c` for the selected path — the one
-thing a context menu would offer that nothing else does).
+directories `user-dirs.dirs` decorates), and `d063f54` (`ctrl-alt-c` for the selected path — the one row
+a context menu can offer that nothing else does).
 
 **The selection is a set** (`cf36b9c`): ctrl-press adds a row and takes it away again, shift-press
 takes the range from the anchor, `ctrl-alt-a` takes every row, and the footer counts when there is
@@ -516,10 +516,16 @@ selected", a ctrl-press on the row the cursor was on could only ever add it, so 
 no gesture. The pick is kept by *name*, like the cursor, so a sort or a batch cannot move it to another
 file. `ctrl-alt-c` copies all of it, one path per line.
 
-**Still owed in F1b**: the **right-click menu**, and only that. It is deliberately last: for a read-only
-milestone it would have two live rows (`open`, which is `Enter`, and `copy path`, which is
-`ctrl-alt-c`), and a menu that promises the rows F5 and F6 will bring is worse than no menu. Everything
-else the milestone gates is done; measurement 7 is taken (§10).
+**The right-click menu** was the last thing F1b owed, and it is deliberately the smallest version a
+read-only browser can honestly have: `0f4ac50` puts the control in `dtr-widgets` (a `Popup` belongs to
+a *widget*, and a right-press has only a point, so the menu is an area placed where the press was), and
+`0eb9151` gives the pane its two rows — `open` and `copy path`, the same two calls `Enter` and
+`ctrl-alt-c` make — and makes the window open it, dismiss it and not let the keyboard reach the shell
+while it is up. The rows say no chords: the chords are `[keys]`' business, and a menu that printed the
+defaults would lie the first time somebody rebound one. What it deliberately does not offer is the rows
+F5 and F6 will bring, because a menu of things that do nothing is worse than no menu.
+
+That closes F1b: everything the milestone gates is done and measurement 7 is taken (§10).
 
 F1 is split in two because the listing is where the correctness lives and the grid is where the look
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with

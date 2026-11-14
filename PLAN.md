@@ -943,7 +943,7 @@ it is opened with.
   Both are UI and renderer work now; the ordered list is `docs/ghostty.md`.
 - Quake mode (quick terminal), tray, taskbar progress (`OSC 9;4`), single-instance CLI.
 
-### M4 — a real file manager, and the desktop's file picker (planned)
+### M4 — a real file manager, and the desktop's file picker (F0–F1b landed)
 
 Two asks, one implementation: the file pane becomes a **manager** (a grid of large icons, places,
 multi-select, and eventually writes) and the same browser becomes the desktop's file picker, as an
@@ -957,10 +957,10 @@ The shape is a crate split, which is also the first milestone: `crates/dtr` beco
 because the daemon opens one window per request, and **`dtr-portal`** is the daemon — which is also the
 manager window's process, so `dtr-files [PATH]` asks it for a window instead of being a third binary.
 
-**Implemented:** `F0`, `F1a`, and `F1b` up to the grid being usable — tiles, icons, thumbnails, 2-D
-keys, press and wheel, hidden files, a polled refresh, the order in `[files]` with its control in the
-header, the breadcrumb and the places popup (`docs/manager.md` §12 has the commits and names what F1b
-still owes: the right-click menu, which waits for the verbs F5 and F6 bring). Not `dtr-frame`: it has no second
+**Implemented:** `F0`, `F1a`, and `F1b` whole — tiles, icons, thumbnails, 2-D keys, press and wheel,
+multi-select with `ctrl-alt-a` and `ctrl-alt-c`, hidden files, a polled refresh, the order in `[files]`
+with its control in the header, the breadcrumb, the places popup, and the right-press menu's two rows
+(`docs/manager.md` §12 has the commits). Not `dtr-frame`: it has no second
 caller until the daemon exists, so a multi-window loop would be shaped against one window — the
 refactor F0's own gate is there to prevent.
 
