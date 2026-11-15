@@ -4358,15 +4358,22 @@ impl App {
             } => {
                 let entries: Vec<dtr_files::Entry> = entries
                     .into_iter()
-                    .map(|entry| dtr_files::Entry {
-                        name: entry.name,
-                        is_dir: entry.dir,
-                        size: (!entry.dir).then_some(entry.size),
-                        // SFTP's `READDIR` carries the time in the same packet as
-                        // the size, so a remote listing needs no metadata pass.
-                        modified: entry.modified.map(|secs| {
-                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
-                        }),
+                    .map(|entry| {
+                        // The SFTP client is a Unix-host protocol in every deployment
+                        // we have, and its `READDIR` carries no attributes: the dot
+                        // rule is the far side's own.
+                        let hidden = entry.name.starts_with('.');
+                        dtr_files::Entry {
+                            name: entry.name,
+                            is_dir: entry.dir,
+                            hidden,
+                            size: (!entry.dir).then_some(entry.size),
+                            // SFTP's `READDIR` carries the time in the same packet as
+                            // the size, so a remote listing needs no metadata pass.
+                            modified: entry.modified.map(|secs| {
+                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+                            }),
+                        }
                     })
                     .collect();
                 if let Some(browser) = self.browser_waiting(&alias, &path) {

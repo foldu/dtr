@@ -104,6 +104,9 @@ impl Backend for Memory {
                 if let Some(file_name) = name.file_name() {
                     seen.insert(file_name.to_owned());
                     entries.push(Entry {
+                        // In-memory paths have no machine behind them, so the Unix
+                        // spelling is the only rule there is to apply.
+                        hidden: file_name.to_string_lossy().starts_with('.'),
                         name: file_name.to_string_lossy().into_owned(),
                         kind: Kind::File,
                         len: Some(bytes.len() as u64),
@@ -119,6 +122,7 @@ impl Backend for Memory {
                 if let Some(file_name) = dir.file_name() {
                     if seen.insert(file_name.to_owned()) {
                         entries.push(Entry {
+                            hidden: file_name.to_string_lossy().starts_with('.'),
                             name: file_name.to_string_lossy().into_owned(),
                             kind: Kind::Dir,
                             len: None,

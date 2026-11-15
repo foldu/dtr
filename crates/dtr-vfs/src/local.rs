@@ -152,31 +152,27 @@ impl Backend for Local {
 /// filesystem provides it, the `d_type` — so a name sort costs one `readdir` and
 /// a sort, and the size and the date are [`Local::facts`]'s business. Where
 /// `d_type` is `DT_UNKNOWN` (network filesystems, mostly) std does the `lstat`
-/// itself, so this is a saving on ext4/xfs/btrfs and never worse elsewhere.
+/// itself, so this is a saving on ext4/xfs/btrfs and never worse elsewhere. On
+/// Windows the walk is [`dtr_shell::Dir`], which gets the same things from
+/// `FindFirstFileW` — including whether the entry is hidden and how big it is,
+/// which `read_dir` on that platform keeps to itself.
 fn walk(path: &Path, tx: &async_channel::Sender<Result<Vec<Entry>>>) {
     let failed = |err: std::io::Error| {
         let _ = tx.send_blocking(Err(
             anyhow::Error::new(err).context(format!("list {}", path.display()))
         ));
     };
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
+    let found = match entries(path) {
+        Ok(found) => found,
         Err(err) => return failed(err),
     };
     let mut batch = Vec::with_capacity(BATCH);
-    for entry in entries {
+    for entry in found {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => return failed(err),
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let kind = kind_of_entry(&entry);
-        batch.push(Entry {
-            name,
-            kind,
-            len: None,
-            modified: None,
-        });
+        batch.push(entry);
         if batch.len() >= BATCH && tx.send_blocking(Ok(std::mem::take(&mut batch))).is_err() {
             return;
         }
@@ -184,6 +180,43 @@ fn walk(path: &Path, tx: &async_channel::Sender<Result<Vec<Entry>>>) {
     if !batch.is_empty() {
         let _ = tx.send_blocking(Ok(batch));
     }
+}
+
+/// Every name in `path`, with everything the walk could say for free — including
+/// whether this machine calls it hidden, which is the platform's rule and not the
+/// view's.
+#[cfg(not(windows))]
+fn entries(path: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<Entry>>> {
+    Ok(std::fs::read_dir(path)?.map(|entry| {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // The Unix rule, and the only place it is written down: a name that starts
+        // with a dot is the filesystem's way of saying hidden.
+        let hidden = name.starts_with('.');
+        Ok(Entry {
+            name,
+            kind: kind_of_entry(&entry),
+            hidden,
+            len: None,
+            modified: None,
+        })
+    }))
+}
+
+/// The Windows walk, whose attributes arrive with the name — and with the size and
+/// the write time, which is why a listing there needs no metadata pass at all.
+#[cfg(windows)]
+fn entries(path: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<Entry>>> {
+    Ok(dtr_shell::Dir::open(path)?.map(|found| {
+        let found = found?;
+        Ok(Entry {
+            name: found.name,
+            kind: if found.is_dir { Kind::Dir } else { Kind::File },
+            hidden: found.hidden,
+            len: found.len,
+            modified: found.modified,
+        })
+    }))
 }
 
 /// What a directory entry says it is, without a `stat` where the filesystem
@@ -194,6 +227,7 @@ fn walk(path: &Path, tx: &async_channel::Sender<Result<Vec<Entry>>>) {
 /// groups** when the metadata pass caught up — a row jumping from the files to the
 /// folders while somebody is reading it. Links are rare, and the kind a row is
 /// given here is the kind it keeps.
+#[cfg(not(windows))]
 fn kind_of_entry(entry: &std::fs::DirEntry) -> Kind {
     let Ok(file_type) = entry.file_type() else {
         return Kind::Other;

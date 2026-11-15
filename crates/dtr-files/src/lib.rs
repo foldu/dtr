@@ -21,6 +21,7 @@
 //! the order the work lands in.
 
 mod browser;
+mod desktop;
 mod grid;
 pub mod icons;
 pub mod pick;

@@ -60,6 +60,14 @@ const PLACES_WIDTH: f32 = 22.0;
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
+    /// Whether the machine calls it hidden.
+    ///
+    /// **Not a spelling.** Unix hides a name that starts with a dot and Windows
+    /// hides a `FILE_ATTRIBUTE_HIDDEN` file, so the machine that walked the
+    /// directory answers (`dtr_vfs::Entry::hidden`) and the view only decides whether
+    /// hidden entries are on screen. Asking the name was right on one platform and
+    /// wrong on the other, and on `C:\` it made `Ctrl+H` a lie.
+    pub hidden: bool,
     /// File size in bytes; `None` for directories and for entries the OS would
     /// not report one for.
     pub size: Option<u64>,
@@ -74,6 +82,7 @@ impl From<dtr_vfs::Entry> for Entry {
         Self {
             name: entry.name,
             is_dir: entry.kind.is_dir(),
+            hidden: entry.hidden,
             size: entry.len,
             modified: entry.modified,
         }
@@ -85,6 +94,8 @@ impl Entry {
         Self {
             name: "..".to_owned(),
             is_dir: true,
+            // The parent row is not a file, so no machine has an opinion about it.
+            hidden: false,
             size: None,
             modified: None,
         }
@@ -572,20 +583,31 @@ impl Browser {
         Some(self.cwd.join(&entry.name))
     }
 
-    /// The places a popup offers: home, the desktop's decorated directories, and
-    /// the root of the filesystem.
+    /// The places a popup offers: home, the desktop's decorated directories, the
+    /// platform's own, and the root of the file system.
     ///
     /// Built on demand and owned, so the popup holds no borrow of the icon set
     /// while it draws: a `RefCell` borrow across a closure that calls back into
     /// the same browser is a panic waiting for a slow frame.
     pub fn place_list(&self) -> Vec<(String, PathBuf)> {
         let mut places = vec![("home".to_owned(), self.home.clone())];
+        // The platform's own places second: on Windows the user's known folders and
+        // the drives, which is what a navigation pane on that desktop lists; on a
+        // freedesktop machine nothing, because the decorations below are its answer.
+        for (label, path) in crate::desktop::places() {
+            if path != self.home && !places.iter().any(|(_, known)| *known == path) {
+                places.push((label, path));
+            }
+        }
         for (path, _icon) in self.icons.borrow().places().iter() {
             // A place equal to home is the row above it.
-            if path != self.home {
+            if path != self.home && !places.iter().any(|(_, known)| known == path) {
                 places.push((display_path(path, &self.home), path.to_path_buf()));
             }
         }
+        // A freedesktop machine has one root; Windows has the drives, which are
+        // already in the list above and are not `/`.
+        #[cfg(not(windows))]
         places.push(("filesystem".to_owned(), PathBuf::from("/")));
         places
     }
@@ -2732,7 +2754,7 @@ pub fn arrange(entries: Vec<Entry>, cwd: &Path, view: &View) -> Vec<Entry> {
 pub fn arrange_split(entries: Vec<Entry>, cwd: &Path, view: &View) -> (Vec<Entry>, Vec<Entry>) {
     let (mut shown, hidden): (Vec<Entry>, Vec<Entry>) = entries
         .into_iter()
-        .partition(|entry| view.show_hidden || !entry.name.starts_with('.'));
+        .partition(|entry| view.show_hidden || !entry.hidden);
     shown.sort_by_cached_key(|entry| SortKey::of(entry, view));
     // After the sort and before nothing else: `..` is synthetic, and it is first
     // whatever the key and whatever the direction.
@@ -3003,7 +3025,7 @@ pub fn human_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Component, Path, PathBuf};
+    use std::path::{Path, PathBuf};
 
     use super::{
         Browser, Entry, Key, Layout, Outcome, Request, Sort, View, arrange, clamp_selection,
@@ -3014,6 +3036,10 @@ mod tests {
         Entry {
             name: name.to_owned(),
             is_dir,
+            // The fixture machine is a Unix one, where the flag *is* the dot: a test
+            // that wants the Windows rule sets the field itself, which is what
+            // `a_hidden_entry_is_hidden_because_the_listing_said_so` does.
+            hidden: name.starts_with('.'),
             size: None,
             modified: None,
         }
@@ -3024,6 +3050,7 @@ mod tests {
         Entry {
             name: name.to_owned(),
             is_dir: false,
+            hidden: name.starts_with('.'),
             size: Some(size),
             modified: modified
                 .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
@@ -3117,6 +3144,32 @@ mod tests {
             },
         );
         assert_eq!(names(&shown), ["..", ".git", ".bashrc", "visible"]);
+    }
+
+    /// **Hidden is an attribute, not a spelling.** Windows hides `pagefile.sys` and
+    /// `desktop.ini` and has no opinion about a dot, so the view asks the entry and
+    /// never the name: a name with no dot can be hidden, and a dotted name the machine
+    /// calls ordinary stays on screen.
+    #[test]
+    fn a_hidden_entry_is_hidden_because_the_listing_said_so() {
+        let mut pagefile = entry("pagefile.sys", false);
+        pagefile.hidden = true;
+        let mut dotfile = entry(".bashrc", false);
+        dotfile.hidden = false;
+        let entries = vec![pagefile, dotfile, entry("notes.txt", false)];
+        let shown = arrange(entries.clone(), Path::new("/tmp/work"), &View::default());
+        assert_eq!(names(&shown), ["..", ".bashrc", "notes.txt"]);
+        // And the flag the other way round shows it: the two halves are the filter,
+        // not a second read.
+        let all = arrange(
+            entries,
+            Path::new("/tmp/work"),
+            &View {
+                show_hidden: true,
+                ..View::default()
+            },
+        );
+        assert_eq!(names(&all), ["..", ".bashrc", "notes.txt", "pagefile.sys"]);
     }
 
     /// A directory that gained a file is re-listed by the poll, once, and the
@@ -3918,6 +3971,7 @@ mod kittest_tests {
         Entry {
             name: name.to_owned(),
             is_dir,
+            hidden: false,
             size,
             // No dates: the snapshot is of the rows, and a date column is F1b.
             modified: None,

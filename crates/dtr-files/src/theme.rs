@@ -275,6 +275,18 @@ impl std::fmt::Debug for Picture {
 }
 
 impl Picture {
+    /// A picture from bytes this crate produced rather than read: the shell's own
+    /// icon, encoded as PNG on the way in ([`crate::shell`]).
+    ///
+    /// The URI is the caller's, because it is what egui's texture cache keys on
+    /// and only the caller knows what was drawn — a path and a size, for an icon.
+    pub(crate) fn from_png(uri: String, bytes: Vec<u8>) -> Self {
+        Self {
+            uri,
+            bytes: Bytes::from(Arc::from(bytes)),
+        }
+    }
+
     pub fn uri(&self) -> &str {
         &self.uri
     }
@@ -301,6 +313,13 @@ const MAX_READS_PER_FRAME: usize = 12;
 pub struct IconSet {
     theme: Theme,
     places: Places,
+    /// Whether the desktop's own pictures are asked for before the theme's.
+    ///
+    /// True for this machine's set and false for a set a test built: `IconSet::empty`
+    /// promises to ask nobody, and a snapshot that quietly asked the shell would
+    /// depend on the desktop that made it — the same reason the theme is a fixture
+    /// there.
+    shell: bool,
     loaded: RefCell<Loaded>,
 }
 
@@ -320,6 +339,7 @@ impl IconSet {
         Self {
             theme: Theme::system(),
             places: Places::load(),
+            shell: true,
             loaded: RefCell::new(Loaded::default()),
         }
     }
@@ -330,6 +350,7 @@ impl IconSet {
         Self {
             theme: Theme::new(Vec::new(), Vec::new()),
             places: Places::default(),
+            shell: false,
             loaded: RefCell::new(Loaded::default()),
         }
     }
@@ -339,6 +360,7 @@ impl IconSet {
         Self {
             theme,
             places,
+            shell: false,
             loaded: RefCell::new(Loaded::default()),
         }
     }
@@ -397,6 +419,15 @@ impl IconSet {
     }
 
     fn resolve(&self, path: &Path, name: &str, is_dir: bool, px: u32) -> Option<Arc<Picture>> {
+        // The desktop's own answer first. On Windows the shell's icon cache is
+        // where "what does a .pdf look like" lives and there is no file to read,
+        // so the theme below has nothing to offer; on Linux there is no shell and
+        // this is the theme's turn.
+        if self.shell {
+            if let Some(picture) = crate::desktop::picture(path, is_dir, px) {
+                return Some(Arc::new(picture));
+            }
+        }
         if is_dir {
             // A decorated place first, then the plain folder: `folder-download`
             // is missing from a theme that only carries the generic set.

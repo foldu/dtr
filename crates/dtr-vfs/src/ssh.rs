@@ -176,6 +176,10 @@ async fn serve(alias: &str, session: &Rc<async_lock::Mutex<Option<dtr_sftp::Sess
                         // packet, so a remote listing is complete as it streams:
                         // no metadata pass, and a remote sort is free.
                         batch.push(Entry {
+                            // A `READDIR` carries no attributes, and the far side is
+                            // a Unix host in every deployment we have: the dot rule is
+                            // the best answer available, and it is the right one there.
+                            hidden: entry.name.starts_with('.'),
                             name: entry.name,
                             kind: if entry.dir { Kind::Dir } else { Kind::File },
                             len: Some(entry.size),

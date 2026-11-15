@@ -539,10 +539,6 @@ fn class<'a>(pattern: &'a [char], at: Option<char>) -> Option<(bool, &'a [char])
 mod tests {
     use super::*;
 
-    fn file(name: &str) -> PathBuf {
-        PathBuf::from(name)
-    }
-
     #[test]
     fn a_star_matches_anything_and_a_question_mark_one_character() {
         assert!(glob("*.png", "photo.png"));

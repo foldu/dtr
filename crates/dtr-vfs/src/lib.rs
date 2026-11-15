@@ -115,6 +115,15 @@ pub struct Entry {
     /// The file name alone, not a path: the directory is the request's.
     pub name: String,
     pub kind: Kind,
+    /// Whether this machine calls the entry hidden.
+    ///
+    /// **Hidden is a fact the machine reports, not a spelling.** Unix hides a name
+    /// that starts with a dot; Windows hides a `FILE_ATTRIBUTE_HIDDEN` file, and a
+    /// dot there is nothing special. Only the backend knows which machine it
+    /// walked, so the backend answers, and the view decides only whether hidden
+    /// entries are on screen — asking the *name* was right on one platform and
+    /// wrong on the other, and it made `Ctrl+H` a lie on `C:\`.
+    pub hidden: bool,
     /// The size, when the listing already knows it.
     ///
     /// `None` means **ask**, not "there is none": a local `readdir` yields a name
