@@ -255,7 +255,9 @@ grid-or-list question had the name first — that question is now the `Layout` (
 - **A folder pressed in a file picker is a way in** (`Outcome::Navigate`), which is what every
   desktop's Open button does with a folder selected: the question stays open one level down. A
   picker also starts on the first *real* row and not on `..`, or its first Enter refuses something
-  that looks highlighted.
+  that looks highlighted — and the row is **highlighted as well as under the cursor** (`focus`, not a
+  bare `selected`), because the cursor alone draws nothing: the picker said "the selected file" about
+  a row nothing pointed at, and `insert` would have taken it.
 - Filters are the portal's `a(sa(us))` matched against the name; MIME patterns are not matched by a
   name and are treated as "cannot tell", which is why the first caller passes none.
 

@@ -1401,7 +1401,11 @@ impl Browser {
             return;
         }
         if let Some(index) = self.entries.iter().position(|entry| !entry.is_parent()) {
-            self.selected = index;
+            // Highlighted as well as under the cursor, because the highlight is what
+            // a person reads: a picker that would insert the first file while nothing
+            // on screen looks chosen is the same first press saying nothing, one step
+            // later (`docs/manager.md` §4).
+            self.focus(index);
             self.preselect.set(false);
         }
     }
@@ -3229,6 +3233,11 @@ mod tests {
             browser.selected_entry().map(|entry| entry.name.as_str()),
             Some("a.txt"),
             "a picker opens on the first file"
+        );
+        assert!(
+            browser.is_selected(1),
+            "and that file is highlighted, or the footer says `the selected file` \
+             about a row nothing points at"
         );
         assert_eq!(
             browser.accept_pick(),
