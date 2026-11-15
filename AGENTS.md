@@ -62,8 +62,9 @@ matches the shell running it and kills yours.
   `nix flake check` and `just deny` runs all four locally. An ignore is a claim the
   advisory cannot be reached; write the reason down.
 - `just --list` lists tasks; `just check` is `nix flake check`; `just test` is the suite
-  without the sandbox. Both runners run the same command, so a red job means the same
-  thing on either.
+  without the sandbox, through nextest plus the `cargo test --doc` it cannot run
+  (`docs/nextest.md`). The sandbox gate runs `cargo test`; both cover the same tests, so a
+  red job means the same thing on either.
 
 ## Releasing
 

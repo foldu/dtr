@@ -426,6 +426,11 @@
         # the advisory half needs the RustSec database, so `just deny` and CI
         # run it here, where there is a network.
         pkgs.cargo-deny
+        # The test runner `just test` uses. One process per test, tests from
+        # every binary scheduled together, and a report that says which test is
+        # slow. It does not run doctests, so `just test` keeps `cargo test
+        # --doc` beside it — see `docs/nextest.md`.
+        pkgs.cargo-nextest
         # What a headless machine lacks and a desktop already has: a Vulkan
         # implementation that is not a GPU, and fonts for fontconfig to find.
         # The UI tests render through wgpu and lay out real text, so without

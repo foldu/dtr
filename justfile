@@ -4,7 +4,15 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # `just` is installed in the devShell, but someone with a global `just` should
 # get the same answer: inside the devShell cargo is on PATH, outside it is not.
-dev := if `command -v cargo >/dev/null 2>&1 && echo yes` == "yes" { "" } else { "nix develop .#default --command" }
+# The `if` is load bearing: `command -v cargo && echo yes` exits 1 when cargo is
+# missing, and just reports a failed backtick instead of answering "no".
+dev := if `if command -v cargo >/dev/null 2>&1; then echo yes; else echo no; fi` == "yes" { "" } else { "nix develop .#default --command" }
+
+# `just test` needs nextest, which is not part of the Rust toolchain: a machine
+# can have a global `cargo` and no `cargo-nextest`, and the failure for that is
+# a bare "no such command". Ask for the tool the recipe actually runs, and for
+# cargo too — nextest is a cargo subcommand.
+nxt := if `if command -v cargo-nextest >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then echo yes; else echo no; fi` == "yes" { "" } else { "nix develop .#default --command" }
 
 # List the recipes.
 default:
@@ -20,9 +28,15 @@ deny:
     # `nix flake check`: `checks.deny` is the half that answers offline.
     {{ dev }} cargo deny check
 
-# The suite without the sandbox: the inner loop.
+# The suite without the sandbox: the inner loop. nextest runs one process per
+# test and schedules every binary together, where `cargo test` finishes one
+# binary before starting the next — worth about half a second here, most of
+# which is that the 3 s test no longer waits for the other binaries. It
+# cannot run doctests, so they follow it. One shell, so a machine outside the
+# devShell pays for one `nix develop` rather than one per command.
+# `docs/nextest.md` has the measurements and what CI still runs instead.
 test *args:
-    {{ dev }} cargo test --workspace {{ args }}
+    {{ nxt }} bash -c 'cargo nextest run --workspace {{ args }} && cargo test --workspace --doc {{ args }}'
 
 # Format the Rust sources and this justfile. The flake checks both halves
 # (`fmt` and `just-fmt`), so forgetting this is a red `nix flake check` rather
