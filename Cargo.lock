@@ -1190,6 +1190,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "dirs",
+ "dtr-shell",
  "dtr-vfs",
  "dtr-widgets",
  "egui",
@@ -1207,6 +1208,13 @@ dependencies = [
  "async-channel",
  "compio",
  "tempfile",
+]
+
+[[package]]
+name = "dtr-shell"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1242,6 +1250,7 @@ dependencies = [
  "compio",
  "dirs",
  "dtr-sftp",
+ "dtr-shell",
  "tempfile",
  "tracing",
 ]

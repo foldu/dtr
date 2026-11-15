@@ -1,0 +1,25 @@
+[package]
+name = "dtr-shell"
+description = "What the Windows shell knows: a file's icon, the user's folders, the drives, and which entries are hidden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Nothing on Linux: this crate is the Win32 surface, and everything public here
+# answers "there is no shell" on a machine that has none. It is a crate rather
+# than a module so that `dtr-files` and `dtr-vfs` — neither of which may know
+# what an `HICON` is — can ask their three questions without a `windows-sys`
+# dependency, and so the Win32 code has one home instead of three.
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  # `FindFirstFileW`, whose `WIN32_FIND_DATAW` carries the attributes and the
+  # size in the same call that carries the name; the drive enumeration.
+  "Win32_Storage_FileSystem",
+  # `CoTaskMemFree`, for the string `SHGetKnownFolderPath` allocates.
+  "Win32_System_Com",
+  # `ILD_TRANSPARENT`, for `IImageList::GetIcon`.
+  "Win32_UI_Controls",
+] }

@@ -15,5 +15,12 @@ async-channel.workspace = true
 async-lock.workspace = true
 tracing.workspace = true
 
+# The Windows listing: `FindFirstFileW` hands back the attributes — and the size and
+# the write time — in the call that carries the name, where `read_dir` keeps them to
+# itself. Only the Windows half of `local.rs` asks, so this is not a dependency of
+# the crate on any other platform.
+[target.'cfg(windows)'.dependencies]
+dtr-shell = { path = "../dtr-shell" }
+
 [dev-dependencies]
 tempfile.workspace = true

@@ -21,6 +21,10 @@ image.workspace = true
 # the same browser draws a remote directory, and a listing whose shape differs by
 # machine is two models.
 dtr-vfs = { path = "../dtr-vfs" }
+# The desktop's own pictures and places. The Win32 crate, which answers "there is
+# no shell" on a machine that has none: this crate asks it and never sees an
+# `HICON`, and the icon theme below is what a freedesktop machine answers with.
+dtr-shell = { path = "../dtr-shell" }
 # The look, and the two egui quirks a painted pane has to know about. Not `dtr`:
 # the file picker is a second process and cannot link a terminal.
 dtr-widgets = { path = "../dtr-widgets" }
