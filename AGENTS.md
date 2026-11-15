@@ -19,6 +19,7 @@ window, one OS thread per pane. `crates/` holds the workspace:
 | `dtr-sshconfig` | the ssh config parser |
 | `dtr-sftp` | the SFTP client |
 | `dtr-vfs` | file backends: local, in-memory, ssh |
+| `dtr-shell` | what the Windows shell knows: a file's icon, known folders, drives, hidden attributes |
 | `dtr-widgets` | the UI's look: palettes, style tokens, and painted controls |
 | `dtr-ttl` | the Tera Term macro language — manual, corpus, and an interpreter that runs the corpus |
 

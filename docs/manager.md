@@ -23,7 +23,7 @@ worth measuring before anyone promises a number.
 | `crates/dtr-files` | the browser, a crate of its own since F0: one selection, keyboard only (arrows, `Enter`, `h`/`l`, `r`, `g`/`G`), 18-point painted rows, name and size, a synthetic `..`, dotfiles filtered with no toggle, no icons, no wheel, no row is a click target |
 | the pane | a leaf in the split tree, so splits, focus, zoom, close and "a shell beside it" came free (`docs/panes.md`) |
 | the local listing | **streamed and off the UI thread since F1a**: `Browser::reload` asks `dtr-vfs`'s batched `list`, `poll` merges a burst per frame, and the footer says `reading… n so far` rather than `empty directory` |
-| what a listing carries | `{ name, kind, len: Option, modified: Option }`. The walk takes no `stat` at all — `read_dir` gives the name and `d_type`, and a symlink is resolved once — so a name sort is a `readdir` and a sort, and the sizes and times arrive from a second pass that only a sort needing them starts (§3) |
+| what a listing carries | `{ name, kind, hidden, len: Option, modified: Option }`. The walk takes no `stat` at all — `read_dir` gives the name and `d_type`, and a symlink is resolved once — so a name sort is a `readdir` and a sort, and the sizes and times arrive from a second pass that only a sort needing them starts (§3). `hidden` is the *machine's* answer and not the view's: Unix derives it from the leading dot, Windows from `FILE_ATTRIBUTE_HIDDEN \| FILE_ATTRIBUTE_SYSTEM`, and on Windows the same `FindFirstFileW` call also fills `len` and `modified`, so that pass does not exist there |
 | the order | `arrange(entries, cwd, &View)` with four keys, reverse, folders-first and hidden in one value; reversing flips the key and not the grouping, unknowns sink both ways, `..` is inserted after the sort |
 | the first click target | the close cross in the header, `f24ea1f` — and it needed an `Area` of its own *because* the pane is painted rather than clicked (`docs/files.md` §13) |
 | `zbus` | already a dependency (`crates/dtr/src/system/linux.rs`), and `notify.rs`'s test already **serves** a D-Bus interface over a private bus |
@@ -76,7 +76,11 @@ other painted thing (`AGENTS.md`, "Do not hand-roll a widget").
 - **Keys change meaning.** In a grid `Left` is a movement, so "go to the parent" becomes `Backspace`,
   `Alt+Up` and the breadcrumb; `explorer::Key` grows `Right`, `PageUp`, `PageDown`, and
   `App::explorer_key` translates accordingly. `Home`/`End` stay ends, type-ahead still works.
-- **Icons are three questions, in this order.** What the entry *is* (`inode-directory` → `folder`,
+- **Icons: the desktop's own picture first, then three questions about the entry.** On a machine that
+  has a shell, `dtr-shell` answers with the icon the desktop already has — the association's colour
+  page, the `.exe`'s own bitmap, the folder it draws for `Downloads` — because that is the picture a
+  person recognises, and there is no file to read (`docs/windows.md` §11). Otherwise, and wherever the
+  shell has no answer, freedesktop: what the entry *is* (`inode-directory` → `folder`,
   MIME → a theme name: `text-x-generic`, `image-x-generic`, `application-pdf`, `text-x-script`, …); what
   the *packaging* says (`a.desktop` file's own `Icon=`, an executable's application icon, both already
   implemented for the new-tab menu in `system::linux`); and whether the desktop has decorated it (a
@@ -90,7 +94,11 @@ other painted thing (`AGENTS.md`, "Do not hand-roll a widget").
   screenful of small textures, which is the difference in what each caches), and a cell asks for at
   most four decodes at a time and never blocks — the type icon is drawn until the picture lands.
 - **The size ladder.** `in_theme` currently asks for 64 px first because a menu row is 18 points. A
-  grid wants 96 or 128, so the ladder becomes a parameter with the same first-match rule.
+  grid wants 96 or 128, so the ladder becomes a parameter with the same first-match rule — and the
+  tile's *physical* size is what asks (`tile_icon × pixels_per_point`), because a 48-point tile on a 2×
+  screen wants a 96-pixel picture. Windows has no ladder to walk: the shell has four sizes
+  (16/32/48/256) and the answer is the smallest that is at least the request, which is why a 48-point
+  tile is sharp and a 2× one takes the 256 and is downscaled.
 - **The list view ships in the same milestone, not later.** A pane is often 450 points wide, where a
   96-point tile gives two or three columns — six items where ten rows fit. Grid is the default; one
   toggle (`Ctrl+1`/`Ctrl+2`) is the escape hatch, and it is the existing renderer, kept rather than
@@ -565,3 +573,9 @@ F1 is split in two because the listing is where the correctness lives and the gr
 does: streaming plus sorting makes an index-based selection wrong, so **F1a changes the model with
 nothing new on screen**, which is the only way to test it honestly. F1b may then assume a listing that
 is already complete, ordered and keyed by name.
+
+**The Windows pass**, after F2, and not a milestone: `b560db0` (`dtr-shell`: the shell's icons, the
+known folders, the drives, and a `FindFirstFileW` walk whose attributes come with the name) and
+`75cca68` (the two things the pane had been asking the wrong authority: hidden is a field of the
+listing, and the icon is the desktop's before it is the theme's). `docs/windows.md` §11 is the
+account, with the captures it was written from.

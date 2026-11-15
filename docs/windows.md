@@ -487,3 +487,75 @@ What did not, and was fixed in one commit:
 
 Both are invisible on Linux, which is why the Linux captures of F1b and F2 never showed them:
 a path with a drive letter is not a shape that code had ever been given.
+
+---
+
+## 11. What the shell knows: icons, places, hidden
+
+Measured 2026-11-15 on the same guest at 100 %, from `base`, with F2 plus a new `dtr-shell`:
+`dtr.exe --files C:\fixture --capture … --capture-after 2500`, another run with `--keys ctrl-h`,
+another with `--keys ctrl-alt-p`, one at `--files C:\`, and one with `AppsUseLightTheme=0`. The
+places popup is the one thing here that needs a press **and** a release — `--click` is a press alone,
+which is what the pane's own targets want and not what an egui `Popup::menu` toggles on — so that
+capture comes from the guest's own pointer over QMP (`references/gui.md`), which is also the proof
+that a hand can open it.
+
+Three questions a Windows desktop answers differently, and the pane answered none of them:
+
+**The icon.** There is no `share/icons` here. The answer is the shell's icon cache — the colour page
+the registry associates with `.pdf`, the bitmap an `.exe` carries inside it, the folder the shell
+draws for `Downloads` — so `dtr-shell` asks the shell for an `HICON` and turns it into RGBA, and
+`dtr-files` encodes that as the same `Picture` (bytes and a URI) the icon theme would have produced.
+Before it the grid drew its own glyphs: one page for a PDF, the same page for a video, the same page
+for `notepad.exe`. After it, `notepad.exe` has Notepad's own icon, `.dll` the DLL-with-gear,
+`.zip` a zipper, `photo.jpg` the JPEG picture, and `main.rs` a blank page — because Windows has no
+association for it and Explorer shows exactly that.
+
+Three details, each of which is a way this goes wrong:
+
+- **Ask the extension, not the file.** `SHGFI_USEFILEATTRIBUTES` answers from the association without
+  opening anything, so a hundred-name listing is a hundred registry lookups and no disk. An `.exe`,
+  `.lnk` or `.ico` *carries* its picture, so those (and five more) are asked for for real — which is
+  what puts the program's own icon on the tile rather than a generic application.
+- **The system image list, not `SHGFI_ICON`.** The latter answers 32 px and nothing else, and 32 px in
+  a 48-point tile is visibly soft. `SHGetImageList` has 16/32/48/256; `windows-sys` names the
+  function but not the interface it returns, so `IImageList::GetIcon` is called through its vtable at
+  index 10. A wrong index calls a different method with these arguments, so the answer is verified
+  before it is used — a null handle is refused, and a bitmap that is not icon-sized is refused — and
+  the 32 px path is the fallback for a process the shell will not give the list to.
+- **The mask only when there is no alpha.** A modern icon has an alpha channel; a legacy one has an
+  AND mask. Using the mask on a modern icon turns its rounded corner into a hard one and loses its
+  shadow, so the mask is consulted only when every alpha byte is zero.
+
+**The places.** `user-dirs.dirs` is a freedesktop file, and `Downloads` on Windows is a *known
+folder* — one that OneDrive or a redirected profile is free to move — while the roots are *drives*.
+The popup was `home` and `filesystem` (which on Windows meant `\`, the current drive's root) and
+nothing else. It is now `home`, `desktop`, `downloads`, `documents`, `pictures`, `music`, `videos`,
+then `Windows (C:)` and `WINVM (E:)`: the volume's own label, or Explorer's noun for the kind when
+there is none (`Local Disk (C:)`, `DVD Drive (D:)`, `Removable Disk (E:)`), with the letter always
+bracketed. The drives replace `filesystem`, because there is no single root to name.
+
+**Hidden.** A leading dot is Unix's hidden file; Windows hides `FILE_ATTRIBUTE_HIDDEN`, and Explorer
+hides `FILE_ATTRIBUTE_SYSTEM` with it. The view asked the *name*, which is right on one platform and
+wrong on the other, so `Ctrl+H` was a lie: `C:\fixture` showed 9 entries with `secret.txt` and
+`desktop.ini` among them, and `C:\` would have offered `pagefile.sys`, `$Recycle.Bin` and
+`System Volume Information`. Hidden is now a fact of the listing (`dtr_vfs::Entry::hidden`), answered
+by the machine that walked the directory; `C:\fixture` shows 9 and `Ctrl+H` shows 11, and `C:\` shows
+its 13 ordinary entries.
+
+**The walk came with it.** `std::fs::DirEntry` does not expose the attributes, and a `stat` per name
+to get them is the second pass that can move a row between the visible and the hidden half *after* it
+was drawn. `FindFirstFileW` returns the attributes, the size and the write time in the call that
+returns the name, so on Windows the listing is one call per entry and the `facts` pass does not exist
+at all.
+
+**Dark mode needs no second icon path.** With `AppsUseLightTheme=0` the same window came up in the
+Windows dark skin; the shell's icons are background-independent pictures, so nothing about them
+changes with the scheme.
+
+Deliberately missing: **overlay icons** (a shortcut's arrow, OneDrive's cloud) come from
+`SHGetIconOverlayIndex` and want a second `HICON` composed per tile; **a menu row has no picture**, so
+the places popup is words where Explorer's has icons beside them; and none of this has a *test* — the
+pure halves (drive labels, mask-to-alpha, `FILETIME` to `SystemTime`) are unit-tested on any machine,
+and the rest is this capture. That is also the answer to "is it native now": the pictures and the
+places are Explorer's own, and the windows, the buttons, the footer and the tiles are still dtr's.
