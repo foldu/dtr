@@ -1,8 +1,11 @@
 # dtr
 
-A serial-first terminal: `libghostty-vt` for the VT core, egui/wgpu for the window, one
-OS thread per pane. The chrome is the platform's own — Adwaita on Linux, the Windows 11
-skin there — and the terminal is Kanagawa Wave.
+A super serial terminal which also a file browser for some reason. `libghostty-vt` for the
+VT core, egui/wgpu for the window, one OS thread per pane.
+
+The chrome is not native: it is painted to look like the platform's own — Adwaita on
+Linux, the Windows 11 skin there — and it kinda looks like it, which is the point. The
+terminal is Kanagawa Wave.
 
 <table>
   <tr>
