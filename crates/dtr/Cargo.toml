@@ -1,6 +1,6 @@
 [package]
 name = "dtr"
-description = "A serial-first terminal"
+description = "A super serial terminal which also a file browser for some reason"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

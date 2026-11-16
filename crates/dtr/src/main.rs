@@ -1,4 +1,4 @@
-//! dtr — a serial-first terminal: the binary.
+//! dtr — a super serial terminal, and a file browser for some reason: the binary.
 //!
 //! This file is the shape of one run — arguments, the config and store it opens,
 //! and the order they are set up in. Everything that draws or talks to a device
@@ -59,7 +59,11 @@ enum ThemeAction {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "dtr", version, about = "A serial-first terminal")]
+#[command(
+    name = "dtr",
+    version,
+    about = "A super serial terminal which also a file browser for some reason"
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,

@@ -1,5 +1,5 @@
 {
-  description = "dtr — a serial-first terminal";
+  description = "dtr — a super serial terminal which also a file browser for some reason";
 
   inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.zst";
   inputs.rust-overlay = {

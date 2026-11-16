@@ -6,8 +6,8 @@ in [PLAN.md](PLAN.md); the TTL specification in
 
 ## What it is
 
-A serial-first terminal in Rust: `libghostty-vt` for the VT core, egui/wgpu for the
-window, one OS thread per pane. `crates/` holds the workspace:
+A super serial terminal that also browses files, in Rust: `libghostty-vt` for the VT
+core, egui/wgpu for the window, one OS thread per pane. `crates/` holds the workspace:
 
 | crate | what |
 | --- | --- |

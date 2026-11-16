@@ -34,13 +34,13 @@ pub fn ui(ui: &mut Ui, look: &Look) -> Option<Event> {
         .show(ui, &skin, |ui, _inner| {
             ui.add_space(style.gap * 2.0);
             // Stacked rather than in a column: a term wide enough for
-            // "a serial-first terminal" leaves a body narrow enough to
+            // "a super serial terminal" leaves a body narrow enough to
             // elide, and an about page that truncates its own sentences
             // is worse than one that is four lines longer.
             for (term, body) in [
                 (
-                    "a serial-first terminal",
-                    "libghostty-vt for the terminal itself",
+                    "a super serial terminal",
+                    "libghostty-vt, and a file browser for some reason",
                 ),
                 ("drawn with", "egui and wgpu, one thread per pane"),
                 ("config", "TOML, in ~/.config/dtr/config.toml"),
@@ -91,7 +91,7 @@ mod tests {
             });
         harness.run_steps(2);
         harness.get_by_label(&format!("version {}", env!("CARGO_PKG_VERSION")));
-        harness.get_by_label("a serial-first terminal");
+        harness.get_by_label("a super serial terminal");
         harness.snapshot("about");
     }
 }

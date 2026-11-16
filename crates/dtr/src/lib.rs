@@ -1,4 +1,4 @@
-//! dtr — a serial-first terminal.
+//! dtr — a super serial terminal, and a file browser for some reason.
 //!
 //! The crate is a library plus a thin binary for one reason: the file browser is
 //! becoming a manager *and* the desktop's file picker, and the picker is a second
