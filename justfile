@@ -73,6 +73,10 @@ wine:
 icons:
     ./scripts/icon.sh
 
+# Regenerate the README's two screenshots. The Windows half needs `winvm`.
+screenshots *args:
+    ./scripts/screenshots.sh {{ args }}
+
 # vtebench; `just bench -- --check` only validates the payloads.
 bench *args:
     ./scripts/bench.sh {{ args }}
