@@ -2394,10 +2394,15 @@ fn pick_footer(
                     ui.scope_builder(egui::UiBuilder::new().max_rect(slab), |ui| {
                         let response = ui.add_sized(
                             egui::vec2(slab.width(), style.row),
+                            // The name rides in the middle of the row: a
+                            // `TextEdit` that fills a tall field draws its galley
+                            // against the field's top unless it is told to centre
+                            // (`widgets/combo.rs` in `dtr-widgets`).
                             egui::TextEdit::singleline(&mut *draft)
                                 .id(id.with("name"))
                                 .hint_text("a name")
-                                .desired_width(slab.width()),
+                                .desired_width(slab.width())
+                                .align(egui::Align2::LEFT_CENTER),
                         );
                         // Typing is the point of a save picker, so the field takes
                         // the keyboard once, when it opens.

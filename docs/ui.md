@@ -207,7 +207,11 @@ what makes them testable and what lets a caller `--send` into them.
   this row's — so the field is made row-height and the galley asks to centre itself
   (`align(Align2::LEFT_CENTER)`). Without that the accent's `#RRGGBB` sat against the top of
   a 34-point Adwaita field while the dropdowns beside it were centred, and the serial
-  sheet's profile and baud fields had the same tilt.
+  sheet's profile and baud fields had the same tilt. The two fields that are not this
+  widget — the palette's query line and the save picker's name — ask for the same
+  alignment themselves, and the palette's harness installs the resolved skin on the
+  context for the same reason: a harness that skips it draws an 18-point field and cannot
+  show the bug.
 - `ContextMenu` — a menu that opens where a press was, with `Row`s. **A `Popup`
   belongs to a widget**: the sort selector and the places button each hang their
   menu off their own response, and a right-press has no control, only a point —

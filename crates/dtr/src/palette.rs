@@ -207,10 +207,17 @@ impl Palette {
 
                 let query_font =
                     FontId::new(style.value_font.size + 2.5, style.value_font.family.clone());
+                // Centred in the field, not hung from its top: a single-line
+                // `TextEdit` lays its galley out with the *parent's* alignment —
+                // `LEFT_TOP` in a top-down `Ui` — and the field is as tall as the
+                // skin's row, so the query sat at the top of a 34-point Adwaita
+                // field instead of in the middle of it. `widgets/combo.rs` has the
+                // same trap and the same answer.
                 let response = TextEdit::singleline(&mut self.input)
                     .hint_text("connect, ssh, shell, replay, files, demo…")
                     .font(query_font.clone())
                     .desired_width(f32::INFINITY)
+                    .align(Align2::LEFT_CENTER)
                     .show(ui);
                 if response.response.changed() {
                     self.recompute();
@@ -241,15 +248,58 @@ impl Palette {
                     return;
                 }
 
+                // The two hint lines at the bottom are measured *before* the
+                // rows, not after them: the second one wraps at this width, so
+                // what it costs is a fact about the fonts rather than a number,
+                // and counting only the rows left a short window's hints under
+                // its bottom edge — outside the card drawn around them.
+                let hint_font =
+                    FontId::new(style.label_font.size - 1.5, style.label_font.family.clone());
+                let hints = [
+                    (
+                        "up/down or ctrl-n/ctrl-p choose   tab complete   enter run   esc close",
+                        palette.dim,
+                    ),
+                    // The only place the keys are written down. Nothing else in
+                    // the window says that tabs exist, which is how a terminal
+                    // ends up with one tab and no idea there could be more.
+                    (
+                        "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
+                         ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
+                         ctrl+, preferences    ctrl+? keys",
+                        palette.disabled,
+                    ),
+                ];
+                let galleys: Vec<(egui::Color32, std::sync::Arc<egui::Galley>)> = hints
+                    .iter()
+                    .map(|(text, colour)| {
+                        let galley = ui.painter().layout(
+                            (*text).to_owned(),
+                            hint_font.clone(),
+                            *colour,
+                            room.width(),
+                        );
+                        (*colour, galley)
+                    })
+                    .collect();
+                let spacing = ui.spacing().item_spacing.y;
+                let hint_gap = 4.0;
+                let hints_height = galleys
+                    .iter()
+                    .map(|(_, galley)| galley.size().y)
+                    .sum::<f32>()
+                    + spacing * (galleys.len() - 1) as f32;
+
                 // Ten rows is what a list wants at most, and a list you can see at
                 // once beats one you have to scroll — but the skin decides how tall
                 // a row is, so how many fit is measured from the space the field
-                // left. A compact skin gets ten; a tall one gets fewer rather than
-                // rows outside the card.
+                // left, less what the hints below them need. A compact skin gets
+                // ten; a tall one gets fewer rather than rows outside the card.
                 let row = style.row;
-                let spacing = ui.spacing().item_spacing.y;
-                let fits =
-                    (((ui.available_height() + spacing) / (row + spacing)).floor() as usize).max(1);
+                let fits = (((ui.available_height() - hint_gap - hints_height + spacing)
+                    / (row + spacing))
+                    .floor() as usize)
+                    .max(1);
                 let visible = 10.min(self.completions.len()).min(fits);
                 let first = self.selected.saturating_sub(visible - 1);
                 let row_height = style.row;
@@ -305,32 +355,14 @@ impl Palette {
                     }
                 }
 
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "up/down or ctrl-n/ctrl-p choose   tab complete   enter run   esc close",
-                    )
-                    .font(egui::FontId::new(
-                        style.label_font.size - 1.5,
-                        style.label_font.family.clone(),
-                    ))
-                    .color(palette.dim),
-                );
-                // The only place the keys are written down. Nothing else in the
-                // window says that tabs exist, which is how a terminal ends up
-                // with one tab and no idea there could be more.
-                ui.label(
-                    RichText::new(
-                        "ctrl+shift t tab    ctrl+tab switch    ctrl+| split    \
-                         ctrl+shift w close    ctrl+shift o block    ctrl+shift p palette    \
-                         ctrl+, preferences    ctrl+? keys",
-                    )
-                    .font(egui::FontId::new(
-                        style.label_font.size - 1.5,
-                        style.label_font.family.clone(),
-                    ))
-                    .color(palette.disabled),
-                );
+                // Painted through `ui.label` from the same strings and font the
+                // rows were measured against, so the reservation and the picture
+                // cannot disagree about a wrapped line — and the hints stay in the
+                // accessibility tree, which painted galleys would not.
+                ui.add_space(hint_gap);
+                for (text, colour) in hints {
+                    ui.label(RichText::new(text).font(hint_font.clone()).color(colour));
+                }
             })
             .response
             .rect;
@@ -592,6 +624,14 @@ mod kittest_tests {
         assert_eq!(palette.borrow().selected(), 0, "C-p comes back");
     }
 
+    /// The window installs the resolved skin on the context (`Gpu::render`), so
+    /// every stock widget a screen borrows is drawn at the skin's row: without
+    /// this the palette's `TextEdit` is an 18-point field rather than Adwaita's
+    /// 34, and the harness cannot show what a query does inside one.
+    fn install_skin(look: &Look, ui: &mut egui::Ui) {
+        look.skin().apply(ui.ctx());
+    }
+
     /// The palette as the eye sees it: a query, the completions it filtered to,
     /// and the key hints underneath.
     #[test]
@@ -600,6 +640,7 @@ mod kittest_tests {
         palette.toggle();
         let look = Look::default();
         let mut harness = Harness::new_ui(|ui| {
+            install_skin(&look, ui);
             palette.ui(ui, &look);
         });
         harness.run();
@@ -623,6 +664,7 @@ mod kittest_tests {
             ..Look::default()
         };
         let mut harness = Harness::new_ui(|ui| {
+            install_skin(&look, ui);
             palette.ui(ui, &look);
         });
         harness.run();
@@ -643,6 +685,7 @@ mod kittest_tests {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(560.0, 300.0))
             .build_ui(|ui| {
+                install_skin(&look, ui);
                 palette.ui(ui, &look);
             });
         harness.run();
