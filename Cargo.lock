@@ -1117,7 +1117,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dtr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1170,14 +1170,14 @@ dependencies = [
 
 [[package]]
 name = "dtr-complete"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nucleo-matcher",
 ]
 
 [[package]]
 name = "dtr-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "toml_edit 0.23.10+spec-1.0.0",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-files"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-sftp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1212,14 +1212,14 @@ dependencies = [
 
 [[package]]
 name = "dtr-shell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "dtr-sshconfig"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glob",
  "tempfile",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1238,11 +1238,11 @@ dependencies = [
 
 [[package]]
 name = "dtr-ttl"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "dtr-vfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-widgets"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "egui_kittest",
