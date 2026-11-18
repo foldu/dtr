@@ -33,3 +33,9 @@ perf.data.*
 flame.svg
 flamegraph.svg
 profile.svg
+
+# direnv is per-machine: `.envrc` is one line (`use flake`) that a checkout
+# generates, and `.direnv/` is its cache. Neither is shared, and both are what
+# the release recipe's dirty-tree check must not trip over.
+/.envrc
+/.direnv/

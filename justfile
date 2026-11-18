@@ -81,14 +81,14 @@ screenshots *args:
 bench *args:
     ./scripts/bench.sh {{ args }}
 
-# Cut a release: bump, commit, tag and push.
-[confirm]
-release version:
+# Refuse a bad release before the gate runs: `just` runs a recipe's dependencies
+# in order, so a typo, a dirty tree or a missing mirror answers in a second
+# instead of after the `nix flake check` that follows it.
+_release-version version:
     #!/usr/bin/env bash
     set -euo pipefail
 
     version="{{ version }}"
-    tag="v$version"
 
     if ! printf '%s' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'; then
         echo "release: $version is not X.Y.Z (or X.Y.Z-suffix)" >&2
@@ -107,10 +107,30 @@ release version:
         echo "release: on $branch, not master" >&2
         exit 1
     fi
-    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-        echo "release: $tag already exists" >&2
+    if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+        echo "release: v$version already exists" >&2
         exit 1
     fi
+
+    # Two remotes, because the tag is what publishes: GitLab (`origin`) holds
+    # the history and runs the flake gate, GitHub (`github`) runs
+    # `.github/workflows/release.yml` and makes the release. A tag that reaches
+    # only one of them is half a release, so a missing mirror is refused here
+    # rather than after the commit exists.
+    if ! git remote get-url github >/dev/null 2>&1; then
+        echo "release: no 'github' remote; add the mirror first:" >&2
+        echo "  git remote add github git@github.com:foldu/dtr.git" >&2
+        exit 1
+    fi
+
+# Cut a release: the gate, the bump, the commit, the tag, and both pushes.
+[confirm]
+release version: (_release-version version) check
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    version="{{ version }}"
+    tag="v$version"
 
     # One source of truth: Cargo.toml. flake.nix imports it, so this edit moves
     # the package version, the exe's version and the release together — and the
@@ -135,7 +155,15 @@ release version:
     git push origin HEAD
     git push origin "$tag"
 
+    # GitHub is where the release is published, so the commit and the tag go
+    # there too. A sandboxed terminal's own `ssh` refuses the system config and
+    # cannot reach the agent, so when this push fails try the forwarded one:
+    #   GIT_SSH_COMMAND=$HOME/.dsh/bin/fwd-ssh git push github HEAD --follow-tags
+    git push github HEAD
+    git push github "$tag"
+
     echo
-    echo "$tag is pushed. If the GitHub mirror copies tags,"
-    echo ".github/workflows/release.yml builds dtr.exe and publishes it;"
-    echo "if it does not, push the tag by hand: git push github $tag"
+    echo "$tag is pushed to origin and github. The tag starts"
+    echo ".github/workflows/release.yml, which runs the gate again, builds"
+    echo "dtr.exe and publishes it. Follow it with:"
+    echo "  gh run watch -R foldu/dtr"

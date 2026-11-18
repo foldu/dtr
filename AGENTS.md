@@ -68,17 +68,18 @@ matches the shell running it and kills yours.
 
 ## Releasing
 
-`just release X.Y.Z` refuses a dirty tree or a non-`master` branch, rewrites the workspace
-version in `Cargo.toml` (its only home — `flake.nix` imports it, so package, exe and tag
-cannot disagree), refreshes `Cargo.lock` through `cargo metadata`, proves the flake
-reports the same number, then commits, tags `vX.Y.Z` and pushes;
-`.github/workflows/release.yml` does the rest on the tag: refuses a tag that disagrees
-with `Cargo.toml`, runs the full `nix flake check`, builds `dtr.exe`, publishes it with
-`--generate-notes` (a `-suffix` makes it a pre-release), and a re-run replaces the assets.
+`just release X.Y.Z` runs the full `nix flake check`, refuses a dirty tree, a non-`master`
+branch or a missing `github` remote, rewrites the workspace version in `Cargo.toml` (its
+only home — `flake.nix` imports it, so package, exe and tag cannot disagree), refreshes
+`Cargo.lock` through `cargo metadata`, proves the flake reports the same number, then
+commits, tags `vX.Y.Z` and pushes both remotes; `.github/workflows/release.yml` does the
+rest on the tag: refuses a tag that disagrees with `Cargo.toml`, runs the gate again,
+builds `dtr.exe`, publishes it with `--generate-notes` (a `-suffix` makes it a
+pre-release), and a re-run replaces the assets.
 
-**The tag triggers the release**, and the repository is mirrored GitLab → GitHub: if tags
-are not mirrored nothing publishes — push it by hand (`git push github vX.Y.Z`) or turn
-tag mirroring on.
+**The tag triggers the release, and only the one GitHub receives does**: GitLab (`origin`)
+is the source of truth; GitHub (`github`) is the mirror whose Actions publish, so the
+recipe pushes the commit and the tag to both.
 
 ## The house rules
 
