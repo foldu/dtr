@@ -949,6 +949,20 @@ mod tests {
     }
 
     #[test]
+    fn a_local_manager_can_write_so_the_write_chords_are_its() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let manager = manager(scratch.path());
+        // The window asks the shared table with `Scope::manager(self.can_write())`;
+        // the browser's own caps are what says the chords are real here, so this
+        // is the fact that F2/Delete/Ctrl+C/Ctrl+V/Ctrl+Shift+N hang on.
+        assert!(manager.can_write());
+        assert_eq!(
+            dtr_pane_host::Scope::manager(manager.can_write()),
+            dtr_pane_host::Scope::manager(true)
+        );
+    }
+
+    #[test]
     fn a_write_answer_refreshes_only_when_the_batch_is_done() {
         let scratch = tempfile::tempdir().expect("tempdir");
         let mut manager = manager(scratch.path());

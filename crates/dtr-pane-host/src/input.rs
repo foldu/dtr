@@ -49,10 +49,15 @@ impl Scope {
     }
 
     /// The scope a browser is in, from what it already knows about itself.
+    ///
+    /// A picker never has the write verbs whatever its backend could do: the
+    /// question is read-only by construction, so the two facts are not
+    /// independent and [`Scope::picker`] and this agree.
     pub fn of(browser: &dtr_files::Browser) -> Self {
+        let picker = browser.is_picking();
         Self {
-            picker: browser.is_picking(),
-            write: browser.caps().write,
+            picker,
+            write: !picker && browser.caps().write,
         }
     }
 
@@ -421,6 +426,41 @@ mod tests {
                 Scope::manager(true)
             ),
             Some(Key::DeletePermanently)
+        );
+    }
+
+    /// The scope a frontend passes is the browser's own facts, not a guess: the
+    /// local browser has the write verbs, a remote one starts read-only until its
+    /// backend says otherwise, and a picker is a question.
+    #[test]
+    fn a_scope_is_what_the_browser_says_it_is() {
+        let local = dtr_files::Browser::new(None);
+        assert_eq!(
+            Scope::of(&local),
+            Scope::manager(true),
+            "a local browser has the verbs"
+        );
+
+        let mut remote = dtr_files::Browser::remote_at("build", std::path::PathBuf::from("/"));
+        assert_eq!(
+            Scope::of(&remote),
+            Scope::manager(false),
+            "a remote pane is read-only until the backend says it is not"
+        );
+        remote.set_caps(dtr_vfs::Caps {
+            watch: false,
+            dir_size: false,
+            write: true,
+            trash: false,
+        });
+        assert_eq!(Scope::of(&remote), Scope::manager(true));
+
+        let mut picking = dtr_files::Browser::new(None);
+        picking.set_pick(dtr_files::Request::open());
+        assert_eq!(
+            Scope::of(&picking),
+            Scope::picker(),
+            "a picker is not a manager with the same keys"
         );
     }
 }
