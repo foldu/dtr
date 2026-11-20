@@ -1,4 +1,5 @@
-//! The file browser: a directory listing, a selection, and the views over them.
+//! The file browser: a directory listing, a selection, the views over them, and
+//! the file operations.
 //!
 //! One browser, three frontends. The file pane in a terminal draws it in a tab,
 //! the manager is the same browser in a window of its own, and the desktop's file
@@ -7,6 +8,13 @@
 //! boundary buys: no winit, no wgpu, no `libghostty-vt`, no terminal theme. A
 //! surface hands in an `egui::Ui`, a rectangle in points, and a
 //! [`dtr_widgets::Skin`]; the browser paints and reports what a person asked for.
+//!
+//! **The writes are reported, never executed.** A rename, a delete or a paste
+//! becomes a [`WriteRequest`] the app's worker takes with [`Browser::take_write`]
+//! and executes through `dtr_vfs`'s verbs; the answer comes back as
+//! [`Browser::write_succeeded`] or [`Browser::write_failed`], and a conflict is
+//! the one overwrite card this crate draws. The rules are `docs/manager.md` §7
+//! and the state machine is [`write`].
 //!
 //! The two things a caller must supply, because the browser cannot know them:
 //!
@@ -31,6 +39,7 @@ pub mod manager;
 pub mod pick;
 pub mod theme;
 pub mod thumb;
+pub mod write;
 
 pub use browser::{
     Browser, Entry, Key, Layout, MenuChoice, PaneOutcome, PaneView, Sort, SortChange, View,
@@ -41,3 +50,4 @@ pub use grid::{cell_rect, columns, first_row, index_at, rows, visible_rows};
 pub use icons::{Places, desktop_icon, type_icon};
 pub use pick::{Filter, Mode, Outcome, Pick, Request, Select, glob};
 pub use theme::{Category, IconSet, Picture, Theme};
+pub use write::{Failure, Question, WriteOp, WriteRequest, Writes, next_free_name, valid_name};
