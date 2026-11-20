@@ -239,9 +239,12 @@ pub fn ssh_hosts(config: &Path) -> Vec<(String, String)> {
         }
     };
 
-    let mut hosts = Vec::new();
-    for entry in parsed.hosts() {
-        for alias in entry.aliases() {
+    // `Config::aliases` is the one enumerator: concrete names only, in file
+    // order, each once — the same list the manager window's sidebar draws.
+    parsed
+        .aliases()
+        .into_iter()
+        .map(|alias| {
             let resolved = parsed.resolve(alias);
             let mut detail = String::new();
             if let Some(user) = &resolved.user {
@@ -258,10 +261,9 @@ pub fn ssh_hosts(config: &Path) -> Vec<(String, String)> {
                 }
                 detail.push_str(&resolved.effective_port().to_string());
             }
-            hosts.push((alias.to_owned(), detail));
-        }
-    }
-    hosts
+            (alias.to_owned(), detail)
+        })
+        .collect()
 }
 
 /// One program this machine offers as a local shell.

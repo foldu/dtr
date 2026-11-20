@@ -121,6 +121,26 @@ impl Config {
         self.hosts.clone()
     }
 
+    /// Every concrete alias the configuration offers, in file order, each once.
+    ///
+    /// The names a picker draws: negated patterns and patterns with a wildcard
+    /// are not aliases a person can open ([`HostEntry::aliases`]), and OpenSSH
+    /// accepts the same name in two `Host` blocks while a picker must not list it
+    /// twice. This is the one enumerator — the terminal's new-tab menu and the
+    /// manager window's sidebar both ask it rather than re-deriving it.
+    pub fn aliases(&self) -> Vec<&str> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut aliases = Vec::new();
+        for entry in &self.hosts {
+            for alias in entry.aliases() {
+                if seen.insert(alias) {
+                    aliases.push(alias);
+                }
+            }
+        }
+        aliases
+    }
+
     /// The `Match` blocks that were retained but are never applied.
     pub fn unapplied_match_blocks(&self) -> Vec<MatchEntry> {
         self.match_blocks.clone()
@@ -235,4 +255,22 @@ pub(crate) enum ScopeKind {
     Host(Vec<String>),
     /// A `Match` block that is never applied.
     Match,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A picker's list: concrete names only (no wildcards, no negations), in
+    /// file order, and a name that appears in two blocks is one row.
+    #[test]
+    fn aliases_are_the_concrete_names_once_in_file_order() {
+        let config = crate::parse_str(
+            "Host web\n    User alice\nHost db web\nHost !skip *\nHost *.example admin\n",
+            Path::new("."),
+        )
+        .expect("a valid config");
+        assert_eq!(config.aliases(), vec!["web", "db", "admin"]);
+    }
 }

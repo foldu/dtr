@@ -35,7 +35,7 @@
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align, Color32, Layout, Rect, Sense, Ui, UiBuilder, Vec2};
 
-use crate::{Button, Skin, Stripe, stripe};
+use crate::{Button, Skin, Stripe, human_size as bytes, stripe};
 
 /// How far the words of one job sit above the bottom stripe, in rows.
 ///
@@ -446,24 +446,8 @@ fn action_rect(row: Rect, style: &crate::Style, width: f32) -> Rect {
 /// A byte count the way `dtr-files` writes one, so a queue row and a status bar
 /// do not disagree about a megabyte.
 ///
-/// It is a copy of `dtr_files::browser::human_size`, not a dependency: the
-/// widgets crate is the bottom of that graph, and a display format shared across
-/// it belongs here first. When the manager puts a size in the queue this function
-/// and that one should become one function; until then the two spellings are
-/// pinned by each crate's tests.
-fn bytes(value: u64) -> String {
-    const K: f64 = 1024.0;
-    let value_f = value as f64;
-    if value_f < K {
-        format!("{value} B")
-    } else if value_f < K * K {
-        format!("{:.1} kB", value_f / K)
-    } else if value_f < K * K * K {
-        format!("{:.1} MB", value_f / (K * K))
-    } else {
-        format!("{:.1} GB", value_f / (K * K * K))
-    }
-}
+/// The format itself is `dtr_widgets::human_size`, the one home at the bottom of
+/// the graph; `bytes` here is only the name this module's rows know it by.
 
 #[cfg(test)]
 mod tests {

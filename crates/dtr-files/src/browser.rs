@@ -3922,18 +3922,13 @@ fn items(count: usize, verb: &str) -> String {
 
 /// A byte count a person can read. Shared with a surface's toasts, which report a
 /// save the same way the pane reports a file.
+///
+/// The one implementation is `dtr_widgets::human_size`: the transfer queue's card
+/// draws the same number, and two spellings of a megabyte is the kind of
+/// disagreement a skin exists to prevent. This stays as the name `dtr-files`'
+/// callers (and `dtr`) use.
 pub fn human_size(bytes: u64) -> String {
-    const K: f64 = 1024.0;
-    let value = bytes as f64;
-    if value < K {
-        format!("{bytes} B")
-    } else if value < K * K {
-        format!("{:.1} kB", value / K)
-    } else if value < K * K * K {
-        format!("{:.1} MB", value / (K * K))
-    } else {
-        format!("{:.1} GB", value / (K * K * K))
-    }
+    dtr_widgets::human_size(bytes)
 }
 
 #[cfg(test)]

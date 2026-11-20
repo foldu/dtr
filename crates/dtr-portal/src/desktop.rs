@@ -224,29 +224,23 @@ fn read_ssh_hosts() -> Vec<Host> {
     }
 }
 
-/// The aliases of a parsed config: `Host` patterns without wildcards, in file
-/// order, each once.
+/// The aliases of a parsed config, in file order.
 ///
-/// A wildcard block (`Host *`) is a default, not a host a person can open, and
-/// `aliases()` already drops the negations; the dedupe is for the config that
-/// lists `web` in two blocks, which OpenSSH accepts and a sidebar must not draw
-/// twice.
+/// The enumerator is `dtr-sshconfig`'s (`Config::aliases`): concrete names only,
+/// each once — the same list the terminal's new-tab menu draws — and the only
+/// thing this module adds is the sidebar's row shape. Mounts stay here because
+/// they are the manager window's own section.
 fn hosts_of(config: &dtr_sshconfig::Config) -> Vec<Host> {
-    let mut hosts: Vec<Host> = Vec::new();
-    for entry in config.hosts() {
-        for alias in entry.aliases() {
-            if hosts.iter().any(|host| host.alias == alias) {
-                continue;
-            }
-            hosts.push(Host {
-                alias: alias.to_owned(),
-                // `dtr-vfs::Ssh` has no `home()`; the row opens at `.` — the one
-                // path every SFTP server resolves against the far account's home.
-                home: None,
-            });
-        }
-    }
-    hosts
+    config
+        .aliases()
+        .into_iter()
+        .map(|alias| Host {
+            alias: alias.to_owned(),
+            // `dtr-vfs::Ssh` has no `home()`; the row opens at `.` — the one
+            // path every SFTP server resolves against the far account's home.
+            home: None,
+        })
+        .collect()
 }
 
 /// Aliases from ssh-config **text**, with `base_dir` for its `Include`s.

@@ -35,11 +35,13 @@
 //! and says so in `-v` — never a window that quietly ignored what it was asked
 //! for.
 
+mod format;
 mod palette;
 mod skin;
 mod style;
 mod widgets;
 
+pub use format::human_size;
 pub use palette::{AccentLadder, Palette, readable_on};
 pub use skin::{
     ADWAITA_ACCENT, Choice, EGUI_ACCENT_DARK, EGUI_ACCENT_LIGHT, Origin, Skin, WINDOWS_ACCENT_DARK,
