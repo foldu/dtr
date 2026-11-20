@@ -32,6 +32,8 @@ pub mod cache;
 pub mod local;
 pub mod memory;
 pub mod ssh;
+#[cfg(unix)]
+mod trash;
 
 pub use local::Local;
 pub use memory::Memory;
@@ -85,6 +87,55 @@ pub struct Caps {
     pub watch: bool,
     /// Whether a directory's size is known, rather than a guess.
     pub dir_size: bool,
+    /// Whether the write verbs are real here: [`Backend::create_dir`],
+    /// [`Backend::rename`], [`Backend::copy`], [`Backend::move_to`] and
+    /// [`Backend::remove`] with [`Removal::Permanent`].
+    pub write: bool,
+    /// Whether [`Removal::Trash`] is real here — a delete the desktop can undo.
+    ///
+    /// False does **not** mean deletes are unavailable: it means the only delete
+    /// is permanent, which the UI confirms. A backend must never treat a
+    /// `Trash` request as permanent.
+    pub trash: bool,
+}
+
+/// How [`Backend::remove`] should dispose of a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// Move it to the desktop's trash, from which it can be restored. A
+    /// backend whose [`Caps::trash`] is false refuses this with an error: a
+    /// delete that reads as recoverable must never destroy anything.
+    Trash,
+    /// Delete it for good. A directory goes with its contents. This is the one
+    /// destructive verb; the confirmation for it belongs to the caller.
+    Permanent,
+}
+
+/// A write refused because the destination is already there.
+///
+/// **The trait never replaces an existing destination.** Replacing is a question
+/// for the person — replace, keep both or skip — so a backend answers with this
+/// and changes nothing; the UI recognises it through [`is_conflict`] and shows
+/// the one conflict card. A rename, a copy and a move share it; so does a
+/// `create_dir` whose name is taken, because that is a name collision rather
+/// than an overwrite choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} already exists", self.path.display())
+    }
+}
+
+impl std::error::Error for Conflict {}
+
+/// Whether `err` is a [`Conflict`], i.e. "the destination exists and nothing was
+/// replaced". The UI turns this into the replace / keep both / skip card.
+pub fn is_conflict(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<Conflict>())
 }
 
 /// What a path is.
@@ -197,6 +248,88 @@ pub trait Backend: Send + Sync {
         let (_tx, rx) = async_channel::bounded(1);
         rx
     }
+
+    // ---- writes -------------------------------------------------------------
+    //
+    // The default for every verb is the same refusal, which is what lets a
+    // read-only backend (`Ssh` today) declare `write: false` and implement
+    // nothing. Callers gate on [`Caps::write`] first; the error is the
+    // belt-and-braces answer for a call that got through anyway.
+
+    /// Make one directory at `path`.
+    ///
+    /// The parent must exist — this is `mkdir`, not `mkdir -p`. An existing
+    /// `path` is a [`Conflict`]: a name collision is reported, never silently
+    /// accepted.
+    fn create_dir<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { Err(unsupported(self.id(), "create a directory", path)) })
+    }
+
+    /// Rename `from` to `to`, which may also move it to another directory on
+    /// the same machine.
+    ///
+    /// A backend **never replaces an existing destination**: if `to` is there,
+    /// the answer is a [`Conflict`] and nothing has changed. `from == to` is a
+    /// no-op. A rename that would cross filesystems fails; a caller that wants a
+    /// cross-device move is asking for a copy plus a remove.
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let _ = to;
+            Err(unsupported(self.id(), "rename", from))
+        })
+    }
+
+    /// Copy one file's bytes to `to`, returning how many bytes were written.
+    ///
+    /// A whole-file copy, deliberately: a directory is refused for now and
+    /// belongs to the transfer queue, which can segment a big tree and show
+    /// progress. `to` must not exist — the same [`Conflict`] rule as a rename,
+    /// so a paste is asked about rather than guessed.
+    fn copy<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async move {
+            let _ = to;
+            Err(unsupported(self.id(), "copy", from))
+        })
+    }
+
+    /// Move `from` into another directory on the same machine.
+    ///
+    /// The same primitive as [`Backend::rename`] and the same conflict rule; the
+    /// two exist because a screen says them differently ("Rename…" against a
+    /// name versus "Move to…" against a directory) and preflights them
+    /// differently.
+    fn move_to<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let _ = to;
+            Err(unsupported(self.id(), "move", from))
+        })
+    }
+
+    /// Delete `path`, into the trash or for good.
+    ///
+    /// A backend whose [`Caps::trash`] is false **must refuse**
+    /// [`Removal::Trash`] instead of treating it as permanent — a delete the
+    /// user believes is recoverable may not destroy anything — and the caller
+    /// offers the permanent delete with its confirmation instead. A directory is
+    /// removed with its contents either way.
+    fn remove<'a>(&'a self, path: &'a Path, how: Removal) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let verb = match how {
+                Removal::Trash => "trash",
+                Removal::Permanent => "delete",
+            };
+            Err(unsupported(self.id(), verb, path))
+        })
+    }
+}
+
+/// The refusal every write verb defaults to: names the backend, the verb and the
+/// path, because "unsupported" alone reads like a bug rather than a capability.
+fn unsupported(id: &BackendId, verb: &str, path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{id} cannot {verb} {}: this backend has no write support",
+        path.display()
+    )
 }
 
 /// The backends this app can reach, by machine.

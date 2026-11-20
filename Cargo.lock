@@ -1251,6 +1251,7 @@ dependencies = [
  "dirs",
  "dtr-sftp",
  "dtr-shell",
+ "libc",
  "tempfile",
  "tracing",
 ]

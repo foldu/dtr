@@ -1,10 +1,13 @@
 //! This machine's filesystem.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-use crate::{Backend, BackendId, Batches, BoxFuture, Caps, Entry, Facts, Kind, Meta, Refinements};
+use crate::{
+    Backend, BackendId, Batches, BoxFuture, Caps, Conflict, Entry, Facts, Kind, Meta, Refinements,
+    Removal,
+};
 
 /// How many entries a batch holds. Small enough that a 100 000-entry directory
 /// starts showing rows at once, large enough that the channel is not the cost.
@@ -13,6 +16,10 @@ const BATCH: usize = 64;
 /// The filesystem dtr itself is running on.
 pub struct Local {
     id: BackendId,
+    /// Where [`Removal::Trash`] puts things, when a caller pins it. `None` means
+    /// the freedesktop trash the desktop shares, chosen per path in
+    /// [`crate::trash`].
+    trash_root: Option<PathBuf>,
 }
 
 impl Default for Local {
@@ -25,6 +32,21 @@ impl Local {
     pub fn new() -> Self {
         Self {
             id: BackendId::Local,
+            trash_root: None,
+        }
+    }
+
+    /// A local backend whose trash is `root`, instead of the user's.
+    ///
+    /// This is the test and sandbox seam: a delete must never reach the real
+    /// `$HOME`/`$XDG_DATA_HOME` from a test. It also bypasses the spec's
+    /// same-filesystem rule, because a temporary directory is usually on a
+    /// different device from `$XDG_DATA_HOME`, and the rule would otherwise
+    /// write `$topdir/.Trash-$uid` into the test's own temp tree.
+    pub fn with_trash_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            id: BackendId::Local,
+            trash_root: Some(root.into()),
         }
     }
 }
@@ -71,10 +93,14 @@ impl Backend for Local {
 
     fn caps(&self) -> Caps {
         // A local filesystem can be watched; a directory has no length of its
-        // own.
+        // own. It can be written everywhere, but the trash is the freedesktop
+        // spec, which is Unix's: Windows gets the permanent delete only (and the
+        // UI's confirmation with it).
         Caps {
             watch: true,
             dir_size: false,
+            write: true,
+            trash: cfg!(unix),
         }
     }
 
@@ -138,6 +164,141 @@ impl Backend for Local {
             )));
         }
         rx
+    }
+
+    fn create_dir<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<()>> {
+        let path = path.to_path_buf();
+        Box::pin(async move { blocking(move || create_dir(&path)).await })
+    }
+
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, Result<()>> {
+        let from = from.to_path_buf();
+        let to = to.to_path_buf();
+        Box::pin(async move { blocking(move || rename(&from, &to)).await })
+    }
+
+    fn copy<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, Result<u64>> {
+        let from = from.to_path_buf();
+        let to = to.to_path_buf();
+        Box::pin(async move { blocking(move || copy(&from, &to)).await })
+    }
+
+    fn move_to<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, Result<()>> {
+        // On one machine a move *is* a rename; the two verbs exist for the UI.
+        self.rename(from, to)
+    }
+
+    fn remove<'a>(&'a self, path: &'a Path, how: Removal) -> BoxFuture<'a, Result<()>> {
+        let path = path.to_path_buf();
+        let trash_root = self.trash_root.clone();
+        Box::pin(async move { blocking(move || remove(&path, how, trash_root.as_deref())).await })
+    }
+}
+
+/// Run a blocking filesystem change on a thread of its own and hand its answer
+/// back to the runtime.
+///
+/// Every write verb is blocking syscalls from end to end — a `rename` across a
+/// slow mount is not a poll-able readiness event — so none of them belongs on the
+/// thread that draws.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    compio::runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| anyhow::anyhow!("{err}"))?
+}
+
+/// `mkdir`, one level. An existing name is a conflict, not an accepted no-op.
+fn create_dir(path: &Path) -> Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(Conflict {
+            path: path.to_path_buf(),
+        }
+        .into()),
+        Err(err) => Err(err).with_context(|| format!("create directory {}", path.display())),
+    }
+}
+
+/// `rename`, refusing to replace a destination that is already there.
+///
+/// `std::fs::rename` silently replaces a file (and an empty directory) on Unix,
+/// which is the one thing the trait promises not to do; the existence check is
+/// that promise. A race can still lose to another process — no portable
+/// `rename`-if-absent exists — but the common case (a paste onto a name) is the
+/// caller's question and this answers it before anything changes.
+fn rename(from: &Path, to: &Path) -> Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(Conflict {
+            path: to.to_path_buf(),
+        }
+        .into());
+    }
+    // Name the source the caller asked about before the kernel does.
+    std::fs::symlink_metadata(from).with_context(|| format!("rename {}", from.display()))?;
+    std::fs::rename(from, to)
+        .with_context(|| format!("rename {} to {}", from.display(), to.display()))
+}
+
+/// Copy one file, returning the bytes that arrived.
+///
+/// A directory is refused with a message that says where tree copies belong: the
+/// transfer queue (§8 of `docs/manager.md`), which can segment one and report
+/// progress. Refusing is the honest answer; a silent half copy is not.
+fn copy(from: &Path, to: &Path) -> Result<u64> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(Conflict {
+            path: to.to_path_buf(),
+        }
+        .into());
+    }
+    let meta = std::fs::metadata(from).with_context(|| format!("copy {}", from.display()))?;
+    if meta.is_dir() {
+        anyhow::bail!(
+            "copy {}: copying a directory is not supported yet (it belongs to the transfer queue)",
+            from.display()
+        );
+    }
+    std::fs::copy(from, to).with_context(|| format!("copy {} to {}", from.display(), to.display()))
+}
+
+/// Delete, into the trash or for good.
+///
+/// **There is no fallback from one to the other.** A trash that cannot be done is
+/// an error, never an unlink: the caller asked for a delete that can be undone,
+/// and destroying it instead is the one thing this must not do.
+fn remove(path: &Path, how: Removal, trash_root: Option<&Path>) -> Result<()> {
+    match how {
+        Removal::Permanent => remove_permanently(path),
+        #[cfg(unix)]
+        Removal::Trash => crate::trash::trash(path, trash_root),
+        #[cfg(not(unix))]
+        Removal::Trash => {
+            let _ = trash_root;
+            anyhow::bail!(
+                "the trash is not implemented on this platform: ask for a permanent delete of {}",
+                path.display()
+            )
+        }
+    }
+}
+
+/// Unlink a file, or remove a directory with everything under it.
+///
+/// The metadata is `symlink_metadata`: a link is deleted as a link, never
+/// followed into the directory or file it names.
+fn remove_permanently(path: &Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("delete {}", path.display()))?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("delete directory {}", path.display()))
+    } else {
+        std::fs::remove_file(path).with_context(|| format!("delete {}", path.display()))
     }
 }
 

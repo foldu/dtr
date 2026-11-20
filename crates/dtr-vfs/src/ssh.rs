@@ -262,10 +262,14 @@ impl Backend for Ssh {
     fn caps(&self) -> Caps {
         // Inotify does not cross an ssh connection, and a directory has no
         // length. Saying so is what stops the UI polling for changes that can
-        // never arrive.
+        // never arrive. Writing is the same story for now: the SFTP codec has no
+        // write verbs yet (`docs/sftp.md`, F7), and there is no trash over ssh
+        // even then — a remote delete that cannot be undone must not pretend.
         Caps {
             watch: false,
             dir_size: false,
+            write: false,
+            trash: false,
         }
     }
 
