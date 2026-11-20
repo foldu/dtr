@@ -967,8 +967,9 @@ scheduling, the ssh transport, the queue card and the tab stripe. `F6`: local wr
 verbs with freedesktop trash and the one conflict card; `F7`: the same over ssh, with the segmented
 write codec and remote panes that list and write through one backend. `docs/manager.md` §12 is the
 account and the commit list; the gaps it names are the honest limits — the two F0 measurements,
-live-ssh evidence, the manager chrome's four follow-ups, and one deliberate refactor: the frontend
-glue the terminal and the portal each write is a dedup pass of its own.
+live-ssh evidence, the manager chrome's four follow-ups, and the frontend glue the terminal and the
+portal each wrote, which is now one crate (`dtr-pane-host`) with only the live native-palette reader
+left where it is (`docs/files.md` §17).
 
 The order, each gated by what it makes checkable — the stages are `F0`…`F7`, this programme's own
 numbers, so that an `M` never names two things:

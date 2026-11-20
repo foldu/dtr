@@ -731,6 +731,13 @@ own header under the toolbar, so there are two breadcrumbs (needs a body-only se
 the search field stores text without filtering and the status count is a second local listing (both
 need a small `dtr-files` API); and the sidebar's ssh rows open at `.` because `Ssh` has no `home()`.
 And the frontend glue — the winit key table, the click counter, the listing pump and the write
-executor — is written twice, once in the terminal and once in the portal. That duplication was
-measured and deliberately left as its own pass (the code is ~3 % of the portal today and would grow
-with the F4/F5 wiring); it is the one item this programme knowingly hands on.
+executor — was written twice, once in the terminal and once in the portal. That duplication was
+measured (~3 % of the portal, and growing with the F4/F5 wiring) and then removed as its own pass:
+`crates/dtr-pane-host` now holds one key table with a `Scope` that withholds write chords from a
+picker and from a read-only backend, one click-run rule, one listing pump, one write executor, and
+the keep-both naming rule is `dtr_transfer::naming` only, so the browser and the queue cannot pick
+different names (`docs/files.md` §17). The one piece deliberately left where it was is the live
+native-palette reader in `crates/dtr/src/system`: moving it under `dtr-widgets` would drag a compio
+runtime, a zbus feature and a platform reader into the widget crate, and the test rule that keeps
+the look snapshots deterministic depends on its caller living in the test binary — a design decision
+for its own change, not a mechanical move.
