@@ -5201,9 +5201,13 @@ impl dtr_frame::App for App {
         // `HTMAXBUTTON`, or Windows 11 never offers the snap-layout flyout.
         // winit has no hook for a hit test, so the window procedure is
         // subclassed — once, when the window exists and before its first frame.
+        // Spelled out rather than `client_frame.then(|| Box::new(...))`: the
+        // closure-to-trait-object coercion of the `then` result is not applied
+        // in that position (the Windows-only code is invisible to a Linux
+        // build, so only the cross-compile finds it).
         #[cfg(target_os = "windows")]
-        let on_created: Option<Box<dyn FnOnce(Arc<Window>)>> = client_frame.then(|| {
-            Box::new(|window: Arc<Window>| {
+        let on_created: Option<Box<dyn FnOnce(Arc<Window>)>> = if client_frame {
+            let install: Box<dyn FnOnce(Arc<Window>)> = Box::new(|window: Arc<Window>| {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Ok(handle) = window.window_handle() {
                     if let RawWindowHandle::Win32(win32) = handle.as_raw() {
@@ -5215,10 +5219,13 @@ impl dtr_frame::App for App {
                         unsafe { crate::chrome::windows::install(hwnd) };
                     }
                 }
-            })
-        });
+            });
+            Some(install)
+        } else {
+            None
+        };
         #[cfg(not(target_os = "windows"))]
-        let on_created = None;
+        let on_created: Option<Box<dyn FnOnce(Arc<Window>)>> = None;
 
         let options = dtr_frame::WindowOptions {
             title: String::from("dtr"),
