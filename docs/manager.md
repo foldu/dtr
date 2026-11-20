@@ -9,7 +9,8 @@ They are one project because they are one widget. The browser in a terminal pane
 daemon's picker, and the browser in a manager window of its own are the same `dtr-files` view with a
 different chrome and a different footer.
 
-**F0, F1a, F1b and F2 are built; F3…F7 are not.** §12 is the order — stages **F0…F7**, with F1 split as F1a and F1b —
+**F0…F7 are built** — every stage §12 lists, with the gaps that section names. §12 is the order —
+stages **F0…F7**, with F1 split as F1a and F1b —
 and these are this programme's numbers, not the project's `M` milestones. `PLAN.md` §3 (`M4`) is the
 same programme in a paragraph; the rest of this is the reasoning, the facts it rests on, and the things
 worth measuring before anyone promises a number.
@@ -705,3 +706,31 @@ the window" — is the Xvfb capture of the real manager window §6 describes: 10
 listing, the sidebar and the status bar, taken after an XTEST-driven navigation into `pictures/`.
 `nix build .#dtr-portal .#checks.x86_64-linux.dtr-portal-packaging` installs both binaries
 (`dtr-portal`, `dtr-files`) and both activation files, with `Exec=` naming the installed daemon.
+
+**F3, F5, F6 and F7 landed in the same pass.** `fb629c6` and `d6d1e26` (F3: the
+`dtr-portal` FileChooser backend — options, URIs, the request lifecycle over zbus, the packaging and
+`nixosModules.dtr-portal` — and then the real picker window on `dtr-frame`: warm, hidden between
+requests, X11 transient/modal, captured at 900 × 620). `03a6142` (the SFTP write codec: `MKDIR`,
+`RMDIR`, `REMOVE`, `RENAME`, `SETSTAT`, `posix-rename@openssh.com` and `statvfs@openssh.com`, plus
+the segmented read/write pair and a chunked upload), `ec2c65e` (F6's model: `Caps { write, trash }`,
+the five VFS verbs and the freedesktop Trash for the local backend), `ca2d50c`/`932dae3` (the
+browser's write request/answer state machine, the inline field, the one overwrite card, the
+permanent-delete confirmation) and `9b24088`/`12f773c` (the app worker, the six chords, the palette
+commands and the modal keyboard gate). F7: `7a10865` (the ssh backend writes) and `804bc7f` (remote
+panes list *and* write through the one VFS `Ssh` backend; the app's own SFTP worker is gone). F5:
+`74a1e9e`/`041bace` (the queue core and its scheduler), `70e15b9` (the ssh transport),
+`ac8be6d` (the conflict and queue cards) and `eb7d97a` (the app's queue worker, card, tab stripe and
+`jobs` command). The `dtr-frame` extraction F0 deferred is `f984b9b`–`d399a70`, and it is what made
+the picker and manager windows possible without a second copy of the window traps.
+
+**What is not done, stated rather than implied.** The two F0 measurements (§10.1, the GNOME
+picker's time-to-dialog, and §10.2, ours cold and warm) are still owed. Remote browsing and writing
+have no live-ssh-server evidence — the codec's mock server and the ignored `$DTR_SSH_TEST_HOST` test
+are what exists. The manager window's chrome carries four known gaps: its content draws the pane's
+own header under the toolbar, so there are two breadcrumbs (needs a body-only seam in `dtr-files`);
+the search field stores text without filtering and the status count is a second local listing (both
+need a small `dtr-files` API); and the sidebar's ssh rows open at `.` because `Ssh` has no `home()`.
+And the frontend glue — the winit key table, the click counter, the listing pump and the write
+executor — is written twice, once in the terminal and once in the portal. That duplication was
+measured and deliberately left as its own pass (the code is ~3 % of the portal today and would grow
+with the F4/F5 wiring); it is the one item this programme knowingly hands on.
