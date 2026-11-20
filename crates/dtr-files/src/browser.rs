@@ -18,18 +18,23 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use egui::{Align2, Stroke};
 
-use dtr_vfs::{Backend as _, Local};
-use dtr_widgets::{ContextMenu, Glyph, Icon, IconTile, MenuRow, Skin, icon_tile, tile_height};
+use dtr_vfs::{Backend as _, BackendId, Caps, Local, Removal};
+use dtr_widgets::{
+    Button, Card, Conflict, ConflictAnswer, ConflictDecision, ContextMenu, Edit, Editable, Glyph,
+    Icon, IconTile, MenuRow, Skin, icon_tile, row, tile_height,
+};
 
 use crate::grid::{cell_rect, columns, first_row, index_at, row_of, rows, visible_rows};
 use crate::pick::{Mode, Outcome, Pick, Request};
 use crate::theme::IconSet;
 use crate::thumb::{Thumbs, looks_like_image};
+use crate::write::{Failure, WriteOp, WriteRequest, Writes, next_free_name, valid_name};
 
 const ROW_HEIGHT: f32 = 18.0;
 /// The gap between two grid cells, and the inset of the grid inside the body:
@@ -54,6 +59,17 @@ const CLOSE_SIDE: f32 = 20.0;
 const SORT_WIDTH: f32 = 72.0;
 /// The places button's slot at the header's left: a glyph, not a word.
 const PLACES_WIDTH: f32 = 22.0;
+/// The inline field's width for a new folder: a band under the header, wide
+/// enough for a name and not the whole listing.
+const EDIT_WIDTH: f32 = 260.0;
+/// The smallest an inline field may get in a pane narrower than its own row.
+const EDIT_MIN_WIDTH: f32 = 120.0;
+/// The inline field's identity, shared by the `Editable`, the child scope its
+/// text field lives in and the one focus request. The text field's id is
+/// arithmetic over these three (`ui.scope_id().with("child").with((EDIT_ID,
+/// "text"))`), so they cannot drift apart — a focus request at a different id is
+/// a field that opens unfocused.
+const EDIT_ID: &str = "file-edit";
 
 /// One line in the listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +140,23 @@ pub enum Key {
     PageDown,
     /// The parent directory, whatever the view: `Backspace` and `Alt+Up`.
     Parent,
+    /// `F2`: rename the row the cursor is on, in the listing.
+    ///
+    /// The browser takes a `Key`, not a chord: which chord opens the field is
+    /// `[keys]`' business and the app's mapping, exactly as it is for the
+    /// arrows.
+    Rename,
+    /// `Delete`: trash the selection where the backend has a trash, and ask for
+    /// the permanent delete where it does not.
+    Delete,
+    /// `Shift+Delete`: the one permanent delete, with its confirmation.
+    DeletePermanently,
+    /// A folder in this directory — `Ctrl+Shift+N` by default.
+    NewFolder,
+    /// Keep the selection for a paste, in this browser's own buffer.
+    Copy,
+    /// Copy the browser's buffer into this directory.
+    Paste,
 }
 
 /// What a listing is ordered by.
@@ -277,7 +310,11 @@ pub struct Browser {
     view: View,
     /// A filesystem problem to show in the pane itself. The pane stays usable
     /// and its header stays visible; it never goes blank.
-    message: Option<String>,
+    ///
+    /// A cell because a write plan started from the inline field is decided
+    /// inside a draw (`&Browser`), and the footer it feeds is drawn beside it:
+    /// the same bargain `menu` makes for the right-press menu.
+    message: RefCell<Option<String>>,
     /// Set when this pane browses another machine over SFTP. `None` is the
     /// local filesystem.
     remote: Option<Remote>,
@@ -351,6 +388,22 @@ pub struct Browser {
     /// `dtr --files some/file` names a file the walk has not sent yet, so the
     /// selection is a promise rather than a lookup.
     wanted: Option<String>,
+    /// What the location's backend can do. **Read-only by default**, so a wrong
+    /// guess hides a verb instead of offering a broken one; a local pane asks
+    /// its own backend, a remote one stays read-only until F7 says otherwise.
+    caps: Caps,
+    /// The write requests of the current operation, its queue and its one
+    /// question. A cell because the conflict card is drawn from a `&Browser`,
+    /// like `menu` and `crumbs`.
+    writes: RefCell<Writes>,
+    /// The inline field, when a rename or a new folder is being typed.
+    edit: RefCell<Option<EditState>>,
+    /// The permanent delete's confirmation, when it is up.
+    confirm: RefCell<Option<Confirm>>,
+    /// The paths a copy put aside for a paste. The browser's own buffer rather
+    /// than the system clipboard: a paste inside one pane has to work without
+    /// asking anybody else, and a path is not text to paste into a shell.
+    clipboard: RefCell<Vec<PathBuf>>,
 }
 
 /// A listing on its way in.
@@ -391,6 +444,44 @@ pub struct Remote {
     pub download: Option<PathBuf>,
 }
 
+/// Which name the inline field is writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditKind {
+    /// The row the cursor is on, in place.
+    Rename,
+    /// A band under the header: the name of a folder that does not exist yet.
+    NewFolder,
+}
+
+/// The inline name field: what it is, what has been typed, and why the last
+/// press refused it.
+///
+/// The text is owned here, not in a widget: the field is drawn from a
+/// `&Browser`, so the value it edits is the browser's own cell — the same
+/// bargain `Pick`'s draft makes for a save dialog.
+struct EditState {
+    kind: EditKind,
+    text: String,
+    /// The refusal the footer says after an empty or unusable name.
+    problem: Option<String>,
+    /// Focus the field on the next frame it is drawn: a field that opens without
+    /// the keyboard is a field a person has to click before typing into.
+    focus: bool,
+}
+
+/// The permanent delete's confirmation.
+///
+/// A delete that cannot be undone is the one verb §7 asks about first, and a
+/// backend without a trash (`Caps::trash` false, Windows, the in-memory map)
+/// only has that one. The card is drawn in the pane and answered there; this is
+/// the state it is drawn from.
+struct Confirm {
+    /// The row names, in listing order, for the card's body.
+    names: Vec<String>,
+    /// The paths to remove, kept where the answer is given.
+    paths: Vec<PathBuf>,
+}
+
 impl Browser {
     /// Open at `start`, or at the process's current directory when there is no
     /// start path. A path that names a file shows its parent directory and
@@ -425,7 +516,7 @@ impl Browser {
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
-            message: None,
+            message: RefCell::new(None),
             remote: Some(Remote {
                 alias: alias.to_owned(),
                 pending: None,
@@ -437,6 +528,18 @@ impl Browser {
             refining: None,
             facts_for: None,
             wanted: None,
+            // A remote backend has no write verbs until F7 (`docs/trash.md` §6),
+            // so a remote pane is read-only rather than offering a broken verb.
+            caps: Caps {
+                watch: false,
+                dir_size: false,
+                write: false,
+                trash: false,
+            },
+            writes: RefCell::new(Writes::default()),
+            edit: RefCell::new(None),
+            confirm: RefCell::new(None),
+            clipboard: RefCell::new(Vec::new()),
         };
         browser.remote_request();
         browser
@@ -487,7 +590,7 @@ impl Browser {
         }
         remote.awaiting = None;
         self.cwd = path;
-        self.message = None;
+        self.message.borrow_mut().take();
         self.adopt(entries);
         self.selected = clamp_selection(self.selected, self.entries.len());
     }
@@ -798,21 +901,57 @@ impl Browser {
 
     /// Draw the right-press menu, if it is open, and report the row chosen.
     ///
-    /// The rows are the two things a read-only browser can actually do, and
-    /// neither says its chord: the chords are `[keys]`' business, and a menu that
-    /// printed the default would lie the first time somebody rebound one. They
-    /// are the same two verbs the pane already has — `Enter` and `ctrl-alt-c` —
-    /// rather than a menu that promises the rows F5 and F6 will bring.
+    /// The rows are built from [`Self::caps`] and the selection, and none of them
+    /// says its chord: the chords are `[keys]`' business, and a menu that printed
+    /// the default would lie the first time somebody rebound one.
     fn menu_ui(&self, ctx: &egui::Context, skin: &Skin, id: egui::Id) -> Option<MenuChoice> {
         if !self.menu.borrow().is_open() {
             return None;
         }
-        let rows = [MenuRow::new("open"), MenuRow::new("copy path")];
+        let choices = self.menu_choices();
+        let rows: Vec<MenuRow<'_>> = choices.iter().map(|(row, _)| *row).collect();
         let chosen = self.menu.borrow_mut().ui(ctx, skin, id, &rows);
-        chosen.map(|index| match index {
-            0 => MenuChoice::Open,
-            _ => MenuChoice::CopyPath,
-        })
+        chosen.map(|index| choices[index].1)
+    }
+
+    /// The right-press menu's rows, and what each asks for.
+    ///
+    /// **Filtered, never greyed.** A read-only backend has the two verbs the
+    /// pane always had; a writable one adds the write verbs, and a row the
+    /// backend cannot do is absent rather than a control that fails when pressed
+    /// (`docs/manager.md` §7). `rename`, `copy`, `make a copy` and `delete` are
+    /// about a row and need one; `new folder` and `paste` are about the
+    /// directory and do not.
+    ///
+    /// `move to…` is deliberately missing: it needs a directory picker, and a
+    /// menu row that opened a second half-built dialog would be a promise this
+    /// milestone cannot keep (`docs/manager.md` §7 has it with the queue). The
+    /// gap is in the report, not in the menu.
+    fn menu_choices(&self) -> Vec<(MenuRow<'static>, MenuChoice)> {
+        let mut rows = vec![
+            (MenuRow::new("open"), MenuChoice::Open),
+            (MenuRow::new("copy path"), MenuChoice::CopyPath),
+        ];
+        if !self.caps.write {
+            return rows;
+        }
+        if !self.selected_files().is_empty() {
+            rows.push((MenuRow::new("rename"), MenuChoice::Rename));
+            rows.push((MenuRow::new("copy"), MenuChoice::Copy));
+            rows.push((MenuRow::new("make a copy"), MenuChoice::MakeCopy));
+            rows.push((
+                MenuRow::new(match self.caps.trash {
+                    true => "delete",
+                    false => "delete permanently",
+                }),
+                MenuChoice::Delete,
+            ));
+        }
+        rows.push((MenuRow::new("new folder"), MenuChoice::NewFolder));
+        if !self.clipboard.borrow().is_empty() {
+            rows.push((MenuRow::new("paste"), MenuChoice::Paste));
+        }
+        rows
     }
 
     /// Whether this pane is answering a picker's question (`docs/manager.md` §4).
@@ -982,7 +1121,449 @@ impl Browser {
     /// A worker error, shown the way a filesystem error is.
     pub fn apply_failure(&mut self, message: String) {
         if self.remote.is_some() {
-            self.message = Some(message);
+            self.set_message(message);
+        }
+    }
+
+    /// Say something in the footer, replacing whatever it said.
+    fn set_message(&self, message: impl Into<String>) {
+        *self.message.borrow_mut() = Some(message.into());
+    }
+
+    // ---- what the location's backend can do ---------------------------------
+
+    /// What this pane's backend can do, which is what its menu is filtered by.
+    pub fn caps(&self) -> Caps {
+        self.caps
+    }
+
+    /// Tell the pane what its backend can do.
+    ///
+    /// The caller's answer, never a guess: a local pane asks
+    /// `Local::new().caps()` in its constructor and a remote one stays read-only
+    /// until F7 gives it write verbs. A read-only pane does not offer a verb that
+    /// would fail — a menu of dead rows is the bug this hides instead of
+    /// reporting.
+    pub fn set_caps(&mut self, caps: Caps) {
+        self.caps = caps;
+    }
+
+    /// The machine this pane's location is on, for a write request.
+    fn backend_id(&self) -> BackendId {
+        match self.alias() {
+            Some(alias) => BackendId::Ssh(alias.to_owned()),
+            None => BackendId::Local,
+        }
+    }
+
+    // ---- writes: requests out, answers in -----------------------------------
+    //
+    // Nothing here touches a file. The app's worker takes a request, executes it
+    // through `dtr_vfs`'s verbs and reports the answer; a conflict comes back as
+    // a `dtr_vfs::Conflict` and becomes the one overwrite card, which this pane
+    // draws.
+
+    /// The next write to execute, if there is one and nothing is being asked.
+    ///
+    /// **The worker owns the I/O.** Take one request, execute it, then report
+    /// [`Self::write_succeeded`] or [`Self::write_failed`] before asking again:
+    /// the plan is sequential because a conflict question is about *the* request
+    /// that conflicted, and the answer must land before the next one starts.
+    pub fn take_write(&self) -> Option<WriteRequest> {
+        self.writes.borrow_mut().take_request()
+    }
+
+    /// A request finished. `true` when the whole operation is finished, which is
+    /// when the caller should [`Self::refresh`] the listing: every verb changes
+    /// it, and a delete that left its row on screen reads as a delete that did
+    /// nothing.
+    pub fn write_succeeded(&self) -> bool {
+        self.writes.borrow_mut().succeeded()
+    }
+
+    /// A request failed with `err`.
+    ///
+    /// A [`dtr_vfs::Conflict`] opens the overwrite card ([`Failure::Asking`]);
+    /// anything else puts its words in the footer and stops the batch
+    /// ([`Failure::Stopped`]). The caller refreshes when
+    /// [`Failure::Stopped`] or [`Failure::Idle`] comes back, because what
+    /// succeeded before the failure is already on disk.
+    pub fn write_failed(&self, err: &anyhow::Error) -> Failure {
+        let failure = self.writes.borrow_mut().failed(err);
+        if let Some(message) = self.writes.borrow().failure().map(str::to_owned) {
+            self.set_message(message);
+        }
+        failure
+    }
+
+    /// Whether the overwrite card is up.
+    pub fn write_question(&self) -> bool {
+        self.writes.borrow().question().is_some()
+    }
+
+    /// Whether anything in this pane wants the keyboard for itself: the inline
+    /// field, the overwrite card, or the permanent delete's confirmation.
+    ///
+    /// The app asks before mapping a key to the listing. A rename field where `r`
+    /// reloads and `h` walks up a directory is a field nobody can type in.
+    pub fn write_modal(&self) -> bool {
+        self.edit_open() || self.write_question() || self.confirm.borrow().is_some()
+    }
+
+    /// Whether a new write may start: not while a field, a card or a
+    /// confirmation is up.
+    ///
+    /// The app is meant to stop mapping keys at [`Self::write_modal`], but a
+    /// caller that does not must not start a second operation under a dialog —
+    /// a delete behind an open overwrite question is a card about one file while
+    /// another disappears.
+    fn write_ready(&self) -> bool {
+        !self.write_modal()
+    }
+
+    /// Open the inline field on the row the cursor is on, prefilled with its
+    /// name: what `F2` asks for.
+    pub fn begin_rename(&mut self) {
+        if !self.write_ready() {
+            return;
+        }
+        if !self.caps.write {
+            self.set_message("this machine cannot rename files");
+            return;
+        }
+        let Some(entry) = self.selected_entry() else {
+            self.set_message("nothing to rename");
+            return;
+        };
+        if entry.is_parent() {
+            self.set_message("the parent row is a place, not a file");
+            return;
+        }
+        let text = entry.name.clone();
+        *self.edit.borrow_mut() = Some(EditState {
+            kind: EditKind::Rename,
+            text,
+            problem: None,
+            focus: true,
+        });
+    }
+
+    /// Open the inline field for a folder in this directory.
+    pub fn begin_new_folder(&mut self) {
+        if !self.write_ready() {
+            return;
+        }
+        if !self.caps.write {
+            self.set_message("this machine cannot create folders");
+            return;
+        }
+        *self.edit.borrow_mut() = Some(EditState {
+            kind: EditKind::NewFolder,
+            text: String::new(),
+            problem: None,
+            focus: true,
+        });
+    }
+
+    /// Escape: the field goes away and nothing is written.
+    pub fn cancel_edit(&self) {
+        self.edit.borrow_mut().take();
+    }
+
+    /// Whether the inline field is open.
+    pub fn edit_open(&self) -> bool {
+        self.edit.borrow().is_some()
+    }
+
+    /// The field's refusal, in the words the footer says.
+    pub fn edit_problem(&self) -> Option<String> {
+        self.edit
+            .borrow()
+            .as_ref()
+            .and_then(|edit| edit.problem.clone())
+    }
+
+    /// The paths a copy put aside, in this browser's own buffer.
+    pub fn clipboard(&self) -> Vec<PathBuf> {
+        self.clipboard.borrow().clone()
+    }
+
+    /// Put paths in the paste buffer.
+    ///
+    /// A caller may supply them — the app's clipboard, another pane — which is
+    /// what makes a copy and a paste in two panes one operation rather than two
+    /// half ones.
+    pub fn set_clipboard(&mut self, paths: Vec<PathBuf>) {
+        *self.clipboard.borrow_mut() = paths;
+    }
+
+    /// Copy the selection into the paste buffer.
+    ///
+    /// The browser's buffer, not the system clipboard: a path is not text to
+    /// paste into a shell, and `ctrl-alt-c` already puts the paths on the
+    /// system's clipboard. What this is for is the paste the menu offers.
+    pub fn copy_selection(&mut self) {
+        if !self.write_ready() {
+            return;
+        }
+        let paths = self.selected_files();
+        if paths.is_empty() {
+            self.set_message("nothing to copy");
+            return;
+        }
+        let count = paths.len();
+        *self.clipboard.borrow_mut() = paths;
+        self.set_message(items(count, "copied"));
+    }
+
+    /// Copy what the buffer holds into this directory.
+    pub fn paste(&mut self) {
+        if !self.write_ready() {
+            return;
+        }
+        if !self.caps.write {
+            self.set_message("this machine cannot write files");
+            return;
+        }
+        let clipboard = self.clipboard.borrow().clone();
+        if clipboard.is_empty() {
+            self.set_message("nothing to paste");
+            return;
+        }
+        let mut taken = self.taken_names();
+        let mut ops = Vec::new();
+        for from in clipboard {
+            let Some(name) = from
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            let mut destination = self.cwd.join(&name);
+            // A paste into the directory the file already lives in is a copy of
+            // it, not a question about replacing it with itself: "replace" there
+            // would remove the source and then find nothing to copy.
+            if destination == from || taken.contains(&name) {
+                let fresh = next_free_name(&name, &taken);
+                taken.insert(fresh.clone());
+                destination = self.cwd.join(fresh);
+            }
+            ops.push(WriteOp::Copy {
+                from,
+                to: destination,
+            });
+        }
+        if ops.is_empty() {
+            self.set_message("nothing to paste");
+            return;
+        }
+        let count = ops.len();
+        self.start_plan(ops, items(count, "copying"));
+    }
+
+    /// Copy the selection inside this directory, numbered: `report (2).txt`.
+    ///
+    /// No card, because there is no question: a copy of a name that is in front
+    /// of you is the numbered one by definition.
+    pub fn make_copy(&mut self) {
+        if !self.write_ready() {
+            return;
+        }
+        if !self.caps.write {
+            self.set_message("this machine cannot write files");
+            return;
+        }
+        let paths = self.selected_files();
+        if paths.is_empty() {
+            self.set_message("nothing to copy");
+            return;
+        }
+        let mut taken = self.taken_names();
+        let mut ops = Vec::new();
+        for from in paths {
+            let Some(name) = from
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            let fresh = next_free_name(&name, &taken);
+            taken.insert(fresh.clone());
+            ops.push(WriteOp::Copy {
+                from,
+                to: self.cwd.join(fresh),
+            });
+        }
+        let count = ops.len();
+        self.start_plan(ops, items(count, "copying"));
+    }
+
+    /// Delete the selection — into the trash where the backend has one, and
+    /// behind a confirmation where it does not.
+    ///
+    /// `permanently` is `Shift+Delete`: the one delete that cannot be undone, and
+    /// §7 says it asks first. A backend without a trash (`Caps::trash` false)
+    /// has only that delete, so its ordinary key asks too.
+    pub fn delete(&mut self, permanently: bool) {
+        if !self.write_ready() {
+            return;
+        }
+        if !self.caps.write {
+            self.set_message("this machine cannot delete files");
+            return;
+        }
+        let paths = self.selected_files();
+        if paths.is_empty() {
+            self.set_message("nothing to delete");
+            return;
+        }
+        let how = match permanently || !self.caps.trash {
+            true => Removal::Permanent,
+            false => Removal::Trash,
+        };
+        if how == Removal::Permanent {
+            let names = paths
+                .iter()
+                .filter_map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .collect();
+            *self.confirm.borrow_mut() = Some(Confirm { names, paths });
+            return;
+        }
+        let count = paths.len();
+        self.start_plan(
+            paths
+                .into_iter()
+                .map(|at| WriteOp::Remove { at, how })
+                .collect(),
+            items(count, "trashing"),
+        );
+    }
+
+    /// Whether a permanent delete is waiting for its confirmation.
+    pub fn confirm_permanent(&self) -> bool {
+        self.confirm.borrow().is_some()
+    }
+
+    /// Answer the permanent delete's confirmation.
+    fn answer_confirm(&self, yes: bool) {
+        let Some(confirm) = self.confirm.borrow_mut().take() else {
+            return;
+        };
+        if !yes {
+            return;
+        }
+        let count = confirm.paths.len();
+        let ops = confirm
+            .paths
+            .into_iter()
+            .map(|at| WriteOp::Remove {
+                at,
+                how: Removal::Permanent,
+            })
+            .collect();
+        self.start_plan(ops, items(count, "deleting"));
+    }
+
+    /// Answer the overwrite card.
+    fn answer_conflict(&self, answer: ConflictAnswer) {
+        self.writes.borrow_mut().answer(answer);
+    }
+
+    /// Close the overwrite card: this operation writes nothing more.
+    fn cancel_conflict(&self) {
+        self.writes.borrow_mut().cancel();
+    }
+
+    /// The selection as real paths: the parent row is a place, not a file, and
+    /// a write must never act on it.
+    fn selected_files(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| !entry.is_parent() && self.is_selected(*index))
+            .map(|(_, entry)| self.cwd.join(&entry.name))
+            .collect()
+    }
+
+    /// Every name in this directory the view knows, shown or hidden.
+    fn taken_names(&self) -> BTreeSet<String> {
+        self.entries
+            .iter()
+            .chain(self.hidden.iter())
+            .filter(|entry| !entry.is_parent())
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// Whether this directory already has a row called `name`, hidden or not.
+    fn name_taken(&self, name: &str) -> bool {
+        self.entries
+            .iter()
+            .chain(self.hidden.iter())
+            .any(|entry| !entry.is_parent() && entry.name == name)
+    }
+
+    /// Begin one operation: the queue is the browser's, and the caller takes one
+    /// request at a time from it.
+    fn start_plan(&self, ops: Vec<WriteOp>, message: String) {
+        if ops.is_empty() {
+            return;
+        }
+        let replace = match self.caps.trash {
+            true => Removal::Trash,
+            false => Removal::Permanent,
+        };
+        let names = self.taken_names();
+        let mut writes = self.writes.borrow_mut();
+        *writes = Writes::new(self.backend_id(), replace, names);
+        for op in ops {
+            writes.push(op);
+        }
+        drop(writes);
+        self.set_message(message);
+    }
+
+    /// Take the inline field's answer: a request, or a refusal the footer says.
+    fn submit_edit(&self, kind: EditKind, text: &str) {
+        if let Err(problem) = valid_name(text) {
+            if let Some(edit) = self.edit.borrow_mut().as_mut() {
+                edit.problem = Some(problem.to_owned());
+            }
+            return;
+        }
+        match kind {
+            EditKind::NewFolder => {
+                if self.name_taken(text) {
+                    if let Some(edit) = self.edit.borrow_mut().as_mut() {
+                        edit.problem = Some(format!("{text} already exists"));
+                    }
+                    return;
+                }
+                self.edit.borrow_mut().take();
+                self.start_plan(
+                    vec![WriteOp::CreateDir {
+                        at: self.cwd.join(text),
+                    }],
+                    items(1, "creating"),
+                );
+            }
+            EditKind::Rename => {
+                let Some(entry) = self.selected_entry() else {
+                    self.edit.borrow_mut().take();
+                    return;
+                };
+                if entry.is_parent() || entry.name == text {
+                    self.edit.borrow_mut().take();
+                    return;
+                }
+                let from = self.cwd.join(&entry.name);
+                let to = self.cwd.join(text);
+                self.edit.borrow_mut().take();
+                self.start_plan(vec![WriteOp::Rename { from, to }], items(1, "renaming"));
+            }
         }
     }
 
@@ -994,7 +1575,9 @@ impl Browser {
     fn remote_request(&mut self) {
         if let Some(remote) = self.remote.as_mut() {
             remote.pending = Some(self.cwd.clone());
-            self.message = Some("loading…".to_owned());
+        }
+        if self.remote.is_some() {
+            self.set_message("loading…");
         }
     }
 
@@ -1021,13 +1604,21 @@ impl Browser {
             frame: Cell::new(None),
             icons: RefCell::new(IconSet::system()),
             thumbs: RefCell::new(Thumbs::default()),
-            message: None,
+            message: RefCell::new(None),
             remote: None,
             local: Local::new(),
             incoming: None,
             refining: None,
             facts_for: None,
             wanted: None,
+            // A local filesystem is the one backend that can write today, and it
+            // is the one that says whether it has a trash (Unix does, Windows
+            // does not). Asking the backend is the whole point of `Caps`.
+            caps: Local::new().caps(),
+            writes: RefCell::new(Writes::default()),
+            edit: RefCell::new(None),
+            confirm: RefCell::new(None),
+            clipboard: RefCell::new(Vec::new()),
         };
 
         let (mut cwd, select) = match start {
@@ -1132,6 +1723,15 @@ impl Browser {
             Key::Top => self.selected = 0,
             Key::Bottom => self.selected = last,
             Key::Reload => self.refresh(),
+            // The write verbs the app's `[keys]` map onto. None of them touches
+            // the disk here: each opens a field or starts a plan, and the app's
+            // worker executes what `take_write` hands out.
+            Key::Rename => self.begin_rename(),
+            Key::NewFolder => self.begin_new_folder(),
+            Key::Delete => self.delete(false),
+            Key::DeletePermanently => self.delete(true),
+            Key::Copy => self.copy_selection(),
+            Key::Paste => self.paste(),
             Key::Enter => {
                 let entry = self.selected_entry()?.clone();
                 if entry.is_parent() {
@@ -1195,7 +1795,7 @@ impl Browser {
         self.entries.clear();
         self.selected = 0;
         self.scroll.set(0);
-        self.message = None;
+        self.message.borrow_mut().take();
         self.incoming = None;
         self.refining = None;
         self.facts_for = None;
@@ -1320,7 +1920,7 @@ impl Browser {
             self.incoming = None;
         }
         if let Some(message) = failure {
-            self.message = Some(message);
+            self.set_message(message);
         }
         if !arrived.is_empty() {
             self.merge(arrived);
@@ -1700,41 +2300,56 @@ impl Browser {
             return;
         }
 
-        // Footer: a filesystem problem, the selected path, or a quiet hint.
-        if let Some(message) = &self.message {
-            painter.text(
-                egui::pos2(footer.left() + 8.0, footer.center().y),
-                Align2::LEFT_CENTER,
-                message,
-                small.clone(),
-                palette.accent,
-            );
-        } else if self.reading() {
+        // Footer: the field's refusal, a filesystem or write problem, the
+        // selected path, or a quiet hint. The line is computed first and owned,
+        // because every source below is a cell this draw would otherwise borrow
+        // while painting its answer.
+        let mut said: Option<(String, egui::Color32)> = None;
+        if let Some(problem) = self
+            .edit
+            .borrow()
+            .as_ref()
+            .and_then(|edit| edit.problem.clone())
+        {
+            said = Some((problem, palette.accent));
+        }
+        if said.is_none()
+            && let Some(message) = self.message.borrow().clone()
+        {
+            said = Some((message, palette.accent));
+        }
+        if said.is_none()
+            && let Some(message) = self.writes.borrow().failure().map(str::to_owned)
+        {
+            said = Some((message, palette.accent));
+        }
+        if said.is_none() && self.edit.borrow().is_some() {
+            let hint = match self.edit.borrow().as_ref().map(|edit| edit.kind) {
+                Some(EditKind::Rename) => "Enter renames · Escape cancels",
+                _ => "Enter creates · Escape cancels",
+            };
+            said = Some((hint.to_owned(), palette.dim));
+        }
+        if said.is_none() && self.reading() {
             // **A streamed listing must never render its emptiness as a fact.**
             // `empty directory` while the walk is running is a claim the pane
             // cannot make yet; the count is what it does know.
-            let said = match self.pass_progress() {
+            let reading = match self.pass_progress() {
                 Some((answered, total)) => format!("reading sizes… {answered}/{total}"),
                 None => format!("reading… {} so far", self.entries.len().saturating_sub(1)),
             };
-            painter.text(
-                egui::pos2(footer.left() + 8.0, footer.center().y),
-                Align2::LEFT_CENTER,
-                said,
-                small.clone(),
-                palette.dim,
-            );
-        } else if let Some(label) = self.selection_label() {
+            said = Some((reading, palette.dim));
+        }
+        if said.is_none()
+            && let Some(label) = self.selection_label()
+        {
             // Several selected rows are a number and not a path: the footer has one
             // line, and the path of the third of five answers nothing.
-            painter.text(
-                egui::pos2(footer.left() + 8.0, footer.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                small.clone(),
-                palette.dim,
-            );
-        } else if let Some(entry) = self.selected_entry() {
+            said = Some((label, palette.dim));
+        }
+        if said.is_none()
+            && let Some(entry) = self.selected_entry()
+        {
             let path = if entry.is_parent() {
                 parent_of(&self.cwd)
                     .map(|parent| display_path(&parent, &self.home))
@@ -1742,21 +2357,27 @@ impl Browser {
             } else {
                 display_join(&self.cwd, &entry.name, &self.home)
             };
-            painter.text(
-                egui::pos2(footer.left() + 8.0, footer.center().y),
-                Align2::LEFT_CENTER,
-                path,
-                small.clone(),
-                palette.dim,
-            );
-        } else if self.message.is_none() {
-            painter.text(
-                footer.center(),
-                Align2::CENTER_CENTER,
-                "empty directory",
-                small.clone(),
-                palette.dim,
-            );
+            said = Some((path, palette.dim));
+        }
+        match said {
+            Some((line, colour)) => {
+                painter.text(
+                    egui::pos2(footer.left() + 8.0, footer.center().y),
+                    Align2::LEFT_CENTER,
+                    line,
+                    small.clone(),
+                    colour,
+                );
+            }
+            None => {
+                painter.text(
+                    footer.center(),
+                    Align2::CENTER_CENTER,
+                    "empty directory",
+                    small.clone(),
+                    palette.dim,
+                );
+            }
         }
 
         draw_border(ui, skin, rect, focused);
@@ -2004,6 +2625,261 @@ impl Browser {
             ui.ctx().request_repaint();
         }
     }
+
+    /// Where the inline field goes: over the row being renamed, or in a band
+    /// under the header for a folder that does not exist yet.
+    ///
+    /// The rectangle comes from the frame the draw just recorded — the same
+    /// bargain the hit test makes — so a field anchored to a row cannot be drawn
+    /// where that row is not.
+    fn edit_rect(&self, kind: EditKind, skin: &Skin) -> Option<egui::Rect> {
+        let frame = self.frame.get()?;
+        match kind {
+            EditKind::Rename => {
+                let rect = match frame.layout {
+                    Layout::List => {
+                        // Clamped into the page: a wheel notch under an open
+                        // field must not put the field over the header.
+                        let offset = self
+                            .selected
+                            .saturating_sub(frame.first)
+                            .min(frame.visible.saturating_sub(1));
+                        let row = egui::Rect::from_min_size(
+                            egui::pos2(
+                                frame.body.left() + 4.0,
+                                frame.body.top() + offset as f32 * ROW_HEIGHT,
+                            ),
+                            egui::vec2((frame.body.width() - 8.0).max(1.0), ROW_HEIGHT),
+                        );
+                        egui::Rect::from_min_size(
+                            egui::pos2(row.left(), row.center().y - skin.style.row / 2.0),
+                            egui::vec2(row.width(), skin.style.row),
+                        )
+                    }
+                    Layout::Grid => {
+                        let cell = cell_rect(
+                            self.selected,
+                            frame.across,
+                            frame.cell,
+                            frame.gap,
+                            frame.content.min,
+                            frame.first,
+                        );
+                        // A tile's label is its bottom: the field takes that,
+                        // clamped into the body so a wheel notch under an open
+                        // field cannot put it over the header.
+                        let top = (cell.bottom() - skin.style.row).clamp(
+                            frame.body.top(),
+                            (frame.body.bottom() - skin.style.row).max(frame.body.top()),
+                        );
+                        egui::Rect::from_min_size(
+                            egui::pos2(cell.left(), top),
+                            egui::vec2(cell.width(), skin.style.row),
+                        )
+                    }
+                };
+                Some(rect)
+            }
+            EditKind::NewFolder => {
+                let width = EDIT_WIDTH
+                    .min(frame.body.width() - 16.0)
+                    .max(EDIT_MIN_WIDTH.min(frame.body.width() - 16.0))
+                    .max(1.0);
+                Some(egui::Rect::from_min_size(
+                    egui::pos2(frame.body.left() + 8.0, frame.body.top() + 4.0),
+                    egui::vec2(width, skin.style.row),
+                ))
+            }
+        }
+    }
+
+    /// The inline name field, in an area of its own.
+    ///
+    /// Its own area for the reason the close cross has one: the pane is
+    /// `interactable(false)`, and a text field drawn inside it would be a picture
+    /// of a field. The text lives in the browser's cell, so the field survives
+    /// frames the way the picker's save draft does.
+    fn edit_ui(&self, ctx: &egui::Context, id: egui::Id, skin: &Skin) {
+        let kind = match self.edit.borrow().as_ref() {
+            Some(edit) => edit.kind,
+            None => return,
+        };
+        let Some(rect) = self.edit_rect(kind, skin) else {
+            return;
+        };
+        let area_id = id.with("field");
+        dtr_widgets::prime_area(ctx, area_id, egui::Order::Background, rect, true);
+        let (mut typed, mut submit, mut cancel) = (None::<String>, false, false);
+        let (kind, text) = {
+            let mut state = self.edit.borrow_mut();
+            let Some(edit) = state.as_mut() else {
+                return;
+            };
+            egui::Area::new(area_id)
+                // The pane's order, and after it, so the field is above the row
+                // it is replacing.
+                .order(egui::Order::Background)
+                .fixed_pos(rect.min)
+                .constrain(false)
+                .fade_in(false)
+                .show(ctx, |ui| {
+                    ui.set_min_size(rect.size());
+                    ui.set_max_size(rect.size());
+                    ui.spacing_mut().interact_size.y = skin.style.row;
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(rect).id_salt(EDIT_ID),
+                        |ui| {
+                            // A name field takes the keyboard the frame it
+                            // opens: the direction is the framework's own "give
+                            // it to the next widget that asks", and this scope's
+                            // only such widget is the text field. Predicting the
+                            // field's id instead would be arithmetic over another
+                            // crate's private salts, which is a focus request that
+                            // silently misses the first time that crate moves.
+                            if edit.focus {
+                                ui.memory_mut(|memory| {
+                                    memory.move_focus(egui::FocusDirection::Next);
+                                });
+                                edit.focus = false;
+                            }
+                            let label = match edit.kind {
+                                EditKind::Rename => "new name",
+                                EditKind::NewFolder => "folder name",
+                            };
+                            let choices: [&str; 0] = [];
+                            if let Some(result) = Editable::new(EDIT_ID, &edit.text, label)
+                                .width(rect.width())
+                                .valid(edit.problem.is_none())
+                                .show(ui, skin, &choices)
+                                && let Edit::Typed(text) = result
+                            {
+                                typed = Some(text);
+                            }
+                            // Read after the field so a half-typed name is in
+                            // `edit.text` before the press is acted on. A widget
+                            // does not remove the frame's keys, so this is the
+                            // same keystroke the text field just saw.
+                            submit = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                        },
+                    );
+                });
+            if let Some(text) = typed.take() {
+                edit.text = text;
+            }
+            (edit.kind, edit.text.clone())
+        };
+        if cancel {
+            self.cancel_edit();
+        } else if submit {
+            self.submit_edit(kind, &text);
+        }
+    }
+
+    /// The one overwrite card, drawn over the pane while a conflict is asking.
+    ///
+    /// The card's state is [`Writes`]', so the app needs no second channel for
+    /// it: it only has to stop mapping keys to the listing while
+    /// [`Self::write_modal`] says so. Answering writes the next request, which
+    /// the app pumps with [`Self::take_write`].
+    fn conflict_ui(&self, ui: &mut egui::Ui, skin: &Skin, id: egui::Id) {
+        let Some(question) = self.writes.borrow().question().cloned() else {
+            return;
+        };
+        let destination = display_path(&question.destination, &self.home);
+        let source = question
+            .source()
+            .map(|path| display_path(path, &self.home))
+            .unwrap_or_else(|| destination.clone());
+        let detail = match question.remaining {
+            0 => None,
+            remaining => Some(format!(
+                "this answer settles the other {remaining} item(s) in the batch"
+            )),
+        };
+        let mut card = Conflict::new(&source, &destination)
+            .id(id.with("conflict"))
+            .title("replace existing file?")
+            .focus(ConflictAnswer::Skip);
+        if let Some(detail) = &detail {
+            card = card.detail(detail);
+        }
+        if let Some(decision) = card.show(ui, skin) {
+            match decision {
+                ConflictDecision::Answer(answer) => self.answer_conflict(answer),
+                ConflictDecision::Cancel => self.cancel_conflict(),
+            }
+        }
+    }
+
+    /// The permanent delete's confirmation, drawn over the pane.
+    ///
+    /// A `Card` with two `Button`s and not the overwrite card's three: the
+    /// answers are "delete it" and "keep it", and a control whose third answer is
+    /// a different question's is the drift the widget crate exists to prevent.
+    /// The way out is the card's cross and Escape, and **Enter is the safe
+    /// answer** — a key that lands on a confirmation because a chord was being
+    /// typed must never be the one that deletes.
+    fn confirm_ui(&self, ui: &mut egui::Ui, skin: &Skin, id: egui::Id) {
+        if self.confirm.borrow().is_none() {
+            return;
+        }
+        if ui.input(|input| {
+            input.key_pressed(egui::Key::Escape) || input.key_pressed(egui::Key::Enter)
+        }) {
+            self.answer_confirm(false);
+            return;
+        }
+        // The card's words are copied out before it draws: its answer is a cell
+        // this pane owns, and holding the borrow across the click is the panic.
+        let (count, names) = {
+            let pending = self.confirm.borrow();
+            let Some(confirm) = pending.as_ref() else {
+                return;
+            };
+            (confirm.paths.len(), confirm.names.join(", "))
+        };
+        let answer = Cell::new(None::<bool>);
+        let close = &answer;
+        let card = Card::new(id.with("confirm"), "delete permanently?")
+            .size(440.0, 200.0)
+            .min(320.0, 160.0)
+            // The cross's name is not the answer button's: a card whose way out
+            // and whose keep-it button are both "cancel" is two nodes one name,
+            // which a screen reader and a test cannot tell apart.
+            .close("cancel the delete")
+            .footer(move |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if Button::new("delete permanently").show(ui, skin) {
+                        close.set(Some(true));
+                    }
+                    if Button::new("cancel").show(ui, skin) {
+                        close.set(Some(false));
+                    }
+                });
+            })
+            .show(ui, skin, |ui, _width| {
+                row(ui, skin, "items", |ui| {
+                    ui.label(egui::RichText::new(&names).font(skin.style.value_font.clone()));
+                });
+                ui.add_space(skin.style.gap);
+                ui.label(
+                    egui::RichText::new(match count {
+                        1 => "this cannot be undone".to_owned(),
+                        count => format!("these {count} items cannot be undone"),
+                    })
+                    .font(skin.style.label_font.clone())
+                    .color(skin.palette.danger),
+                );
+            });
+        if card.close {
+            self.answer_confirm(false);
+            return;
+        }
+        if let Some(yes) = answer.get() {
+            self.answer_confirm(yes);
+        }
+    }
 }
 
 /// One file pane as a surface sees it: a rectangle in points, the browser, and
@@ -2097,8 +2973,10 @@ pub struct PaneOutcome {
 
 /// What the right-press menu asked for.
 ///
-/// Two verbs, both of which the pane already had a key for: this is a second way
-/// to the same two calls, never a second implementation of them.
+/// A verb the pane already has or a write the browser reports; the app's answer
+/// to one of these is a [`Browser`] method, never a second implementation of it.
+/// Which of these is *offered* is [`Browser::caps`]' business: a read-only pane
+/// has only [`Self::Open`] and [`Self::CopyPath`], which is what F1b shipped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuChoice {
     /// The row `Enter` acts on: put a file's path on the command line, or go into
@@ -2106,6 +2984,19 @@ pub enum MenuChoice {
     Open,
     /// Every selected path, one per line, on the clipboard — `ctrl-alt-c`.
     CopyPath,
+    /// A folder in this directory, named in the inline field.
+    NewFolder,
+    /// The row under the cursor, renamed in the inline field.
+    Rename,
+    /// Put the selection in the browser's paste buffer.
+    Copy,
+    /// Copy the paste buffer into this directory.
+    Paste,
+    /// Copy the selection beside itself, numbered: `report (2).txt`.
+    MakeCopy,
+    /// Delete the selection — into the trash where there is one, behind the
+    /// confirmation where there is not.
+    Delete,
 }
 
 /// What the sort control asked for: one of the four keys, or one of the two
@@ -2241,6 +3132,11 @@ pub fn pane_ui(
         }
         pick_cancel = answer.cancel;
     }
+    // The inline field and the two cards, last: each is an area above everything
+    // the pane drew, and the card has to be over a listing rather than under it.
+    browser.edit_ui(&ctx, id.with("edit"), skin);
+    browser.conflict_ui(ui, skin, id);
+    browser.confirm_ui(ui, skin, id);
     PaneOutcome {
         close,
         sort,
@@ -3016,6 +3912,14 @@ pub fn display_join(dir: &Path, name: &str, home: &Path) -> String {
     display_path(&dir.join(name), home)
 }
 
+/// A footer's words for a count: `copied 1 item`, `copying 2 items`.
+fn items(count: usize, verb: &str) -> String {
+    match count {
+        1 => format!("{verb} 1 item"),
+        count => format!("{verb} {count} items"),
+    }
+}
+
 /// A byte count a person can read. Shared with a surface's toasts, which report a
 /// save the same way the pane reports a file.
 pub fn human_size(bytes: u64) -> String {
@@ -3040,6 +3944,8 @@ mod tests {
         Browser, Entry, Key, Layout, Outcome, Request, Sort, View, arrange, clamp_selection,
         crumbs, display_join, display_path, first_visible, human_size, parent_of, plain,
     };
+    use crate::write::{Failure, WriteOp};
+    use dtr_vfs::{Caps, Removal};
 
     fn entry(name: &str, is_dir: bool) -> Entry {
         Entry {
@@ -3900,7 +4806,7 @@ mod tests {
         // The failure arrives the way the listing does: as a batch.
         settle(&mut browser);
         assert!(browser.entries.is_empty());
-        let message = browser.message.expect("a message");
+        let message = browser.message.borrow().clone().expect("a message");
         assert!(
             message.contains("list "),
             "the path is in the message: {message}"
@@ -3963,6 +4869,234 @@ mod tests {
             browser.is_waiting_for(Path::new("/var/log")),
             "still waiting"
         );
+    }
+
+    /// A remote pane is read-only until F7, and a local one asks its backend:
+    /// the menu is filtered by `Caps`, so a wrong answer here is a verb that
+    /// fails when pressed.
+    #[test]
+    fn a_remote_pane_is_read_only_and_a_local_one_asks_its_backend() {
+        let remote = Browser::remote("jupyter");
+        assert!(!remote.caps().write);
+        assert!(!remote.caps().trash);
+        let mut local = Browser::new(Some(std::env::temp_dir()));
+        assert!(local.caps().write, "a local filesystem can be written");
+        assert_eq!(local.caps().trash, cfg!(unix), "the trash is Unix's");
+        // The caller can tell a pane what it cannot know for itself.
+        local.set_caps(Caps {
+            write: false,
+            ..local.caps()
+        });
+        assert!(!local.caps().write);
+    }
+
+    /// The fixture the write tests act on: the remote pane's written-down
+    /// listing, with the caps of a backend that can write.
+    fn writable() -> Browser {
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        browser.apply_listing(
+            PathBuf::from("/var/log"),
+            vec![
+                entry("a.log", false),
+                entry("b.log", false),
+                entry("conf", true),
+            ],
+        );
+        browser.set_caps(Caps {
+            watch: false,
+            dir_size: false,
+            write: true,
+            trash: true,
+        });
+        browser
+    }
+
+    /// **The menu is the backend's verbs**, not a picture of the milestone: a
+    /// read-only pane has the two rows F1b shipped, a writable one adds the
+    /// write rows, and a row about a *file* is absent while the cursor is on
+    /// `..`. A row that would do nothing is not greyed; it is not there.
+    #[test]
+    fn the_menu_is_the_backends_verbs() {
+        fn labels(browser: &Browser) -> Vec<String> {
+            browser
+                .menu_choices()
+                .into_iter()
+                .map(|(row, _)| row.label.to_owned())
+                .collect()
+        }
+
+        let mut read_only = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        read_only.apply_listing(PathBuf::from("/var/log"), vec![entry("a.log", false)]);
+        read_only.select_only(1);
+        assert_eq!(labels(&read_only), ["open", "copy path"]);
+
+        let mut browser = writable();
+        browser.select_only(row_of(&browser, "a.log"));
+        assert_eq!(
+            labels(&browser),
+            [
+                "open",
+                "copy path",
+                "rename",
+                "copy",
+                "make a copy",
+                "delete",
+                "new folder"
+            ]
+        );
+        // A paste needs something in the buffer, or it is a dead row.
+        browser.set_clipboard(vec![PathBuf::from("/var/log/b.log")]);
+        assert!(labels(&browser).contains(&"paste".to_owned()));
+        // A backend with no trash has the permanent delete, and says so.
+        browser.set_caps(Caps {
+            trash: false,
+            ..browser.caps()
+        });
+        assert!(labels(&browser).contains(&"delete permanently".to_owned()));
+        // The parent row is a place: nothing acts on it, but the directory's own
+        // verbs are still there.
+        browser.select_only(0);
+        let rows = labels(&browser);
+        for absent in ["rename", "copy", "make a copy"] {
+            assert!(!rows.contains(&absent.to_owned()), "{absent} on `..`");
+        }
+        assert!(rows.contains(&"new folder".to_owned()));
+    }
+
+    /// A delete with a trash behind it goes there without a question; one
+    /// without a trash asks first, and only the confirmation's yes writes.
+    #[test]
+    fn a_delete_is_trashed_where_there_is_a_trash_and_asks_where_there_is_not() {
+        let mut browser = writable();
+        browser.select_only(row_of(&browser, "a.log"));
+        browser.delete(false);
+        assert!(!browser.confirm_permanent(), "a trash is not a question");
+        assert_eq!(
+            browser.take_write().expect("the trash").op,
+            WriteOp::Remove {
+                at: PathBuf::from("/var/log/a.log"),
+                how: Removal::Trash,
+            }
+        );
+
+        // No trash: the ordinary delete is the permanent one, and it asks.
+        let mut browser = writable();
+        let caps = browser.caps();
+        browser.set_caps(Caps {
+            trash: false,
+            ..caps
+        });
+        browser.select_only(row_of(&browser, "a.log"));
+        browser.delete(false);
+        assert!(browser.confirm_permanent(), "a permanent delete asks");
+        assert!(
+            browser.take_write().is_none(),
+            "nothing is written before the answer"
+        );
+        browser.answer_confirm(false);
+        assert!(!browser.confirm_permanent());
+        assert!(browser.take_write().is_none(), "keeping it writes nothing");
+
+        browser.delete(false);
+        browser.answer_confirm(true);
+        assert_eq!(
+            browser.take_write().expect("the delete").op,
+            WriteOp::Remove {
+                at: PathBuf::from("/var/log/a.log"),
+                how: Removal::Permanent,
+            }
+        );
+
+        // Shift+Delete asks even where the trash exists: it is the delete that
+        // cannot be undone, so it is never the quiet one.
+        let mut browser = writable();
+        browser.select_only(row_of(&browser, "a.log"));
+        browser.delete(true);
+        assert!(browser.confirm_permanent());
+        browser.answer_confirm(true);
+        assert_eq!(
+            browser.take_write().expect("the permanent delete").op,
+            WriteOp::Remove {
+                at: PathBuf::from("/var/log/a.log"),
+                how: Removal::Permanent,
+            }
+        );
+    }
+
+    /// A paste into the directory a file is already in is a copy of it beside
+    /// itself, not a question about replacing it with itself — "replace" there
+    /// would remove the source and then find nothing to copy.
+    #[test]
+    fn a_paste_into_its_own_directory_is_kept_alongside() {
+        let mut browser = writable();
+        browser.set_clipboard(vec![PathBuf::from("/var/log/a.log")]);
+        browser.paste();
+        let request = browser.take_write().expect("a copy");
+        assert_eq!(
+            request.op,
+            WriteOp::Copy {
+                from: PathBuf::from("/var/log/a.log"),
+                to: PathBuf::from("/var/log/a (2).log"),
+            },
+            "the copy is numbered, and it is not a conflict question"
+        );
+    }
+
+    /// A failure that is not a conflict says so in the footer and stops the
+    /// batch; a conflict opens the card and its answer becomes the retry.
+    #[test]
+    fn a_failed_write_says_so_and_a_conflict_asks() {
+        let mut browser = writable();
+        browser.set_clipboard(vec![
+            PathBuf::from("/elsewhere/a.log"),
+            PathBuf::from("/elsewhere/b.log"),
+        ]);
+        browser.paste();
+        assert!(browser.take_write().is_some());
+        let failure = browser.write_failed(&anyhow::anyhow!("permission denied"));
+        assert_eq!(failure, Failure::Stopped);
+        let message = browser
+            .message
+            .borrow()
+            .clone()
+            .expect("the footer's words");
+        assert!(message.contains("permission denied"), "{message}");
+        assert!(browser.take_write().is_none(), "the batch stopped");
+
+        let mut browser = writable();
+        browser.set_clipboard(vec![PathBuf::from("/elsewhere/a.log")]);
+        browser.paste();
+        browser.take_write().expect("the copy");
+        let conflict = anyhow::Error::new(dtr_vfs::Conflict {
+            path: PathBuf::from("/var/log/a.log"),
+        });
+        assert_eq!(browser.write_failed(&conflict), Failure::Asking);
+        assert!(browser.write_question(), "the card is up");
+        browser.answer_conflict(dtr_widgets::ConflictAnswer::KeepBoth);
+        assert_eq!(
+            browser.take_write().expect("the retry").op,
+            WriteOp::Copy {
+                from: PathBuf::from("/elsewhere/a.log"),
+                to: PathBuf::from("/var/log/a (2).log"),
+            }
+        );
+    }
+
+    /// A read-only pane refuses out loud rather than opening a field that could
+    /// not submit: a silent no-op reads as a broken key.
+    #[test]
+    fn a_read_only_pane_refuses_a_write_out_loud() {
+        let mut browser = Browser::remote_at("jupyter", PathBuf::from("/var/log"));
+        browser.apply_listing(PathBuf::from("/var/log"), vec![entry("a.log", false)]);
+        browser.select_only(1);
+        browser.begin_rename();
+        assert!(!browser.edit_open());
+        let message = browser.message.borrow().clone().expect("a refusal");
+        assert!(message.contains("cannot rename"), "{message}");
+        browser.begin_new_folder();
+        assert!(!browser.edit_open());
+        browser.delete(false);
+        assert!(browser.take_write().is_none());
     }
 }
 
@@ -4866,5 +6000,277 @@ mod kittest_tests {
         // The app's answer to that, which is the browser's rule.
         browser.borrow_mut().cancel_pick();
         assert!(!browser.borrow().is_picking(), "the picker is gone");
+    }
+
+    /// A pane drawn by itself: the write tests need the picture and the pane's
+    /// own state, and no outcome — acting on a request is the app's.
+    fn pane_harness(browser: std::rc::Rc<std::cell::RefCell<Browser>>) -> Harness<'static> {
+        let skin = skin();
+        Harness::builder()
+            .with_size(egui::vec2(WIDTH, HEIGHT))
+            .build_ui(move |ui| {
+                let browser = browser.borrow();
+                pane_ui(
+                    ui,
+                    egui::Id::unique("dtr-files-write"),
+                    pane_rect(),
+                    &browser,
+                    &skin,
+                    true,
+                );
+            })
+    }
+
+    /// The written-down fixture, told its backend can write.
+    fn writable_pane() -> Browser {
+        let mut browser = pane();
+        browser.set_caps(Caps {
+            watch: false,
+            dir_size: false,
+            write: true,
+            trash: true,
+        });
+        browser
+    }
+
+    /// **The menu is the backend's verbs, drawn.** A read-only pane has the two
+    /// rows it always had; a writable one adds the write rows, and `paste` is
+    /// there only when the buffer holds something — a row that would do nothing
+    /// is absent, not greyed.
+    #[test]
+    fn the_menu_offers_only_what_the_backend_can_do() {
+        fn draw_then_open(browser: std::rc::Rc<std::cell::RefCell<Browser>>) -> Harness<'static> {
+            {
+                let mut browser = browser.borrow_mut();
+                let mut view = browser.view();
+                view.layout = Layout::List;
+                browser.set_view(view);
+            }
+            let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let mut harness =
+                menu_harness(std::rc::Rc::clone(&browser), std::rc::Rc::clone(&answer));
+            harness.run();
+            assert!(browser.borrow_mut().menu_at(list_point(2)));
+            harness.run();
+            harness
+        }
+
+        // Read-only: the remote fixture, which says so.
+        let harness = draw_then_open(std::rc::Rc::new(std::cell::RefCell::new(pane())));
+        for label in ["open", "copy path"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from a read-only menu"
+            );
+        }
+        for absent in [
+            "rename",
+            "copy",
+            "make a copy",
+            "delete",
+            "new folder",
+            "paste",
+        ] {
+            assert!(
+                harness.query_by_label(absent).is_none(),
+                "{absent} is in a read-only menu"
+            );
+        }
+
+        // Writable: the write verbs appear, and a paste waits for a copy.
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(writable_pane()));
+        let harness = draw_then_open(std::rc::Rc::clone(&browser));
+        for label in ["rename", "copy", "make a copy", "delete", "new folder"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from a writable menu"
+            );
+        }
+        assert!(
+            harness.query_by_label("paste").is_none(),
+            "an empty clipboard has no paste row"
+        );
+        browser.borrow_mut().close_menu();
+        browser
+            .borrow_mut()
+            .set_clipboard(vec![PathBuf::from("/var/log/syslog")]);
+        let harness = draw_then_open(std::rc::Rc::clone(&browser));
+        assert!(
+            harness.query_by_label("paste").is_some(),
+            "paste is a row once there is something to paste"
+        );
+    }
+
+    /// The inline field takes the keyboard the frame it opens, types a name, and
+    /// Enter turns it into the rename request the app's worker executes.
+    #[test]
+    fn the_inline_field_types_and_submits_a_rename() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(writable_pane()));
+        {
+            let mut browser = browser.borrow_mut();
+            let mut view = browser.view();
+            view.layout = Layout::List;
+            browser.set_view(view);
+            let syslog = browser
+                .entries
+                .iter()
+                .position(|entry| entry.name == "syslog")
+                .expect("syslog in the fixture");
+            browser.select_only(syslog);
+            browser.begin_rename();
+        }
+        let mut harness = pane_harness(std::rc::Rc::clone(&browser));
+        harness.run();
+        harness.snapshot("file_pane_rename");
+
+        let field = harness.get_by_label("new name");
+        assert!(
+            field.is_focused(),
+            "a field that does not take the keyboard is a field to click first"
+        );
+        // The field is a real hit target and not a picture of one: the pane's
+        // own area is `interactable(false)`, which is why this one exists
+        // (`docs/files.md` §13).
+        assert_eq!(
+            harness
+                .ctx
+                .layer_id_at(field.rect().center())
+                .map(dtr_widgets::above_the_root),
+            Some(true),
+            "the field must be its own area, not a field drawn inside the pane"
+        );
+        field.type_text(".old");
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(!browser.borrow().edit_open(), "Enter closes the field");
+        assert_eq!(
+            browser.borrow().take_write().expect("the rename").op,
+            WriteOp::Rename {
+                from: PathBuf::from("/var/log/syslog"),
+                to: PathBuf::from("/var/log/syslog.old"),
+            },
+            "the field opens on the old name and the caret at its end"
+        );
+    }
+
+    /// Escape is the field's way out and writes nothing.
+    #[test]
+    fn escape_closes_the_field_and_writes_nothing() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(writable_pane()));
+        browser.borrow_mut().begin_new_folder();
+        let mut harness = pane_harness(std::rc::Rc::clone(&browser));
+        harness.run();
+        assert!(harness.query_by_label("folder name").is_some());
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(!browser.borrow().edit_open());
+        assert!(browser.borrow().take_write().is_none());
+    }
+
+    /// A name that is not a name — empty, or a separator — is refused in the
+    /// footer, and the field stays open rather than failing silently.
+    #[test]
+    fn the_field_refuses_an_empty_name() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(writable_pane()));
+        browser.borrow_mut().begin_new_folder();
+        let mut harness = pane_harness(std::rc::Rc::clone(&browser));
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        assert!(browser.borrow().edit_open(), "the field stays to be fixed");
+        assert_eq!(
+            browser.borrow().edit_problem().as_deref(),
+            Some("type a name")
+        );
+        assert!(browser.borrow().take_write().is_none());
+
+        // A name the directory already has is a refusal with its name in it.
+        harness.get_by_label("folder name").focus();
+        harness.run();
+        harness.get_by_label("folder name").type_text("syslog");
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        let problem = browser.borrow().edit_problem().expect("a refusal");
+        assert!(problem.contains("syslog"), "{problem}");
+        assert!(browser.borrow().take_write().is_none());
+    }
+
+    /// The one overwrite card: drawn over the pane, answered with one of the
+    /// three words, and the answer becomes the retry.
+    #[test]
+    fn the_overwrite_card_answers_with_keep_both() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(writable_pane()));
+        {
+            let mut browser = browser.borrow_mut();
+            browser.set_clipboard(vec![PathBuf::from("/elsewhere/syslog")]);
+            browser.paste();
+            assert!(browser.take_write().is_some(), "the copy is out");
+            let conflict = anyhow::Error::new(dtr_vfs::Conflict {
+                path: PathBuf::from("/var/log/syslog"),
+            });
+            assert_eq!(browser.write_failed(&conflict), Failure::Asking);
+        }
+        let mut harness = pane_harness(std::rc::Rc::clone(&browser));
+        harness.run();
+        for label in ["replace", "keep both", "skip"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "{label} is missing from the conflict card"
+            );
+        }
+        harness.snapshot("file_pane_conflict");
+        harness.get_by_label("keep both").click();
+        harness.run();
+        assert!(!browser.borrow().write_question(), "the card is answered");
+        assert_eq!(
+            browser.borrow().take_write().expect("the retry").op,
+            WriteOp::Copy {
+                from: PathBuf::from("/elsewhere/syslog"),
+                to: PathBuf::from("/var/log/syslog (2)"),
+            }
+        );
+    }
+
+    /// A permanent delete is a confirmation before it is a request: the card is
+    /// up, nothing is queued, and only its destructive answer writes.
+    #[test]
+    fn a_permanent_delete_asks_before_it_deletes() {
+        let browser = std::rc::Rc::new(std::cell::RefCell::new(writable_pane()));
+        {
+            let mut browser = browser.borrow_mut();
+            let caps = browser.caps();
+            browser.set_caps(Caps {
+                trash: false,
+                ..caps
+            });
+            let syslog = browser
+                .entries
+                .iter()
+                .position(|entry| entry.name == "syslog")
+                .expect("syslog in the fixture");
+            browser.select_only(syslog);
+            browser.delete(false);
+            assert!(browser.confirm_permanent());
+        }
+        let mut harness = pane_harness(std::rc::Rc::clone(&browser));
+        harness.run();
+        assert!(
+            harness.query_by_label("delete permanently").is_some(),
+            "the confirmation names what it does"
+        );
+        assert!(harness.query_by_label("cancel").is_some());
+        assert!(browser.borrow().take_write().is_none());
+        harness.get_by_label("delete permanently").click();
+        harness.run();
+        assert!(!browser.borrow().confirm_permanent());
+        assert_eq!(
+            browser.borrow().take_write().expect("the delete").op,
+            WriteOp::Remove {
+                at: PathBuf::from("/var/log/syslog"),
+                how: Removal::Permanent,
+            }
+        );
     }
 }
