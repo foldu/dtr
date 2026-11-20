@@ -1117,7 +1117,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dtr"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1172,14 +1172,14 @@ dependencies = [
 
 [[package]]
 name = "dtr-complete"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "nucleo-matcher",
 ]
 
 [[package]]
 name = "dtr-config"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "toml_edit 0.23.10+spec-1.0.0",
@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-files"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-frame"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "egui",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-pane-host"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-portal"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-sftp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1269,14 +1269,14 @@ dependencies = [
 
 [[package]]
 name = "dtr-shell"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "dtr-sshconfig"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "glob",
  "tempfile",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-store"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-transfer"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dtr-vfs",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-transfer-ssh"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1319,11 +1319,11 @@ dependencies = [
 
 [[package]]
 name = "dtr-ttl"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "dtr-vfs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "dtr-widgets"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "egui",
  "egui_kittest",
