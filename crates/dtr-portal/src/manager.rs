@@ -661,16 +661,38 @@ impl Manager {
             self.go(Where::remote(host, path));
             return;
         }
-        let path = local_path(&text, &self.home);
         match self.alias() {
             // A typed absolute path while remote is another machine's path:
             // switching browsers is the only honest reading.
-            Some(_) if path.is_absolute() => self.go(Where::local(path)),
-            Some(alias) => {
-                let alias = alias.to_owned();
-                self.go(Where::remote(&alias, PathBuf::from(&text)));
+            Some(_) if Path::new(&text).is_absolute() => {
+                let path = local_path(&text, &self.home);
+                self.go(Where::local(path));
             }
-            None => self.go(Where::local(path)),
+            Some(alias) => {
+                // A relative remote path is relative to the directory on
+                // screen, not to the process's working directory: `.` on an
+                // sftp connection is the far account's home, which is a
+                // different directory entirely.
+                let alias = alias.to_owned();
+                let path = if text == "~" || text.starts_with("~/") {
+                    remote_path(&text)
+                } else {
+                    self.browser.directory().join(&text)
+                };
+                self.go(Where::remote(&alias, path));
+            }
+            None => {
+                let path = local_path(&text, &self.home);
+                // A typed relative path is relative to the directory on screen,
+                // the way a shell is: the daemon's own working directory is not a
+                // place the person has ever been.
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    self.browser.directory().join(path)
+                };
+                self.go(Where::local(path));
+            }
         }
     }
 
@@ -847,6 +869,20 @@ mod tests {
         assert_eq!(remote_path("~"), PathBuf::from("."));
         assert_eq!(remote_path("~/src"), PathBuf::from("src"));
         assert_eq!(remote_path("/var/log"), PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn a_typed_relative_location_lands_under_the_directory_on_screen() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(scratch.path().join("pictures")).expect("dir");
+        let mut manager = manager(scratch.path());
+        settle(&mut manager);
+        manager.set_location_mode(LocationMode::Edit);
+        manager.draft = Some(PathBuf::from("pictures"));
+        manager.submit_location();
+        assert_eq!(manager.browser.directory(), scratch.path().join("pictures"));
+        assert_eq!(manager.location_mode, LocationMode::Breadcrumb);
+        assert!(manager.state().can_go_back);
     }
 
     #[test]
