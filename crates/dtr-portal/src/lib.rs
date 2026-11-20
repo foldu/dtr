@@ -8,7 +8,7 @@
 //! picker is dtr's browser and its process is already warm (`docs/manager.md`
 //! §2, §5).
 //!
-//! This is **F3's D-Bus half**. What is here now:
+//! What is here:
 //!
 //! - [`Portal`], serving `OpenFile`, `SaveFile` and `SaveFiles` on the session
 //!   bus as `org.freedesktop.impl.portal.desktop.dtr`, with the signatures read
@@ -18,28 +18,27 @@
 //!   for (the raw filter list, so `current_filter` can be echoed back);
 //! - [`uri`], which turns a path's **bytes** into a `file://` URI — a path is
 //!   not promised to be UTF-8, so `to_string_lossy` is not an encoder;
-//! - [`Host`], the one seam the window plugs into. A host receives a [`Call`]
-//!   and answers through its [`Reply`]; the test below answers over a real
-//!   private bus with a headless host, and the picker window is one small
-//!   implementation of this trait rather than a rewrite.
-//!
-//! The picker **window itself is not in this crate yet**. It needs
-//! `crates/dtr-frame` (the window, the surface, the event loop), which is being
-//! extracted in parallel; until it lands, the binary's host answers every
-//! request with a cancel and says so in the log. That is deliberately the only
-//! thing standing between this backend and a usable desktop dialog: the D-Bus
-//! surface, the request lifecycle, the option mapping and the answer encoding
-//! are all finished and tested here.
+//! - [`Host`], the one seam the window plugs into: a host receives a [`Call`] and
+//!   answers through its [`Reply`];
+//! - [`window`], the real host: one `dtr-frame` window, hidden and warm between
+//!   requests, drawing the F2 picker (`dtr_files::pane_ui` in `Mode::Pick`) and
+//!   answering through the same `Reply`. The binary's `main` runs that loop.
 //!
 //! ## Threads
 //!
 //! The D-Bus task must never block on I/O. zbus dispatches each method call on a
 //! task of its own, so a pending request is a future waiting on a channel and
 //! `Request.Close()` from the frontend runs while it waits. A [`Host`] is called
-//! on that task under a mutex, so [`Host::open`] must **post** the work — to a
-//! window thread, in the real implementation — and answer later through the
-//! [`Reply`]. A host that read a directory, or waited for a person, inside
-//! [`Host::open`] would stall every other method on the connection.
+//! on that task under a mutex, so [`Host::open`] must **post** the work and
+//! answer later through the [`Reply`]. A host that read a directory, or waited
+//! for a person, inside [`Host::open`] would stall every other method on the
+//! connection.
+//!
+//! **The window loop is the process's main thread.** winit refuses to create its
+//! event loop anywhere else, so the split is: `main` builds and runs the picker
+//! loop, and the D-Bus connection is the thread that moves. The listing is a
+//! thread of its own again — `dtr-vfs`'s local backend walks a directory on one
+//! and streams batches back, which the window only drains per frame.
 //!
 //! ## Packaging
 //!
@@ -53,14 +52,16 @@
 //! - `portals.conf` — the user's `[preferred]` mapping, an example rather than
 //!   something a package should install.
 //!
-//! `flake.nix` installs the first two and grows a `nixosModules.dtr-portal`
-//! that sets `xdg.portal.config` and `xdg.portal.extraPortals`.
+//! `flake.nix` installs the first two and grows a `nixosModules.dtr-portal` that
+//! sets `xdg.portal.config` and `xdg.portal.extraPortals`.
 
 mod host;
 pub mod options;
 mod paths;
 mod portal;
 mod uri;
+pub mod window;
+mod x11;
 
 pub use host::{Answer, Call, Chosen, Host, Reply, RequestId, WindowContext};
 pub use options::{DecodeError, Decoded, Kind, Options, PortalFilter};

@@ -1,9 +1,10 @@
 //! Who shows the picker, and how the person's answer gets back.
 //!
 //! The portal's job ends at "somebody must ask a person"; everything after that
-//! is the [`Host`]. Today the only host is a test double and the binary's
-//! cancel-everything stub; the picker window will be a third, and the trait is
-//! shaped so that it is a small one:
+//! is the [`Host`]. [`crate::window::WindowHost`] is the real one, the
+//! private-bus tests have a headless double, and the binary's no-display path
+//! has a stub that answers cancel; the trait is shaped so that a host is a small
+//! thing:
 //!
 //! - **The request is the browser's own.** [`Call::request`] is a
 //!   [`Request`](dtr_files::pick::Request) — the same value F2's picker draws —

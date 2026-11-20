@@ -6,11 +6,11 @@ browser, its picker mode and the footer are already `dtr-files` (`docs/manager.m
 this crate is the protocol half that turns a portal call into a `Request`, a person's
 answer into `uris`, and a frontend's `Close()` into a cancelled request.
 
-**F3 is split.** This is the D-Bus half: the interface, the option mapping, the URI
-encoding, the request lifecycle, the packaging and the NixOS module, all tested over a
-private bus. The picker **window** is the follow-up, because it needs `crates/dtr-frame`
-(the multi-window event loop, surface and DPI handling) which is being extracted in
-parallel. The window is one `Host` implementation, not a rewrite: §9 is the checklist.
+**F3 is built.** The interface, the option mapping, the URI encoding, the request
+lifecycle, the packaging and the NixOS module are one half, tested over a private bus;
+the picker **window** is the other: one `dtr-frame` window, kept hidden and warm between
+requests, drawing the F2 browser and answering through the same `Host` seam the private-bus
+tests use. §9 is the window, as built, and how it was verified.
 
 ## 1. What is built
 
@@ -21,8 +21,11 @@ parallel. The window is one `Host` implementation, not a rewrite: §9 is the che
 | `src/uri.rs` | path **bytes** → percent-encoded `file://` URI |
 | `src/paths.rs` | the `SaveFiles` uniquifier (`report(1).pdf`) |
 | `src/host.rs` | `Host`, `Call`, `Reply`, `Answer` — the one seam the window plugs into |
-| `src/main.rs` | the daemon `xdg-desktop-portal` activates |
+| `src/window.rs` | the picker **window**: the `dtr-frame` loop, the `Desk` state machine, the drawing, input and the answer |
+| `src/x11.rs` | `parent_window` parsing, and the `WM_TRANSIENT_FOR`/`_NET_WM_STATE_MODAL` writes winit has no API for |
+| `src/main.rs` | the daemon `xdg-desktop-portal` activates: the bus on a thread, the window loop on `main` |
 | `assets/` | `dtr.portal`, the D-Bus `.service` file, and the `portals.conf` example |
+| `examples/picker_call.rs` | a stand-in frontend: calls `OpenFile`, waits for the window capture, checks the X11 hints, closes |
 | `tests/private_bus.rs` | a private `dbus-daemon`, this backend, and a client acting as the frontend |
 
 The installed XML was read rather than remembered —
@@ -137,12 +140,32 @@ use is `InvalidArgs` rather than a second picker behind one `Close`.
 The connection is zbus with the `async-io` backend, the one the settings portal already
 uses: zbus drives its own executor and reactor on their own threads, so this crate pulls
 in no tokio and needs no runtime of its own (`docs/compio.md` §2). `Host::open` and
-`Host::close` are called on the D-Bus task under a mutex and must **post** to whatever
-owns the window; the answer travels back through `Reply` from wherever the person is,
-which may be another thread and minutes later. Nothing on the bus path reads a directory.
+`Host::close` are called on the D-Bus task under a mutex and **post** to the window loop
+(`EventLoopProxy::send_event`); the answer travels back through `Reply` from wherever the
+person is, which may be another thread and minutes later. Nothing on the bus path reads a
+directory.
 
-The binary's `main` is therefore one `pollster::block_on` for the handshake and a
-`pending()` future after it: the executor has the sockets, `main` only has to not exit.
+**The window loop is the process's main thread, not a thread beside it.** winit 0.30
+refuses to create its `EventLoop` anywhere else — it panics with a message that names
+`with_any_thread` as the escape hatch it is there to talk you out of — so the split is the
+reverse of the obvious one:
+
+```text
+main             bring up the picker loop, hand the bus a host, run the loop
+dtr-portal-bus   serve the interface, hold the connection, never return
+dtr-list / …     dtr-vfs's own walk threads, streaming batches to a Browser
+```
+
+`main` waits for the D-Bus handshake before entering the loop, so a name it cannot own is
+an exit status rather than a window nobody can reach; and it returns when the loop exits,
+which is the idle timeout. The process lives exactly as long as the picker loop, and
+"idle-exit so activation can start it again" is one `event_loop.exit()` rather than a
+second way to shut a daemon down.
+
+The listing is a third thread and already existed: `dtr-vfs`'s local backend starts a
+`dtr-list` thread per walk (`local.rs` names the picker as one of the callers that has no
+runtime to borrow) and the window only drains its batches per frame. Neither the bus path
+nor the frame path does a `read_dir`.
 
 ## 6. Packaging
 
@@ -258,63 +281,276 @@ it runs:
   error because the object is gone;
 - `a_malformed_option_is_refused_instead_of_hanging` — `InvalidArgs`;
 - `a_malformed_request_never_reaches_the_host` — no call, no exported object;
-- `the_daemon_binary_serves_the_interface` — the shipped `dtr-portal` binary (not the
-  library) is started with `DBUS_SESSION_BUS_ADDRESS` pointing at the private bus,
-  polled until it owns the name, sent a request, and answers response 1: the binary's
-  placeholder host is exercised, and a `main` that failed its handshake would show up
-  here as a timeout or a service error.
+- `the_daemon_binary_serves_the_interface_without_a_display` — the shipped `dtr-portal`
+  binary (not the library) is started with `DBUS_SESSION_BUS_ADDRESS` pointing at the
+  private bus and with `DISPLAY`/`WAYLAND_DISPLAY` removed, polled until it owns the name,
+  sent a request, and answers response 1: the binary's documented no-window path (serve,
+  answer cancel, say why in the log) is exercised, and a `main` that failed its handshake
+  would show up here as a timeout or a service error. The display variables are removed
+  on purpose: the real binary runs the picker window on its main thread, and a test on a
+  developer's desktop must not leave a dialog waiting for a person who is not there.
+
+**The window's own unit tests** need no display either, because `src/window.rs` keeps the
+decisions apart from the window:
+
+- `one_picker_at_a_time_and_the_rest_wait` — a second request queues and is shown when the
+  first is answered;
+- `a_close_before_the_window_showed_it_drops_it_without_an_answer` — a `Close` for a
+  queued request removes it, a `Close` for the one on screen takes it down, and **neither**
+  sends anything: the portal already answered cancel;
+- `a_close_that_arrives_before_its_open_is_remembered` — the reordered case is dropped
+  once and not swallowed for ever;
+- `the_idle_clock_runs_while_nothing_is_showing` — a request resets it, an answer is the
+  last activity;
+- `the_title_falls_back_to_the_question`;
+- `only_a_choice_becomes_an_answer` — a `Chosen` outcome is the only one that reaches the
+  bus, and its filter is echoed only when the request offered a list;
+- `x11::a_portal_x11_handle_is_the_window_id_in_hex` and
+  `x11::handles_this_process_cannot_use_are_not_parents` — `x11:0x…` with and without
+  `0x`, uppercase hex, and the handles that are not a window: `wayland:…`, empty, `x11:0`,
+  junk.
+
+**The window itself is verified under Xvfb** (§9.7): the daemon runs with the capture hook,
+`examples/picker_call.rs` sends a real `OpenFile` with a real X11 parent, and the PNG plus
+the two X11 properties are the evidence.
 
 ## 8. What is deliberately not here
 
-- **The window.** See §9; until it lands the binary's host answers cancel and logs why.
-  That is a milestone split, not a design.
 - **`choices`.** No widget in the picker, and the interface lets a portal ignore them.
 - **Several folders for `directory` + `multiple`** — one folder, as above.
 - **A read-only toggle for `OpenFile`** — `writable` is always false for opens.
 - **The Documents portal and write access.** The backend returns paths; granting an
   application access outside a sandbox is `xdg-desktop-portal`'s job with the Documents
   portal, and `writable: false` is the honest answer for a picker that reads.
-- **Idle exit and a resident hidden window.** The process serves and stays; the window
-  task decides when it may exit (`docs/manager.md` §5, §11: a resident daemon's memory).
+- **The desktop's own palette.** The picker's skin is Adwaita — dark by default,
+  `DTR_PORTAL_SCHEME=light` for the other — not the machine's real GTK palette: the reader
+  that does that (`crates/dtr/src/system`) is in the terminal crate and needs a running
+  desktop. That is a fallback with a documented switch, and the reader moving into a crate
+  both frontends can use is the follow-up (F4 needs the same answer for the manager
+  window).
+- **Remote folders in a picker.** A portal request names a *path* (`current_folder` is
+  bytes with no host), so `OpenFile` can only mean this machine: the window's listing is
+  `dtr-vfs`'s `Local`, and `Ssh` is not reachable from the interface. The manager window
+  (F4) has no such limit and needs the SFTP pump dtr's `App` has (`Browser::take_request`
+  → worker → `apply_listing`), which is why that seam is `dtr-vfs`'s and not this crate's.
 - **`org.dtr.Files.OpenWindow`** (the manager window's private interface) is F4, and it
-  shares this daemon — one more interface, not a second process.
-- **Wayland transient windows.** `parent_window` is an opaque handle there and winit
-  exposes no xdg-foreign, so the picker is not transient on Wayland. Written down, not
-  lied about with a flag.
+  shares this daemon — one more interface, not a second process. The `window` module is
+  shaped for that reuse; §9.8 says what it can take.
+- **Wayland transient windows.** `parent_window` is an opaque xdg-foreign token there and
+  winit exposes no way to attach one, so the picker is not transient on Wayland. Written
+  down, not lied about with a flag.
 - **Windows.** The crate is Linux's; it compiles elsewhere but there is no portal there.
 
-## 9. The window follow-up
+## 9. The window, as built
 
-The shape is already fixed; the work is a `Host` implementation in the binary (and the
-`dtr-frame` dependency):
+`src/window.rs` is the `Host` §9 was a checklist for; `src/x11.rs` is the hint winit cannot
+set; `examples/picker_call.rs` is the frontend that drives it under Xvfb. The shape, point
+by point:
 
-1. **A window thread.** `dtr-frame` owns the event loop and a `Vec` of windows over one
-   `egui::Context`; the daemon's `main` hands it a channel and `Host::open` posts a
-   `Call` to it (never blocks).
-2. **Build the picker from the call.** `Mode::Pick(Pick::new(call.request))`,
-   `pick.set_filter(call.filter.unwrap_or(0))`, the title from `call.window.title`, the
-   confirm word from `call.request.accept`. The `Request` already carries
-   `Select`, `folder` (`current_folder`), `name` (`current_name`/`current_file`) and the
-   glob filters; nothing needs translating again.
-3. **Transiency and modality.** Parse `call.window.parent_window`: `x11:0x…` becomes
-   `Window::set_transient_for`, with `modal` from `call.window.modal`; document the
-   Wayland limitation.
-4. **The answer.** On accept, `Pick::accept(cwd, cursor, selection)` gives an `Outcome`:
-   `Chosen(paths)` → `Answer::Chosen(Chosen { paths, filter: request.filters
-   .is_empty().then_some(pick.filter()) })` (the `writable` result is derived by the
-   backend, not the host); `Refused`/`Replace`/`Navigate` stay in the picker — the
-   footer already says and does the right thing — so only `Chosen` and
-   `Cancelled` (Escape, the close button, or the window being dismissed) reach `Reply`.
-   `Reply::send` returning false means the request was already answered (the frontend
-   closed it), so the window comes down without a second answer.
-5. **`Host::close`.** Find the window by `RequestId` and close it without answering: the
-   backend has already answered cancel.
-6. **One window per request, hidden between them, idle-exit after a timeout** — the
-   memo's reason for a daemon rather than a fresh process per dialog (`docs/manager.md`
-   §5, §11). A request that arrives while the window thread is busy posts and waits
-   rather than being dropped.
-7. **The listing runs on its own thread/runtime**, as `Browser::reload` already expects;
-   the D-Bus task keeps its promise of never doing I/O.
+### 9.1 The loop is the main thread
 
-`#[cfg(test)]` has a headless `Host` in `tests/private_bus.rs` to copy from; the real
-one differs only in where it posts and that it paints.
+winit 0.30 panics when its `EventLoop` is created off the main thread, and points at the
+X11/Wayland `with_any_thread` extensions as the escape hatch it exists to talk you out of.
+So the process is the other way round from the sketch: `main` builds the picker loop, hands
+the D-Bus side a `WindowHost`, waits for the bus handshake, and runs the loop. The bus is a
+thread of its own (`dtr-portal-bus`), which is the half that does not care where it runs.
+`Host::open` is `EventLoopProxy::send_event(Event::Open(call))` and `Host::close` is the
+same with `Event::Close(id)` — posting, never blocking — and the answer travels back through
+the `Call`'s own `Reply` from the window's `about_to_wait`.
+
+If the loop cannot be built at all (no display, no X/Wayland backend), `main` takes the
+documented no-window path: serve the interface, answer every request cancel with the reason
+in the log. A dialog that never appears with no explanation is the failure mode this
+refuses to have.
+
+### 9.2 One warm window, one picker at a time
+
+`resumed` creates the window, immediately hides it, and installs the skin — so the adapter,
+device, egui context and fonts are paid for once, before the first dialog rather than during
+it. One seam `dtr-frame` does not expose: `WindowOptions` has no `visible`, so the window is
+created and then hidden two calls later; on a real window manager that is one map that can
+flash at daemon startup. Adding `visible` to `WindowOptions` belongs in the frame crate, not
+here. `Desk` holds the queue; `about_to_wait` (i.e. after the whole event batch, never inside
+`user_event`) shows the head when nothing is on screen. That ordering is what makes an
+`Open` and the `Close` that raced it never paint a window, and it is what the unit tests
+assert.
+
+A second request while one is up is **queued**; the frontend's method call waits, which is
+what an async portal method is for. `Host::close` for a queued request removes it, for the
+one on screen hides it without answering (the portal answered cancel when it saw the close),
+and for an id it has never heard of remembers it for five seconds so a reordered open is
+dropped rather than painted — the wire cannot produce one today, and the guard is there so
+that a shifted queue cannot.
+
+### 9.3 What is drawn, and in what skin
+
+`Browser::new(start)` where `start` is `request.folder` or else `dirs::home_dir()` — the
+daemon's working directory after D-Bus activation is not a place anybody chose — then
+`browser.set_pick(request.clone())`, then `Pick::set_filter(call.filter)`. The client area
+is the pane: `dtr_files::pane_ui(ui, id, ui.max_rect(), &browser, &skin, true)` paints the
+header, breadcrumb, grid/list, places popup, sort control, close cross and the picker's own
+footer (`docs/manager.md` §4). The window adds no chrome of its own; the caption is
+`Window.title`, or "Open a file" / "Choose a folder" / "Save a file" when the application
+gave none.
+
+The skin is `dtr_widgets::Skin::adwaita(dark, ADWAITA_ACCENT)`: GNOME's chrome is what a
+desktop dialog looks like, `DTR_PORTAL_SCHEME=light|dark` settles the scheme (default dark),
+and §8 says why it is not the machine's actual palette yet.
+
+### 9.4 Input
+
+The window is the only place a picker's keys exist, so it maps them itself, once, and the
+browser's own rules do the rest:
+
+- `Escape` cancels — closing a save's `replace` question first and the picker second, the
+  browser's one-button-two-depths rule; the footer's cancel button reports the same thing
+  through `PaneOutcome::pick_cancel`;
+- `Enter` accepts, exactly the footer's button (`Browser::accept_pick`);
+- arrows, `PageUp`/`PageDown`, `Home`/`End`, `Backspace`, `Alt+Up` and `h j k l r g G` are
+  `dtr_files::Key`s, the same mapping dtr's file panes use — **unless an egui widget has the
+  keyboard**, which is a save's name field, so typing a name does not also move a listing
+  behind it;
+- a left press is `Browser::clicked` with dtr's double-click counter (400 ms, four points),
+  and the wheel is `Browser::scroll`;
+- key **releases** are ignored: the release of the keystroke that opened the window arrives
+  after it is open, and acting on both would cancel twice (`AGENTS.md`).
+
+### 9.5 The answer
+
+Only two outcomes reach the bus:
+
+- `Outcome::Chosen(paths)` → `Answer::Chosen(Chosen { paths, filter })`, where `filter` is
+  `pick.filter()` **only when the request offered filters** — an index into an empty list
+  is not a filter, and `current_filter` exists because the application asked for a list
+  (`docs/portal.md` §2);
+- `Cancelled` for `Escape`, the footer's cancel, the header's cross and the window
+  manager's close button.
+
+`Refused` and `Replace` stay in the footer (it says why and the button stays armed), and
+`Navigate` calls `Browser::navigate` so a folder in a file picker is a way in, not an
+answer. `Reply::send` returning false means the frontend closed first — the log says so and
+the window comes down without a second answer.
+
+### 9.6 Transiency, modality, and the Wayland gap
+
+`x11:0x…` becomes `WM_TRANSIENT_FOR`, and `Window.modal` adds
+`_NET_WM_STATE = [_NET_WM_STATE_MODAL]`, written in `src/x11.rs` before the window is mapped
+— EWMH's window for a window's initial state, and the only one that works for a window that
+is reused by the next application. winit 0.30 has no API for either: `WindowExtX11` is empty
+and the only parent-shaped attribute, `with_embed_parent_window`, would reparent the picker
+*into* the application's window. So the properties are written over the X protocol with
+`x11rb`, using the id `raw-window-handle` hands out — two dependencies that were already in
+the tree through winit, and one function that fails quietly (a debug log) when the window is
+not X11.
+
+A Wayland `parent_window` is an xdg-foreign token, not a window id, and winit exposes no
+way to attach one; the picker is not transient there. That is the documented gap, not a
+flag that lies. A request with no `parent_window` clears the previous hints before the
+window is shown again, so a reused window never inherits the last application's parent.
+
+### 9.7 The listing
+
+The picker does not own a listing thread, and should not: `Browser` already streams it.
+`Browser::new`/`navigate`/`refresh` start `dtr-vfs`'s `Local::list`, which walks on its own
+`dtr-list` thread and sends batches over a channel (`crates/dtr-vfs/src/local.rs` names the
+picker as a caller with no runtime to borrow); the window drains them in `Browser::poll()`
+once per frame and re-`stat`s the directory with `refresh_if_changed()` twice a second while
+a picker is up. That is the same pump dtr's `App` uses, one `poll()` and no second
+implementation, and the D-Bus task keeps its promise of never doing I/O.
+
+There is no compio runtime in this crate and no `Vfs` handle, because a portal request
+cannot name a machine (§8): `current_folder` is bytes with no host, so the answer is always
+this machine's `Local`. When F4 grows a remote manager window it needs the SFTP pump — the
+`Browser::take_request` → worker → `apply_listing` handshake — and *that* is where
+`dtr_vfs::Vfs` and an alias live.
+
+### 9.8 Idle exit, and what F4 can reuse
+
+With nothing on screen and no request for `DTR_PORTAL_IDLE_TIMEOUT_MS` (default 60 s;
+environment only, like the other hooks) the loop calls `event_loop.exit()`. `main` returns,
+the process — and with it the bus connection and the service name — go away, and
+`xdg-desktop-portal` activates a fresh one for the next request. The first picker of a
+session pays for a process; every later one within the timeout is a frame.
+
+F4 (the manager window) shares this daemon and can take:
+
+- `window::start`/`Run`/`WindowHost`'s split — one loop, one event type, one place a second
+  window scheme plugs in — but **not `WindowHost` as a `Host`**: the manager window is a
+  private `org.dtr.Files.OpenWindow` call, so it needs its own host or a host that posts a
+  different enum;
+- the `Desk` shape (what is queued, what is shown, the idle clock), which generalises;
+- `x11::parent_window` and `x11::set_transient_for` unchanged, and `Options::skin`;
+- the capture hook, which is how any window in this process gets photographed for real.
+
+What F4 must solve differently: **two windows at once**. `Windows` is a `Vec<Frame>`, so a
+manager window beside a picker is the collection's job, not a second event loop — but this
+module's `PickerApp` is written around exactly one window id and one `Picker`, so the app
+type needs per-window state (a `HashMap<WindowId, …>`, and `Desk` per window or one desk
+with a window id) rather than a second copy of it.
+
+### 9.9 Verification
+
+The gate is still the devShell one (§7). The *window* is verified under Xvfb, because the
+thing being checked is that a real mapped X11 window, a lavapipe surface, the skin and the
+listing agree — and because the X11 hints are facts about the window, not about our code:
+
+```sh
+nix develop .#default --command bash -c 'cargo build -p dtr-portal --example picker_call'
+xvfb=$(nix build nixpkgs#xvfb --no-link --print-out-paths)/bin/Xvfb
+$xvfb :171 -screen 0 1280x800x24 -nolisten tcp -ac &
+export DISPLAY=:171
+
+dbus-run-session -- bash -c '
+  DTR_PORTAL_CAPTURE=/tmp/dtr-portal-picker.png \
+  DTR_PORTAL_CAPTURE_AFTER_MS=800 \
+  DTR_PORTAL_IDLE_TIMEOUT_MS=5000 \
+    ./target/debug/dtr-portal > /tmp/portal.log 2>&1 &
+  daemon=$!
+  sleep 3
+  ./target/debug/examples/picker_call --capture /tmp/dtr-portal-picker.png --parent
+  wait $daemon
+'
+```
+
+`examples/picker_call.rs` prints what it saw; a good run is:
+
+```text
+captured 900 × 620 at /tmp/dtr-portal-picker.png
+window 0x200002 is transient for 0x600000
+_NET_WM_STATE = ["_NET_WM_STATE_MODAL"]
+request answered response 1 (cancel)
+```
+
+and the daemon's own log ends:
+
+```text
+DEBUG dtr_portal::window: photographing the picker window path=/tmp/dtr-portal-picker.png
+ INFO dtr_frame: captured the window path=/tmp/dtr-portal-picker.png width=900 height=620
+DEBUG dtr_portal::portal: answered the file chooser request response=1 uris=false
+ INFO dtr_portal::window: no picker for the idle timeout; exiting so D-Bus activation can start afresh idle_s=5
+```
+
+The PNG is the window's client area at 1× (900 × 620, the requested inner size): header with
+the places button and breadcrumb, the grid of the scratch directory the client passed as
+`current_folder`, the filter control, and `cancel`/`Open` in the footer. `magick identify`
+reads it and `read_image` looks at it. The same run twice, one request after the other, is the warm-window check: both
+`set the picker's X11 hints` lines name the same window (`2097154` here), so the second
+picker reused the window and the device the first one left hidden, and the daemon then
+exited 0 at its idle timeout. `WINIT_X11_SCALE_FACTOR=2` re-runs the whole thing at
+1800 × 1240 with the same point measurements, which is the DPI half of the frame's job:
+`pane_ui` is handed points and the window is the only thing that knows the factor.
+
+The two hooks that make this possible are
+`DTR_PORTAL_CAPTURE` (write the first shown picker's surface once, through
+`dtr_frame`'s `COPY_SRC` path — the same mechanism `dtr --capture` uses) and
+`DTR_PORTAL_IDLE_TIMEOUT_MS`, so a verification run's daemon exits by itself and *proves*
+the idle path at the same time.
+
+Two environment notes from the run above: there is no window manager on Xvfb, so the window
+has no decorations and the close button in the capture is the pane's own cross; and the
+icon theme is not installed there, so the grid's file icons are egui's missing-image
+placeholder — dtr's file pane draws identically in that environment, and the picker's own
+chrome is what the capture is for. The `first frame elapsed_ms=3015` line is mostly the
+client's deliberate three-second wait before it asked, not the window: the frame itself was
+drawn 20 ms after the request, which is what "warm" means. The daemon's exit status is 0
+because the idle timeout ended the loop — the same run proves the idle policy.

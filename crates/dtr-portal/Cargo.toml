@@ -7,16 +7,38 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Requests are answered from a host that is not the D-Bus task (a window, later),
-# and the answer has exactly one slot: an unbounded sender would let a host
-# answer twice without noticing, and a blocking `send` would make a slow window
-# stall the bus. Bounded-by-one and `try_send` is the shape the protocol wants.
+# Requests are answered from a host that is not the D-Bus task (the window
+# thread), and the answer has exactly one slot: an unbounded sender would let a
+# host answer twice without noticing, and a blocking `send` would make a slow
+# window stall the bus. Bounded-by-one and `try_send` is the shape the protocol
+# wants. Also the channel the window thread uses to tell the host whether it ever
+# got a window.
 async-channel.workspace = true
 # The question and the answer are already written and tested without a window:
 # `Request`/`Select`/`Filter` are the portal's options mapped onto the browser,
 # and the picker's `Outcome` is what one eventually becomes. Linking the browser
 # crate is what makes this backend a backend rather than a second file dialog.
 dtr-files = { path = "../dtr-files" }
+# The window, the surface and the egui loop, so the picker does not re-solve
+# DPI, surface loss, viewport commands or drop order (`docs/frame.md`).
+dtr-frame = { path = "../dtr-frame" }
+# The chrome the picker is painted in: the footer's buttons, the rows' metrics
+# and the palette all come from one skin, as they do in the terminal.
+dtr-widgets = { path = "../dtr-widgets" }
+# The draw closure is an `egui` pass, and `pane_ui` speaks egui's units (points).
+egui.workspace = true
+# The window loop is winit's: events, the active event loop, and the key and
+# pointer vocabulary the picker's input is read in.
+winit.workspace = true
+# The empty underlay's clear colour and a `Scene`'s wgpu types.
+wgpu.workspace = true
+# Where a picker starts when the request names no folder: a desktop dialog opens
+# in the person's home, not in whatever directory the daemon was activated from.
+dirs.workspace = true
+# X11 `parent_window`: winit 0.30 exposes no transient-for, so the one hint it
+# cannot set is set over the X protocol directly (`src/x11.rs`). Same version as
+# the one already in the tree through winit and arboard.
+x11rb = "0.13"
 # The D-Bus stack, with the `async-io` backend the settings portal already uses:
 # zbus drives its own executor on its own thread, so this crate needs no tokio
 # and no runtime of its own (`docs/compio.md` §2).
@@ -25,9 +47,9 @@ zbus.workspace = true
 # library leaves logging to its caller; the binary installs the subscriber.
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# `main` is one call into the library and then a future that never finishes: the
-# zbus executor owns the sockets on its own thread, so an async runtime here
-# would be a second scheduler for no work.
+# `main` is one call into the library and then the window loop: the zbus executor
+# owns the sockets on its own thread, so an async runtime here would be a second
+# scheduler for no work.
 pollster.workspace = true
 
 [dev-dependencies]
@@ -39,3 +61,10 @@ tempfile.workspace = true
 # the D-Bus handshakes have to be driven to completion: the same one-line
 # executor `main` uses, here so the test does not need a runtime of its own.
 pollster.workspace = true
+# The Xvfb picker example reads the captured PNG's dimensions to say what the
+# window became: the same encoder `dtr-frame` writes it with, used the other way.
+png.workspace = true
+# The example is a sequence of checks with a sentence per failure; the library
+# keeps its own errors typed (`DecodeError`, `String`), so this is the example's
+# alone.
+anyhow.workspace = true

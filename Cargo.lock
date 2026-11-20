@@ -1219,12 +1219,21 @@ dependencies = [
 name = "dtr-portal"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
  "async-channel",
+ "dirs",
  "dtr-files",
+ "dtr-frame",
+ "dtr-widgets",
+ "egui",
+ "png 0.18.1",
  "pollster 0.4.0",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "wgpu",
+ "winit",
+ "x11rb",
  "zbus",
 ]
 

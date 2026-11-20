@@ -8,8 +8,9 @@
 //! the test: it sends the same vardicts an application's portal call becomes and
 //! checks the `(u response, a{sv} results)` that comes back.
 //!
-//! The host is headless — the window is the follow-up — and answers through the
-//! same [`Reply`] the real window will use, from the test thread. A request that
+//! The host is headless — the picker window is `dtr_portal::window`, and it is
+//! tested where a window can exist (`docs/portal.md` §7) — and answers through
+//! the same [`Reply`] the real window uses, from the test thread. A request that
 //! is deliberately left pending is how `Request.Close()` is exercised: nothing in
 //! the production path knows the difference between "the person is still
 //! deciding" and "the test has not answered yet".
@@ -742,11 +743,17 @@ fn the_save_files_uniquifier_is_bounded_and_keeps_the_first_dot() {
 
 /// The shipped daemon, not just the library: `xdg-desktop-portal` runs the
 /// binary, and if it cannot own the bus name the frontend gets a service error
-/// rather than a dialog. Until the window lands its host answers cancel, so a
-/// request must come back with response 1 — and with a real answer rather than a
-/// hang, which is the failure mode a broken `main` would have.
+/// rather than a dialog.
+///
+/// The binary normally runs the picker window on its main thread
+/// (`dtr_portal::window`); a test that started it on a machine with a display
+/// would leave a dialog waiting for a person who is not there. So `DISPLAY` and
+/// `WAYLAND_DISPLAY` are removed from its environment, which takes the daemon's
+/// documented no-window path: it serves the interface and answers every request
+/// with a cancel, with the reason in its log. That is the assertion — a real
+/// answer, not a hang, which is the failure mode a broken `main` would have.
 #[test]
-fn the_daemon_binary_serves_the_interface() {
+fn the_daemon_binary_serves_the_interface_without_a_display() {
     let Some(bus) = private_bus() else {
         eprintln!("no dbus-daemon on PATH; skipping the file chooser portal test");
         return;
@@ -762,6 +769,11 @@ fn the_daemon_binary_serves_the_interface() {
     let child = Child(
         std::process::Command::new(env!("CARGO_BIN_EXE_dtr-portal"))
             .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+            // No display: the binary takes its documented no-window path, and
+            // this test is about it owning the name and answering.
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -810,7 +822,10 @@ fn the_daemon_binary_serves_the_interface() {
         options(vec![("multiple", a_bool(false))]),
     );
     let wire = wait(waiting).expect("the daemon answers its first request");
-    assert_eq!(wire.0, 1, "the placeholder host answers cancel, visibly");
+    assert_eq!(
+        wire.0, 1,
+        "a machine with no display answers cancel, visibly"
+    );
     assert!(wire.1.is_empty());
     drop(child);
 }
