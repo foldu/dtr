@@ -1226,6 +1226,7 @@ dependencies = [
  "compio",
  "dtr-files",
  "dtr-vfs",
+ "tempfile",
  "winit",
 ]
 

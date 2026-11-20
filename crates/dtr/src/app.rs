@@ -27,7 +27,7 @@ use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
 use crate::ui::Status;
 use dtr_files::{
-    Browser, Failure, Layout as FileLayout, PaneView as FilePaneView, Sort as FileSort, WriteOp,
+    Browser, Failure, Layout as FileLayout, PaneView as FilePaneView, Sort as FileSort,
     WriteRequest,
 };
 
@@ -736,54 +736,6 @@ fn cycled(active: usize, count: usize, forward: bool) -> usize {
     } else {
         (active + count - 1) % count
     }
-}
-
-/// Execute one file operation through the machine's backend, off the UI thread.
-///
-/// The trait's rule is that **a backend never replaces an existing destination**
-/// — replacing is the person's answer to the overwrite card, and it is spelled
-/// here rather than hidden in a backend: `request.replace` names how to clear the
-/// destination, and this removes it *first*, then runs the verb. A destination
-/// that vanished between the conflict and the answer is not an error (the
-/// answer was "write over it", and it is no longer there); any other failure
-/// from the removal stops the operation before the verb runs.
-///
-/// Every verb is awaited on the background thread, so a slow mount or an `ssh`
-/// round trip cannot drop a frame. The `Arc<dyn Backend>` is resolved on the UI
-/// thread — `Vfs::backend` owns the connection pool, and looking a connection up
-/// is not I/O — and travels here as an owned handle.
-async fn execute_write(
-    backend: std::sync::Arc<dyn dtr_vfs::Backend>,
-    request: WriteRequest,
-) -> anyhow::Result<()> {
-    let WriteRequest { op, replace, .. } = request;
-    if let (Some(how), Some(destination)) = (replace, op.destination()) {
-        match backend.remove(destination, how).await {
-            Ok(()) => {}
-            Err(err) if is_not_found(&err) => {}
-            Err(err) => return Err(err),
-        }
-    }
-    match &op {
-        WriteOp::CreateDir { at } => backend.create_dir(at).await,
-        WriteOp::Rename { from, to } => backend.rename(from, to).await,
-        WriteOp::Copy { from, to } => backend.copy(from, to).await.map(|_bytes| ()),
-        WriteOp::Move { from, to } => backend.move_to(from, to).await,
-        WriteOp::Remove { at, how } => backend.remove(at, *how).await,
-    }
-}
-
-/// Whether a failed write was "it is not there", which the replace path ignores.
-///
-/// The VFS verbs wrap the OS error with the path they were working on, so the
-/// `io::Error` is in the chain rather than at the top. Only the *removal* of a
-/// destination uses this: a missing source is a real error and must stay one.
-fn is_not_found(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
-    })
 }
 
 /// The stripe a queue row asks for, in the tab strip's terms.
@@ -4665,7 +4617,11 @@ impl App {
         for (leaf, backend, request) in work {
             let proxy = self.proxy.clone();
             self.bg_spawn(move |_runtime| async move {
-                let result = execute_write(backend, request).await;
+                // The shared executor: the same replace-then-verb and
+                // not-found rule the portal's worker runs, so a remote pane's
+                // write cannot behave differently depending on which frontend
+                // started it.
+                let result = dtr_pane_host::execute(backend, request).await;
                 let _ = proxy.send_event(UserEvent::Write { leaf, result });
             });
         }
@@ -7759,11 +7715,17 @@ impl dtr_frame::Scene for GridScene<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BELL_FLASH, RemoteListing, WriteOp, WriteRequest, bell_alpha, cell_of, closed, copy_to,
-        cycled, execute_write, listing_waiter, mouse_goes_to_program, remote_caps, save_name,
-        tab_name, wheel_reaches_the_terminal,
+        BELL_FLASH, RemoteListing, WriteRequest, bell_alpha, cell_of, closed, copy_to, cycled,
+        listing_waiter, mouse_goes_to_program, remote_caps, save_name, tab_name,
+        wheel_reaches_the_terminal,
     };
+    use dtr_files::WriteOp;
     use std::path::{Path, PathBuf};
+
+    /// The shared executor, under the name these tests have always used for it:
+    /// the verb match is `dtr-pane-host`'s, and the test below is the app's
+    /// half of the proof that the plan the browser reports reaches the disk.
+    use dtr_pane_host::execute as execute_write;
 
     /// A bell is a flash that fades and then stops: `Some` while it rings, `None`
     /// once it is over, and never a fixed alpha that the window could leave on

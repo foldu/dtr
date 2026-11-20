@@ -14,12 +14,17 @@
 //!   write verb.
 //! - [`Gestures`] — the click-run counter: one press, two, three, within 400 ms
 //!   and four pixels.
+//! - [`write::execute`] — one [`dtr_files::WriteRequest`] through a
+//!   [`dtr_vfs::Backend`]'s verbs, with the replace-then-verb and not-found
+//!   rule.
 //!
 //! What is not here, deliberately: a window, an event loop, a runtime or a
 //! channel to a thread. Each frontend owns its own.
 
 pub mod gestures;
 pub mod input;
+pub mod write;
 
 pub use gestures::{CLICK_SLOP, DOUBLE_CLICK, Gestures};
 pub use input::{Scope, pane_key};
+pub use write::{execute, is_not_found};

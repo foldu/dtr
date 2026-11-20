@@ -157,7 +157,7 @@ async fn run(vfs: &Vfs, job: Job, sink: &impl Fn(WorkerEvent)) {
         } => list(vfs, manager, alias, path, sink).await,
         Job::Count { manager, path } => count(vfs, manager, path, sink).await,
         Job::Write { manager, request } => {
-            let result = match execute(vfs, &request).await {
+            let result = match execute(vfs, request).await {
                 Ok(()) => WriteResult::Ok,
                 Err(err) => match conflict_path(&err) {
                     Some(path) => WriteResult::Conflict(path),
@@ -255,27 +255,14 @@ async fn count(vfs: &Vfs, manager: u64, path: PathBuf, sink: &impl Fn(WorkerEven
 
 /// Run one write request through the machine's backend.
 ///
-/// This is the discipline `Writes` documents: `replace` means *remove the
-/// existing destination with that removal, then run the verb* — the trait never
-/// replaces anything itself — and a missing destination is not a failure of the
-/// removal. Every verb is the backend's; nothing here re-implements a rename.
-async fn execute(vfs: &Vfs, request: &WriteRequest) -> anyhow::Result<()> {
+/// The verbs are `dtr-pane-host`'s: resolving the `Arc<dyn Backend>` is the
+/// frontend's half (the connection pool lives in its `Vfs`), and the
+/// replace-then-verb and not-found rules are the shared executor's, so this
+/// window and the terminal's file pane cannot disagree about what `replace`
+/// does.
+async fn execute(vfs: &Vfs, request: WriteRequest) -> anyhow::Result<()> {
     let backend = vfs.backend(&request.backend)?;
-    if let (Some(destination), Some(how)) = (request.op.destination(), request.replace) {
-        match backend.remove(destination, how).await {
-            Ok(()) => {}
-            Err(err) if missing(&err) => {}
-            Err(err) => return Err(err),
-        }
-    }
-    let op = &request.op;
-    match op {
-        dtr_files::WriteOp::CreateDir { at } => backend.create_dir(at).await,
-        dtr_files::WriteOp::Rename { from, to } => backend.rename(from, to).await,
-        dtr_files::WriteOp::Copy { from, to } => backend.copy(from, to).await.map(|_| ()),
-        dtr_files::WriteOp::Move { from, to } => backend.move_to(from, to).await,
-        dtr_files::WriteOp::Remove { at, how } => backend.remove(at, *how).await,
-    }
+    dtr_pane_host::execute(backend, request).await
 }
 
 /// The destination a refused write collided with, when it was a conflict.
@@ -286,25 +273,6 @@ fn conflict_path(err: &anyhow::Error) -> Option<PathBuf> {
     err.chain()
         .find_map(|cause| cause.downcast_ref::<dtr_vfs::Conflict>())
         .map(|conflict| conflict.path.clone())
-}
-
-/// Whether an error is "the path was not there", which a replace may ignore.
-///
-/// The message chain rather than one backend's type: `Local` wraps an
-/// `io::Error` in context and `Ssh` answers with its own words, so the io error
-/// is looked for down the `anyhow` chain and a remote not-found is recognised by
-/// the SFTP status text. A false negative leaves the write failed, which is the
-/// safe direction.
-fn missing(err: &anyhow::Error) -> bool {
-    if err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
-    }) {
-        return true;
-    }
-    let text = format!("{err:#}").to_ascii_lowercase();
-    text.contains("no such file") || text.contains("not found") || text.contains("no file")
 }
 
 #[cfg(test)]
@@ -372,7 +340,7 @@ mod tests {
         };
         let runtime = compio::runtime::Runtime::new().expect("runtime");
         let vfs = Vfs::new();
-        let result = runtime.block_on(async { execute(&vfs, &request).await });
+        let result = runtime.block_on(async { execute(&vfs, request).await });
         assert!(result.is_err(), "a missing parent is still a failure");
     }
 
@@ -389,7 +357,7 @@ mod tests {
             replace: None,
         };
         runtime
-            .block_on(async { execute(&vfs, &make).await })
+            .block_on(async { execute(&vfs, make).await })
             .expect("mkdir");
         assert!(scratch.path().join("made").is_dir());
         let rename = WriteRequest {
@@ -401,7 +369,7 @@ mod tests {
             replace: None,
         };
         runtime
-            .block_on(async { execute(&vfs, &rename).await })
+            .block_on(async { execute(&vfs, rename).await })
             .expect("rename");
         assert!(scratch.path().join("renamed").is_dir());
         let remove = WriteRequest {
@@ -413,7 +381,7 @@ mod tests {
             replace: None,
         };
         runtime
-            .block_on(async { execute(&vfs, &remove).await })
+            .block_on(async { execute(&vfs, remove).await })
             .expect("remove");
         assert!(!scratch.path().join("renamed").exists());
     }
@@ -435,17 +403,6 @@ mod tests {
             path: PathBuf::from("/tmp/taken.txt"),
         });
         assert!(dtr_vfs::is_conflict(&rebuilt));
-    }
-
-    #[test]
-    fn a_missing_path_is_recognised_through_the_anyhow_chain() {
-        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
-        let err = anyhow::Error::new(io).context("while removing");
-        assert!(missing(&err));
-        let err = anyhow::anyhow!("SFTP: no such file");
-        assert!(missing(&err));
-        let err = anyhow::anyhow!("permission denied");
-        assert!(!missing(&err));
     }
 
     /// `Worker::start` exists and answers a job with an event: the channel and

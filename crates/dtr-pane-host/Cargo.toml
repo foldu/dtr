@@ -26,6 +26,8 @@ async-channel.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
-# `Memory` is the fake ssh host: the listing pump and the write executor tests
-# run the real `Backend` trait with no server, no disk and no window.
+# `Memory` is the fake ssh host: the listing pump tests run the real `Backend`
+# trait with no server and no window.
 compio.workspace = true
+# A scratch directory for the executor's real `Local` verbs.
+tempfile.workspace = true
