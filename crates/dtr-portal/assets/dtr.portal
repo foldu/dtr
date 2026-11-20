@@ -1,0 +1,13 @@
+# The backend entry: what xdg-desktop-portal reads to find a FileChooser
+# implementation. Installed to $out/share/xdg-desktop-portal/portals/dtr.portal,
+# which is one of the directories $XDG_DATA_DIRS searches — so a trial install
+# under ~/.local/share needs no system change.
+#
+# `UseIn` lists the desktops this backend is offered to when nothing says
+# otherwise. dtr's look reads the GNOME/GTK palette, so gnome is the desktop it
+# belongs on; elsewhere an explicit portals.conf key (what nixosModules.dtr-portal
+# writes) overrides this list.
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.dtr
+Interfaces=org.freedesktop.impl.portal.FileChooser
+UseIn=gnome

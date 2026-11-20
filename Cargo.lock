@@ -1201,6 +1201,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dtr-portal"
+version = "0.1.1"
+dependencies = [
+ "async-channel",
+ "dtr-files",
+ "pollster 0.4.0",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "dtr-sftp"
 version = "0.1.1"
 dependencies = [

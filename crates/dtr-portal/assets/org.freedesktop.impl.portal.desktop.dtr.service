@@ -1,0 +1,12 @@
+# Bus activation: the first FileChooser call starts this process if it is not
+# running, and the portal keeps it for the session (one window per request, warm
+# between them — docs/manager.md §5).
+#
+# `Exec=` is substituted at build time (`flake.nix`) with the *installed* binary,
+# because a build directory in here is a store path that stops existing; the
+# source file's placeholder is not a valid command, so a package that forgot the
+# substitution is caught by checks.dtr-portal-packaging rather than by a dialog
+# that silently never opens.
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.dtr
+Exec=@DTR_PORTAL@

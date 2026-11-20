@@ -186,6 +186,36 @@
         '';
       });
 
+    # The file chooser portal backend, as a package of its own: it is a service
+    # the desktop activates, not part of the terminal, and a machine that does not
+    # run the portal should not install it. `docs/portal.md` is the account.
+    dtr-portal = craneLib.buildPackage (cargoCommon
+      // {
+        pname = "dtr-portal";
+        cargoArtifacts = dtrDeps;
+        # The suite is a check of its own (`checks.tests`, and the devShell gate);
+        # building the package should not wait for a private bus.
+        doCheck = false;
+        # Only the daemon: a bare `cargo build` at the workspace root builds the
+        # terminal too, and its VT core and wgpu are not this package's business.
+        cargoExtraArgs = "--locked --package dtr-portal";
+        # The two text files that make a backend loadable, in the locations
+        # $XDG_DATA_DIRS is searched for. `Exec=` names the *installed* binary:
+        # a build directory there is a store path that stops existing, and a
+        # dialog that silently never opens is this packaging's worst failure.
+        # `portals.conf` is deliberately not installed: it is the user's choice,
+        # and the NixOS module writes it (`docs/portal.md`).
+        postInstall = ''
+          install -Dm644 ${./crates/dtr-portal/assets/dtr.portal} \
+            $out/share/xdg-desktop-portal/portals/dtr.portal
+          install -Dm644 ${./crates/dtr-portal/assets/org.freedesktop.impl.portal.desktop.dtr.service} \
+            $out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.dtr.service
+          substituteInPlace \
+            $out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.dtr.service \
+            --replace-fail '@DTR_PORTAL@' "$out/bin/dtr-portal"
+        '';
+      });
+
     dtr-windows = pkgs.stdenv.mkDerivation {
       pname = "dtr";
       inherit version;
@@ -242,7 +272,7 @@
     };
   in {
     packages.${system} = {
-      inherit dtr libghostty-vt libghostty-vt-win;
+      inherit dtr dtr-portal libghostty-vt libghostty-vt-win;
       windows = dtr-windows;
       default = dtr;
     };
@@ -405,6 +435,109 @@
       fi
         touch $out
       '';
+
+      # The packaging is four lines of text where every typo is a chooser that
+      # never opens: a portal file whose DBusName disagrees with the service
+      # file, or an `Exec=` naming nothing, has no test in any language. This
+      # checks the *installed* files, so it fails on a missed substitution too.
+      dtr-portal-packaging = pkgs.runCommand "dtr-portal-packaging" {
+        nativeBuildInputs = [pkgs.gnugrep pkgs.gnused pkgs.coreutils];
+      } ''
+        portal=${dtr-portal}/share/xdg-desktop-portal/portals/dtr.portal
+        service=${dtr-portal}/share/dbus-1/services/org.freedesktop.impl.portal.desktop.dtr.service
+
+        # The interface this crate serves is what the portal entry advertises.
+        grep -qx 'Interfaces=org.freedesktop.impl.portal.FileChooser' "$portal"
+        portal_name=$(sed -n 's/^DBusName=//p' "$portal")
+        service_name=$(sed -n 's/^Name=//p' "$service")
+        test -n "$portal_name" && test "$portal_name" = "$service_name" || {
+          echo "the portal file names '$portal_name', the service file owns '$service_name'" >&2
+          exit 1
+        }
+        test "$service_name" = org.freedesktop.impl.portal.desktop.dtr || {
+          echo "the service owns the wrong bus name: $service_name" >&2
+          exit 1
+        }
+
+        exec_path=$(sed -n 's/^Exec=//p' "$service")
+        test -x "$exec_path" || {
+          echo "Exec=$exec_path is not an executable the package installs" >&2
+          exit 1
+        }
+        case "$exec_path" in
+          */bin/dtr-portal) ;;
+          *) echo "Exec= does not point at the package's own binary: $exec_path" >&2; exit 1 ;;
+        esac
+        touch $out
+      '';
+
+      # The module's whole job is two option values, and `nix flake check` cannot
+      # see them any other way: a check that only greps the package would pass
+      # while the module named the wrong file. This evaluates a bare NixOS
+      # configuration with the module imported and reads back the portals.conf
+      # NixOS would write, plus the package whose portal file it points at.
+      dtr-portal-module = let
+        # `nixpkgs.lib` has no `nixosSystem` (that lives in the flake's own NixOS
+        # entry point, which a flake input does not export); `eval-config.nix` is
+        # the same evaluator `nixosSystem` is a wrapper around.
+        evaluated = import (nixpkgs + "/nixos/lib/eval-config.nix") {
+          inherit system;
+          modules = [
+            self.nixosModules.dtr-portal
+            {services.dtr-portal.enable = true;}
+          ];
+        };
+        conf = evaluated.config.environment.etc."xdg/xdg-desktop-portal/portals.conf".text;
+      in
+        assert lib.assertMsg
+        (lib.elem dtr-portal evaluated.config.xdg.portal.extraPortals)
+        "nixosModules.dtr-portal did not put the package on xdg.portal.extraPortals";
+        assert lib.assertMsg evaluated.config.xdg.portal.enable
+        "nixosModules.dtr-portal did not enable xdg.portal";
+        pkgs.runCommand "dtr-portal-module" {} ''
+          cat > portals.conf <<'EOF'
+          ${conf}
+          EOF
+          grep -qx 'org.freedesktop.impl.portal.FileChooser=dtr' portals.conf || {
+            echo "the module did not name dtr as the FileChooser backend:" >&2
+            cat portals.conf >&2
+            exit 1
+          }
+          grep -Fqx 'default=*' portals.conf || {
+            echo "the module broke every other interface by naming no default:" >&2
+            cat portals.conf >&2
+            exit 1
+          }
+          touch $out
+        '';
+    };
+
+    # Importing this module is the opt-in: it names dtr as the FileChooser
+    # backend, hands the portal file to xdg-desktop-portal, and leaves every
+    # other interface on the machine's own backend. `docs/portal.md` §Packaging
+    # is the account of the precedence rules and why `common` is the right file.
+    nixosModules.dtr-portal = {
+      config,
+      lib,
+      ...
+    }: let
+      cfg = config.services.dtr-portal;
+    in {
+      options.services.dtr-portal.enable =
+        lib.mkEnableOption "the dtr file chooser portal backend";
+
+      config = lib.mkIf cfg.enable {
+        xdg.portal.enable = true;
+        xdg.portal.extraPortals = [self.packages.${system}.dtr-portal];
+        xdg.portal.config.common = {
+          # `*` is portals.conf's "first implementation found" rule — what
+          # xdg-desktop-portal did before configuration existed — so interfaces
+          # this module says nothing about keep working. `mkDefault`: a desktop's
+          # own NixOS module that names a default should win.
+          default = lib.mkDefault "*";
+          "org.freedesktop.impl.portal.FileChooser" = "dtr";
+        };
+      };
     };
 
     devShells.${system}.default = pkgs.mkShell {
