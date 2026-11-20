@@ -193,7 +193,7 @@ recipe pushes the commit and the tag to both.
   skipped publish cannot leave the picture stale.
 - **`Terminal::resize`'s pixel arguments are the cell's, not the pane's** — the pane size
   put every click in the top-left cell. **A resize must re-fit the terminal, not just the
-  surface**: `WindowEvent::Resized` must call `fit_panes`, where per-size state belongs.
+  surface**: the frame that draws the new size calls `fit_panes`, where per-size state belongs.
   **Two layouts must agree on the top inset**: `fit_panes` sizes and `pane_views` draws,
   both asking `App::top_inset`, or the pty keeps a taller area's rows. **With
   `chrome = "client"` that strip is also the title bar**: the platform's own caption height

@@ -315,10 +315,6 @@ open rather than guessed at.
 
 Keystroke → pty → parse → publish → repaint → draw → present:
 
-- **Publish gate.** Half a refresh interval, floored at 2 ms
-  (`crates/dtr/src/pane.rs:59`); when the pane is hot it waits out the gate before publishing
-  (`crates/dtr/src/pane.rs:1155`). Idle sessions publish immediately (the deadline is in the
-  past), so a prompt is not delayed — but sustained typing pays up to 8.3 ms at 60 Hz.
 - **Present.** `AutoVsync` (`crates/dtr/src/app.rs`), one frame in the
   compositor's queue: `desired_maximum_frame_latency` is set to 1. On DX12 the
   wait for a free swapchain buffer happens in `get_current_texture` — wgpu's DX12
@@ -332,11 +328,13 @@ Keystroke → pty → parse → publish → repaint → draw → present:
   work". A frame-phase instrument must start the clock after
   `get_current_texture` and keep acquire and present as separate maxima.
 - **Publish gate.** Half a refresh interval, floored at 2 ms
-  (`crates/dtr/src/pane.rs`): 8.3 ms at 60 Hz, 4.2 ms at 120 Hz, and **16.7 ms in
-  a 30 Hz mode** — a 4K laptop panel is the place a 30 Hz mode actually happens,
-  and there the gate alone is more than a refresh of echo latency. Whatever
-  counter reads the frame budget (an overlay, or the `publish gate` debug line
-  when the panel changes) is where to check which mode the machine is in.
+  (`crates/dtr/src/pane.rs:59`); when the pane is hot it waits out the gate before publishing
+  (`crates/dtr/src/pane.rs:1155`), so sustained typing pays 8.3 ms at 60 Hz, 4.2 ms at
+  120 Hz, and **16.7 ms in a 30 Hz mode** — a 4K laptop panel is the place a 30 Hz mode
+  actually happens, and there the gate alone is more than a refresh of echo latency.
+  Idle sessions publish immediately (the deadline is already in the past), so a prompt is
+  not delayed. Whatever counter reads the frame budget (an overlay, or the `publish gate`
+  debug line when the panel changes) is where to check which mode the machine is in.
 
 Expected worst case before the compositor is gate + one refresh; the latency
 hint above removes one frame of queueing, which is the only part of that chain
