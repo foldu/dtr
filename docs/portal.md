@@ -399,8 +399,10 @@ and §8 says why it is not the machine's actual palette yet.
 
 ### 9.4 Input
 
-The window is the only place a picker's keys exist, so it maps them itself, once, and the
-browser's own rules do the rest:
+The window owns its events, but not the meaning of a key: the mapping to
+`dtr_files::Key`, the picker's scope and the double-click rule are
+`dtr-pane-host`'s, shared with the terminal's file panes (`crates/dtr-pane-host`,
+§10.3). The browser's own rules do the rest:
 
 - `Escape` cancels — closing a save's `replace` question first and the picker second, the
   browser's one-button-two-depths rule; the footer's cancel button reports the same thing
@@ -409,8 +411,9 @@ browser's own rules do the rest:
 - arrows, `PageUp`/`PageDown`, `Home`/`End`, `Backspace`, `Alt+Up` and `h j k l r g G` are
   `dtr_files::Key`s, the same mapping dtr's file panes use — **unless an egui widget has the
   keyboard**, which is a save's name field, so typing a name does not also move a listing
-  behind it;
-- a left press is `Browser::clicked` with dtr's double-click counter (400 ms, four points),
+  behind it. The picker asks for `Scope::picker()`, which withholds the write chords: a
+  read-only question must not offer rename, delete, copy, paste or new-folder;
+- a left press is `Browser::clicked` with `dtr_pane_host::Gestures` (400 ms, four points),
   and the wheel is `Browser::scroll`;
 - key **releases** are ignored: the release of the keystroke that opened the window arrives
   after it is open, and acting on both would cancel twice (`AGENTS.md`).
@@ -650,14 +653,23 @@ one.
 
 `src/worker.rs` is the "UI thread asks for slow work" rule for this process: one
 thread, one compio runtime, three jobs. A remote listing through
-`dtr_vfs::Ssh::list` collected into one piece for `Browser::apply_listing`; a
-local count for the status bar; and the browser's `WriteRequest`s executed
-through the VFS verbs, with `replace` clearing the destination with that removal
-first. The conflict case is why the worker has its own result type: `dtr-files`
-chooses its overwrite card by downcasting to `dtr_vfs::Conflict`, and an
-`anyhow::Error` cannot cross a thread — so the worker carries the destination and
-the window rebuilds the typed error. Local browsing needs none of this: the
-browser streams `Local::list` itself, as in the picker.
+`dtr_vfs::Ssh::list`, coalesced by `dtr_pane_host::listing::collect` into the one
+piece `Browser::apply_listing` takes — the same coalescing, failure rule and
+host-plus-directory routing the terminal's frame loop drains, so the two windows
+cannot disagree about a stale reply; a local count for the status bar; and the
+browser's `WriteRequest`s executed by `dtr_pane_host::execute`, the same
+replace-then-verb and not-found rule the terminal's panes use. The conflict case
+is why the worker has its own result type: `dtr-files` chooses its overwrite card
+by downcasting to `dtr_vfs::Conflict`, and an `anyhow::Error` cannot cross a
+thread — so the worker carries the destination and the window rebuilds the typed
+error. Local browsing needs none of this: the browser streams `Local::list`
+itself, as in the picker.
+
+The window's own input is the shared table too: `picker_key` asks
+`Scope::picker()`, and `manager_key` asks `Scope::manager(manager.can_write())`,
+so a manager window over a writable backend now has `F2`, `Delete`,
+`Shift+Delete`, `Ctrl+C`, `Ctrl+V` and `Ctrl+Shift+N` — the chords the terminal's
+file pane has had since F6 — while a read-only pane still gets only movement.
 
 ### 10.4 Tests and verification
 
@@ -733,9 +745,11 @@ What is *not* done, exactly:
 - **Host rows open at `.`** (`Ssh` has no `home()`), **drives are Linux-only**
   (`/proc/mounts`; Windows has no drives section), and **sidebar rows are text** —
   no theme icon resolver lives in this process.
-- **No write chords.** The browser's verbs are reachable through the pane's
-  right-click menu only; mapping `F2`/`Delete`/`Ctrl+Shift+N` is the terminal's
-  `[keys]` business (F6), not this window's.
+- **No write chords in the capture's build order — now they exist.** The manager
+  window had the pane's right-click menu only; with the shared table it also has
+  `F2`/`Delete`/`Ctrl+C`/`Ctrl+V`/`Ctrl+Shift+N` whenever its backend has the
+  write verbs. This bullet is kept as the record of the gap the F6 merge left and
+  the shared table closed.
 - **A remote file does not open.** `Enter`/the menu on a remote file sets the
   browser's download request, which this window does not pump (downloads are
   F5/F7); local files go to `xdg-open`. `CopyPath` uses egui's in-app clipboard,

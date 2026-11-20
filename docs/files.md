@@ -628,7 +628,49 @@ through lavapipe in the devShell.
   the keep-both thickness is covered by reproducing `numbered_name`, not by passing a name.
 - **Rate/ETA** on the card is the widget's `rate` hook and nothing computes it yet; the stripe and the
   counts are the progress.
-- **The dedup pass** (`docs/files.md` §14 mentions the write path moving) should absorb: `job_of` and
-  `pre_answer` live in `crate::transfer` next to the queue command; `dtr-files`' `next_free_name` and
-  `dtr_transfer::naming::numbered_name` are two spellings of one rule, pinned only by tests — the
-  queue's `KeepBoth` pre-answer is the code that depends on them agreeing.
+- **The dedup pass landed** (`docs/files.md` §17): `job_of`/`pre_answer` stay in `crate::transfer`
+  (the queue is the app's), but the keep-both rule is `dtr_transfer::naming` only — the browser's
+  `next_free_name` walks its candidates and `pre_answer`'s `keeps_both` calls
+  `naming::is_numbered_name`, so the two cannot pick different names.
+
+## 17. The frontend glue is one crate (`dtr-pane-host`)
+
+The terminal's file panes and the desktop's manager window are the same `Browser`
+behind two different windows, and the glue between them — the parts that are the
+same in both — now lives in `crates/dtr-pane-host`:
+
+- **`input::pane_key`** is the winit key to `dtr_files::Key` table. `input::Scope`
+  is what gates it: `Scope::picker()` withholds every write chord (a read-only
+  question must not offer rename), `Scope::manager(caps.write)` withholds them for
+  a backend without the verbs, and `Scope::of(&Browser)` reads both facts the
+  browser already knows. The portal's manager window gained the F6 chords this
+  way; its picker stayed movement-only.
+- **`Gestures`** is the click-run counter (1/2/3, four points, 400 ms), so a
+  manager window and a terminal grid count the same hand the same way. Its
+  400 ms boundary is inclusive once, where the two old copies disagreed (`<=` vs
+  `<`).
+- **`write::execute`** runs one `WriteRequest` through an `Arc<dyn Backend>` with
+  the replace-then-verb and not-found rule. The not-found test is the union of the
+  two old ones (`io::ErrorKind::NotFound` in the chain, then SFTP's words), which
+  is the documented intent: a destination that vanished after the overwrite card
+  is not a failure. A missing *source* stays a failure.
+- **`listing`** is the remote protocol: `Listing` coalesces batches, `Pump` drains
+  finished walks into the pane waiting for that host and directory (a reply to a
+  directory the pane left is dropped), and `collect` is the same coalescing for a
+  worker thread. Each frontend keeps its own runtime/thread/frame loop.
+
+What deliberately stays per frontend: the terminal's pointer-to-cell and
+mouse-encoder path (terminal state, not a file pane's), the app's F5 queue routing
+(`transfer::is_queued`/`pre_answer`/`job_of`), the portal's window/thread model,
+`Browser`'s own handshake and the local listing's poll.
+
+**Not moved: the native-palette reader.** `crates/dtr/src/system` still reads the
+desktop and the portal still falls back to `Skin::adwaita` + `DTR_PORTAL_SCHEME`.
+Moving it into `dtr-widgets` would put a compio runtime, a zbus feature and a
+platform reader under the widget crate, and the `#[cfg(test)]` "a test does not
+read the desktop" rule that keeps the look snapshots deterministic only works
+because the reader's *caller* is in the test binary. That is a design decision
+(where the live platform reader lives and how a test suppresses it) rather than a
+mechanical move, so it is left for its own change; the portal's own contract
+(`docs/portal.md` §8) already says a desktop palette would be an improvement, not
+a correctness fix.
