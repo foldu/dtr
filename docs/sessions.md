@@ -338,6 +338,35 @@ read to `TimedOut` — so the CR flusher and the disconnect teller read differen
 and **a settings change still reconnects by stopping the reader**, which is now a flag the
 thread polls between reads rather than a cancelled task.
 
+### Delayed input
+
+A U-Boot prompt is a line reader with no flow control and a small buffer: type `help`
+quickly and the board receives `hepl`, because the second byte arrived while it was still
+handling the first. The terminal's side of that is *pacing*, and it is a mode rather than a
+setting because it is a property of the board in front of you — the same dtr may have a
+board that needs it and an `ssh` tab that does not.
+
+**The mode is off until it is switched on**: `ctrl-alt-d` (`key-delay` in `[keys]`, so it
+can be moved or handed back), or the palette's `lag`. It is window-wide: every serial tab
+paces, because there is one cable, and a shell tab ignores it — a pty has a buffer and
+pacing it only makes typing feel broken. **The status strip says so in red**: a full-height
+`DELAY 1 ms` chip at the far right, where it never moves the label or the counters.
+
+The period is `[serial] key_delay_ms`, 1–1000 with a default of 1. **One byte per period,
+not one keystroke**: the second byte of `ESC [ A` is as much at risk as the second letter of
+a word, so a multi-byte sequence is spaced too. The first byte of a burst goes at once and
+the next is a period behind it, so the delay is the gap *between* bytes and a single
+keystroke after a pause is not slower than it was. Bytes are queued in order, so a paste or
+a fast typist cannot overtake an earlier byte; the queue is capped at 4096 and a reader
+that stops reading gets the backlog written at once rather than growing the queue. Turning
+the mode off writes what was waiting immediately, so a keystroke cannot be stranded behind
+a mode that is gone.
+
+Paste is a different pacing decision and was already separate: a clipboard is written in
+128-byte chunks 20 ms apart on a serial line (`write_paste`), and delayed input never
+touches it. The chip's number is the config's, so editing `key_delay_ms` while the mode is
+on reaches the open panes through the config reload rather than waiting for a toggle.
+
 
 ## 12. A drop keeps the tab; tmux keeps the work
 

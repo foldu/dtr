@@ -635,6 +635,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         about_open: false,
         stats_overlay: startup.stats,
         stats_due: std::time::Instant::now(),
+        key_delay: false,
         keymap_card: crate::keymap::Overlay {
             open: startup.keymap,
             edit: None,
@@ -1427,6 +1428,13 @@ struct App {
     /// instrument that forced every frame would measure itself. See
     /// [`crate::stats::REFRESH_INTERVAL`].
     stats_due: std::time::Instant,
+    /// Whether serial keystrokes are spaced by `serial.key_delay_ms`.
+    ///
+    /// Off at startup on purpose: it is a property of the board on the other end
+    /// of the cable, and a mode left on from yesterday makes every later
+    /// keystroke feel sticky. Window-wide because the board is: every serial pane
+    /// gets the same answer, and a shell pane ignores it.
+    key_delay: bool,
     /// The keyboard map: the card's own state (whether it is up, and which row is
     /// waiting for a key), plus the bindings it draws, which are rebuilt whenever
     /// one is written.
@@ -3541,6 +3549,30 @@ impl App {
                 session.pane.send(crate::pane::Command::Echo(session.echo));
                 true
             }
+            // A window-wide switch, not a per-pane one: it is the board on the
+            // cable that needs it, and a person who turned it on for the board
+            // in front of them means every serial tab. It reaches a shell not at
+            // all — the pane ignores it unless its transport is serial.
+            Action::KeyDelay => {
+                self.key_delay = !self.key_delay;
+                let delay = self.key_delay_period();
+                tracing::debug!(
+                    on = self.key_delay,
+                    ms = self.config.serial.key_delay_ms,
+                    "key delay"
+                );
+                for tab in &self.tabs {
+                    for pane in tab.leaves.values() {
+                        if let Pane::Terminal(session) = pane
+                            && session.serial
+                        {
+                            session.pane.send(crate::pane::Command::KeyDelay(delay));
+                        }
+                    }
+                }
+                self.repaint("key delay");
+                true
+            }
         }
     }
 
@@ -3677,6 +3709,20 @@ impl App {
         // all, and a keymap that remembered the old chords would leave the file
         // describing a keyboard nobody has.
         self.keymap = crate::keys::Keymap::new(&self.config.keys);
+        // `serial.key_delay_ms` is live too, and it is a period: a pane already
+        // pacing at the old number would keep it until the mode was toggled.
+        if self.key_delay {
+            let delay = self.key_delay_period();
+            for tab in &self.tabs {
+                for pane in tab.leaves.values() {
+                    if let Pane::Terminal(session) = pane
+                        && session.serial
+                    {
+                        session.pane.send(crate::pane::Command::KeyDelay(delay));
+                    }
+                }
+            }
+        }
     }
 
     /// Read the config file again, because it changed on disk.
@@ -3962,6 +4008,14 @@ impl App {
         );
         match spawned {
             Ok(pane) => {
+                // A mode that is already on belongs to a pane that did not exist
+                // when it was switched on, or a serial tab opened now would type
+                // at full speed in a window whose chip says otherwise.
+                if matches!(transport, Transport::Serial(_))
+                    && let Some(delay) = self.key_delay_period()
+                {
+                    pane.send(crate::pane::Command::KeyDelay(Some(delay)));
+                }
                 let alias = ssh_alias(&transport);
                 let session = Session {
                     pane,
@@ -4992,8 +5046,24 @@ impl App {
                 tracing::debug!(on = self.stats_overlay, "debug overlay");
                 self.repaint("debug overlay toggled");
             }
+            // The keys action and the palette command are one implementation:
+            // the palette arm delegates, so the two cannot disagree about what
+            // the switch does.
+            Action::KeyDelay => {
+                self.dispatch(crate::keys::Action::KeyDelay);
+            }
             Action::Quit => self.quit = true,
         }
+    }
+
+    /// How long a byte waits behind the one before it while delayed input is on.
+    ///
+    /// `None` when the mode is off, which is the pane's "write it straight
+    /// through" answer. The period is the config's, so a reload reaches panes
+    /// through `adopt_config` rather than through a second copy here.
+    fn key_delay_period(&self) -> Option<std::time::Duration> {
+        self.key_delay
+            .then(|| std::time::Duration::from_millis(self.config.serial.key_delay_ms.into()))
     }
 }
 
@@ -5869,6 +5939,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut scrollback = 0u64;
                     let mut modem = None;
                     let mut counters = false;
+                    let mut serial = false;
                     if let Some(session) = self.session() {
                         let stats = session.pane.stats().clone();
                         label = session.label.clone();
@@ -5876,6 +5947,7 @@ impl ApplicationHandler<UserEvent> for App {
                         scrollback = stats.scrollback();
                         modem = session.serial.then(|| (stats.dtr(), stats.rts()));
                         counters = session.counters;
+                        serial = session.serial;
                         if let Some(session) = self.session_mut() {
                             session.meter.sample(rx, tx);
                         }
@@ -5897,6 +5969,14 @@ impl ApplicationHandler<UserEvent> for App {
                         scrollback,
                         modem,
                         counters,
+                        // Only a serial pane has bytes to space, and only its
+                        // line needs the chip: a shell telling the strip it is
+                        // delayed would be a mode that is doing nothing.
+                        key_delay: if self.key_delay && serial {
+                            self.key_delay_period()
+                        } else {
+                            None
+                        },
                     };
                     let mut action = None;
                     let mut copied = None;

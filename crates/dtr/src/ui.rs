@@ -343,6 +343,9 @@ pub struct Status<'a> {
     /// is not a serial line: its byte totals are noise, and the strip is scarce
     /// space next to a filename or a path.
     pub counters: bool,
+    /// The period delayed input is spacing serial keystrokes by, when the mode is
+    /// on and the focused pane is a serial line; `None` draws no chip.
+    pub key_delay: Option<std::time::Duration>,
 }
 
 /// A short-lived note in the corner: "copied 1.2 kB".
@@ -1449,7 +1452,46 @@ pub fn status_bar(ui: &mut Ui, status: &Status, look: &Look) {
             .font(body_font.clone())
             .color(p.dim),
         );
+        if let Some(delay) = status.key_delay {
+            // At the far right, in its own layout: it is an indicator, not part
+            // of the row's text, and a chip that moved when RX grew would be read
+            // as one. The layout takes the rest of the row and aligns from the
+            // right, so nothing to its left moves.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                delay_chip(ui, delay, &skin);
+            });
+        }
     });
+}
+
+/// The red `DELAY 1 ms` chip, at full bar height.
+///
+/// An indicator rather than a button: it senses nothing, takes no hover and no
+/// click, because the way to switch the mode off is the chord or the palette, and
+/// a chip that looked pressable would be a third way in with no way to say so.
+/// `DELAY` first because the strip is read at a glance from the corner of the eye.
+///
+/// The chip is painted rather than laid out as a label so its fill covers the
+/// bar's own height; a painted gadget has no accessibility node unless it says
+/// so, which is why the response carries the text.
+fn delay_chip(ui: &mut egui::Ui, delay: std::time::Duration, skin: &dtr_widgets::Skin) {
+    let palette = skin.palette;
+    let style = &skin.style;
+    let text = format!("DELAY {} ms", delay.as_millis());
+    let font = egui::FontId::new(style.label_font.size - 0.5, style.label_font.family.clone());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.clone(), font, palette.on_danger);
+    // The bar's own height, inside the panel's padding: the strip is 24 points
+    // and its margin leaves 16, so the chip fills what it was given and no more.
+    let height = ui.available_height().min(STATUS_HEIGHT);
+    let width = galley.size().x + style.padding.x * 2.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, f32::from(style.control_radius), palette.danger);
+    let at = rect.center() - galley.size() / 2.0;
+    ui.painter().galley(at, galley, palette.on_danger);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
 }
 
 fn human_bytes(value: f64) -> String {
@@ -2427,5 +2469,62 @@ mod kittest_tests {
             dtr_widgets::above_the_root(popup),
             "the menu is above the root layer: {popup:?}"
         );
+    }
+
+    /// A status strip with only the parts the chip's test cares about.
+    fn status_strip(key_delay: Option<std::time::Duration>) -> Status<'static> {
+        Status {
+            label: "demo",
+            tabs: (1, 1),
+            rx: 1_024,
+            tx: 512,
+            rx_rate: 0.0,
+            tx_rate: 0.0,
+            scrollback: 0,
+            modem: Some((true, true)),
+            counters: true,
+            key_delay,
+        }
+    }
+
+    /// A harness the height of the bar, with the panel's own padding, so the chip
+    /// is measured at the size it will be on screen rather than at a dialog row's.
+    fn status_harness(look: Look, key_delay: Option<std::time::Duration>) -> Harness<'static> {
+        Harness::builder()
+            .with_size(egui::vec2(720.0, STATUS_HEIGHT))
+            .build_ui(move |ui| {
+                egui::Frame::new()
+                    .fill(look.skin().palette.card)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| status_bar(ui, &status_strip(key_delay), &look));
+            })
+    }
+
+    /// Delayed input is a mode, and the strip has to say so: on, there is a red
+    /// `DELAY 1 ms` chip; off, there is nothing — not a dim chip, not a zero.
+    #[test]
+    fn the_delay_chip_is_on_the_strip_only_when_the_mode_is_on() {
+        let mut harness =
+            status_harness(Look::default(), Some(std::time::Duration::from_millis(1)));
+        harness.run();
+        harness.get_by_label("DELAY 1 ms");
+
+        let mut harness = status_harness(Look::default(), None);
+        harness.run();
+        assert!(
+            harness.query_by_label("DELAY 1 ms").is_none(),
+            "the chip must not be drawn when the mode is off"
+        );
+    }
+
+    /// What the chip looks like in dtr's own chrome, at the bar's height: a
+    /// baseline rather than a claim, so a later change to the strip cannot move
+    /// it silently.
+    #[test]
+    fn the_status_strip_renders_with_the_delay_chip() {
+        let mut harness =
+            status_harness(Look::default(), Some(std::time::Duration::from_millis(1)));
+        harness.run();
+        harness.snapshot("status_delay");
     }
 }

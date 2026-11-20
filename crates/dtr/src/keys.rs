@@ -76,6 +76,16 @@ pub enum Action {
     ModemRts,
     ModemBreak,
     Echo,
+    /// Space the bytes typed at a serial line, for a board whose input buffer
+    /// drops fast keystrokes.
+    ///
+    /// A runtime switch rather than a setting, and off by default: whether the
+    /// board in front of you needs it changes with the board, and a mode left on
+    /// from yesterday makes every later keystroke feel sticky. The *period* is
+    /// `serial.key_delay_ms`; this is only on/off. It does nothing to a shell or
+    /// an ssh session, because a pty has a buffer and pacing it only makes typing
+    /// feel broken.
+    KeyDelay,
     /// Show the keyboard map: every binding, grouped, for the person who has
     /// just installed this and does not know ctrl-shift-p exists yet.
     Keymap,
@@ -127,6 +137,7 @@ impl Action {
             Self::ModemRts => "modem-rts",
             Self::ModemBreak => "modem-break",
             Self::Echo => "echo",
+            Self::KeyDelay => "key-delay",
             Self::Keymap => "keymap",
         }
     }
@@ -181,6 +192,7 @@ impl Action {
             Self::ModemRts => "toggle RTS",
             Self::ModemBreak => "send a break",
             Self::Echo => "echo to the log",
+            Self::KeyDelay => "delay serial keystrokes",
             Self::Keymap => "this keyboard map",
         }
     }
@@ -223,7 +235,9 @@ impl Action {
             | Self::PreviousPrompt
             | Self::NextPrompt
             | Self::CaptureBlock => Group::Scrollback,
-            Self::ModemDtr | Self::ModemRts | Self::ModemBreak | Self::Echo => Group::Serial,
+            Self::ModemDtr | Self::ModemRts | Self::ModemBreak | Self::Echo | Self::KeyDelay => {
+                Group::Serial
+            }
         }
     }
 }
@@ -290,7 +304,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 43] = [
+pub const ALL: [Action; 44] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -333,6 +347,7 @@ pub const ALL: [Action; 43] = [
     Action::ModemRts,
     Action::ModemBreak,
     Action::Echo,
+    Action::KeyDelay,
     Action::Keymap,
 ];
 
@@ -397,6 +412,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("modem-rts", "ctrl-shift-r"),
     ("modem-break", "ctrl-shift-b"),
     ("echo", "ctrl-shift-e"),
+    // Delayed input, the U-Boot problem: ctrl+alt and a letter is the family
+    // the pane and file commands already live in, and `d` is free there.
+    ("key-delay", "ctrl-alt-d"),
     // `ctrl-?` rather than F1: a terminal's F1 is `ESC O P` and belongs to the
     // program (Midnight Commander's help menu is the usual one), while ctrl+?
     // is what applications have used for "keyboard shortcuts" for decades.
@@ -875,6 +893,40 @@ mod tests {
             Keymap::new(&read().keys).bound(Action::NewTab),
             vec!["ctrl-shift-t".to_owned()]
         );
+    }
+
+    /// Delayed input's default chord, and the two things `[keys]` may do with
+    /// it: take it away, because the chord belongs to whoever wants it, and move
+    /// it, because the point of a rebindable default is that a terminal does not
+    /// get to pick somebody's keyboard.
+    #[test]
+    fn the_key_delay_default_is_ctrl_alt_d_and_the_config_can_rebind_it() {
+        let chord = parse_sequence("ctrl-alt-d").expect("chord").chords[0];
+        let mut overrides = BTreeMap::new();
+        assert_eq!(
+            Keymap::new(&overrides).resolve(&[], chord),
+            Matched::Action(Action::KeyDelay),
+            "the shipped default"
+        );
+
+        overrides.insert("key-delay".to_owned(), Sequence::disabled());
+        assert_eq!(
+            Keymap::new(&overrides).resolve(&[], chord),
+            Matched::Nothing,
+            "a disabled binding hands the chord back"
+        );
+
+        overrides.insert(
+            "key-delay".to_owned(),
+            parse_sequence("ctrl-alt-l").expect("chord"),
+        );
+        let keymap = Keymap::new(&overrides);
+        let moved = parse_sequence("ctrl-alt-l").expect("chord").chords[0];
+        assert_eq!(
+            keymap.resolve(&[], moved),
+            Matched::Action(Action::KeyDelay)
+        );
+        assert_eq!(keymap.resolve(&[], chord), Matched::Nothing);
     }
 
     /// The three refusals, and the one chord that is accepted.

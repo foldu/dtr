@@ -157,6 +157,9 @@ pub fn capture(
         tx_rate: 0.0,
         scrollback: stats.scrollback(),
         modem: serial.then(|| (stats.dtr(), stats.rts())),
+        // The offscreen path is a renderer test, not a live serial session:
+        // there is no App mode to report.
+        key_delay: None,
     };
 
     // The layout is decided before the egui pass because the file pane's

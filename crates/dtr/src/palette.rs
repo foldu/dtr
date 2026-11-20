@@ -36,6 +36,9 @@ pub enum Action {
     /// accelerator and `s` is `ssh`'s — `crates/dtr-complete` fails the build on
     /// a collision. The `--stats` flag is the other way in.
     Stats,
+    /// Delayed input for a serial line: `lag` and not `delay`, because `d` is
+    /// demo's accelerator, and not `slow` because `s` is ssh's.
+    KeyDelay,
 }
 
 pub struct Palette {
@@ -442,6 +445,9 @@ fn action_for(line: &str) -> Option<Action> {
         "about" => Some(Action::About),
         // `stats` would share ssh's accelerator; see `Action::Stats`.
         "overlay" => Some(Action::Stats),
+        // `delay` would share demo's accelerator, `slow` ssh's; see
+        // `Action::KeyDelay`.
+        "lag" => Some(Action::KeyDelay),
         _ => None,
     }
 }
@@ -504,6 +510,14 @@ mod tests {
         // `stats` would collide with ssh's accelerator; the command is named for
         // what it draws and the flag keeps the word the docs use.
         assert!(matches!(action_for("overlay"), Some(Action::Stats)));
+    }
+
+    #[test]
+    fn lag_toggles_the_serial_input_delay() {
+        // `delay` would share demo's accelerator and `slow` ssh's: a command's
+        // first letter is its accelerator, and the completion engine refuses a
+        // collision at build time.
+        assert!(matches!(action_for("lag"), Some(Action::KeyDelay)));
     }
 
     #[test]

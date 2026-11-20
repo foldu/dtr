@@ -21,6 +21,14 @@ pub mod keys;
 /// therefore part of the type, not a recommendation in a comment.
 pub const SCROLLBACK_LIMIT: usize = 100_000_000;
 
+/// The range `serial.key_delay_ms` accepts, in milliseconds.
+///
+/// The floor is one byte period — zero would be "off", which is what the
+/// runtime switch is for, not a config value — and the ceiling is the point past
+/// which the delay is a stall rather than a help: 1000 ms between two bytes is
+/// slower than reading them out of a paste.
+pub const KEY_DELAY_MS_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
+
 /// Everything configurable. Defaults are what a fresh install gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -225,6 +233,21 @@ pub struct Serial {
     /// of the cable, so they live in the store as per-port memory (see
     /// `dtr-store`), not here.
     pub auto_reconnect: bool,
+    /// How long to leave between two bytes typed on a serial line, in
+    /// milliseconds, while delayed input is switched on.
+    ///
+    /// A bootloader's line reader often has no flow control and a buffer small
+    /// enough to drop the second byte of a fast escape sequence, so a person
+    /// typing at it gets `hepl` for `help`. Spacing the bytes is the only fix
+    /// that does not need the board's cooperation. This is the *period*; the
+    /// mode itself is a runtime switch (`ctrl-alt-d`, or the palette's `lag`)
+    /// because it is a property of the board in front of you, not of the
+    /// terminal.
+    ///
+    /// 1–1000 ms. The default, 1 ms, is enough for the U-Boot configuration this
+    /// was written for, and small enough not to be felt on a board that needs
+    /// nothing.
+    pub key_delay_ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -397,6 +420,7 @@ impl Default for Config {
             keys: std::collections::BTreeMap::new(),
             serial: Serial {
                 auto_reconnect: true,
+                key_delay_ms: 1,
             },
             font: Font {
                 size: 14.0,
@@ -472,6 +496,23 @@ impl Config {
                 config.serial.auto_reconnect = reconnect.as_bool().ok_or_else(|| {
                     Error::Value("serial.auto_reconnect must be true or false".into())
                 })?;
+            }
+            if let Some(delay) = serial.get("key_delay_ms") {
+                let value = delay.as_integer().ok_or_else(|| {
+                    Error::Value(
+                        "serial.key_delay_ms must be a whole number of milliseconds".into(),
+                    )
+                })?;
+                let (low, high) = (
+                    i64::from(*KEY_DELAY_MS_RANGE.start()),
+                    i64::from(*KEY_DELAY_MS_RANGE.end()),
+                );
+                if !(low..=high).contains(&value) {
+                    return Err(Error::Value(format!(
+                        "serial.key_delay_ms {value} is outside {low} to {high} milliseconds"
+                    )));
+                }
+                config.serial.key_delay_ms = value as u32;
             }
         }
 
@@ -834,6 +875,13 @@ pub const TEMPLATE: &str = r##"# dtr configuration.
 # Follow the device if it is unplugged and replugged under a new name.
 auto_reconnect = true
 #
+# Milliseconds between two bytes typed on a serial line while delayed input is
+# on. A board whose line reader has no flow control drops fast input; spacing the
+# bytes is what makes typing land. The mode is off until `ctrl-alt-d` or the
+# palette's `lag` turns it on, and the status bar then shows a red DELAY chip.
+# 1 to 1000.
+key_delay_ms = 1
+#
 # Baud rate and CR translation are not here: they describe the board on the
 # other end of the cable, so dtr remembers them per port and the preferences card
 # edits them while a port is open.
@@ -937,6 +985,40 @@ mod tests {
         let config = Config::load(std::path::Path::new("/nonexistent/dtr/config.toml")).unwrap();
         assert!(config.serial.auto_reconnect);
         assert_eq!(config.font.size, 14.0);
+    }
+
+    /// One millisecond is the default because it is the U-Boot configuration the
+    /// mode was written for: enough for a board that drops back-to-back bytes,
+    /// and not felt on one that does not.
+    #[test]
+    fn a_key_delay_defaults_to_one_millisecond_and_is_configured_in_that_range() {
+        assert_eq!(Config::default().serial.key_delay_ms, 1);
+        assert_eq!(Config::parse("").unwrap().serial.key_delay_ms, 1);
+        let config = Config::parse("[serial]\nkey_delay_ms = 25\n").unwrap();
+        assert_eq!(config.serial.key_delay_ms, 25);
+        // The shipped template is the file `--write-config` writes, so it has to
+        // be a config the parser accepts.
+        let shipped = Config::parse(super::TEMPLATE).expect("the template parses");
+        assert_eq!(shipped.serial.key_delay_ms, 1);
+    }
+
+    /// The bounds are in the message, because "outside the range" without the
+    /// range is a person guessing at the number.
+    #[test]
+    fn a_key_delay_outside_one_to_a_thousand_is_refused() {
+        for text in [
+            "[serial]\nkey_delay_ms = 0\n",
+            "[serial]\nkey_delay_ms = 1001\n",
+            "[serial]\nkey_delay_ms = -5\n",
+        ] {
+            let error = Config::parse(text).unwrap_err().to_string();
+            assert!(error.contains("serial.key_delay_ms"), "{error}");
+            assert!(error.contains("1 to 1000"), "{error}");
+        }
+        let error = Config::parse("[serial]\nkey_delay_ms = \"slow\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("whole number"), "{error}");
     }
 
     /// Scrollback is bounded by default, and there is no spelling that makes it

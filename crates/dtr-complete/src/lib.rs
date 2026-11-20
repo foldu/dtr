@@ -139,6 +139,14 @@ const COMMANDS: &[Command] = &[
         summary: "show frame time and fps",
         argument: Argument::None,
     },
+    // Delayed input for a board that drops fast keystrokes: `lag` and not
+    // `delay`, because `d` is demo's accelerator — and not `slow`, because `s`
+    // is ssh's.
+    Command {
+        name: "lag",
+        summary: "delay serial keystrokes for a slow device",
+        argument: Argument::None,
+    },
     Command {
         name: "quit",
         summary: "close the window",

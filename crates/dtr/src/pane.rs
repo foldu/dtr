@@ -437,6 +437,17 @@ pub enum Command {
         top: bool,
     },
     Echo(bool),
+    /// Pace typed bytes on a serial line: one byte every period, or straight
+    /// through when `None`.
+    ///
+    /// A board's line reader often has no flow control and a buffer small enough
+    /// to drop the second byte of a fast escape sequence, so the bytes are
+    /// spaced rather than the keystrokes: the second byte of a three-byte
+    /// sequence is as much at risk as the second letter of a word. `None` writes
+    /// what is already queued at once and clears the timer, so switching the mode
+    /// off cannot strand a byte. Ignored by a pane whose transport is not serial:
+    /// a pty has a buffer, and pacing it only makes typing feel broken.
+    KeyDelay(Option<std::time::Duration>),
     Copy,
     /// Copy a cell range: `(start, end)` as linear indices, in either order.
     Paste(Vec<u8>),
@@ -1446,6 +1457,10 @@ async fn run(
         matches!(transport, Transport::Serial(_)).then(|| std::time::Duration::from_millis(20));
     let mut paste: Vec<u8> = Vec::new();
     let mut paste_at: Option<std::time::Instant> = None;
+    // Typed bytes waiting to be spaced, and the period they are being spaced by.
+    // Separate from the paste queue: a paste is already paced at 20 ms and is
+    // the program's text, while this is the keyboard.
+    let mut key_pacer = KeyPacer::new();
     let (reconnect_tx, reconnect_rx) = async_channel::unbounded::<serial::Port>();
     // Dropping the master closes the pty, which is what ends the child.
     let mut pty_keep: Option<Box<dyn MasterPty + Send>> = None;
@@ -1521,6 +1536,11 @@ async fn run(
             (None, None)
         }
     };
+
+    // Delayed input is a serial line's problem: a pty has a buffer, and a replay
+    // or the demo screen has no program to type at. One answer for the pane's
+    // life, because the transport is the pane's.
+    let serial_transport = matches!(transport, Transport::Serial(_));
 
     match transport {
         Transport::Serial(cfg) => {
@@ -1957,6 +1977,26 @@ async fn run(
                     Some(std::time::Instant::now() + tick)
                 };
             }
+            // Delayed input: one byte per period, re-armed from the write rather
+            // than from the old deadline, so a write that took longer than the
+            // period cannot turn the queue into a burst to catch up.
+            _ = when(
+                key_pacer.due().is_some(),
+                compio::time::sleep_until(key_pacer.due().unwrap_or_else(std::time::Instant::now))
+            )
+            .fuse() => {
+                if let Some(byte) = key_pacer.take(std::time::Instant::now()) {
+                    deliver(
+                        &[byte],
+                        &mut term,
+                        &stats,
+                        &mut sink,
+                        &mut typed_early,
+                        ever_opened,
+                    )
+                    .await;
+                }
+            }
             stream = when(!source_alive && reconnect.is_some(), reconnect_rx.recv()).fuse() => {
                 if let Ok(port) = stream {
                     match port.try_clone() {
@@ -2010,6 +2050,32 @@ async fn run(
                             }
                         }
                     }
+                    Command::KeyDelay(delay) => {
+                        // A shell, a replay and the demo screen ignore it: the
+                        // setting is about the cable, and they have none.
+                        if !serial_transport {
+                            continue;
+                        }
+                        tracing::debug!(
+                            ms = delay.map(|delay| delay.as_millis() as u64),
+                            "key delay"
+                        );
+                        // Turning it off writes what was queued at once, so a
+                        // byte cannot be stranded behind a mode that is gone.
+                        if let Some(bytes) = key_pacer.set(delay)
+                            && !bytes.is_empty()
+                        {
+                            deliver(
+                                &bytes,
+                                &mut term,
+                                &stats,
+                                &mut sink,
+                                &mut typed_early,
+                                ever_opened,
+                            )
+                            .await;
+                        }
+                    }
                     Command::Write(bytes) => {
                         // What actually reaches the session, and how often: the
                         // other half of a doubled keystroke.
@@ -2017,17 +2083,23 @@ async fn run(
                             bytes = ?String::from_utf8_lossy(&bytes).escape_debug().to_string(),
                             "write"
                         );
-                        deliver(
-                            &bytes,
-                            &mut term,
-                            &stats,
-                            &mut sink,
-                            &mut typed_early,
-                            ever_opened,
-                        )
-                        .await;
+                        if let Some(bytes) =
+                            key_pacer.push(&bytes, std::time::Instant::now())
+                        {
+                            deliver(
+                                &bytes,
+                                &mut term,
+                                &stats,
+                                &mut sink,
+                                &mut typed_early,
+                                ever_opened,
+                            )
+                            .await;
+                        }
                         // Local echo is for devices that do not echo: the bytes
-                        // are shown without being sent anywhere else.
+                        // are shown without being sent anywhere else, and
+                        // immediately: echo is a picture of the keystroke, not a
+                        // second wire.
                         if echo {
                             term.vt_write(&bytes);
                             publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
@@ -2062,15 +2134,19 @@ async fn run(
                             bytes = ?String::from_utf8_lossy(&bytes).escape_debug().to_string(),
                             "key"
                         );
-                        deliver(
-                            &bytes,
-                            &mut term,
-                            &stats,
-                            &mut sink,
-                            &mut typed_early,
-                            ever_opened,
-                        )
-                        .await;
+                        if let Some(bytes) =
+                            key_pacer.push(&bytes, std::time::Instant::now())
+                        {
+                            deliver(
+                                &bytes,
+                                &mut term,
+                                &stats,
+                                &mut sink,
+                                &mut typed_early,
+                                ever_opened,
+                            )
+                            .await;
+                        }
                     }
                     // Same argument as a key: what a click means is the
                     // terminal's state, and only the terminal has it. The encoder
@@ -2503,9 +2579,99 @@ fn pasted(bracketed: bool, text: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Put a paste on the wire, honouring what the program asked for.
+/// The most bytes delayed input may hold for a reader that has stopped reading.
 ///
-/// One place, because a paste can be written the moment it arrives and a held
+/// The queue exists so a burst of keystrokes is spaced, not so it can grow: a
+/// serial writer that blocks (a device with a full buffer, a hacked cable) would
+/// otherwise turn "type faster than 1 ms a byte" into unbounded memory. At the
+/// cap the queue is written out at once — a byte every 1 ms is already the slow
+/// path, and a burst this large means the pacing has failed anyway.
+const KEY_QUEUE_CAP: usize = 4096;
+
+/// A queue that spaces typed bytes on a serial line.
+///
+/// One byte per period, and the queue is the part that makes the spacing honest:
+/// a three-byte escape sequence must not be split across a tick, and a paste must
+/// not overtake the keystroke before it.
+///
+/// The first byte of a burst is due **now**, not a period from now: what a board
+/// needs is the *gap between* bytes, and adding a period in front of the first
+/// one would make a single keystroke after a pause feel sticky for no gain. The
+/// `at` field is the schedule, and `take` re-arms it one period from the write
+/// rather than from the previous deadline, so a slow write cannot turn the queue
+/// into a burst to catch up.
+struct KeyPacer {
+    delay: Option<std::time::Duration>,
+    queue: std::collections::VecDeque<u8>,
+    /// When the byte at the front of the queue is due; `None` when it is empty.
+    at: Option<std::time::Instant>,
+}
+
+impl KeyPacer {
+    fn new() -> Self {
+        Self {
+            delay: None,
+            queue: std::collections::VecDeque::new(),
+            at: None,
+        }
+    }
+
+    /// Turn pacing on, change its period, or turn it off.
+    ///
+    /// Off returns the bytes that were waiting so the caller can write them
+    /// immediately: a mode switched off mid-keystroke must not swallow one.
+    fn set(&mut self, delay: Option<std::time::Duration>) -> Option<Vec<u8>> {
+        self.delay = delay;
+        if delay.is_some() {
+            return None;
+        }
+        self.at = None;
+        (!self.queue.is_empty()).then(|| self.queue.drain(..).collect())
+    }
+
+    /// Queue typed bytes, or hand them back to be written now.
+    ///
+    /// `Some` means "write this immediately": either nothing is being paced, or
+    /// the queue is full and the whole thing is being flushed rather than grown.
+    /// `None` means the bytes are queued and the next one is due at [`due`].
+    fn push(&mut self, bytes: &[u8], now: std::time::Instant) -> Option<Vec<u8>> {
+        if self.delay.is_none() {
+            return Some(bytes.to_vec());
+        }
+        if self.queue.len() + bytes.len() > KEY_QUEUE_CAP {
+            let mut out: Vec<u8> = self.queue.drain(..).collect();
+            out.extend_from_slice(bytes);
+            self.at = None;
+            tracing::warn!(
+                bytes = out.len(),
+                cap = KEY_QUEUE_CAP,
+                "key delay queue full; writing the backlog now"
+            );
+            return Some(out);
+        }
+        self.queue.extend(bytes.iter().copied());
+        if self.at.is_none() {
+            self.at = Some(now);
+        }
+        None
+    }
+
+    /// When the next byte is due, if one is queued.
+    fn due(&self) -> Option<std::time::Instant> {
+        self.at
+    }
+
+    /// Take the byte that is due and schedule the next one a period later.
+    fn take(&mut self, now: std::time::Instant) -> Option<u8> {
+        let byte = self.queue.pop_front();
+        self.at = match (self.delay, self.queue.is_empty()) {
+            (Some(delay), false) => Some(now + delay),
+            _ => None,
+        };
+        byte
+    }
+}
+
 /// Put bytes on the session, wherever the session happens to be.
 ///
 /// Shared by typing, a key the encoder produced and a paste, because the rule is
@@ -2543,6 +2709,9 @@ async fn deliver(
     }
 }
 
+/// Put a paste on the wire, honouring what the program asked for.
+///
+/// One place, because a paste can be written the moment it arrives and a held
 /// one is written later — and the answer to "bracketed?" has to be read from the
 /// terminal at the moment of writing, not at the moment of arriving.
 async fn write_paste(
@@ -4080,6 +4249,108 @@ mod selection_tests {
             term.vt_write(format!("pushed {line}\r\n").as_bytes());
         }
         assert_eq!(viewport_cell(&cell.start, 5), None);
+    }
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::{KEY_QUEUE_CAP, KeyPacer};
+    use std::time::{Duration, Instant};
+
+    /// The shape the board needs: one byte per tick, in order, and the first one
+    /// straight away — the gap is *between* bytes, so a keystroke after a pause
+    /// is not slower than it was.
+    #[test]
+    fn one_byte_per_tick_in_order_with_the_first_due_at_once() {
+        let start = Instant::now();
+        let delay = Duration::from_millis(1);
+        let mut pacer = KeyPacer::new();
+        assert!(pacer.set(Some(delay)).is_none());
+
+        assert!(
+            pacer.push(b"abc", start).is_none(),
+            "paced bytes are queued"
+        );
+        assert_eq!(pacer.due(), Some(start), "the first byte is due now");
+        assert_eq!(pacer.take(start), Some(b'a'));
+        assert_eq!(
+            pacer.due(),
+            Some(start + delay),
+            "the next byte is a period behind the write"
+        );
+        assert_eq!(pacer.take(start + delay), Some(b'b'));
+        assert_eq!(pacer.take(start + delay * 2), Some(b'c'));
+        assert_eq!(pacer.due(), None, "an empty queue has no deadline");
+        assert_eq!(pacer.take(start + delay * 3), None);
+    }
+
+    /// A multi-byte sequence is spaced byte by byte, not handed over whole: the
+    /// second byte of `ESC [ A` is as much at risk as the second letter of a
+    /// word, and a board with no flow control is why this exists.
+    #[test]
+    fn escape_sequences_are_spaced_as_bytes() {
+        let start = Instant::now();
+        let delay = Duration::from_millis(5);
+        let mut pacer = KeyPacer::new();
+        pacer.set(Some(delay));
+        pacer.push(b"\x1b[A", start);
+        assert_eq!(pacer.take(start), Some(0x1b));
+        assert_eq!(pacer.take(start + delay), Some(b'['));
+        assert_eq!(pacer.take(start + delay * 2), Some(b'A'));
+        assert_eq!(pacer.due(), None);
+    }
+
+    /// Off is the old behaviour, and turning it off must hand back what was
+    /// waiting: a byte swallowed by a mode that is no longer on is a keystroke
+    /// lost, and the person watching the screen cannot tell it from a dropped
+    /// line.
+    #[test]
+    fn turning_it_off_flushes_what_was_queued() {
+        let start = Instant::now();
+        let mut pacer = KeyPacer::new();
+        // Nothing paced: the bytes are handed straight back.
+        assert_eq!(pacer.push(b"x", start), Some(b"x".to_vec()));
+
+        pacer.set(Some(Duration::from_millis(2)));
+        pacer.push(b"held", start);
+        assert_eq!(pacer.set(None), Some(b"held".to_vec()));
+        assert_eq!(pacer.due(), None);
+        assert_eq!(pacer.take(start), None, "the flush emptied the queue");
+        // And the next write is immediate again.
+        assert_eq!(pacer.push(b"y", start), Some(b"y".to_vec()));
+    }
+
+    /// A reader that stops reading must not grow the queue: at the cap the
+    /// backlog is written out at once rather than becoming memory the terminal
+    /// holds forever.
+    #[test]
+    fn a_full_queue_is_written_out_in_order_instead_of_growing() {
+        let start = Instant::now();
+        let mut pacer = KeyPacer::new();
+        pacer.set(Some(Duration::from_millis(1)));
+        let first = vec![b'a'; KEY_QUEUE_CAP - 1];
+        assert!(pacer.push(&first, start).is_none());
+        // One more byte fits exactly; the byte after that overflows.
+        assert!(pacer.push(b"b", start).is_none());
+        let overflow = pacer.push(b"cd", start).expect("overflow is written now");
+        assert_eq!(overflow.len(), KEY_QUEUE_CAP + 2);
+        assert_eq!(&overflow[..KEY_QUEUE_CAP - 1], first.as_slice());
+        assert_eq!(&overflow[KEY_QUEUE_CAP - 1..], b"bcd");
+        assert_eq!(pacer.due(), None, "the queue was emptied into the write");
+        assert_eq!(pacer.take(start), None);
+    }
+
+    /// Changing the period while bytes are waiting keeps them and applies the new
+    /// gap to the next one.
+    #[test]
+    fn a_new_period_applies_to_bytes_already_queued() {
+        let start = Instant::now();
+        let mut pacer = KeyPacer::new();
+        pacer.set(Some(Duration::from_millis(1)));
+        pacer.push(b"ab", start);
+        pacer.set(Some(Duration::from_millis(9)));
+        assert_eq!(pacer.take(start), Some(b'a'));
+        assert_eq!(pacer.due(), Some(start + Duration::from_millis(9)));
     }
 }
 
