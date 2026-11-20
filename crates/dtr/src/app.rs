@@ -41,8 +41,6 @@ pub enum UserEvent {
         alias: String,
         listing: crate::tmux::Listing,
     },
-    /// Something the SFTP worker finished.
-    Sftp(SftpEvent),
     /// A link pointed at a directory, so the UI should show it — locally, or in a
     /// pane over `alias` when the session that printed the link was remote. The
     /// worker that resolved the link knows what the path *is*; only the UI knows
@@ -79,38 +77,63 @@ pub enum UserEvent {
     },
 }
 
-/// What the SFTP worker is asked to do, and what it reports back.
+/// A remote pane's listing on its way in from the machine's VFS backend.
 ///
-/// The connection lives on its own thread, never on the pane's: a 2 GB transfer
-/// must not be able to stall emulation (docs/sftp.md §5.2).
-#[derive(Debug)]
-pub enum SftpMsg {
-    List {
-        alias: String,
-        path: PathBuf,
-    },
-    Download {
-        alias: String,
-        remote: PathBuf,
-        local: PathBuf,
-    },
+/// This is the app's half of the one listing protocol a [`Browser`] speaks:
+/// the pane asks with `take_request`, the app starts `Backend::list` — the same
+/// `Ssh` backend the pane's writes go through, so a listing and a write share
+/// one connection — and the batches are drained here, on the frame, until the
+/// stream ends. Only then is the whole listing handed back with
+/// `Browser::apply_listing`, which is what the browser's old single-reply
+/// handshake did: a row arriving mid-walk does not re-sort the view under a
+/// pointer, and a batch that lands after the pane navigated away is dropped by
+/// the handshake's own host-and-directory guard.
+///
+/// Dropping this value drops the receiver, which is how a walk is cancelled.
+struct RemoteListing {
+    alias: String,
+    path: PathBuf,
+    batches: dtr_vfs::Batches,
+    entries: Vec<dtr_files::Entry>,
+    /// The error the stream ended with, if it ended with one. A walk that fails
+    /// halfway still has rows worth showing, so they are applied and the
+    /// message goes in the footer.
+    failure: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum SftpEvent {
-    Listed {
-        alias: String,
-        path: PathBuf,
-        entries: Vec<dtr_sftp::Entry>,
-    },
-    Downloaded {
-        local: PathBuf,
-        bytes: u64,
-    },
-    Failed {
-        alias: String,
-        message: String,
-    },
+impl RemoteListing {
+    fn new(alias: String, path: PathBuf, batches: dtr_vfs::Batches) -> Self {
+        Self {
+            alias,
+            path,
+            batches,
+            entries: Vec::new(),
+            failure: None,
+        }
+    }
+
+    /// Take every batch that is ready.
+    ///
+    /// Returns `true` when the stream has ended — a burst of 157 batches costs
+    /// one merge, the same rule the local listing's poll follows — and the
+    /// caller then applies what arrived. Every batch so far is coalesced into
+    /// one `Vec`, because `apply_listing` is the whole-listing answer the
+    /// pane's handshake is written for.
+    fn drain(&mut self) -> bool {
+        loop {
+            match self.batches.try_recv() {
+                Ok(Ok(batch)) => self
+                    .entries
+                    .extend(batch.into_iter().map(dtr_files::Entry::from)),
+                Ok(Err(err)) => {
+                    self.failure = Some(format!("{err:#}"));
+                    return true;
+                }
+                Err(async_channel::TryRecvError::Empty) => return false,
+                Err(async_channel::TryRecvError::Closed) => return true,
+            }
+        }
+    }
 }
 
 /// A link under the pointer: the cell it is on, and where it points.
@@ -569,7 +592,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         wake: std::cell::Cell::new(false),
         strip_logged: None,
         folded_notices: std::collections::BTreeSet::new(),
-        sftp: None,
+        remote_listings: Vec::new(),
         wake_why: std::cell::Cell::new("startup"),
         egui_redraw_pending: false,
         loop_report: std::cell::RefCell::new(LoopReport::default()),
@@ -702,76 +725,6 @@ fn cycled(active: usize, count: usize, forward: bool) -> usize {
         (active + 1) % count
     } else {
         (active + count - 1) % count
-    }
-}
-
-/// Where the selection lands after closing the active tab, or `None` when that
-/// was the last one.
-/// The worker: one connection per alias, reused until the alias changes.
-///
-/// Everything blocking lives here, on a thread of its own with a runtime of its
-/// own — the same shape as a pane, for the opposite reason: a transfer must
-/// never share a thread with the emulator. compio's handles are thread-local,
-/// so this is also the thread that must own the session.
-fn sftp_worker(
-    rx: std::sync::mpsc::Receiver<SftpMsg>,
-    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
-) {
-    let runtime = match compio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            tracing::error!(%err, "sftp runtime");
-            return;
-        }
-    };
-    let mut connected: Option<(String, dtr_sftp::Session)> = None;
-
-    while let Ok(message) = rx.recv() {
-        let alias = match &message {
-            SftpMsg::List { alias, .. } | SftpMsg::Download { alias, .. } => alias.clone(),
-        };
-
-        let outcome: Result<SftpEvent, anyhow::Error> = runtime.block_on(async {
-            if connected.as_ref().map(|(name, _)| name.as_str()) != Some(alias.as_str()) {
-                connected = None;
-                let session = dtr_sftp::Session::connect(&alias).await?;
-                connected = Some((alias.clone(), session));
-            }
-            let (_, session) = connected
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("no session"))?;
-            match message {
-                SftpMsg::List { alias, path } => {
-                    // "." is the pane's way of asking for the home directory:
-                    // only the server knows where that is.
-                    let path = if path == std::path::Path::new(".") {
-                        session.home().await?
-                    } else {
-                        path
-                    };
-                    let entries = session.list(&path.to_string_lossy()).await?;
-                    Ok(SftpEvent::Listed {
-                        alias,
-                        path,
-                        entries,
-                    })
-                }
-                SftpMsg::Download { remote, local, .. } => {
-                    let bytes = session.download(&remote.to_string_lossy(), &local).await?;
-                    tracing::info!(?remote, ?local, bytes, "sftp download");
-                    Ok(SftpEvent::Downloaded { local, bytes })
-                }
-            }
-        });
-
-        let event = match outcome {
-            Ok(event) => event,
-            Err(err) => SftpEvent::Failed {
-                alias,
-                message: format!("{err:#}"),
-            },
-        };
-        let _ = proxy.send_event(UserEvent::Sftp(event));
     }
 }
 
@@ -944,6 +897,8 @@ fn bell_alpha(at: Option<std::time::Instant>) -> Option<f32> {
     Some(BELL_ALPHA * left.clamp(0.0, 1.0))
 }
 
+/// Where the selection lands after closing the active tab, or `None` when that
+/// was the last one.
 fn closed(active: usize, count: usize) -> Option<usize> {
     if count <= 1 {
         return None;
@@ -1083,23 +1038,47 @@ fn file_browser(config: &dtr_config::Config, start: Option<PathBuf>) -> Browser 
     browser
 }
 
+/// What a pane over `alias` may do: the ssh backend's own answer.
+///
+/// Every remote [`Browser`] is built through this, so a pane a link opened and a
+/// pane the split button opened cannot disagree about whether a rename is real.
+/// **The listing and the writes are one backend**: `Vfs::backend` hands out the
+/// alias's single `Ssh`, whose thread owns the one `ssh` child, so a capability
+/// reported here is one the worker will actually exercise — `write: true`,
+/// `trash: false` (there is no remote trash, and a delete there is the
+/// permanent, confirmed one).
+fn remote_caps(vfs: &dtr_vfs::Vfs, alias: &str) -> dtr_vfs::Caps {
+    match vfs.backend(&dtr_vfs::BackendId::Ssh(alias.to_owned())) {
+        Ok(backend) => backend.caps(),
+        // `Vfs::backend` builds an ssh backend on demand, so this is a bug rather
+        // than a machine without files. A pane is better read-only than one
+        // offering verbs with no worker behind them.
+        Err(err) => {
+            tracing::warn!(%alias, %err, "no backend for a remote pane; read-only");
+            dtr_vfs::Caps {
+                watch: false,
+                dir_size: false,
+                write: false,
+                trash: false,
+            }
+        }
+    }
+}
+
 /// The same, for a pane over another machine.
 ///
-/// Read-only **in this task, and on purpose**: `dtr-vfs`'s ssh backend has the
-/// write verbs, but the app's remote pane still lists through the older SFTP
-/// worker, so a write here would be executed against a connection the pane does
-/// not share. The caps say so rather than offering a verb that fails — F7 wires
-/// the remote pane to `Vfs::backend` and flips these four flags, and until then
-/// `docs/files.md` §14 says the pane is read-only.
-fn remote_file_browser(config: &dtr_config::Config, alias: &str, path: PathBuf) -> Browser {
+/// The caps are the ssh backend's (see [`remote_caps`]), not a literal: the pane
+/// lists with `Backend::list` and writes with the write worker through that one
+/// backend, so the menu offers exactly the verbs the worker can execute.
+fn remote_file_browser(
+    vfs: &dtr_vfs::Vfs,
+    config: &dtr_config::Config,
+    alias: &str,
+    path: PathBuf,
+) -> Browser {
     let mut browser = Browser::remote_at(alias, path);
     browser.set_view(file_view(config));
-    browser.set_caps(dtr_vfs::Caps {
-        watch: false,
-        dir_size: false,
-        write: false,
-        trash: false,
-    });
+    browser.set_caps(remote_caps(vfs, alias));
     browser
 }
 
@@ -1344,6 +1323,41 @@ impl Tab {
     }
 }
 
+/// Every file pane in every tab, whoever has the focus.
+///
+/// A list of what is waiting is the pane's, not the focus's: a pane a link opened
+/// is deliberately unfocused, and it must still fill in.
+fn browsers(tabs: &mut [Tab]) -> impl Iterator<Item = &mut Browser> {
+    tabs.iter_mut()
+        .flat_map(|tab| tab.leaves.values_mut())
+        .filter_map(|pane| match pane {
+            Pane::Files(browser) => Some(browser),
+            _ => None,
+        })
+}
+
+/// The pane that should receive `alias`'s listing of `path`, if there is one.
+///
+/// Two panes can browse one host, so the match is by host *and* by the directory
+/// the pane asked for — not by the focus. The directory check is the stale-reply
+/// guard as well: `Browser::reload` leaves `awaiting` pointing at the old
+/// directory while the new request is still pending, so a reply to the directory
+/// the pane just left would still look like an answer. The pane is showing the
+/// directory it asked for the whole time the walk runs, so requiring
+/// `directory() == path` accepts live replies and drops the ones that lost a
+/// race with a navigation.
+fn listing_waiter<'a>(
+    browsers: impl IntoIterator<Item = &'a mut Browser>,
+    alias: &str,
+    path: &Path,
+) -> Option<&'a mut Browser> {
+    browsers.into_iter().find(|browser| {
+        browser.alias() == Some(alias)
+            && browser.directory() == path
+            && browser.is_waiting_for(path)
+    })
+}
+
 struct App {
     tabs: Vec<Tab>,
     /// When each pane may publish, shared with every pane as nanoseconds: the
@@ -1417,8 +1431,10 @@ struct App {
     /// Panes whose waiting notice has been folded away to its bar. Per pane, and
     /// only while that pane is waiting: the next drop starts loud again.
     folded_notices: std::collections::BTreeSet<crate::layout::LeafId>,
-    /// The SFTP worker, and the alias it is connected to.
-    sftp: Option<std::sync::mpsc::Sender<SftpMsg>>,
+    /// The remote listings on their way in, from each alias's one `Ssh`
+    /// backend. Drained here rather than in a browser because the model is only
+    /// `&mut` before the frame starts, and the receiver is what a listing is.
+    remote_listings: Vec<RemoteListing>,
     /// Why the last wake was asked for, so a spin can name its cause.
     wake_why: std::cell::Cell<&'static str>,
     /// A redraw asked for on egui's behalf has not been drawn yet. Asking again
@@ -2545,7 +2561,7 @@ impl App {
             })
         };
         let browser = match &alias {
-            Some(alias) => remote_file_browser(&self.config, alias, path),
+            Some(alias) => remote_file_browser(&self.vfs, &self.config, alias, path),
             None => file_browser(&self.config, Some(path)),
         };
         if let Some(id) = existing {
@@ -4537,26 +4553,6 @@ impl App {
         self.tabs[self.active].zoom = None;
     }
 
-    /// Split the focused pane and put a file manager in the new half. Side by
-    /// side is the useful default: a listing next to the command line it feeds.
-    /// Start the SFTP worker if it is not running yet.
-    ///
-    /// One worker per window, not per pane: the file browser is a window-level
-    /// tool, and every transfer it makes shares one connection per host.
-    fn sftp_worker(&mut self) -> &std::sync::mpsc::Sender<SftpMsg> {
-        if self.sftp.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<SftpMsg>();
-            let proxy = self.proxy.clone();
-            std::thread::Builder::new()
-                .name("dtr-sftp".into())
-                .spawn(move || sftp_worker(rx, proxy))
-                .ok();
-            self.sftp = Some(tx);
-        }
-        // `is_none` was false either way by now.
-        self.sftp.as_ref().expect("worker started")
-    }
-
     /// Take whatever every file pane's listing has delivered, then ask for
     /// whatever a remote one is waiting on.
     ///
@@ -4572,7 +4568,7 @@ impl App {
                 }
             }
         }
-        self.pump_sftp();
+        self.pump_remote_listings();
         self.pump_writes();
     }
 
@@ -4584,8 +4580,9 @@ impl App {
     /// the object and not a borrow), and the answer comes back as
     /// [`UserEvent::Write`] to be handed to `write_succeeded`/`write_failed`.
     ///
-    /// **Every leaf in every tab**, like `pump_sftp`: a pane a link opened is
-    /// deliberately unfocused, and the operation is the pane's, not the focus's.
+    /// **Every leaf in every tab**, like `pump_remote_listings`: a pane a link
+    /// opened is deliberately unfocused, and the operation is the pane's, not the
+    /// focus's.
     /// One request per pane per pump, because `take_write` hands out the next only
     /// once the previous answer has landed — which is what makes a conflict
     /// answerable at all.
@@ -4604,9 +4601,10 @@ impl App {
                 let Some(request) = browser.take_write() else {
                     continue;
                 };
-                // A remote request cannot reach a backend yet in this task: the
-                // pane is read-only, so this is a bug or a future F7 pane, and
-                // either way it is answered rather than left in flight.
+                // The machine's backend, resolved where the pool lives. A remote
+                // pane asks for `BackendId::Ssh(alias)` and gets the same `Ssh`
+                // its listing is coming from — one child, one thread — so a
+                // write cannot land on a connection the pane does not browse.
                 match self.vfs.backend(&request.backend) {
                     Ok(backend) => work.push((*leaf, backend, request)),
                     Err(err) => unrouteable.push((*leaf, err)),
@@ -4668,13 +4666,54 @@ impl App {
             })
     }
 
-    /// Ask for whatever any remote pane is waiting on, and start any download it
-    /// asked for.
+    /// Drain the remote listings that are arriving, then start the ones a pane is
+    /// waiting on.
+    ///
+    /// **One connection per alias for the whole pane**: a remote pane's listing
+    /// comes from `Backend::list` on the alias's `Ssh`, which is the backend the
+    /// write worker resolves for that pane's `BackendId::Ssh(alias)` — so the
+    /// directory on screen and the rename that changes it are the same `ssh`
+    /// child, and a pane no longer needs the separate SFTP worker the listing
+    /// used to open.
     ///
     /// Every leaf in every tab, not the focused one: a pane nobody is typing in
     /// still has to list, and the panes a link opens are deliberately unfocused.
     /// Pumping only the focus left those showing "loading…" for ever.
-    fn pump_sftp(&mut self) {
+    fn pump_remote_listings(&mut self) {
+        // 1. What arrived since the last frame. A listing that ends is applied
+        //    whole, in one `apply_listing`, which is the handshake the browser
+        //    was written for: the router's host-and-directory match drops a reply
+        //    to a directory the pane has left, so a slow batch cannot yank the
+        //    view back.
+        let mut finished = Vec::new();
+        let mut index = 0;
+        while index < self.remote_listings.len() {
+            if self.remote_listings[index].drain() {
+                finished.push(self.remote_listings.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        for listing in finished {
+            let Some(browser) = self.browser_waiting(&listing.alias, &listing.path) else {
+                tracing::debug!(
+                    alias = %listing.alias,
+                    path = %listing.path.display(),
+                    "a remote listing arrived for no pane"
+                );
+                continue;
+            };
+            browser.apply_listing(listing.path, listing.entries);
+            if let Some(message) = listing.failure {
+                // Rows that did arrive are still worth showing: the far side
+                // has them, and an empty pane would read as an empty directory.
+                browser.apply_failure(message);
+            }
+        }
+
+        // 2. What a pane is waiting for now. A request is only taken once the
+        //    previous answer has landed (`take_request` consumes `pending`), so
+        //    this cannot start a second walk for one directory.
         let mut requests = Vec::new();
         let mut downloads = Vec::new();
         for tab in &mut self.tabs {
@@ -4693,100 +4732,56 @@ impl App {
             }
         }
         for (alias, path) in requests {
-            let tx = self.sftp_worker();
-            let _ = tx.send(SftpMsg::List { alias, path });
+            match self.vfs.backend(&dtr_vfs::BackendId::Ssh(alias.clone())) {
+                Ok(backend) => self.remote_listings.push(RemoteListing::new(
+                    alias,
+                    path.clone(),
+                    backend.list(&path),
+                )),
+                Err(err) => {
+                    let message = format!("{err:#}");
+                    if let Some(browser) = self.browser_waiting(&alias, &path) {
+                        browser.apply_failure(message);
+                    }
+                }
+            }
         }
         for (alias, remote) in downloads {
-            let local = save_target(&remote);
-            let tx = self.sftp_worker();
-            let _ = tx.send(SftpMsg::Download {
-                alias,
-                remote,
-                local,
-            });
+            self.begin_download(alias, remote);
         }
     }
 
-    /// The pane waiting for this listing, on this host.
+    /// A remote file the pane was told to copy down, through the same VFS fetch
+    /// a click and a "Save as" use — one connection, and the bytes land under
+    /// `~/Downloads` exactly as before.
+    fn begin_download(&mut self, alias: String, remote: PathBuf) {
+        let dest = save_target(&remote);
+        let location = dtr_vfs::Location {
+            backend: dtr_vfs::BackendId::Ssh(alias),
+            path: remote,
+        };
+        self.begin_save(location, dest);
+    }
+
+    /// The pane waiting for this listing, on this host, still showing its
+    /// directory.
     ///
     /// A reply names the directory it answers and two panes can browse one host,
-    /// so the match is by host *and* by what the pane asked for.
+    /// so the match is by host *and* by what the pane asked for. The directory
+    /// check is the stale-reply guard: `reload` leaves `awaiting` pointing at the
+    /// old directory while the new request is still only `pending`, so
+    /// `is_waiting_for` alone would accept a reply for the directory the pane
+    /// just left — and applying it would move the pane back.
     fn browser_waiting(&mut self, alias: &str, path: &Path) -> Option<&mut Browser> {
-        for tab in &mut self.tabs {
-            for pane in tab.leaves.values_mut() {
-                let Pane::Files(browser) = pane else {
-                    continue;
-                };
-                if browser.alias() == Some(alias) && browser.is_waiting_for(path) {
-                    return Some(browser);
-                }
-            }
-        }
-        None
-    }
-
-    /// Any pane browsing this host, for a failure that names no directory.
-    fn browser_on(&mut self, alias: &str) -> Option<&mut Browser> {
-        for tab in &mut self.tabs {
-            for pane in tab.leaves.values_mut() {
-                let Pane::Files(browser) = pane else {
-                    continue;
-                };
-                if browser.alias() == Some(alias) {
-                    return Some(browser);
-                }
-            }
-        }
-        None
-    }
-
-    fn sftp_event(&mut self, event: SftpEvent) {
-        match event {
-            SftpEvent::Listed {
-                alias,
-                path,
-                entries,
-            } => {
-                let entries: Vec<dtr_files::Entry> = entries
-                    .into_iter()
-                    .map(|entry| {
-                        // The SFTP client is a Unix-host protocol in every deployment
-                        // we have, and its `READDIR` carries no attributes: the dot
-                        // rule is the far side's own.
-                        let hidden = entry.name.starts_with('.');
-                        dtr_files::Entry {
-                            name: entry.name,
-                            is_dir: entry.dir,
-                            hidden,
-                            size: (!entry.dir).then_some(entry.size),
-                            // SFTP's `READDIR` carries the time in the same packet as
-                            // the size, so a remote listing needs no metadata pass.
-                            modified: entry.modified.map(|secs| {
-                                std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
-                            }),
-                        }
-                    })
-                    .collect();
-                if let Some(browser) = self.browser_waiting(&alias, &path) {
-                    browser.apply_listing(path, entries);
-                }
-            }
-            SftpEvent::Downloaded { local, bytes } => {
-                self.toast = Some((
-                    format!("copied {} bytes to {}", bytes, local.display()),
-                    std::time::Instant::now(),
-                ));
-            }
-            SftpEvent::Failed { alias, message } => {
-                if let Some(browser) = self.browser_on(&alias) {
-                    browser.apply_failure(message);
-                }
-            }
-        }
+        listing_waiter(browsers(&mut self.tabs), alias, path)
     }
 
     /// Open a file pane over another machine, beside the terminal that is on it.
+    ///
+    /// The browser is built **before** the layout is borrowed: it asks `Vfs` for
+    /// the alias's backend, and that lookup needs `&self`.
     fn split_files_remote(&mut self, alias: &str) {
+        let browser = remote_file_browser(&self.vfs, &self.config, alias, PathBuf::from("."));
         self.unzoom();
         let id = self.next_leaf;
         self.next_leaf += 1;
@@ -4798,10 +4793,7 @@ impl App {
         {
             return;
         }
-        tab.leaves.insert(
-            id,
-            Pane::Files(remote_file_browser(&self.config, alias, PathBuf::from("."))),
-        );
+        tab.leaves.insert(id, Pane::Files(browser));
         tab.focus = id;
     }
 
@@ -5685,12 +5677,16 @@ impl dtr_frame::App for App {
         // it: the walk is on its own thread and its batches arrive whenever they
         // do. Sixteen milliseconds is the gate that turns a burst into one frame —
         // a 10 000-entry directory is 157 batches, and 157 repaints is 157
-        // pictures nobody sees (`docs/manager.md` §3).
-        let listing = self.tabs.iter().any(|tab| {
-            tab.leaves
-                .values()
-                .any(|pane| matches!(pane, Pane::Files(browser) if browser.reading()))
-        });
+        // pictures nobody sees (`docs/manager.md` §3). A **remote** walk is the
+        // same state without a browser flag to ask: its batches are drained from
+        // `remote_listings`, so the in-flight list itself is what keeps frames
+        // coming until the answer is applied.
+        let listing = !self.remote_listings.is_empty()
+            || self.tabs.iter().any(|tab| {
+                tab.leaves
+                    .values()
+                    .any(|pane| matches!(pane, Pane::Files(browser) if browser.reading()))
+            });
         if listing {
             self.repaint("a file listing is arriving");
             deadlines.soon(std::time::Instant::now() + std::time::Duration::from_millis(16));
@@ -5888,10 +5884,6 @@ impl dtr_frame::App for App {
         event: UserEvent,
     ) {
         match event {
-            UserEvent::Sftp(event) => {
-                self.sftp_event(event);
-                self.repaint("sftp");
-            }
             UserEvent::Reveal { path, alias } => {
                 self.reveal_directory(path, alias);
                 self.repaint("a link named a directory");
@@ -7430,10 +7422,11 @@ impl dtr_frame::Scene for GridScene<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BELL_FLASH, WriteOp, WriteRequest, bell_alpha, browser_key, cell_of, closed, copy_to,
-        cycled, execute_write, mouse_goes_to_program, save_name, tab_name,
-        wheel_reaches_the_terminal,
+        BELL_FLASH, RemoteListing, WriteOp, WriteRequest, bell_alpha, browser_key, cell_of, closed,
+        copy_to, cycled, execute_write, listing_waiter, mouse_goes_to_program, remote_caps,
+        save_name, tab_name, wheel_reaches_the_terminal,
     };
+    use std::path::{Path, PathBuf};
 
     /// A file pane's keys are its own, and the one with a modifier is the one
     /// every file manager has. The traps are the chords around it: `ctrl-alt-up`
@@ -7913,5 +7906,209 @@ mod tests {
             browser_key(&Key::Character("j".into()), none),
             Some(dtr_files::Key::Down)
         );
+    }
+
+    /// A remote pane's capabilities are the ssh backend's, not a literal in the
+    /// app: `write: true` is what puts rename/copy/paste/delete in the menu and
+    /// routes the plan to the worker, and `trash: false` is what makes a delete
+    /// the confirmed, permanent one. The old read-only four were a statement the
+    /// listing no longer makes true.
+    #[test]
+    fn a_remote_pane_takes_its_caps_from_the_ssh_backend() {
+        let vfs = dtr_vfs::Vfs::new();
+        assert_eq!(
+            remote_caps(&vfs, "build.example"),
+            dtr_vfs::Caps {
+                watch: false,
+                dir_size: false,
+                write: true,
+                trash: false,
+            },
+            "the pane offers exactly what the backend its writes go through can do"
+        );
+    }
+
+    /// The handshake's routing is by host *and* directory, and a listing that
+    /// lost a race with a navigation is not applied to the directory the pane is
+    /// showing now.
+    ///
+    /// `Browser::reload` leaves `awaiting` on the old directory while the new
+    /// request is still pending, so `is_waiting_for` alone would accept a reply
+    /// for the directory the pane just left. The app's router is what tells the
+    /// two apart.
+    #[test]
+    fn a_listing_goes_to_the_pane_waiting_for_it_and_not_one_that_moved_on() {
+        let mut build = dtr_files::Browser::remote_at("build", PathBuf::from("/srv/old"));
+        let mut other = dtr_files::Browser::remote_at("other", PathBuf::from("/srv/old"));
+        assert_eq!(
+            build.take_request(),
+            Some(("build".to_owned(), PathBuf::from("/srv/old")))
+        );
+        assert_eq!(
+            other.take_request(),
+            Some(("other".to_owned(), PathBuf::from("/srv/old")))
+        );
+
+        // Two panes can browse one directory, and one host can be browsed twice:
+        // only the host the listing names is the destination.
+        let picked = listing_waiter([&mut build, &mut other], "other", Path::new("/srv/old"))
+            .expect("the pane on that host is waiting");
+        assert_eq!(picked.alias(), Some("other"));
+
+        // Navigating leaves the walk's name in `awaiting` — a second request has
+        // not been taken yet — but the pane is showing another directory.
+        build.navigate(PathBuf::from("/srv/new"));
+        assert!(
+            build.is_waiting_for(Path::new("/srv/old")),
+            "the handshake still names the walk it started"
+        );
+        assert!(
+            listing_waiter([&mut build], "build", Path::new("/srv/old")).is_none(),
+            "a reply to the directory the pane left must be dropped, not applied"
+        );
+        assert_eq!(
+            build.take_request(),
+            Some(("build".to_owned(), PathBuf::from("/srv/new"))),
+            "the new directory is what it asks for next"
+        );
+        assert!(
+            listing_waiter([&mut build], "build", Path::new("/srv/new")).is_some(),
+            "and that request is the one a reply is matched against"
+        );
+    }
+
+    /// One backend serves a remote pane's listing and its writes: request →
+    /// `Backend::list` → the whole listing applied through the browser's
+    /// handshake, then a write request run through the same `Arc<dyn Backend>`
+    /// and visible on the other side.
+    ///
+    /// `Memory` is the fake ssh host: it is the same `Backend` trait and it has
+    /// the write caps, so this exercises the app's routing with no server and no
+    /// terminal.
+    #[compio::test]
+    async fn a_remote_pane_lists_and_writes_through_one_backend() {
+        let mem = std::sync::Arc::new(dtr_vfs::Memory::new());
+        mem.write("/lab/alpha.txt", b"hello");
+        mem.dir("/lab/sub");
+        let backend: std::sync::Arc<dyn dtr_vfs::Backend> = mem.clone();
+
+        let mut browser = dtr_files::Browser::remote_at("mem", PathBuf::from("/lab"));
+        browser.set_caps(backend.caps());
+        assert!(browser.caps().write && !browser.caps().trash);
+
+        // The pane asks; the app starts the walk on the machine's backend.
+        let (alias, path) = browser
+            .take_request()
+            .expect("a remote pane asks for its directory");
+        assert_eq!(alias, "mem");
+        assert_eq!(path, PathBuf::from("/lab"));
+        let mut listing = RemoteListing::new(alias.clone(), path.clone(), backend.list(&path));
+        // `Memory`'s walk runs on the runtime's thread, so let it finish the way
+        // a frame would: drain until the stream closes.
+        for _ in 0..100 {
+            if listing.drain() {
+                break;
+            }
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            listing.failure.is_none(),
+            "an in-memory listing cannot fail"
+        );
+        let entries = std::mem::take(&mut listing.entries);
+        assert_eq!(entries.len(), 2, "the walk's rows: {entries:?}");
+
+        // The listing is applied through the one handshake, only once it is
+        // whole — the browser was written for a single reply.
+        let pane = listing_waiter(std::iter::once(&mut browser), &alias, &path)
+            .expect("the pane is waiting for this directory");
+        pane.apply_listing(path.clone(), entries);
+        assert_eq!(browser.directory(), Path::new("/lab"));
+        browser.select_only(1);
+        assert_eq!(browser.selected_path(), Some(PathBuf::from("/lab/sub")));
+        browser.select_only(2);
+        assert_eq!(
+            browser.selected_path(),
+            Some(PathBuf::from("/lab/alpha.txt"))
+        );
+
+        // request → write, on the same backend object the listing came from:
+        // copy what is selected and paste it, exactly what the menu does.
+        browser.copy_selection();
+        browser.paste();
+        let request = browser.take_write().expect("a paste is one request");
+        assert_eq!(
+            request.backend,
+            dtr_vfs::BackendId::Ssh("mem".into()),
+            "the pane names its alias, which is the one connection"
+        );
+        let destination = request
+            .op
+            .destination()
+            .expect("a copy names its destination")
+            .to_path_buf();
+        execute_write(std::sync::Arc::clone(&backend), request)
+            .await
+            .expect("the copy runs on the same backend");
+        assert_eq!(
+            backend
+                .stat(&destination)
+                .await
+                .expect("the copy exists")
+                .len,
+            5,
+            "the pasted file is the source's bytes"
+        );
+        assert!(browser.write_succeeded(), "the one-item batch is done");
+
+        // And the verb a remote pane really has: a delete with no trash is the
+        // permanent one, so it asks first.
+        browser.select_only(2);
+        browser.delete(false);
+        assert!(
+            browser.confirm_permanent(),
+            "ssh has no trash, so the only delete is the confirmed permanent one"
+        );
+    }
+
+    /// The live half: a real OpenSSH host answers the pane's first listing —
+    /// `list(".")`, which every sftp server resolves against the account's home —
+    /// through the same `Ssh` backend the pane's writes use.
+    ///
+    /// Ignored because the gate has no ssh server (`docs/sftp.md` §8 left the
+    /// same gap for the write verbs). Run it by hand against a host you may log
+    /// into without a prompt: `DTR_SSH_TEST_HOST=jupyter cargo test -p dtr --
+    /// --ignored a_live_host`. The assertion is deliberately weak — a host with an
+    /// empty home is still a host that listed — because what it proves is the
+    /// path, not the contents.
+    #[compio::test]
+    #[ignore = "needs a real ssh host: set DTR_SSH_TEST_HOST"]
+    async fn a_live_host_lists_its_home_through_the_vfs_backend() {
+        use dtr_vfs::Backend as _;
+        let Ok(host) = std::env::var("DTR_SSH_TEST_HOST") else {
+            return;
+        };
+        let backend = dtr_vfs::Ssh::new(host.clone());
+        assert!(
+            backend.caps().write,
+            "the pane's menu is built from this answer"
+        );
+        let batches = backend.list(Path::new("."));
+        let rows: Vec<dtr_vfs::Entry> =
+            compio::time::timeout(std::time::Duration::from_secs(60), async {
+                let mut rows = Vec::new();
+                while let Ok(batch) = batches.recv().await {
+                    rows.extend(batch.expect("the home directory lists"));
+                }
+                rows
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{host} did not answer its home listing in 60s"));
+        assert!(
+            rows.iter()
+                .all(|entry| entry.name != "." && entry.name != ".."),
+            "the dot rows are the protocol's, not the pane's"
+        );
+        tracing::info!(%host, rows = rows.len(), "the live host listed its home");
     }
 }

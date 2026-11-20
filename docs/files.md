@@ -396,3 +396,101 @@ and `caps.write = true, caps.trash = false`. The app's remote pane is the missin
 4. The remote menu then hides only what `trash` decides: the delete is permanent and asks, and
    `replace` clears the destination with `Removal::Permanent` (a trash-less backend's rule),
    which the worker already honours through `Writes::new`'s replace value.
+
+## 15. Remote panes list and write through the one ssh backend
+
+§14's four-point checklist is done, and it supersedes the paragraph there that made the remote
+pane read-only on purpose: a remote pane now lists *and* writes through the alias's single
+`dtr-vfs` `Ssh` backend, and the app no longer owns an SFTP client at all. This is the account
+of the app half; `docs/sftp.md` §8 is the backend's.
+
+**Caps come from the backend, at pane construction.** `remote_caps(&Vfs, alias)` asks
+`Vfs::backend(&BackendId::Ssh(alias))` for its `caps()` and hands that to `set_caps`, and it is
+the one reader for both remote-pane constructors (`split_files_remote` and the
+`reveal_directory` branch). The ssh backend says `write: true, trash: false`, so the menu
+offers mkdir/rename/copy/paste/delete, `delete(permanently = false)` takes the **permanent**
+branch (`Caps::trash` is false) and asks its confirmation, and a `replace` answer clears the
+destination with `Removal::Permanent` through `Writes::new`'s replace value — the trash-less
+rule §F6 already had. The old literal four `false`s said "read-only", which stopped being true
+the moment the listing moved.
+
+**The listing pump: `Backend::list`, drained on the frame, applied through the one handshake.**
+`App::pump_remote_listings` is the replacement for `pump_sftp`:
+
+1. every in-flight `RemoteListing` is drained with `try_recv` until it is empty or closed, all
+   its batches coalesced into one `Vec<dtr_files::Entry>`;
+2. a finished one is routed by host *and* directory (`listing_waiter`) and applied whole with
+   `Browser::apply_listing`; a `Err` batch still applies the rows that did arrive and then
+   `apply_failure` puts the words in the footer;
+3. every remote pane's `take_request` starts a `backend.list(...)` — resolved on the UI thread,
+   because `Vfs::backend` owns the pool and a lookup is not I/O — and the request/answer pair
+   stays the browser's existing handshake (`take_request`/`is_waiting_for`/`apply_listing`/
+   `apply_failure`).
+
+Two decisions in that loop are worth keeping:
+
+- **The whole listing is applied once, not per batch.** `apply_listing` is the single-reply
+  answer the browser was written for; calling it per batch would re-run `adopt` (and its sort)
+  and shuffle the rows under a pointer for a listing the ssh backend has already read in one
+  `READDIR` round trip — it hands that one reply over in 64-row batches, so nothing was
+  visible earlier anyway. When paged `READDIR` arrives, the browser's own `merge` (already used
+  by the local listing) is the place to stream it, not a second protocol in the app.
+- **The router also checks the directory the pane is *showing*.** `Browser::reload` leaves
+  `awaiting` pointing at the old directory while the new request is still `pending`, so
+  `is_waiting_for` alone would accept a reply to the directory the pane just left and
+  `apply_listing` would move the pane back. `listing_waiter` requires
+  `directory() == path` as well, which holds for a live walk (the pane shows the directory it
+  asked for the whole time) and drops one that lost the race with a navigation. This is
+  measured by `a_listing_goes_to_the_pane_waiting_for_it_and_not_one_that_moved_on`.
+
+**`sftp_worker` is gone, and so is the second `ssh`.** The worker was `dtr-sftp::Session`
+behind a channel: one connection, reused until the alias changed, for both the listing and the
+pane's Enter-on-a-remote-file download. `Backend::list` replaces the first; the second is now
+`App::begin_download`, which builds a `Location { backend: Ssh(alias), path }` and runs the
+same `copy_to`/`Vfs::materialise` path a click and a link menu's "Save as" already used — so
+the file is fetched through the alias's one backend and copied out of the private cache. The
+`SftpMsg`/`SftpEvent`/`UserEvent::Sftp` vocabulary, the `sftp` field and the thread are deleted;
+nothing in `crates/dtr` names `dtr-sftp` any more (the dependency line in
+`crates/dtr/Cargo.toml` is now unused and is left for a follow-up outside this task's write
+scope). One `ssh` per alias is what remains: the pane's session on its pty, the terminfo copy,
+and the `Ssh` backend's thread, which is shared by the listing, the preview fetch, the
+download and every write of every pane on that alias.
+
+**The home directory is `.`.** `Ssh::list` takes the pane's path literally, and there is no
+`realpath` verb in the `Backend` trait, so the pane's opening path stays the literal `"."` —
+which every sftp server resolves against the account's home. That reads well (`~` for the
+root, `~/sub` below it) and every relative path the pane builds works on the far side, but it
+is a change from the old worker, which resolved `"."` to the absolute home through
+`REALPATH` first: "copy path" from a remote pane now yields `./name` rather than an absolute
+path. Closing that needs a `Backend::canonicalise` (or a `realpath` on `stat`'s answer), which
+belongs in `dtr-vfs`, not here.
+
+**Tests.** There is no ssh server in the gate, so the routing is proved with `Memory` as the
+fake host — it is the same `Backend` trait and it has the write caps:
+
+- `a_remote_pane_takes_its_caps_from_the_ssh_backend`: `remote_caps` is `write: true,
+  trash: false, watch: false, dir_size: false`.
+- `a_listing_goes_to_the_pane_waiting_for_it_and_not_one_that_moved_on`: two browsers, one
+  host/directory each; then a navigation and a reply for the directory left behind, which the
+  router drops.
+- `a_remote_pane_lists_and_writes_through_one_backend`: `remote_at` → `take_request` →
+  `Memory::list` → `RemoteListing::drain` → `apply_listing`, then copy/paste as a
+  `WriteRequest` with `BackendId::Ssh("mem")`, `execute_write` on the same `Arc<dyn Backend>`,
+  and the pasted bytes on the other side. A `delete(false)` then reaches the permanent
+  confirmation, which is the caps decision in the test.
+- `a_live_host_lists_its_home_through_the_vfs_backend` is `#[ignore]`d and gated on
+  `$DTR_SSH_TEST_HOST`: `DTR_SSH_TEST_HOST=jupyter cargo test -p dtr -- --ignored a_live_host`
+  asks a real OpenSSH server for `list(".")`. What it cannot cover, like `docs/sftp.md` §8 says
+  of the write verbs, is the server's own status codes and the 30 s deadline.
+
+Local panes are untouched: `file_browser` still takes `Local::caps`, the listing still goes
+through `Browser`'s own `incoming` stream, and the `--files` capture that watched a local
+listing arrive is the same one (`docs/manager.md` §10, measurement 7).
+
+**Residual gaps.** A live ssh run of the whole pane (open, list, rename, copy, delete) is still
+the missing evidence; the ignored test covers the first round trip only. Remote panes still
+have no transfer queue (a big copy is one 30 s verb, §8 of `docs/manager.md`), no trash (by
+design: permanent only), and a recursive delete/copy is still refused by the backend. And the
+`dtr-sftp` dependency line in `crates/dtr/Cargo.toml` should be deleted once a task owns that
+file.
+
