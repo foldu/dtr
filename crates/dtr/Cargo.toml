@@ -37,7 +37,6 @@ dtr-store = { path = "../dtr-store" }
 dtr-widgets = { path = "../dtr-widgets" }
 egui.workspace = true
 egui-wgpu.workspace = true
-egui-winit.workspace = true
 egui_extras.workspace = true
 arboard.workspace = true
 # `kitty-graphics` is the core's Rust wrapper for the image storage and the

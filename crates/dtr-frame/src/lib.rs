@@ -183,9 +183,12 @@ pub struct WindowOptions {
     pub undecorated_shadow: bool,
     /// Adapter name substring to prefer, e.g. `"nvidia"`.
     pub adapter_hint: Option<String>,
-    /// Called with the created window, before the [`Frame`] exists.
+    /// Called with the created window, before the [`Frame`] exists. The handle
+    /// is the loop's `Arc`, cloned for the callback: platform work that needs
+    /// the native handle (dtr subclasses the window procedure here) can keep it
+    /// if it wants, and the loop still owns the window's lifetime.
     #[allow(clippy::type_complexity)]
-    pub on_created: Option<Box<dyn FnOnce(&Arc<Window>)>>,
+    pub on_created: Option<Box<dyn FnOnce(Arc<Window>)>>,
 }
 
 impl Default for WindowOptions {
@@ -898,7 +901,7 @@ impl Windows {
             window.set_ime_allowed(true);
         }
         if let Some(on_created) = on_created {
-            on_created(&window);
+            on_created(Arc::clone(&window));
         }
         let frame = Frame::new(window, adapter_hint.as_deref())?;
         self.frames.push(frame);

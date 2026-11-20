@@ -5202,8 +5202,8 @@ impl dtr_frame::App for App {
         // winit has no hook for a hit test, so the window procedure is
         // subclassed — once, when the window exists and before its first frame.
         #[cfg(target_os = "windows")]
-        let on_created: Option<Box<dyn FnOnce(&Arc<Window>)>> = client_frame.then(|| {
-            Box::new(|window: &Arc<Window>| {
+        let on_created: Option<Box<dyn FnOnce(Arc<Window>)>> = client_frame.then(|| {
+            Box::new(|window: Arc<Window>| {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Ok(handle) = window.window_handle() {
                     if let RawWindowHandle::Win32(win32) = handle.as_raw() {

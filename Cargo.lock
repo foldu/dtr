@@ -1137,7 +1137,6 @@ dependencies = [
  "dtr-widgets",
  "egui",
  "egui-wgpu",
- "egui-winit",
  "egui_extras",
  "egui_kittest",
  "fontique",

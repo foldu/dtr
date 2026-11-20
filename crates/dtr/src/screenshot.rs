@@ -5,7 +5,6 @@
 //! no unlocked session and no external screenshot tool: this is the only way the
 //! UI gets reviewed (PLAN §4).
 
-use std::fs::File;
 use std::path::Path;
 
 use crate::pane::Frame;
@@ -41,23 +40,16 @@ pub fn cell_metrics(width: u32, height: u32) -> anyhow::Result<crate::render::Me
     Ok(grid.metrics())
 }
 
-/// Write RGBA pixels to `path` as a PNG. Shared with the live-window capture,
-/// so both produce the same file format.
+/// Write RGBA pixels to `path` as a PNG. Shared with the live-window capture
+/// (`dtr_frame::write_png`, where the surface readback lives), so both produce
+/// the same file format.
 pub fn write_png(
     path: &std::path::Path,
     width: u32,
     height: u32,
     pixels: &[u8],
 ) -> anyhow::Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    let mut png = png::Encoder::new(&mut writer, width, height);
-    png.set_color(png::ColorType::Rgba);
-    png.set_depth(png::BitDepth::Eight);
-    let mut png = png.write_header()?;
-    png.write_image_data(pixels)?;
-    png.finish()?;
-    Ok(())
+    dtr_frame::write_png(path, width, height, pixels)
 }
 
 pub fn capture(
@@ -441,14 +433,7 @@ pub fn capture(
 
     full_output.textures_delta.clear();
 
-    let file = File::create(path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    let mut png = png::Encoder::new(&mut writer, width, height);
-    png.set_color(png::ColorType::Rgba);
-    png.set_depth(png::BitDepth::Eight);
-    let mut png = png.write_header()?;
-    png.write_image_data(&pixels)?;
-    png.finish()?;
+    write_png(path, width, height, &pixels)?;
 
     tracing::info!(path = %path.display(), width, height, "wrote screenshot");
     Ok(())
