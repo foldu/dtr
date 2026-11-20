@@ -679,9 +679,47 @@ fn named_key(named: dtr_config::keys::Named) -> winit::keyboard::Key {
         N::End => NamedKey::End,
         N::PageUp => NamedKey::PageUp,
         N::PageDown => NamedKey::PageDown,
-        N::Function(_) => NamedKey::F1,
+        N::Function(number) => function_key(number),
     };
     Key::Named(named)
+}
+
+/// The named key for `f<number>`, which `--keys` and a `[keys]` binding spell.
+///
+/// winit has no `From<u8>` and the variants are not an array, so this is a table.
+/// It has to be right per number: mapping every function key to `F1` made
+/// `--keys "f2"` press F1, so the scripted path silently did something else —
+/// which is exactly the bug a capture is supposed to catch.
+fn function_key(number: u8) -> winit::keyboard::NamedKey {
+    use winit::keyboard::NamedKey;
+    const KEYS: [NamedKey; 24] = [
+        NamedKey::F1,
+        NamedKey::F2,
+        NamedKey::F3,
+        NamedKey::F4,
+        NamedKey::F5,
+        NamedKey::F6,
+        NamedKey::F7,
+        NamedKey::F8,
+        NamedKey::F9,
+        NamedKey::F10,
+        NamedKey::F11,
+        NamedKey::F12,
+        NamedKey::F13,
+        NamedKey::F14,
+        NamedKey::F15,
+        NamedKey::F16,
+        NamedKey::F17,
+        NamedKey::F18,
+        NamedKey::F19,
+        NamedKey::F20,
+        NamedKey::F21,
+        NamedKey::F22,
+        NamedKey::F23,
+        NamedKey::F24,
+    ];
+    let index = usize::from(number).saturating_sub(1);
+    KEYS.get(index).copied().unwrap_or(NamedKey::F1)
 }
 
 /// Why `chord` cannot become `action`'s binding, or `None` when it can.
@@ -1225,6 +1263,35 @@ mod tab_through {
             keymap.resolve(&[], ctrl_tab.chords[0]),
             Matched::Action(Action::NextTab),
             "ctrl-tab still switches"
+        );
+    }
+
+    /// A scripted function key is the key it names. Every `f<n>` used to become
+    /// `F1`, so `--keys "f2"` pressed the wrong key and a capture of the write UI
+    /// could never open the rename field.
+    #[test]
+    fn a_scripted_function_key_is_the_key_it_names() {
+        use winit::keyboard::{Key, NamedKey};
+        for (script, wanted) in [
+            ("f2", NamedKey::F2),
+            ("f5", NamedKey::F5),
+            ("f12", NamedKey::F12),
+            ("f24", NamedKey::F24),
+        ] {
+            let strokes = parse_script(script);
+            assert_eq!(strokes.len(), 1, "{script}");
+            assert_eq!(
+                strokes[0].key,
+                Key::Named(wanted),
+                "{script} is not {wanted:?}"
+            );
+        }
+        // A number outside the configurable range still answers a key rather
+        // than panicking; `Named::parse` is what refuses it.
+        assert_eq!(
+            function_key(25),
+            NamedKey::F1,
+            "an impossible number falls back rather than panicking"
         );
     }
 }
