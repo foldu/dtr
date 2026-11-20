@@ -582,8 +582,9 @@ mod cache_tests {
 
 /// One textured quad pipeline, one texture per (image id, generation).
 ///
-/// It is owned by `render::GridRenderer`, which keeps it before the device in
-/// `Gpu`'s field order — a texture dropped after its device is a segfault on
+/// It is owned by `render::GridRenderer`, which dtr drops before the
+/// `dtr_frame::Frame` that owns the device (`dtr_frame` drops the application
+/// before its windows) — a texture dropped after its device is a segfault on
 /// close, not an error.
 pub struct ImageRenderer {
     pipeline: wgpu::RenderPipeline,

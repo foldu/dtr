@@ -1,6 +1,7 @@
 //! The debug overlay: frame time, fps, and the wait the `slow frame` log cannot see.
 //!
-//! `docs/windows.md` §5.1: `Gpu::cpu_ms` is taken *before* `present`, because a
+//! `docs/windows.md` §5.1: the frame's CPU time (`dtr_frame::FrameTiming::cpu_ms`)
+//! is taken *before* `present`, because a
 //! vsynced frame waiting for the compositor is not work — so the existing
 //! `slow frame` line can never show a vsync wait, and that wait is exactly what
 //! "it feels laggy" is suspected to be. This module keeps the present duration

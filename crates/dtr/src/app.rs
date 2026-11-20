@@ -3780,8 +3780,8 @@ impl App {
         if re_theme {
             self.switch_theme(config.theme.as_deref());
         }
-        // The grid is rebuilt against a new face on the next frame, which is
-        // where `Gpu` is; `fit_panes` then re-fits the pty from the new metrics.
+        // The grid is rebuilt against a new face on the next frame, where the
+        // device is; `fit_panes` then re-fits the pty from the new metrics.
         let font_changed = config.font.size != self.look.size
             || config.font.family != self.look.family
             || config.font.fallback != self.look.fallback;

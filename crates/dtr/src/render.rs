@@ -648,7 +648,7 @@ pub struct GridRenderer {
     uniform: wgpu::Buffer,
     screen: [f32; 2],
     /// The Kitty graphics layer: its own pipeline, its textures and its byte
-    /// budget. Owned here so `Gpu`'s drop order keeps it before the device.
+    /// budget. Owned here so dtr's `Gpu` drops it before the frame's device.
     images: crate::kitty::ImageRenderer,
 }
 

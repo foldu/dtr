@@ -653,7 +653,7 @@ mod kittest_tests {
         assert_eq!(palette.borrow().selected(), 0, "C-p comes back");
     }
 
-    /// The window installs the resolved skin on the context (`Gpu::render`), so
+    /// The window installs the resolved skin on the context (`Gpu::install_skin`), so
     /// every stock widget a screen borrows is drawn at the skin's row: without
     /// this the palette's `TextEdit` is an 18-point field rather than Adwaita's
     /// 34, and the harness cannot show what a query does inside one.
