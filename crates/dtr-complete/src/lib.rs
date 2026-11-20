@@ -147,6 +147,37 @@ const COMMANDS: &[Command] = &[
         summary: "delay serial keystrokes for a slow device",
         argument: Argument::None,
     },
+    // The focused file pane's write verbs. **The accelerator rule names them**:
+    // the first letter is unique, so `copy` cannot be `copy` while `connect`
+    // owns `c`, `delete` cannot be `delete` while `demo` owns `d`, and `rename`
+    // cannot be `rename` while `replay` owns `r`. The words are the shell's and
+    // vim's for the same verbs, and the palette lists them with their summaries
+    // for anyone who does not know them yet.
+    Command {
+        name: "mkdir",
+        summary: "create a folder in the focused file pane",
+        argument: Argument::None,
+    },
+    Command {
+        name: "name",
+        summary: "rename the selected file",
+        argument: Argument::None,
+    },
+    Command {
+        name: "unlink",
+        summary: "delete the selected files",
+        argument: Argument::None,
+    },
+    Command {
+        name: "yank",
+        summary: "copy the selection for a paste",
+        argument: Argument::None,
+    },
+    Command {
+        name: "insert",
+        summary: "paste the copied files into this folder",
+        argument: Argument::None,
+    },
     Command {
         name: "quit",
         summary: "close the window",

@@ -39,6 +39,21 @@ pub enum Action {
     /// Delayed input for a serial line: `lag` and not `delay`, because `d` is
     /// demo's accelerator, and not `slow` because `s` is ssh's.
     KeyDelay,
+    /// The focused file pane's write verbs, by the command names the palette
+    /// offers (`mkdir`, `name`, `unlink`, `yank`, `insert`).
+    ///
+    /// The names are the accelerator rule's: the first letter of a command is
+    /// its accelerator and `crates/dtr-complete` fails on a collision, so
+    /// `copy` cannot be `copy` while `connect` owns `c`, and `delete` cannot be
+    /// `delete` while `demo` owns `d`. The words chosen are the shell's and
+    /// vim's, which is what a terminal's own file manager should be typed in.
+    /// Each is one dispatch, through the same `keys::Action` a chord is: a
+    /// command is a third way to the same write, never a second implementation.
+    FileNewFolder,
+    FileRename,
+    FileDelete,
+    FileCopy,
+    FilePaste,
 }
 
 pub struct Palette {
@@ -448,6 +463,16 @@ fn action_for(line: &str) -> Option<Action> {
         // `delay` would share demo's accelerator, `slow` ssh's; see
         // `Action::KeyDelay`.
         "lag" => Some(Action::KeyDelay),
+        // The file-write commands. `new-folder`, `rename`, `delete`, `copy` and
+        // `paste` are the words a person types, and three of them share a first
+        // letter with a command that already owns it (`connect`, `demo`,
+        // `preferences`); the accelerator rule is why these read as the shell's
+        // and vim's words instead. See `Action::FileNewFolder`.
+        "mkdir" => Some(Action::FileNewFolder),
+        "name" => Some(Action::FileRename),
+        "unlink" => Some(Action::FileDelete),
+        "yank" => Some(Action::FileCopy),
+        "insert" => Some(Action::FilePaste),
         _ => None,
     }
 }
@@ -518,6 +543,23 @@ mod tests {
         // first letter is its accelerator, and the completion engine refuses a
         // collision at build time.
         assert!(matches!(action_for("lag"), Some(Action::KeyDelay)));
+    }
+
+    #[test]
+    fn the_file_commands_are_words_no_other_command_starts_with() {
+        // `copy`, `delete` and `rename` are what a person types, and their first
+        // letters belong to `connect`, `demo` and `replay`; `crates/dtr-complete`
+        // fails the build on a shared accelerator, so the commands are the shell's
+        // and vim's words for the same verbs.
+        assert!(matches!(action_for("mkdir"), Some(Action::FileNewFolder)));
+        assert!(matches!(action_for("name"), Some(Action::FileRename)));
+        assert!(matches!(action_for("unlink"), Some(Action::FileDelete)));
+        assert!(matches!(action_for("yank"), Some(Action::FileCopy)));
+        assert!(matches!(action_for("insert"), Some(Action::FilePaste)));
+        // The words that collide are not silently accepted: `copy` is not a
+        // command, so it must not resolve to the file copy either.
+        assert!(action_for("copy").is_none());
+        assert!(action_for("delete").is_none());
     }
 
     #[test]

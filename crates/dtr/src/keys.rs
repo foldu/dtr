@@ -61,6 +61,24 @@ pub enum Action {
     /// daemon exists (F3) the answer goes to the tab's terminal, which is what
     /// a terminal's own file picker is for.
     FilesPick,
+    /// The write verbs a focused file pane owns.
+    ///
+    /// They are `[keys]` actions like the listing's own, because a chord is the
+    /// config file's business: `F2`, `Delete` and `ctrl-c` are the chords every
+    /// file manager has, and a person who moves one wants the keyboard map to
+    /// say so. Each of them does **nothing at all** when the focused pane is a
+    /// terminal — it returns `false` from dispatch and the key goes to the
+    /// program, because `ctrl-c` is still `^C` and `F2` is still Midnight
+    /// Commander's help. That is the opposite of the listing's view actions,
+    /// which toast "no file pane is focused": a chord that was never for the
+    /// shell may say so, and one that was may not.
+    FilesNewFolder,
+    FilesRename,
+    FilesDelete,
+    /// `Shift+Delete`: the one permanent delete, with its confirmation.
+    FilesDeletePermanent,
+    FilesCopy,
+    FilesPaste,
     Copy,
     Paste,
     ScrollPageUp,
@@ -124,6 +142,12 @@ impl Action {
             Self::FilesReverse => "files-reverse",
             Self::FilesFoldersFirst => "files-folders-first",
             Self::FilesPick => "files-pick",
+            Self::FilesNewFolder => "files-new-folder",
+            Self::FilesRename => "files-rename",
+            Self::FilesDelete => "files-delete",
+            Self::FilesDeletePermanent => "files-delete-permanent",
+            Self::FilesCopy => "files-copy",
+            Self::FilesPaste => "files-paste",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll-page-up",
@@ -179,6 +203,12 @@ impl Action {
             Self::FilesReverse => "reverse the order",
             Self::FilesFoldersFirst => "folders first",
             Self::FilesPick => "pick a file for the shell",
+            Self::FilesNewFolder => "new folder here",
+            Self::FilesRename => "rename the selected file",
+            Self::FilesDelete => "delete the selection",
+            Self::FilesDeletePermanent => "delete permanently",
+            Self::FilesCopy => "copy the selection for a paste",
+            Self::FilesPaste => "paste the copied files here",
             Self::Copy => "copy selection",
             Self::Paste => "paste",
             Self::ScrollPageUp => "scroll a page up",
@@ -225,7 +255,13 @@ impl Action {
             | Self::FilesSortKind
             | Self::FilesReverse
             | Self::FilesFoldersFirst
-            | Self::FilesPick => Group::Files,
+            | Self::FilesPick
+            | Self::FilesNewFolder
+            | Self::FilesRename
+            | Self::FilesDelete
+            | Self::FilesDeletePermanent
+            | Self::FilesCopy
+            | Self::FilesPaste => Group::Files,
             Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
@@ -304,7 +340,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 44] = [
+pub const ALL: [Action; 50] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -334,6 +370,12 @@ pub const ALL: [Action; 44] = [
     Action::FilesReverse,
     Action::FilesFoldersFirst,
     Action::FilesPick,
+    Action::FilesNewFolder,
+    Action::FilesRename,
+    Action::FilesDelete,
+    Action::FilesDeletePermanent,
+    Action::FilesCopy,
+    Action::FilesPaste,
     Action::Copy,
     Action::Paste,
     Action::ScrollPageUp,
@@ -397,6 +439,17 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // `p` for pick, and beside the other `[files]` verbs rather than next to
     // the pane chords: it opens a question inside a pane, not a pane.
     ("files-pick", "ctrl-alt-p"),
+    // The file manager's own chords, and the ones a terminal has to keep
+    // working: `ctrl-c`, `Delete` and `F2` are the shell's while a terminal has
+    // focus, so dispatch answers these only for a focused file pane and lets
+    // everything else fall through to the program. `ctrl-shift-n` is the
+    // exception every desktop agrees on, and a shell does nothing with it.
+    ("files-new-folder", "ctrl-shift-n"),
+    ("files-rename", "f2"),
+    ("files-delete", "delete"),
+    ("files-delete-permanent", "shift-delete"),
+    ("files-copy", "ctrl-c"),
+    ("files-paste", "ctrl-v"),
     ("copy", "ctrl-shift-c"),
     ("paste", "ctrl-shift-v"),
     ("scroll-page-up", "shift-pageup"),
@@ -947,6 +1000,32 @@ mod tests {
         assert_eq!(refuse_reason(&keymap, Action::NewTab, taken), None);
         let free = parse_sequence("ctrl-alt-q").expect("chord").chords[0];
         assert_eq!(refuse_reason(&keymap, Action::Palette, free), None);
+    }
+
+    /// The six write chords are one per verb, and plain `Delete` is not
+    /// `Shift+Delete`: a resolver that folded the shift would make the trash key
+    /// the permanent one, which is the one direction that loses data. The
+    /// chords themselves are the file manager's; a terminal pane keeps them
+    /// because dispatch declines them when no file pane has focus.
+    #[test]
+    fn the_file_write_chords_are_the_ones_every_file_manager_has() {
+        let keymap = Keymap::new(&BTreeMap::new());
+        let resolve = |text: &str| {
+            let chord = parse_sequence(text).expect("a chord").chords[0];
+            keymap.resolve(&[], chord)
+        };
+        assert_eq!(resolve("f2"), Matched::Action(Action::FilesRename));
+        assert_eq!(resolve("delete"), Matched::Action(Action::FilesDelete));
+        assert_eq!(
+            resolve("shift-delete"),
+            Matched::Action(Action::FilesDeletePermanent)
+        );
+        assert_eq!(
+            resolve("ctrl-shift-n"),
+            Matched::Action(Action::FilesNewFolder)
+        );
+        assert_eq!(resolve("ctrl-c"), Matched::Action(Action::FilesCopy));
+        assert_eq!(resolve("ctrl-v"), Matched::Action(Action::FilesPaste));
     }
 
     #[test]

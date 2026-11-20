@@ -26,7 +26,10 @@ use crate::palette::{Action, Palette};
 use crate::pane::{Frame, Pane as TermPane, Transport};
 use crate::ui::Look;
 use crate::ui::Status;
-use dtr_files::{Browser, Layout as FileLayout, PaneView as FilePaneView, Sort as FileSort};
+use dtr_files::{
+    Browser, Failure, Layout as FileLayout, PaneView as FilePaneView, Sort as FileSort, WriteOp,
+    WriteRequest,
+};
 
 pub enum UserEvent {
     Frame,
@@ -65,6 +68,14 @@ pub enum UserEvent {
     SavePath {
         location: dtr_vfs::Location,
         path: Option<PathBuf>,
+    },
+    /// A file pane's write finished on the background thread: which pane asked,
+    /// and what the VFS's verb said. Routed by leaf rather than by "the focused
+    /// pane" because the operation was started in the pane it belongs to and the
+    /// focus may have moved (or the tab closed) while it ran.
+    Write {
+        leaf: crate::layout::LeafId,
+        result: anyhow::Result<()>,
     },
 }
 
@@ -764,6 +775,54 @@ fn sftp_worker(
     }
 }
 
+/// Execute one file operation through the machine's backend, off the UI thread.
+///
+/// The trait's rule is that **a backend never replaces an existing destination**
+/// — replacing is the person's answer to the overwrite card, and it is spelled
+/// here rather than hidden in a backend: `request.replace` names how to clear the
+/// destination, and this removes it *first*, then runs the verb. A destination
+/// that vanished between the conflict and the answer is not an error (the
+/// answer was "write over it", and it is no longer there); any other failure
+/// from the removal stops the operation before the verb runs.
+///
+/// Every verb is awaited on the background thread, so a slow mount or an `ssh`
+/// round trip cannot drop a frame. The `Arc<dyn Backend>` is resolved on the UI
+/// thread — `Vfs::backend` owns the connection pool, and looking a connection up
+/// is not I/O — and travels here as an owned handle.
+async fn execute_write(
+    backend: std::sync::Arc<dyn dtr_vfs::Backend>,
+    request: WriteRequest,
+) -> anyhow::Result<()> {
+    let WriteRequest { op, replace, .. } = request;
+    if let (Some(how), Some(destination)) = (replace, op.destination()) {
+        match backend.remove(destination, how).await {
+            Ok(()) => {}
+            Err(err) if is_not_found(&err) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    match &op {
+        WriteOp::CreateDir { at } => backend.create_dir(at).await,
+        WriteOp::Rename { from, to } => backend.rename(from, to).await,
+        WriteOp::Copy { from, to } => backend.copy(from, to).await.map(|_bytes| ()),
+        WriteOp::Move { from, to } => backend.move_to(from, to).await,
+        WriteOp::Remove { at, how } => backend.remove(at, *how).await,
+    }
+}
+
+/// Whether a failed write was "it is not there", which the replace path ignores.
+///
+/// The VFS verbs wrap the OS error with the path they were working on, so the
+/// `io::Error` is in the chain rather than at the top. Only the *removal* of a
+/// destination uses this: a missing source is a real error and must stay one.
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// Where a copy lands by default: `~/Downloads`, created if it is missing.
 ///
 /// The file browser's download and the link menu's "Save as" share it, so a
@@ -1016,13 +1075,31 @@ fn files_sort(sort: FileSort) -> dtr_config::FilesSort {
 fn file_browser(config: &dtr_config::Config, start: Option<PathBuf>) -> Browser {
     let mut browser = Browser::new(start);
     browser.set_view(file_view(config));
+    // The pane that writes asks the backend that will execute it: `Local::caps`
+    // is where "this machine has a trash" (Unix) and "it can write at all" come
+    // from. A pane built by hand here and a pane the menu opens therefore carry
+    // the same answer, and there is no second table of capabilities in the app.
+    browser.set_caps(dtr_vfs::Backend::caps(&dtr_vfs::Local::new()));
     browser
 }
 
 /// The same, for a pane over another machine.
+///
+/// Read-only **in this task, and on purpose**: `dtr-vfs`'s ssh backend has the
+/// write verbs, but the app's remote pane still lists through the older SFTP
+/// worker, so a write here would be executed against a connection the pane does
+/// not share. The caps say so rather than offering a verb that fails — F7 wires
+/// the remote pane to `Vfs::backend` and flips these four flags, and until then
+/// `docs/files.md` §14 says the pane is read-only.
 fn remote_file_browser(config: &dtr_config::Config, alias: &str, path: PathBuf) -> Browser {
     let mut browser = Browser::remote_at(alias, path);
     browser.set_view(file_view(config));
+    browser.set_caps(dtr_vfs::Caps {
+        watch: false,
+        dir_size: false,
+        write: false,
+        trash: false,
+    });
     browser
 }
 
@@ -1032,19 +1109,70 @@ fn browser_key(
 ) -> Option<dtr_files::Key> {
     use winit::keyboard::{Key, NamedKey};
 
-    // One chord with a modifier, and it is the one every file manager has: the
-    // parent directory is `Alt+Up`, because in a grid `Left` is a movement and
-    // "up a level" needed somewhere to live.
-    if mods.alt_key() || mods.control_key() || mods.super_key() {
-        return match key {
-            Key::Named(NamedKey::ArrowUp) if mods.alt_key() && !mods.control_key() => {
-                Some(dtr_files::Key::Parent)
+    let (ctrl, alt, shift, sup) = (
+        mods.control_key(),
+        mods.alt_key(),
+        mods.shift_key(),
+        mods.super_key(),
+    );
+
+    // The chords a file manager has and a shell has too. They reach here only
+    // when the focused pane *is* a file pane (`App::on_key` asks for the listing
+    // only when `session()` is `None`), and only when the keymap did not claim
+    // them first: the same six are `[keys]` actions (`files-rename`,
+    // `files-delete`, …) whose dispatch declines them when no listing has focus,
+    // so a terminal keeps `^C`, `Delete` and `F2` while a listing keeps its own.
+    //
+    // Keeping them here as well is the pane's own path — the one that works when
+    // the keymap is rebuilt, disabled or absent — and it is why an unmodified
+    // `djklr` still walks a listing without being in `[keys]` at all.
+    if ctrl || alt || sup {
+        // One chord with alt, and it is the one every file manager has: the
+        // parent directory is `Alt+Up`, because in a grid `Left` is a movement and
+        // "up a level" needed somewhere to live.
+        if alt && !ctrl && !sup {
+            if matches!(key, Key::Named(NamedKey::ArrowUp)) {
+                return Some(dtr_files::Key::Parent);
             }
-            _ => None,
-        };
+        }
+        // `ctrl-shift-n` is the desktop's new-folder chord. Its key event is the
+        // *character* `N` because shift is held, which is why the comparison
+        // ignores case.
+        if ctrl && !alt && !sup && shift {
+            if let Key::Character(text) = key {
+                if text.eq_ignore_ascii_case("n") {
+                    return Some(dtr_files::Key::NewFolder);
+                }
+            }
+        }
+        // `ctrl-c` and `ctrl-v`: vim's yank and put, and the file manager's copy
+        // and paste. Without shift, so `ctrl-shift-c` stays the terminal's copy
+        // selection (which dispatch declines for a file pane rather than
+        // pretending a path is text).
+        if ctrl && !alt && !sup && !shift {
+            if let Key::Character(text) = key {
+                if text.eq_ignore_ascii_case("c") {
+                    return Some(dtr_files::Key::Copy);
+                }
+                if text.eq_ignore_ascii_case("v") {
+                    return Some(dtr_files::Key::Paste);
+                }
+            }
+        }
+        return None;
+    }
+
+    // `Shift+Delete` asks first and destroys for good; plain `Delete` trashes
+    // where the machine has a trash and asks where it does not (`Browser::delete`).
+    if shift {
+        if let Key::Named(NamedKey::Delete) = key {
+            return Some(dtr_files::Key::DeletePermanently);
+        }
     }
 
     match key {
+        Key::Named(NamedKey::F2) => Some(dtr_files::Key::Rename),
+        Key::Named(NamedKey::Delete) => Some(dtr_files::Key::Delete),
         Key::Named(NamedKey::ArrowUp) => Some(dtr_files::Key::Up),
         Key::Named(NamedKey::ArrowDown) => Some(dtr_files::Key::Down),
         Key::Named(NamedKey::ArrowLeft) => Some(dtr_files::Key::Left),
@@ -1770,6 +1898,30 @@ impl App {
             return;
         }
 
+        // **The write UI owns the keyboard while it is up.** A rename or
+        // new-folder field is an egui text field; the overwrite card and the
+        // permanent delete's confirmation read Enter and Escape from the same
+        // input. egui has already been fed the event by the frame
+        // (`feed_event` before `on_key`), so stepping aside here is what lets
+        // the field type and the card answer — while this gate is what stops
+        // `ctrl-c` becoming a copy, `r` reloading the listing under the text, a
+        // chord starting an Action, or Escape closing a menu the field was not
+        // in. The browser's own rule is `Browser::write_modal`.
+        if self
+            .focused_browser()
+            .is_some_and(|browser| browser.write_modal())
+        {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            // Duplicate presses are compositor noise, and the field has already
+            // seen the character once: swallow the repeat before it can arrive
+            // as a second `Event::Text`.
+            self.held = Some(stroke.key.clone());
+            return;
+        }
+
         // The menu owns the keyboard in the same way, but only briefly:
         // any key dismisses it and then goes where it was going. Escape is
         // the one that must not reach the shell, because it was aimed at
@@ -1850,7 +2002,12 @@ impl App {
                         }
                         return;
                     }
-                    if let Some(key) = browser_key(&stroke.key, stroke.mods) {
+                    // **A press only.** The release repeats the press's logical
+                    // key (a terminal's encoder is where the "encode a release
+                    // as nothing" rule lives), and a listing has no encoder: a
+                    // `Down` that ran on both edges moved two rows, which is
+                    // what made every arrow key feel like it skated.
+                    if pressed && let Some(key) = browser_key(&stroke.key, stroke.mods) {
                         let chosen = self
                             .focused_browser_mut()
                             .and_then(|browser| browser.handle(key));
@@ -3074,6 +3231,26 @@ impl App {
         self.write_binding(action, None);
     }
 
+    /// Run one file-write verb on the focused file pane.
+    ///
+    /// `false` when the focused pane is not a listing, which is the difference
+    /// between these actions and the listing's view actions: `files-grid` toasts
+    /// "no file pane is focused" because nobody presses `ctrl-1` at a shell, but
+    /// `ctrl-c`, `Delete` and `F2` mean something to the program in a terminal
+    /// pane, and an action that swallowed them would take `^C` away. Dispatch's
+    /// answer of `false` sends the key on to the session, where it was always
+    /// going.
+    fn file_verb(&mut self, verb: impl FnOnce(&mut Browser), why: &'static str) -> bool {
+        {
+            let Some(browser) = self.focused_browser_mut() else {
+                return false;
+            };
+            verb(browser);
+        }
+        self.repaint(why);
+        true
+    }
+
     /// Select every row in the focused listing.
     fn select_all_files(&mut self) -> bool {
         let Some(browser) = self.focused_browser_mut() else {
@@ -3427,6 +3604,24 @@ impl App {
                 self.start_pick();
                 true
             }
+            // The six write verbs. Each is one `Browser` call — the same one the
+            // pane's right-press menu makes, and the same one `browser_key`
+            // makes when the keymap did not claim the chord — so a menu row, a
+            // chord and a palette command cannot drift into three behaviours.
+            //
+            // **Declined when no file pane has focus**, not toasted: see
+            // `file_verb`. `ctrl-c`, `Delete` and `F2` are the shell's chords in
+            // a terminal, and dispatch answering them would eat `^C`.
+            Action::FilesNewFolder => {
+                self.file_verb(|browser| browser.begin_new_folder(), "files new folder")
+            }
+            Action::FilesRename => self.file_verb(|browser| browser.begin_rename(), "files rename"),
+            Action::FilesDelete => self.file_verb(|browser| browser.delete(false), "files delete"),
+            Action::FilesDeletePermanent => {
+                self.file_verb(|browser| browser.delete(true), "files delete permanently")
+            }
+            Action::FilesCopy => self.file_verb(|browser| browser.copy_selection(), "files copy"),
+            Action::FilesPaste => self.file_verb(|browser| browser.paste(), "files paste"),
             Action::ZoomPane => {
                 self.toggle_zoom();
                 true
@@ -4378,6 +4573,99 @@ impl App {
             }
         }
         self.pump_sftp();
+        self.pump_writes();
+    }
+
+    /// Take every file pane's next write and run it on the background thread.
+    ///
+    /// The divide is the browser's: it reports a [`WriteRequest`] and does no
+    /// I/O, this resolves the machine's backend *on the UI thread* (`Vfs::backend`
+    /// hands out an `Arc<dyn Backend>`, which is `Send + Sync`, so the worker gets
+    /// the object and not a borrow), and the answer comes back as
+    /// [`UserEvent::Write`] to be handed to `write_succeeded`/`write_failed`.
+    ///
+    /// **Every leaf in every tab**, like `pump_sftp`: a pane a link opened is
+    /// deliberately unfocused, and the operation is the pane's, not the focus's.
+    /// One request per pane per pump, because `take_write` hands out the next only
+    /// once the previous answer has landed — which is what makes a conflict
+    /// answerable at all.
+    fn pump_writes(&mut self) {
+        let mut work: Vec<(
+            crate::layout::LeafId,
+            std::sync::Arc<dyn dtr_vfs::Backend>,
+            WriteRequest,
+        )> = Vec::new();
+        let mut unrouteable: Vec<(crate::layout::LeafId, anyhow::Error)> = Vec::new();
+        for tab in &self.tabs {
+            for (leaf, pane) in &tab.leaves {
+                let Pane::Files(browser) = pane else {
+                    continue;
+                };
+                let Some(request) = browser.take_write() else {
+                    continue;
+                };
+                // A remote request cannot reach a backend yet in this task: the
+                // pane is read-only, so this is a bug or a future F7 pane, and
+                // either way it is answered rather than left in flight.
+                match self.vfs.backend(&request.backend) {
+                    Ok(backend) => work.push((*leaf, backend, request)),
+                    Err(err) => unrouteable.push((*leaf, err)),
+                }
+            }
+        }
+        for (leaf, err) in unrouteable {
+            self.write_answered(leaf, Err(err));
+        }
+        for (leaf, backend, request) in work {
+            let proxy = self.proxy.clone();
+            self.bg_spawn(move |_runtime| async move {
+                let result = execute_write(backend, request).await;
+                let _ = proxy.send_event(UserEvent::Write { leaf, result });
+            });
+        }
+    }
+
+    /// A pane's write finished: tell its plan, and re-list when it is over.
+    ///
+    /// Routed by leaf, so a pane that was closed while the operation ran is a
+    /// dropped answer rather than somebody else's. The two refresh cases are the
+    /// browser's own: a finished operation, and a batch that stopped on an error
+    /// — what was written before the failure is on disk and the listing must say
+    /// so. A question (`Failure::Asking`) changes nothing on disk, and an answer
+    /// that leaves requests behind (`Failure::Answered`) is pumped again next
+    /// frame.
+    fn write_answered(&mut self, leaf: crate::layout::LeafId, result: anyhow::Result<()>) {
+        let Some(browser) = self.browser_mut(leaf) else {
+            tracing::debug!(leaf, "a file write answered for a pane that is gone");
+            return;
+        };
+        match &result {
+            Ok(()) => {
+                if browser.write_succeeded() {
+                    browser.refresh();
+                }
+            }
+            Err(err) => {
+                let failure = browser.write_failed(err);
+                if matches!(failure, Failure::Stopped | Failure::Idle) {
+                    browser.refresh();
+                }
+            }
+        }
+        self.repaint("file write");
+    }
+
+    /// The file pane at `leaf`, whichever tab it is in.
+    ///
+    /// Leaf ids are unique for the window's life (`App::next_leaf` only counts
+    /// up), so a write's answer does not have to remember the tab it came from.
+    fn browser_mut(&mut self, leaf: crate::layout::LeafId) -> Option<&mut Browser> {
+        self.tabs
+            .iter_mut()
+            .find_map(|tab| match tab.leaves.get_mut(&leaf) {
+                Some(Pane::Files(browser)) => Some(browser),
+                _ => None,
+            })
     }
 
     /// Ask for whatever any remote pane is waiting on, and start any download it
@@ -5084,6 +5372,25 @@ impl App {
             Action::KeyDelay => {
                 self.dispatch(crate::keys::Action::KeyDelay);
             }
+            // The file-write commands are the same delegation, and they need it
+            // twice over: `crates/dtr-complete` lists a command only if it has an
+            // arm here, and this arm is what makes the command a *chord* the
+            // keyboard map documents rather than a second list of verbs.
+            Action::FileNewFolder => {
+                self.dispatch(crate::keys::Action::FilesNewFolder);
+            }
+            Action::FileRename => {
+                self.dispatch(crate::keys::Action::FilesRename);
+            }
+            Action::FileDelete => {
+                self.dispatch(crate::keys::Action::FilesDelete);
+            }
+            Action::FileCopy => {
+                self.dispatch(crate::keys::Action::FilesCopy);
+            }
+            Action::FilePaste => {
+                self.dispatch(crate::keys::Action::FilesPaste);
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -5609,6 +5916,9 @@ impl dtr_frame::App for App {
                         self.repaint("save dialog dismissed");
                     }
                 }
+            }
+            UserEvent::Write { leaf, result } => {
+                self.write_answered(leaf, result);
             }
             UserEvent::Destinations(destinations) => {
                 self.destinations = destinations;
@@ -7120,8 +7430,9 @@ impl dtr_frame::Scene for GridScene<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BELL_FLASH, bell_alpha, browser_key, cell_of, closed, copy_to, cycled,
-        mouse_goes_to_program, save_name, tab_name, wheel_reaches_the_terminal,
+        BELL_FLASH, WriteOp, WriteRequest, bell_alpha, browser_key, cell_of, closed, copy_to,
+        cycled, execute_write, mouse_goes_to_program, save_name, tab_name,
+        wheel_reaches_the_terminal,
     };
 
     /// A file pane's keys are its own, and the one with a modifier is the one
@@ -7172,11 +7483,19 @@ mod tests {
         );
         let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
         assert_eq!(browser_key(&Key::Named(NamedKey::ArrowUp), ctrl_alt), None);
-        // And no other chord with a modifier is the pane's: ctrl+c is a copy, not
-        // a directory listing's business.
+        // And no other chord with a modifier is the pane's — except the six the
+        // write verbs own. `ctrl-shift-c` in particular is **not** the pane's:
+        // it is the terminal's copy selection, and a listing gets `ctrl-c`.
+        let ctrl = ModifiersState::CONTROL;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(
-            browser_key(&Key::Character("c".into()), ModifiersState::CONTROL),
-            None
+            browser_key(&Key::Character("c".into()), ctrl),
+            Some(PaneKey::Copy)
+        );
+        assert_eq!(
+            browser_key(&Key::Character("C".into()), ctrl_shift),
+            None,
+            "ctrl-shift-c is the terminal's copy, not the listing's"
         );
     }
 
@@ -7345,5 +7664,254 @@ mod tests {
     fn closing_the_last_of_several_moves_left() {
         assert_eq!(closed(2, 3), Some(1));
         assert_eq!(closed(1, 2), Some(0));
+    }
+
+    fn write_request(op: WriteOp, replace: Option<dtr_vfs::Removal>) -> WriteRequest {
+        WriteRequest {
+            backend: dtr_vfs::BackendId::Local,
+            op,
+            replace,
+        }
+    }
+
+    fn local_backend(dir: &std::path::Path) -> std::sync::Arc<dyn dtr_vfs::Backend> {
+        std::sync::Arc::new(dtr_vfs::Local::with_trash_root(dir.join("trash")))
+    }
+
+    /// Every verb the plan can hand the worker reaches the trait method the verb
+    /// is named for, and the ones that change the listing really change the disk:
+    /// this is the half that `dtr-files` deliberately does not test, because its
+    /// state machine owns no I/O.
+    #[compio::test]
+    async fn a_write_request_creates_renames_copies_and_deletes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let backend = local_backend(root);
+
+        execute_write(
+            backend.clone(),
+            write_request(
+                WriteOp::CreateDir {
+                    at: root.join("created"),
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("mkdir");
+        assert!(root.join("created").is_dir());
+
+        std::fs::write(root.join("before.txt"), b"bytes").expect("a source");
+        execute_write(
+            backend.clone(),
+            write_request(
+                WriteOp::Rename {
+                    from: root.join("before.txt"),
+                    to: root.join("after.txt"),
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("rename");
+        assert!(!root.join("before.txt").exists());
+        assert_eq!(
+            std::fs::read(root.join("after.txt")).expect("renamed"),
+            b"bytes"
+        );
+
+        execute_write(
+            backend.clone(),
+            write_request(
+                WriteOp::Copy {
+                    from: root.join("after.txt"),
+                    to: root.join("copy.txt"),
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("copy");
+        assert_eq!(
+            std::fs::read(root.join("copy.txt")).expect("copied"),
+            b"bytes"
+        );
+
+        // A delete with a trash is a move into `$trash/files`, and the info file
+        // records where it came from: the disk proves the trash was used rather
+        // than unlink.
+        std::fs::write(root.join("gone.txt"), b"gone").expect("a file to trash");
+        execute_write(
+            backend.clone(),
+            write_request(
+                WriteOp::Remove {
+                    at: root.join("gone.txt"),
+                    how: dtr_vfs::Removal::Trash,
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("trash");
+        assert!(!root.join("gone.txt").exists());
+        assert!(root.join("trash/files/gone.txt").exists(), "into the trash");
+        assert!(
+            root.join("trash/info/gone.txt.trashinfo").exists(),
+            "the info pair"
+        );
+
+        // The permanent delete is the one that does not leave a trash entry.
+        std::fs::write(root.join("permanent.txt"), b"gone").expect("a file to delete");
+        execute_write(
+            backend,
+            write_request(
+                WriteOp::Remove {
+                    at: root.join("permanent.txt"),
+                    how: dtr_vfs::Removal::Permanent,
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("delete");
+        assert!(!root.join("permanent.txt").exists());
+        assert!(!root.join("trash/files/permanent.txt").exists());
+    }
+
+    /// The overwrite answer is spelled by the worker: remove the destination with
+    /// the answer's removal, **then** run the verb. A backend never replaces
+    /// anything itself, so this is the only place the destructive half of
+    /// "replace" happens — and the trash is where the old file goes.
+    #[compio::test]
+    async fn replacing_a_conflict_trashes_the_destination_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let backend = local_backend(root);
+        std::fs::write(root.join("new.txt"), b"new").expect("the source");
+        std::fs::write(root.join("existing.txt"), b"old").expect("the destination");
+
+        execute_write(
+            backend.clone(),
+            write_request(
+                WriteOp::Rename {
+                    from: root.join("new.txt"),
+                    to: root.join("existing.txt"),
+                },
+                Some(dtr_vfs::Removal::Trash),
+            ),
+        )
+        .await
+        .expect("replace");
+
+        assert_eq!(
+            std::fs::read(root.join("existing.txt")).expect("the replacement"),
+            b"new"
+        );
+        assert!(!root.join("new.txt").exists(), "a rename moves the source");
+        assert_eq!(
+            std::fs::read(root.join("trash/files/existing.txt")).expect("the old destination"),
+            b"old",
+            "replace is the trash's, not an unlink"
+        );
+    }
+
+    /// A destination that disappeared between the question and the answer is not
+    /// a failure: the answer was "write over it" and it is no longer there. The
+    /// same code path covers a copy whose destination never existed, which is
+    /// every ordinary paste.
+    #[compio::test]
+    async fn replacing_a_destination_that_is_already_gone_still_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let backend = local_backend(root);
+        std::fs::write(root.join("source.txt"), b"bytes").expect("the source");
+
+        execute_write(
+            backend,
+            write_request(
+                WriteOp::Copy {
+                    from: root.join("source.txt"),
+                    to: root.join("dest.txt"),
+                },
+                Some(dtr_vfs::Removal::Trash),
+            ),
+        )
+        .await
+        .expect("a missing destination is not an error");
+
+        assert_eq!(
+            std::fs::read(root.join("dest.txt")).expect("the copy"),
+            b"bytes"
+        );
+    }
+
+    /// The six chords a file pane owns, mapped as a pure function: which chord
+    /// opens the field and which trashes a file is the app's decision, and a
+    /// listing is the only thing they mean anything to.
+    #[test]
+    fn the_file_pane_maps_its_write_chords() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let mods = |ctrl, alt, shift| {
+            let mut state = ModifiersState::empty();
+            state.set(ModifiersState::CONTROL, ctrl);
+            state.set(ModifiersState::ALT, alt);
+            state.set(ModifiersState::SHIFT, shift);
+            state
+        };
+        let none = mods(false, false, false);
+        let ctrl = mods(true, false, false);
+        let shift = mods(false, false, true);
+        let alt = mods(false, true, false);
+
+        assert_eq!(
+            browser_key(&Key::Named(NamedKey::F2), none),
+            Some(dtr_files::Key::Rename)
+        );
+        assert_eq!(
+            browser_key(&Key::Named(NamedKey::Delete), none),
+            Some(dtr_files::Key::Delete)
+        );
+        assert_eq!(
+            browser_key(&Key::Named(NamedKey::Delete), shift),
+            Some(dtr_files::Key::DeletePermanently),
+            "shift is the difference between the trash and the delete"
+        );
+        assert_eq!(
+            browser_key(&Key::Named(NamedKey::Delete), ctrl),
+            None,
+            "ctrl+delete is not a binding"
+        );
+        assert_eq!(
+            browser_key(&Key::Character("n".into()), mods(true, false, true)),
+            Some(dtr_files::Key::NewFolder)
+        );
+        // Shift makes the event report the character a keyboard produces.
+        assert_eq!(
+            browser_key(&Key::Character("N".into()), mods(true, false, true)),
+            Some(dtr_files::Key::NewFolder)
+        );
+        assert_eq!(
+            browser_key(&Key::Character("c".into()), ctrl),
+            Some(dtr_files::Key::Copy)
+        );
+        assert_eq!(
+            browser_key(&Key::Character("v".into()), ctrl),
+            Some(dtr_files::Key::Paste)
+        );
+        assert_eq!(
+            browser_key(&Key::Character("C".into()), mods(true, false, true)),
+            None,
+            "ctrl-shift-c stays the terminal's copy selection"
+        );
+        assert_eq!(
+            browser_key(&Key::Named(NamedKey::ArrowUp), alt),
+            Some(dtr_files::Key::Parent),
+            "the chord that was already there"
+        );
+        assert_eq!(
+            browser_key(&Key::Character("j".into()), none),
+            Some(dtr_files::Key::Down)
+        );
     }
 }
