@@ -69,6 +69,21 @@ pub fn kind() -> Kind {
 /// GNOME Terminal, Settings — are 46 points tall.
 pub const ADWAITA_TITLEBAR: f32 = 46.0;
 
+/// How tall a caption that *holds the tabs* is, in points.
+///
+/// The strip is not a plain title bar: the tabs live in it, so it has to be a
+/// *tabbed* caption's height, and 46 points is the same number the GNOME header
+/// bar asks for ([`ADWAITA_TITLEBAR`]) — the app's caption is one height on every
+/// platform. It is a native height on Windows too: at 96 DPI Explorer's caption
+/// row (the one its tabs live in) measures ~48 px and Windows Terminal's tab row
+/// is 40 effective pixels (`TerminalWindow.cpp`: `static constexpr auto
+/// titlebarHeight = 40`), so 46 sits inside the range a title bar with tabs in it
+/// occupies. What it is *not* is a plain `SM_CAPTION` band: that is 31 px at
+/// 96 DPI and *shrinks* in points as the display scales (31, 30.4, 30, 29 at
+/// 96/120/144/192 DPI), so at 150 % it is a 45-pixel ribbon beside a tabbed
+/// caption's 69 — which is exactly the report this answers.
+pub const TABBED_TITLEBAR: f32 = 46.0;
+
 /// How tall the title bar is, in points, as the platform would have drawn it.
 ///
 /// With `chrome = "client"` the strip *is* the title bar, so it has to be as tall
@@ -76,21 +91,32 @@ pub const ADWAITA_TITLEBAR: f32 = 46.0;
 /// bar it read as a strip of afterthought, and on Windows it was the tab row's
 /// height rather than the caption's.
 ///
-/// - **Windows** asks. `SM_CYCAPTION + SM_CYSIZEFRAME + SM_CXPADDEDBORDER` at the
+/// - **Windows** asks. `SM_CAPTION + SM_CYSIZEFRAME + SM_CXPADDEDBORDER` at the
 ///   window's DPI is exactly where a standard window's client area starts, which
 ///   is the band a client-side caption stands in; `chrome/windows.rs` reads the
 ///   three metrics, and [`caption_band`] is the arithmetic with the guest's
-///   numbers in its test.
+///   numbers in its test. That band is a *floor*, not the answer: a caption with
+///   tabs in it is a tabbed caption, and [`TABBED_TITLEBAR`] says why it is taller
+///   than a plain one.
 /// - **Adwaita** is [`ADWAITA_TITLEBAR`], measured out of the theme.
 pub fn title_height(scale: f32) -> f32 {
     match kind() {
-        // The platform's answer or, when it has none, what dtr always had. Not a
-        // floor on the answer: Windows' band is 58 pixels at 200 %, which is 29
-        // points, and rounding that up to a tab row would be two pixels of guess
-        // on top of a measurement.
-        Kind::Windows => caption_height(scale).unwrap_or(crate::ui::TAB_HEIGHT),
+        Kind::Windows => windows_caption_height(caption_height(scale)),
         Kind::Adwaita => ADWAITA_TITLEBAR,
     }
+}
+
+/// The Windows strip's height in points: a tabbed caption's, raised to the
+/// platform's own band when that is taller.
+///
+/// `None` is a platform that answered nothing (the offscreen path), and the
+/// tabbed caption is dtr's own look rather than a measurement, so it stands on
+/// its own — the band can only ever raise the answer, never pull it down. That is
+/// the invariant the report needed: **the strip is never shorter than the
+/// platform's own caption at any scale**.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_caption_height(platform_band: Option<f32>) -> f32 {
+    platform_band.unwrap_or(0.0).max(TABBED_TITLEBAR)
 }
 
 #[cfg(target_os = "windows")]
@@ -703,6 +729,46 @@ mod tests {
                 "{dpi} DPI: a chip of {chip} points"
             );
         }
+    }
+
+    /// The Windows strip is a *tabbed* caption: 46 points at every scale, the same
+    /// height as the GNOME header bar, and the platform's own band only raises it
+    /// when a person has made their title bars taller than that — it can never
+    /// shorten it.
+    #[test]
+    fn the_windows_caption_is_a_tabbed_one() {
+        assert_eq!(windows_caption_height(None), TABBED_TITLEBAR);
+        for (dpi, caption, frame, padded) in [
+            (96, 23, 4, 4),
+            (120, 29, 4, 5),
+            (144, 34, 5, 6),
+            (192, 45, 5, 8),
+        ] {
+            let scale = f64::from(dpi) as f32 / 96.0;
+            let band = caption_band(caption, frame, padded, scale).unwrap();
+            let strip = windows_caption_height(Some(band));
+            assert_eq!(strip, TABBED_TITLEBAR, "at {dpi} DPI");
+            assert!(
+                strip >= band,
+                "the strip is shorter than the native band at {dpi} DPI"
+            );
+            assert_eq!(
+                crate::ui::tab_chip_height(strip),
+                26.0,
+                "a tabbed caption gets Adwaita's tab, not a pill"
+            );
+        }
+        assert_eq!(
+            windows_caption_height(Some(50.0)),
+            50.0,
+            "a system caption a person made taller wins"
+        );
+        // At 150 %: 69 pixels over the platform's 45, and 75 reserved with the gap.
+        assert_eq!(strip_pixels(windows_caption_height(Some(30.0)), 1.5), 69.0);
+        assert_eq!(
+            reserved_pixels(windows_caption_height(Some(30.0)), crate::ui::GRID_GAP, 1.5),
+            75.0
+        );
     }
 
     /// The strip is reserved in pixels and drawn in points, and each crosses the

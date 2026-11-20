@@ -156,19 +156,22 @@ Three independent levers.
 | button | 46×32 pt, butted together, full strip height | 24×24 pt circles, ~6 pt gaps, centred |
 | glyph | 10 pt | 16 pt |
 | caption icon | 16 pt, 8 pt in, opens the system menu | 20 pt, 8 pt in, a mark |
-| strip height | Windows' own caption band, queried | 46 pt (libadwaita) |
+| strip height | a tabbed caption: 46 pt, the queried band as a floor | 46 pt (libadwaita) |
 | hover | flat fill per button | circle behind the glyph |
 | close | `#C42B1C` fill, white glyph | the same grey as the others |
 
-**The strip's height is the platform's, not a constant.** With client chrome the strip *is*
-the title bar, and 30 points was a tab row: beside a 46-point GNOME header bar it read as a
-strip of afterthought. `chrome::title_height(scale)` answers, and `-v` logs the answer as
-`strip geometry strip_points=… chip_points=…` so a picture is not the only evidence:
+**The strip's height is a *tabbed* caption's, with the platform's own band as a floor.** With
+client chrome the strip *is* the title bar, and 30 points was a tab row: beside a 46-point
+GNOME header bar it read as a strip of afterthought. `chrome::title_height(scale)` answers,
+and `-v` logs the answer as `strip geometry strip_points=… chip_points=…` so a picture is not
+the only evidence:
 
-- **Windows** asks. `SM_CAPTION + SM_CYSIZEFRAME + SM_CXPADDEDBORDER` via
-  `GetSystemMetricsForDpi` at the window's DPI is where a standard window's client area
-  starts, which is the band a client-side caption stands in (`chrome/windows.rs`). Measured
-  in the Windows 11 guest:
+- **Windows** asks, and then raises the answer to a caption with tabs in it.
+  `SM_CAPTION + SM_CYSIZEFRAME + SM_CXPADDEDBORDER` via `GetSystemMetricsForDpi` at the
+  window's DPI is where a standard window's client area starts — the band a client-side
+  caption stands in — and `AdjustWindowRectExForDpi`, asked with the style winit really
+  keeps, returns the same pixels at every DPI (`chrome/windows.rs`). Measured in the
+  Windows 11 guest (build 26300):
 
   | DPI | caption | frame | padded | pixels | points |
   | --- | --- | --- | --- | --- | --- |
@@ -182,6 +185,22 @@ strip of afterthought. `chrome::title_height(scale)` answers, and `-v` logs the 
   which dtr draws as the strip's own hairline. `GetSystemMetricsForDpi` and not
   `GetSystemMetrics`: winit's windows are per-monitor DPI aware, and a window dragged to a
   125 % monitor has 120-DPI metrics.
+
+  **That band is a floor, not the answer, because this strip carries the tabs.** The
+  comparison behind "titlebar too small (4k hidpi 150%)" was to a title bar *with tabs in
+  it*: at 96 DPI the guest's own windows put Explorer's caption row — the one its tabs live
+  in — at ~48 px and Notepad's tabbed caption at ~42, Windows Terminal's row is 40 effective
+  pixels (`TerminalWindow.cpp`: `static constexpr auto titlebarHeight = 40`), Settings'
+  application-frame title bar is 32, and a plain Win32 caption is 31. The band also
+  *shrinks* in points as the display scales — 31, 30.4, 30, 29 — so at 150 % it is a 45-pixel
+  ribbon beside a 69-pixel tabbed caption, which is exactly the display in the report. The
+  Windows strip is therefore `max(band, TABBED_TITLEBAR)` with 46 points
+  ([`chrome::TABBED_TITLEBAR`]): the same height as the GNOME header bar, so the app's
+  caption is one height on every platform; inside the range the native tabbed captions
+  occupy, and within two points of Explorer's; never shorter than the platform's own
+  caption at any scale; and still the system's own number when a person has made their
+  captions taller than 46. At 150 % that is 69 pixels of strip over a 75-pixel reservation
+  (with the 4-point gap between strip and grid); at 100 %, 46 px over 50.
 - **GNOME** is a constant, because the number is in libadwaita's CSS and dtr does not parse
   CSS (`system/linux.rs` says why): libadwaita 1.9.3's `window:not(.ssd-frame) >
   headerbar.titlebar { min-height: 46px }` — `headerbar { min-height: 47px }` for one out of
@@ -191,10 +210,10 @@ strip of afterthought. `chrome::title_height(scale)` answers, and `-v` logs the 
 
 **The chip follows the strip.** `ui::tab_chip_height` is the strip less six points of air
 above and below, floored at the 20-point chip and capped at Adwaita's own tab
-(`tabbar tab { min-height: 26px }`): so the Windows chip is unchanged (31 − 12 = 19, floored
-at 20) and a 46-point title bar gets a 26-point tab rather than a pill that reads as a
-button. With `chrome = "native"` the strip is only a tab row under the window manager's own
-title bar, and stays 30 points.
+(`tabbar tab { min-height: 26px }`): a tabbed 46-point caption gets a 26-point chip — the
+same number on both platforms, Adwaita's tab, tall enough that the row reads as a place for
+tabs rather than a pill in a caption. With `chrome = "native"` the strip is only a tab row
+under the window manager's own title bar, and stays 30 points.
 
 **Glyphs** — the lever that matters most, because shape is what the eye recognises:
 
@@ -384,6 +403,22 @@ shows one. The remaining difference between Edge and dtr is plausibly
 unverified on real hardware; the hit test and the button itself are not affected, and the
 `WM_NCLBUTTONDOWN` handler exists because winit does not forward a non-client click to
 `DefWindowProc` (that bug made the button dead until it was added).
+
+**The 150 % caption** (2026-11-20). "Titlebar too small (4k hidpi 150%)" was measured
+against title bars that have tabs in them, not against a plain `SM_CYCAPTION` band, and the
+gap is real: at 96 DPI the guest's own Explorer caption row is ~48 px, Notepad's tabbed
+caption ~42, Windows Terminal's row 40 and Settings' application-frame title bar 32, while
+a plain Win32 caption is 31 — and the band dtr was using *shrinks* in points as DPI rises
+(31 / 30.4 / 30 / 29), so at 150 % it drew 45 px where Explorer's kind of caption is ~72.
+`GetSystemMetricsForDpi` and `AdjustWindowRectExForDpi` agree at 96/120/144/192 DPI
+(31/38/45/58), so no pixels were lost to rounding; the strip was sized as the wrong *kind*
+of caption. It is now a tabbed caption's 46 points (§5) — 69 px at 150 %, 46 at 100 % —
+with the queried band as a floor. The drawing side was never in doubt: on Linux at
+`WINIT_X11_SCALE_FACTOR=1.5` the Adwaita path was already 46 pt = 69 physical px, logged as
+`strip geometry strip_points=46 chip_points=26 reserved_px=75` and measured in the capture.
+The 46-point Windows strip was cross-built (`.#windows`) but **not re-run in the guest**;
+`the_windows_caption_is_a_tabbed_one` and `the_caption_is_scaled_once_on_each_side_of_the_boundary`
+cover the arithmetic until it is.
 
 Two smaller findings from the same session, one of them since fixed:
 

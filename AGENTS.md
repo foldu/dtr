@@ -198,9 +198,9 @@ recipe pushes the commit and the tag to both.
   both asking `App::top_inset`, or the pty keeps a taller area's rows. **With
   `chrome = "client"` that strip is also the title bar**: the platform's own caption height
   holds the drag region, eight resize borders and three platform buttons (`crate::chrome`;
-  46 points from libadwaita, Windows' queried band) — the row moved, its height follows the
-  platform — and the drag region stops at `buttons_rect`, or presses over the chips become
-  "sometimes unresponsive".
+  46 points from libadwaita, on Windows a tabbed caption's 46 over the queried band as a
+  floor) — the row moved, its height follows the platform — and the drag region stops at
+  `buttons_rect`, or presses over the chips become "sometimes unresponsive".
 - **`inner_size()` is already physical, so a scale divided by it is always 1.0**:
   `Gpu::scale()` must be `window.scale_factor()`, or the physical/physical ratio reserves
   half the needed space on HiDPI (a 34 px inset over a 30 **point** strip); `-v` logs
