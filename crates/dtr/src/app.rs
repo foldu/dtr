@@ -3551,9 +3551,22 @@ impl App {
             }
             // A window-wide switch, not a per-pane one: it is the board on the
             // cable that needs it, and a person who turned it on for the board
-            // in front of them means every serial tab. It reaches a shell not at
-            // all — the pane ignores it unless its transport is serial.
+            // in front of them means every serial tab. It is also *only* a
+            // serial-line mode: a shell, a file pane or the demo screen has no
+            // cable to pace and no strip to show the red chip on, so the switch
+            // refuses there instead of flipping a mode the window cannot show.
+            // The refusal is a toast rather than silence, because a chord that
+            // does nothing is indistinguishable from a broken one.
             Action::KeyDelay => {
+                if !self.session().is_some_and(|session| session.serial) {
+                    tracing::debug!("key delay refused: the focused pane is not serial");
+                    self.toast = Some((
+                        "delayed input is for serial sessions".to_owned(),
+                        std::time::Instant::now(),
+                    ));
+                    self.repaint("key delay refused");
+                    return true;
+                }
                 self.key_delay = !self.key_delay;
                 let delay = self.key_delay_period();
                 tracing::debug!(

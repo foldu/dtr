@@ -348,9 +348,12 @@ board that needs it and an `ssh` tab that does not.
 
 **The mode is off until it is switched on**: `ctrl-alt-d` (`key-delay` in `[keys]`, so it
 can be moved or handed back), or the palette's `lag`. It is window-wide: every serial tab
-paces, because there is one cable, and a shell tab ignores it — a pty has a buffer and
-pacing it only makes typing feel broken. **The status strip says so in red**: a full-height
-`DELAY 1 ms` chip at the far right, where it never moves the label or the counters.
+paces, because there is one cable — and it is **unavailable anywhere else**. With a shell,
+ssh, file or demo pane focused the chord and the palette command both refuse, with the toast
+`delayed input is for serial sessions`: a pty has a buffer and pacing it only makes typing
+feel broken, and no other kind of pane has the strip the red chip is drawn on. Focus a
+serial pane to change it. **The status strip says so in red**: a full-height `DELAY 1 ms`
+chip at the far right, where it never moves the label or the counters.
 
 The period is `[serial] key_delay_ms`, 1–1000 with a default of 1. **One byte per period,
 not one keystroke**: the second byte of `ESC [ A` is as much at risk as the second letter of
