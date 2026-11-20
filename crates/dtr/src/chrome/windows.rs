@@ -78,7 +78,7 @@ pub fn caption_height(scale: f32) -> Option<f32> {
             "caption band"
         );
     }
-    super::band_points(client.unwrap_or(sum), scale)
+    super::band_points(super::band_pixels(client, caption, frame, padded), scale)
 }
 
 /// The DPI whose caption band was last logged, so `-v` gets one line per display.
@@ -186,11 +186,17 @@ fn set_maximize_hover(hwnd: HWND, inside: bool) {
 }
 
 /// Record where the maximise button is, in points, for this frame.
+///
+/// Points to client pixels the same way the strip's reservation does
+/// ([`crate::chrome::strip_pixels`], once — the winit hit test runs in client
+/// space, so a second factor would put the snap-layout rectangle somewhere the
+/// button is not), rounded because the atomics are integers.
 pub fn set_maximize_rect(rect: egui::Rect, scale: f32) {
-    MAXIMIZE[0].store((rect.left() * scale).round() as i32, Ordering::Relaxed);
-    MAXIMIZE[1].store((rect.top() * scale).round() as i32, Ordering::Relaxed);
-    MAXIMIZE[2].store((rect.right() * scale).round() as i32, Ordering::Relaxed);
-    MAXIMIZE[3].store((rect.bottom() * scale).round() as i32, Ordering::Relaxed);
+    let px = |points: f32| crate::chrome::strip_pixels(points, scale).round() as i32;
+    MAXIMIZE[0].store(px(rect.left()), Ordering::Relaxed);
+    MAXIMIZE[1].store(px(rect.top()), Ordering::Relaxed);
+    MAXIMIZE[2].store(px(rect.right()), Ordering::Relaxed);
+    MAXIMIZE[3].store(px(rect.bottom()), Ordering::Relaxed);
 }
 
 /// Take over the window procedure for the hit test.

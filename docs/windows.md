@@ -95,8 +95,12 @@ WINIT_X11_SCALE_FACTOR=2 dtr … --capture PNG --capture-after MS --exit-after M
 needs no window manager.
 
 The guest offers only 100 % and 125 % at 1280 × 800 on `virtio-vga`, so 150 % has no
-observation on either platform. At an integer factor the `ceil` costs the least; 1.5 is
-where a half-pixel cell would show, and it is the number to try next.
+observation on either platform for the *grid*. The caption's 150 % behaviour was settled
+without one: the guest's per-DPI metrics say the caption band is 45 px there, and a plain
+band is the wrong height for a strip that carries the tabs, so the client caption is a
+design constant with the band as a floor (`chrome.md` §5). At an integer factor the `ceil`
+costs the least; 1.5 is where a half-pixel cell would show, and it is the number to try
+next.
 
 ### 2.2 Why the status bar covers the bottom row
 
@@ -420,6 +424,7 @@ These came from a Windows run and cannot be judged from this tree alone:
 | Whether the Nerd Font is even visible to dtr | `dtr --fonts` on that machine, and the configured family |
 | Is latency the gate, vsync, or the panel | `-v` (`loop`, `publish gate`, `slow frame`) and the counter from §5.2 |
 | How much of resize is ConPTY | the same drag on Linux under a pty, plus timing from §5.2 |
+| Whether the 46-point client caption looks right beside Explorer/Settings | `-v` `strip geometry strip_points=46 chip_points=26 reserved_px=…` and a screenshot at 150 % — `chrome.md` §5 has the heights it is matched against |
 
 Answered: **Windows DPI is reported as expected** — `winit` hands dtr 1.25, and since §2.1
 the grid uses it too (102 × 34 cells at 125 %, against 125 × 43 before). The scale itself is

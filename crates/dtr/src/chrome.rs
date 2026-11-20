@@ -156,6 +156,18 @@ fn caption_band(caption: i32, frame: i32, padded: i32, scale: f32) -> Option<f32
     band_points(caption + frame + padded, scale)
 }
 
+/// The band in physical pixels: the OS's answer for the window's own style when
+/// it gave one, the summed metrics otherwise.
+///
+/// The choice is here rather than in `chrome/windows.rs` so it can be tested on a
+/// host that cannot call `AdjustWindowRectExForDpi`; the call itself is pinned by
+/// the `caption band` line the guest's `-v` prints. `asked` is already checked to
+/// be positive by the module that made the call.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn band_pixels(asked: Option<i32>, caption: i32, frame: i32, padded: i32) -> i32 {
+    asked.unwrap_or(caption + frame + padded)
+}
+
 /// A caption band's physical pixels as points on a `scale` display.
 ///
 /// The band is a *measurement in pixels*; everything egui draws is in points and
@@ -777,18 +789,29 @@ mod tests {
     /// a 31-point caption is 31 points tall over 70 pixels reserved, not 124.
     #[test]
     fn the_caption_is_scaled_once_on_each_side_of_the_boundary() {
-        for scale in [1.0, 1.25, 1.5, 2.0] {
-            let height = 31.0;
-            let drawn = strip_pixels(height, scale);
-            let reserved = reserved_pixels(height, crate::ui::GRID_GAP, scale);
-            assert!(
-                (reserved - drawn - crate::ui::GRID_GAP * scale).abs() < 1e-3,
-                "at {scale}: reserved {reserved} is not the strip {drawn} plus the gap"
-            );
-            assert!(
-                drawn <= reserved,
-                "at {scale}: the strip is drawn over the grid: {drawn} > {reserved}"
-            );
+        // Both captions dtr can have: the 96-DPI band in points (31) and the
+        // tabbed caption it uses on Windows (46). The maximised window is not a
+        // second geometry: winit clamps the *client area* to the monitor's work
+        // area, and the strip still starts at its top and reserves the same
+        // `top_inset`, so the same two numbers cover it.
+        for height in [31.0, TABBED_TITLEBAR] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let drawn = strip_pixels(height, scale);
+                let reserved = reserved_pixels(height, crate::ui::GRID_GAP, scale);
+                assert_eq!(
+                    drawn,
+                    height * scale,
+                    "at {height} pt, {scale}: the strip is drawn once"
+                );
+                assert!(
+                    (reserved - drawn - crate::ui::GRID_GAP * scale).abs() < 1e-3,
+                    "at {height} pt, {scale}: reserved {reserved} is not the strip {drawn} plus the gap"
+                );
+                assert!(
+                    drawn <= reserved,
+                    "at {height} pt, {scale}: the strip is drawn over the grid: {drawn} > {reserved}"
+                );
+            }
         }
         assert_eq!(strip_pixels(31.0, 2.0), 62.0);
         assert_eq!(
@@ -796,7 +819,7 @@ mod tests {
             70.0,
             "a scale applied twice would reserve 124"
         );
-        // And at 150 %, the guest's 45-pixel band is 30 points, drawn 45 pixels.
+        // The guest's 45-pixel band at 150 % is 30 points, drawn 45 pixels.
         let band = caption_band(34, 5, 6, 1.5).unwrap();
         assert_eq!(band, 30.0);
         assert_eq!(strip_pixels(band, 1.5), 45.0);
@@ -805,6 +828,36 @@ mod tests {
             51.0,
             "45 px of strip and 6 px of gap"
         );
+        // And the tabbed caption at 150 %: 69 px drawn over 75 reserved, which is
+        // what `-v` prints and what the pane area's top is. A doubled factor
+        // would reserve (46 * 1.5 + 4) * 1.5 = 109.5.
+        assert_eq!(strip_pixels(TABBED_TITLEBAR, 1.5), 69.0);
+        assert_eq!(
+            reserved_pixels(TABBED_TITLEBAR, crate::ui::GRID_GAP, 1.5),
+            75.0
+        );
+    }
+
+    /// The band's provenance: the OS's answer for the window's own style when it
+    /// gave one, the three metrics otherwise.
+    ///
+    /// A Linux host cannot call `AdjustWindowRectExForDpi`, so the *call* is
+    /// pinned by the `caption band` line `-v` prints in the guest; what is pinned
+    /// here is which number the strip then uses.
+    #[test]
+    fn the_band_prefers_the_windows_own_answer_and_falls_back_to_three_metrics() {
+        assert_eq!(band_pixels(Some(45), 34, 5, 6), 45);
+        assert_eq!(
+            band_pixels(None, 34, 5, 6),
+            45,
+            "no window: the three metrics are the band"
+        );
+        assert_eq!(
+            band_pixels(Some(46), 34, 5, 6),
+            46,
+            "the OS's answer wins over the sum"
+        );
+        assert_eq!(band_pixels(None, 0, 0, 0), 0);
     }
 
     /// The Windows buttons are the platform's: 46 points wide and the full height

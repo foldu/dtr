@@ -651,6 +651,42 @@ mod tests {
         assert_eq!(layout.leaves(), vec![1]);
     }
 
+    /// The pane area starts where the caption's reservation ends, at a fractional
+    /// scale too.
+    ///
+    /// The 46-point tabbed caption at 150 % draws 69 physical pixels and *reserves*
+    /// 75 (the 4-point gap included), and the split tiles the area below that line.
+    /// The inset is `chrome::reserved_pixels`, the one spelling `App::pane_area`
+    /// uses: a scale applied twice — `(height × scale + gap) × scale` — would put
+    /// the panes at 109.5 and lose a row's worth of grid, which is the bug
+    /// `docs/windows.md` §2.2 records for the status bar.
+    #[test]
+    fn the_pane_area_starts_below_the_caption_at_a_fractional_scale() {
+        let scale = 1.5;
+        let inset = crate::chrome::reserved_pixels(
+            crate::chrome::TABBED_TITLEBAR,
+            crate::ui::GRID_GAP,
+            scale,
+        );
+        assert_eq!(inset, 75.0, "69 px of strip and 6 of gap");
+        let screen = Rect::new(0.0, 0.0, 1350.0, 930.0);
+        let area = Rect::new(0.0, inset, screen.width, screen.height - inset);
+        let mut layout = Layout::leaf(1);
+        layout.split(1, Axis::Horizontal, 2, false);
+        for (_, rect) in layout.rects(area, 0.0) {
+            assert_eq!(rect.y, inset, "a pane starts under the strip");
+            assert!(
+                (rect.y + rect.height - screen.height).abs() < 1e-3,
+                "the panes stop at the window's bottom"
+            );
+        }
+        assert_ne!(
+            inset,
+            (crate::chrome::TABBED_TITLEBAR * scale + crate::ui::GRID_GAP) * scale,
+            "a scale applied twice is not the inset"
+        );
+    }
+
     #[test]
     fn a_ratio_outside_the_sane_range_is_clamped() {
         let layout = Layout::Split {

@@ -186,21 +186,30 @@ the only evidence:
   `GetSystemMetrics`: winit's windows are per-monitor DPI aware, and a window dragged to a
   125 % monitor has 120-DPI metrics.
 
-  **That band is a floor, not the answer, because this strip carries the tabs.** The
-  comparison behind "titlebar too small (4k hidpi 150%)" was to a title bar *with tabs in
-  it*: at 96 DPI the guest's own windows put Explorer's caption row — the one its tabs live
-  in — at ~48 px and Notepad's tabbed caption at ~42, Windows Terminal's row is 40 effective
-  pixels (`TerminalWindow.cpp`: `static constexpr auto titlebarHeight = 40`), Settings'
-  application-frame title bar is 32, and a plain Win32 caption is 31. The band also
-  *shrinks* in points as the display scales — 31, 30.4, 30, 29 — so at 150 % it is a 45-pixel
-  ribbon beside a 69-pixel tabbed caption, which is exactly the display in the report. The
-  Windows strip is therefore `max(band, TABBED_TITLEBAR)` with 46 points
-  ([`chrome::TABBED_TITLEBAR`]): the same height as the GNOME header bar, so the app's
-  caption is one height on every platform; inside the range the native tabbed captions
-  occupy, and within two points of Explorer's; never shorter than the platform's own
-  caption at any scale; and still the system's own number when a person has made their
-  captions taller than 46. At 150 % that is 69 pixels of strip over a 75-pixel reservation
-  (with the 4-point gap between strip and grid); at 100 %, 46 px over 50.
+  **That band is a floor, not the answer, because this strip carries the tabs.** Everything
+  a person compares a title bar with at 100 % on that guest, measured the same way:
+
+  | caption | at 96 DPI |
+  | --- | --- |
+  | a plain Win32 caption (`SM_CAPTION` + frame + padded) | 31 px |
+  | Settings' application-frame title bar | 32 px |
+  | Windows Terminal's tabbed row (`titlebarHeight = 40`) | 40 px |
+  | Notepad's Windows 11 tabbed caption | ~42 px |
+  | Explorer's caption row, the one its tabs live in | ~48 px |
+  | libadwaita's GNOME header bar | 46 pt |
+  | **dtr's own client caption** | **46 pt** |
+
+  The comparison behind "titlebar too small (4k hidpi 150%)" was one of the *tabbed* rows,
+  and the band dtr was using shrinks in points as the display scales — 31, 30.4, 30, 29 — so
+  at 150 % it drew a 45-pixel ribbon beside a 69-pixel tabbed caption. **46 is a design
+  choice, not a measurement**: Windows' own tabbed captions span 40–48 px, GNOME's header bar
+  is 46, and dtr takes 46 so its caption is one height on every platform — inside the native
+  range and within two points of Explorer's. The queried band stays as a floor, so the strip
+  is never shorter than the platform's own caption at any scale, and a person who has made
+  their system captions taller than 46 keeps theirs. At 150 % that is 69 px of strip over a
+  75-pixel reservation (with the 4-point gap between strip and grid); at 100 %, 46 over 50.
+  The maximised window is not a second geometry: winit clamps the client area to the
+  monitor's work area, and the strip still starts at its top and reserves the same inset.
 - **GNOME** is a constant, because the number is in libadwaita's CSS and dtr does not parse
   CSS (`system/linux.rs` says why): libadwaita 1.9.3's `window:not(.ssd-frame) >
   headerbar.titlebar { min-height: 46px }` — `headerbar { min-height: 47px }` for one out of
