@@ -43,6 +43,15 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The kittest baselines are Git LFS objects, and the suite reads them
+          # as its *input*: a checkout that leaves 130-byte pointers behind
+          # fails every snapshot with "Invalid PNG signature" and names git-lfs.
+          # That is not a rendering bug and the message lives in a test log, so
+          # the smudge has to be asked for — GitHub's checkout defaults to
+          # `lfs: false`, which is exactly how the v0.1.1 release run failed
+          # 21 snapshot tests (`gh run view 44413473441`).
+          lfs: true
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23

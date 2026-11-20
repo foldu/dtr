@@ -40,6 +40,12 @@ jobs:
           # `--generate-notes` wants history, and so would anything that reads
           # the log between the last tag and this one.
           fetch-depth: 0
+          # The kittest baselines are Git LFS objects and the suite reads them
+          # as input. Without this the checkout leaves pointers, every snapshot
+          # fails to decode, and `nix flake check` fails before the exe is
+          # built — the v0.1.1 run did exactly that (run 44413473441, 21
+          # snapshot failures, no release published).
+          lfs: true
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
