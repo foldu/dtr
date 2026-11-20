@@ -1130,7 +1130,6 @@ dependencies = [
  "dtr-config",
  "dtr-files",
  "dtr-frame",
- "dtr-sftp",
  "dtr-sshconfig",
  "dtr-store",
  "dtr-vfs",
