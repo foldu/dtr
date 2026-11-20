@@ -637,7 +637,11 @@ mod tests {
             ("/a/x.txt", "/b/x (7).txt"),
             ("/a/a.tar.gz", "/b/a.tar (2).gz"),
             ("/a/.env", "/b/.env (2)"),
-            ("/a/report (2).txt", "/b/report (2) (2).txt"),
+            // The number belongs to the stem: a source that already ends in one
+            // continues from it (`report (3).txt`), it does not stack a second
+            // suffix. This is `dtr_transfer::naming`'s rule, and the browser's
+            // keep-both answer asks the same function.
+            ("/a/report (2).txt", "/b/report (3).txt"),
         ] {
             assert_eq!(
                 pre_answer(&request(
@@ -651,8 +655,14 @@ mod tests {
                 "{source} -> {destination}"
             );
         }
-        // A destination with a different name is not a keep-both the queue can
-        // reproduce: ask the browser instead of inventing a third name.
+        // The old queue appended instead (`report (2) (2).txt`), which is not a
+        // name the shared rule makes, so it is not a keep-both the queue can
+        // reproduce. A destination with a different name is the same case: ask
+        // the browser instead of inventing a third name.
+        assert_eq!(
+            pre_answer(&copy("/a/report (2).txt", "/b/report (2) (2).txt")),
+            None
+        );
         assert_eq!(pre_answer(&copy("/a/x.txt", "/b/renamed.txt")), None);
     }
 
