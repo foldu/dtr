@@ -73,6 +73,14 @@ wine:
 icons:
     ./scripts/icon.sh
 
+# Refresh the bundled ConPTY (`crates/dtr/assets/conpty`) from a Windows Terminal
+# release: `just conpty latest`, or a tag such as `v1.25.3131.0`. Download, verify,
+# `UPSTREAM` and the version the unpack directory is named after live in
+# `scripts/conpty.sh`; re-running it for the vendored version changes nothing, so
+# it is the check as well as the update.
+conpty tag:
+    ./scripts/conpty.sh {{ tag }}
+
 # Regenerate the README's two screenshots. The Windows half needs `winvm`.
 screenshots *args:
     ./scripts/screenshots.sh {{ args }}

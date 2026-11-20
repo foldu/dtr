@@ -1,0 +1,8 @@
+# Written by "just conpty v1.25.3131.0"; run the recipe, do not edit by hand.
+tag=v1.25.3131.0
+version=1.25.261109001
+package=Microsoft.Windows.Console.ConPTY.1.25.261109001.nupkg
+url=https://github.com/microsoft/terminal/releases/download/v1.25.3131.0/Microsoft.Windows.Console.ConPTY.1.25.261109001.nupkg
+nupkg-sha256=2d4f846e9b59ab85977d4d15022c696b36e5400f6320608be1c75d3d0195fee7
+conpty-dll-sha256=e971856f89748dc3b458125e9afdd79b5e9574a7c937676116d3cbbd3b71f492
+openconsole-sha256=b17e48b07ef153b420f0a6e178bacd31fb4c3390e21ae746586213fc0719a775

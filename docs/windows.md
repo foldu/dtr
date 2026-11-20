@@ -712,10 +712,15 @@ text followed by 29 `ESC _ G` chunks, written by the child to its console.
   the two files differed.
 
 So the exe now carries them: `crates/dtr/assets/conpty` holds the two binaries,
-`LICENSE` and a `README.md` with the package version, source tag, release URL,
-hashes and the exact update commands (deliberately no submodule and no build:
-rebuilding Windows Terminal means an MSVC toolchain for two files Microsoft
-already builds). `dtr::conpty::install` runs before the first terminal, because
+`LICENSE`, a `README.md` and `UPSTREAM` — the tag, package, URL and SHA-256 of the
+package and both files, all written by the update recipe. `just conpty latest`
+(or `just conpty v1.25.3131.0`) downloads that release's package, unpacks the two
+x64 PE images, rewrites `UPSTREAM` and bumps the version the unpack directory is
+named after; re-running it for the version already vendored changes nothing, so
+it is the check too. There is deliberately no submodule and no build: Microsoft's
+package is the build artifact, and rebuilding Windows Terminal would mean an MSVC
+toolchain for two files Microsoft already builds. `dtr::conpty::install` runs
+before the first terminal, because
 `portable-pty` resolves its ConPTY lazily on the first pane and a pane can exist
 before the first frame. It unpacks them into
 `%LOCALAPPDATA%\dtr\conpty\<package version>\` — staging file then rename, so a

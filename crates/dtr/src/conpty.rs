@@ -171,22 +171,48 @@ mod tests {
         }
     }
 
-    /// `VERSION` names both the unpack directory and the row in the asset
-    /// README that says where the binaries came from, so a bump that forgets
-    /// the provenance is caught here rather than in a Windows log months later.
+    /// `UPSTREAM` is what `just conpty` writes and the only record of where
+    /// the two binaries came from: its version is the one the unpack directory
+    /// is named after, and its hashes have to still describe the committed
+    /// bytes — a vendored binary swapped without the recipe is exactly the
+    /// failure this is for.
     #[test]
-    fn the_asset_readme_describes_the_version_being_unpacked() {
+    fn the_asset_upstream_describes_the_committed_binaries() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/conpty");
-        let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
-        assert!(
-            readme.contains(VERSION),
-            "assets/conpty/README.md does not mention VERSION {VERSION}"
-        );
-        for name in ["conpty.dll", "OpenConsole.exe"] {
+        let upstream = std::fs::read_to_string(root.join("UPSTREAM")).unwrap();
+        let field = |key: &str| -> String {
+            upstream
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .unwrap_or_else(|| panic!("UPSTREAM has no {key}="))
+                .to_owned()
+        };
+        assert_eq!(field("version"), VERSION);
+        for (key, file) in [
+            ("conpty-dll-sha256", "conpty.dll"),
+            ("openconsole-sha256", "OpenConsole.exe"),
+        ] {
+            let recorded = field(key);
             assert!(
-                readme.contains(name),
-                "assets/conpty/README.md does not name {name}"
+                recorded.len() == 64 && recorded.chars().all(|c| c.is_ascii_hexdigit()),
+                "UPSTREAM's {key} is not a sha256: {recorded}"
             );
+            // A hash is only provenance if it still describes the bytes. The nix
+            // sandbox and CI have coreutils; a machine without sha256sum skips
+            // the comparison rather than the whole suite.
+            let output = match std::process::Command::new("sha256sum")
+                .arg(root.join(file))
+                .output()
+            {
+                Ok(output) if output.status.success() => output,
+                _ => continue,
+            };
+            let actual = String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            assert_eq!(actual, recorded, "UPSTREAM's {key} does not match {file}");
         }
     }
 }
