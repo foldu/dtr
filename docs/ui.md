@@ -229,6 +229,12 @@ what makes them testable and what lets a caller `--send` into them.
   an image loader first.
 - `Button` — primary (accent) or secondary (control surface), with the label's
   width as a floor so a clipped word is never a button.
+- `Conflict` — the one card an overwrite asks (§The conflict and the queue),
+  with `replace`, `keep both` and `skip` as its buttons and the destructive one
+  marked from `Palette::danger`.
+- `Queue` — the transfer queue's rows, one a job, with the tab strip's stripe
+  under each and cancel/retry only where the state offers one; its footer is a
+  second call for the card's footer band.
 - `segmented` — one chip per option; the chosen one is the accent with
   `on_accent` on it, which is what makes "selected" mean one thing everywhere.
 - `tabs` — a row of labels with an accent rule under the current one. Not a
@@ -774,3 +780,71 @@ disagreeing.
 `Style::check_radius` is separate from `chip_radius` because Adwaita rounds a
 20-point box by 6 while a tab is a pill, and they differ in the native preset —
 9 against 6 — for exactly that reason.)*
+
+## The conflict and the queue
+
+`docs/manager.md` §7 and §8 name the two cards the file manager puts up when it
+writes; both are painted here, not in the manager, because both are made of this
+crate's parts. They are the two that are **shaped like a card rather than like a
+control**, and they are the first to say so from inside the crate.
+
+**`Conflict` is a card, not a body.** A paste that would replace, a rename onto an
+existing name and a copy whose destination exists are one question with three
+answers — replace, keep both, skip — so the widget calls `Card`'s shell itself
+and returns `Option<ConflictDecision>`: `None` while it is still asking, then an
+answer or `Cancel`. The alternative — a body and footer the screen wires into a
+`Card` — would make every caller rebuild the shell's closers and hand the answer
+back through a cell that the card's footer closure can only write to; the shell's
+whole argument is that nobody spells it twice. The caller supplies what the
+question is about and reads one value:
+
+```rust
+if let Some(decision) = Conflict::new(source, destination)
+    .detail("12.4 MB (14 November 2026 09:12), 29.4 MB (20 November 2026 18:03)")
+    .show(ui, &skin)
+{
+    // F5/F6 map ConflictAnswer::{Replace, KeepBoth, Skip} onto the operation.
+}
+```
+
+The words are the accessibility names (`replace`, `keep both`, `skip`) and cancel
+is the card's cross plus Escape — a fourth "cancel" button would make a dialog
+with four answers. **`Palette::danger` marks the destructive answer**, never a
+literal: the row is three `Button`s, and the edge is repainted over the one that
+replaces — a decoration of the existing control, not a second button style. Enter
+reports the `focus`ed answer (skip by default: a card can appear under a chord
+being typed, and the key that lands on it must not be the one that overwrites);
+the widget owns no cursor, so the arrows are the caller's, and `focus` is how it
+re-renders with another answer. **The focused answer is marked in every skin** —
+the skin's two-tone ring where it has one, an accent rule under the word where
+`Focus::None` (dtr's own chrome) does — because a default nobody can see is a key
+that overwrites a file by surprise.
+
+**`Queue` is a card body**, because the queue's *window* is the caller's: the
+manager card has its own title, cross and footer band, and the queue is the list
+inside it. The caller owns the jobs; `Queue::new(&jobs)` draws one row per job and
+reports the index of the row whose `cancel` or `retry` the pointer pressed
+(`QueueRows`), and `Queue::footer` draws the figure (`2 of 3, 41 MB/s`) and
+`cancel all` for the card's footer band, returning one bool. Two calls, because
+the footer is drawn outside the card's scrolling body: a count and the way to stop
+everything must not leave with the first page of a long list. `Job` is a view —
+name, `JobDirection`, `done`/`total` bytes, `JobState` — and no more: the rate is
+the caller's measurement, the queue and its state machine are the window's, and
+this module has no clock. **The stripe is `crate::stripe`**, the tab strip's own
+control: a fraction at 42%, a sliding band when `stat` could not give a total, and
+a whole stripe for done/failed/cancelled, because "60% of a job that did not
+finish" is not progress. **Cancel and retry are offers**: only a running job has
+`cancel`, only a failed one has `retry`, and a done or cancelled row has neither,
+because either would be a lie about what the queue can do. The row's accessibility
+name is its three facts (`report.pdf upload failed`), and the list has its own
+(`transfer queue`).
+
+`crates/dtr-widgets/tests/cards.rs` keeps four pictures — `conflict_answers`
+(with one answer under the pointer), `conflict_focused` (the destructive answer
+as the default, marked in dtr's chrome), `conflict_ring` (the same in a skin
+that draws a focus ring) and `queue_mixed` (a running job at 42%, a failed one
+with `retry`, a done one) — and each module unit-tests its own hit geometry: the
+three answers disjoint and right-aligned, the action inside its row and clear of
+the row's words. What is *not* here is deliberately the caller's: F5/F6 own the state
+machine, the conflict answers' mapping onto an operation, and which rows are
+really on screen.

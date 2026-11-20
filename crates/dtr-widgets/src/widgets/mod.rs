@@ -23,9 +23,11 @@ mod button;
 mod card;
 mod check;
 mod combo;
+mod conflict;
 mod context;
 mod icons;
 mod menu;
+mod queue;
 mod segmented;
 mod stripe;
 mod tabs;
@@ -36,12 +38,14 @@ pub use button::Button;
 pub use card::{Card, CardOutput, prime_area};
 pub use check::{check, check_box};
 pub use combo::{Edit, Editable};
+pub use conflict::{Conflict, ConflictAnswer, ConflictDecision};
 pub use context::{ContextMenu, Row};
 pub use icons::{cross, cross_at, plus};
 pub use menu::{
     Mark, RowSpec, menu_row, menu_row_chord, menu_row_icon, menu_separator, menu_tip, menu_width,
     point_at,
 };
+pub use queue::{Job, JobDirection, JobState, Queue, QueueRows};
 pub use segmented::segmented;
 pub use stripe::{Stripe, stripe};
 pub use tabs::tabs;

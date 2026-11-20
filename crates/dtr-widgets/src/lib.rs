@@ -47,8 +47,9 @@ pub use skin::{
 };
 pub use style::{Focus, Footer, Preset, Scheme, Section, Style, Title};
 pub use widgets::{
-    Button, Card, CardOutput, ContextMenu, Edit, Editable, Glyph, Icon, IconTile, LABEL_ROWS, Mark,
-    Row as MenuRow, RowSpec, Stripe, above_the_root, check, check_box, cross, cross_at, icon_tile,
-    label_cell, menu_row, menu_row_chord, menu_row_icon, menu_separator, menu_tip, menu_width,
-    plus, point_at, prime_area, row, section, segmented, stripe, tabs, tile_height,
+    Button, Card, CardOutput, Conflict, ConflictAnswer, ConflictDecision, ContextMenu, Edit,
+    Editable, Glyph, Icon, IconTile, Job, JobDirection, JobState, LABEL_ROWS, Mark, Queue,
+    QueueRows, Row as MenuRow, RowSpec, Stripe, above_the_root, check, check_box, cross, cross_at,
+    icon_tile, label_cell, menu_row, menu_row_chord, menu_row_icon, menu_separator, menu_tip,
+    menu_width, plus, point_at, prime_area, row, section, segmented, stripe, tabs, tile_height,
 };
