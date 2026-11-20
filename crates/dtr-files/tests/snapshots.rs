@@ -9,9 +9,9 @@
 //! compared against nothing, and a checkout whose git-lfs had not smudged them
 //! failed with a decode error that reads like a rendering bug.
 //!
-//! This test is the guard, from both sides: every `snapshot("…")` the crate's
-//! tests take must have a real PNG beside it, and every PNG there must belong to
-//! a test that takes it, so a renamed snapshot cannot leave a stale baseline
+//! This test is the guard, from both sides: every snapshot the crate's tests
+//! take must have a real PNG beside it, and every PNG there must belong to a
+//! test that takes it, so a renamed snapshot cannot leave a stale baseline
 //! behind.
 
 use std::collections::BTreeSet;
@@ -21,11 +21,16 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every name passed to `harness.snapshot("…")` under `src/`.
+/// Every name passed to `harness`'s snapshot method under `src/` and `tests/`.
+///
+/// Both, because a baseline belongs next to what it draws: the pane's states are
+/// unit tests in `browser.rs`, while the manager window's are a test file —
+/// scanning one directory would call the other's pictures orphans, which is what
+/// the sibling `dtr-widgets` audit does.
 fn snapshots_taken() -> BTreeSet<String> {
     fn walk(dir: &Path, names: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(dir)
-            .expect("src is part of the crate")
+            .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
             .flatten()
         {
             let path = entry.path();
@@ -33,9 +38,12 @@ fn snapshots_taken() -> BTreeSet<String> {
                 walk(&path, names);
             } else if path.extension().is_some_and(|extension| extension == "rs") {
                 let text = std::fs::read_to_string(&path).expect("a source file is readable");
+                // The needle is assembled from two pieces so this file's own
+                // text cannot match itself when it is scanned.
+                let needle = concat!("snapshot", "(\"");
                 let mut rest = text.as_str();
-                while let Some(at) = rest.find("snapshot(\"") {
-                    let after = &rest[at + "snapshot(\"".len()..];
+                while let Some(at) = rest.find(needle) {
+                    let after = &rest[at + needle.len()..];
                     let Some(end) = after.find('"') else {
                         break;
                     };
@@ -48,6 +56,7 @@ fn snapshots_taken() -> BTreeSet<String> {
 
     let mut names = BTreeSet::new();
     walk(&manifest_dir().join("src"), &mut names);
+    walk(&manifest_dir().join("tests"), &mut names);
     names
 }
 

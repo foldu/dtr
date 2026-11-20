@@ -347,6 +347,55 @@ selection's size. The pane keeps the breadcrumb and a places popup instead of a 
 Nautilus's window is the reference for behaviour, not for pixels: `dtr-widgets` paints from the skin,
 and `Preset::Native` already reads the desktop's palette without linking GTK.
 
+### What the chrome is
+
+The chrome is `crates/dtr-files/src/manager.rs`, and it is **drawing only**: no winit, no wgpu, no
+file I/O on a timer and no `dtr` dependency. A window hands it a rectangle in points, a
+`dtr_widgets::Skin`, a [`ManagerState`] (where the content is, how it is viewed, what the search box
+holds, how many entries there are and what is selected) and a `Sidebar` (places, drives, hosts); it
+paints `egui::Ui` and answers with a `ManagerAnswer` — which button, which crumb, which row, what was
+typed. That is the same bargain `pane_ui` makes, and it is why the four window states are
+`egui_kittest` baselines rather than captures.
+
+- **One layout, computed once.** `ManagerLayout::new(client, &skin)` splits the client into
+  `toolbar`, `sidebar`, `content` and `status`; the window that owns the `Browser` draws it in
+  `ManagerLayout::content` and asks `band_at` for focus. A painter and a window measuring their own
+  bands is the `pane_area` bug (`AGENTS.md`) — two consumers of one rectangle disagreeing. The status
+  bar's four slots (`counts`, `selection`, `path`, `transfer`) are one of those functions too, because
+  the queue (F5) has to agree with the bar about where its figure goes.
+- **The window supplies the data, never the drawing.** The places come from `icons::Places` plus home
+  and root (`Sidebar::places`), the drives are read from `/proc/mounts` by the caller (§8, another
+  stream), and this session's hosts from the ssh config with their SFTP homes (`Sidebar::hosts`).
+  `SidebarEntry` is a *drawn row*: label, a `SidebarChoice` to report, and a caller-resolved picture.
+  A picture is a `TextureId` because resolving a theme icon needs an image loader, which is the
+  window's; the manager draws what it is handed and paints no theme glyph.
+- **Toolbar.** Back/forward/up are `dtr-widgets` `Button`s, enabled from the caller's history flags;
+  then the breadcrumb, one target per component from `browser::crumbs` (the pane's own function), or a
+  `TextEdit` location when `LocationMode::Edit`; then the search/filter field, the grid/list
+  `segmented` control, and a burger at the right end whose rows are `grid`, `list`, `edit location`
+  (or `breadcrumb location`) and `show hidden`. The location-mode toggle lives in the burger rather
+  than beside the breadcrumb so the row keeps its width for the path. The burger is the one painted
+  control: a `Popup` anchors to a `Response`, and `Button` reports only a `bool`.
+- **No Lucide in the toolbar, deliberately.** The SVGs ship in `crates/dtr/assets/icons/`, but drawing
+  them needs `egui_extras`' loader and this crate does not depend on `egui_extras` — a picker process
+  links nothing else. A hand-drawn chevron is what `AGENTS.md` rules out, so back/forward/up are words
+  until `dtr-widgets` grows an icon button (the right home; the burger goes with it). The sidebar rows
+  take the caller's pictures, so the theme's own icons appear there without this crate decoding one.
+- **The sidebar is fixed.** `SIDEBAR_WIDTH` is 196 points, not a splitter: a draggable split is a
+  stored ratio, a hit test and a third consumer of the geometry, and the milestone asks for the rows
+  first. Rows are mouse-only for the same reason the preferences card is — a row is a `menu_row_icon`
+  with a tick on the one the content is showing, and the arrow-key walk can come with the window's
+  focus model.
+- **The status bar is read-only text:** `reading… n so far` while a walk is in flight (never "empty
+  directory"), otherwise the count or `shown of total` when a search hides rows; the selection's count
+  and total size when every selected entry's size is known (`None` keeps the count and drops the
+  total, rather than summing a zero); the path with the ssh alias in front when remote. The right-hand
+  slot is reserved and painted by nobody, because it is the transfer queue's (§8).
+
+What the window still owns: the history stacks, reading the mounts and the ssh config, resolving the
+rows' pictures, the `Browser` in the content rectangle, the search's meaning (the chrome reports text,
+not a filter), and the keyboard. The chrome is mouse-only today and says so.
+
 ## 7. Writes
 
 The half that can lose data, so it comes last and with rules rather than defaults:

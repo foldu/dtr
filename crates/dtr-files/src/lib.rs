@@ -24,6 +24,10 @@ mod browser;
 mod desktop;
 mod grid;
 pub mod icons;
+/// The manager window's chrome: toolbar, sidebar and status bar, with the
+/// geometry the window and the `Browser` share. See
+/// [`manager`] and `docs/manager.md` §6.
+pub mod manager;
 pub mod pick;
 pub mod theme;
 pub mod thumb;
