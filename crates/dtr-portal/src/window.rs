@@ -510,6 +510,50 @@ enum ScreenKind {
     Manager(Manager),
 }
 
+/// The visible windows, and what each is.
+///
+/// A thin `HashMap` wrapper rather than the map itself so the *policy* has a
+/// name and a test: the idle timeout asks how many windows are visible, the
+/// worker events route an answer to the window whose manager id matches, and a
+/// closed window leaves both. Its keys are `WindowId`s in the running app and
+/// plain numbers in the tests, which is why it is generic.
+struct Screens<K, V> {
+    open: HashMap<K, V>,
+}
+
+impl<K: std::hash::Hash + Eq, V> Screens<K, V> {
+    fn new() -> Self {
+        Self {
+            open: HashMap::new(),
+        }
+    }
+
+    /// How many windows a person can see: the idle policy's whole input.
+    fn visible(&self) -> usize {
+        self.open.len()
+    }
+}
+
+impl<K: std::hash::Hash + Eq, V> Default for Screens<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: std::hash::Hash + Eq, V> std::ops::Deref for Screens<K, V> {
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.open
+    }
+}
+
+impl<K: std::hash::Hash + Eq, V> std::ops::DerefMut for Screens<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.open
+    }
+}
+
 /// The capture hook: one photograph of the first window this process shows.
 ///
 /// A window can be shown more than once in a run (the picker is reused), so the
@@ -574,7 +618,7 @@ struct PickerApp {
     frames_drawn: u64,
     desk: Desk,
     /// The visible windows and what they are.
-    screens: HashMap<WindowId, Screen>,
+    screens: Screens<WindowId, Screen>,
     /// The warm picker window, hidden between requests. Not in `screens` while
     /// hidden: the map is what the idle policy asks about.
     picker_window: Option<WindowId>,
@@ -605,7 +649,7 @@ impl PickerApp {
             started: now,
             frames_drawn: 0,
             desk: Desk::new(now),
-            screens: HashMap::new(),
+            screens: Screens::new(),
             picker_window: None,
             failed: None,
             next_manager_id: 1,
@@ -1624,7 +1668,11 @@ impl dtr_frame::App for PickerApp {
                 wake = Some(wake.map_or(screen.next_refresh, |at| at.min(screen.next_refresh)));
             }
         }
-        match idle_exit(self.screens.len(), self.last_activity, self.options.idle) {
+        match idle_exit(
+            self.screens.visible(),
+            self.last_activity,
+            self.options.idle,
+        ) {
             None => {
                 if let Some(wake) = wake.filter(|wake| *wake > now) {
                     deadlines.soon(wake);
@@ -2064,6 +2112,33 @@ mod tests {
         assert_eq!(title(&call), "Save a file");
         call.window.title = "Export as PDF".to_owned();
         assert_eq!(title(&call), "Export as PDF");
+    }
+
+    /// The screen registry: a window is visible while it is in the map, routing
+    /// finds the one an answer names, and closing it leaves the rest.
+    #[test]
+    fn the_screen_registry_counts_and_routes_the_visible_windows() {
+        let mut screens: Screens<u64, (&'static str, u64)> = Screens::new();
+        assert_eq!(screens.visible(), 0, "nothing is visible before a window");
+        screens.insert(10, ("picker", 1));
+        screens.insert(20, ("manager", 7));
+        assert_eq!(screens.visible(), 2);
+
+        // The worker routes by the manager's routing id, not by window order.
+        let routed = screens
+            .iter()
+            .find_map(|(window, (kind, id))| (*id == 7).then_some((*window, *kind)));
+        assert_eq!(routed, Some((20, "manager")));
+        // ...and a close for one window leaves the other visible.
+        assert!(screens.remove(&20).is_some());
+        assert_eq!(screens.visible(), 1);
+        assert_eq!(
+            screens.get(&10).map(|(kind, _)| *kind),
+            Some("picker"),
+            "a hidden picker screen is still the window it belongs to"
+        );
+        assert_eq!(screens.remove(&99), None);
+        assert_eq!(screens.visible(), 1);
     }
 
     /// The idle policy: a visible window keeps the process alive; none means the

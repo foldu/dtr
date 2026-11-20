@@ -670,7 +670,8 @@ nix develop .#default --command bash -c \
 
 New tests, all without a window: the mount reader (pseudo/root/duplicate
 filtering, octal escapes), the ssh-config reader (aliases, wildcards and
-negations, in file order once), the manager's history across machines, its
+negations, in file order once), the screen registry (visible count and routing
+by manager id), the idle policy, the manager's history across machines, its
 sidebar tick, its count plumbing, a typed relative location, and the worker's
 counts, its five write verbs through the real backends, and the conflict
 boundary. The private-bus suite serves **both** interfaces on one private
