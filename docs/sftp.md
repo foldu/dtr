@@ -410,6 +410,58 @@ SFTP joins that milestone:
 
 ---
 
+## 7. The write codec
+
+`crates/dtr-sftp` now has the codec half of F7; the VFS verbs and the UI are the
+follow-ups (`docs/manager.md` §7–§8). Every request reuses the read path's plumbing: one
+id and one answer, the id checked, the frame length bounded at 64 MiB, and every answer's
+packet type matched — a malformed reply is an `Err`, never a panic.
+
+| method | packet | notes |
+|---|---|---|
+| `create_dir(path)` | `SSH_FXP_MKDIR` | mode `0755`, sent as a permissions-only attribute set |
+| `remove(path)` | `SSH_FXP_REMOVE` | one file; a directory is the server's refusal, not a recursive delete |
+| `remove_dir(path)` | `SSH_FXP_RMDIR` | empty directory only |
+| `rename(from, to, overwrite)` | `SSH_FXP_EXTENDED` (`posix-rename@openssh.com`) or `SSH_FXP_RENAME` | see below |
+| `setstat(path, mode)` / `chmod` | `SSH_FXP_SETSTAT` | permissions-only attributes, so nothing else changes |
+| `statvfs(path)` | `SSH_FXP_EXTENDED` (`statvfs@openssh.com`) | typed `StatVfs`; `Err` when not advertised |
+| `begin_upload` / `write_upload_chunk` / `finish_upload` / `abort_upload` | `SSH_FXP_OPEN` (`WRITE\|CREAT\|TRUNC`), `SSH_FXP_WRITE`, `SSH_FXP_CLOSE` | one packet per call: the queue's segment boundary |
+| `upload(local, remote)` | the same four, in a loop | chunks of `CHUNK` (64 KiB), closes on success and on failure |
+
+**Extensions are remembered from `SSH_FXP_VERSION`.** The handshake reads the
+`(name, version)` pairs after the version number into the session and
+`Session::supports` answers what the server offered. Nothing is probed at use time: a
+server that did not advertise `statvfs@openssh.com` gets no packet, and `statvfs` returns
+an `Err` the caller can ignore — a transfer that cannot ask simply proceeds and lets
+`WRITE` fail, rather than acting on a made-up number.
+
+**`rename`'s `overwrite` decides the packet, not the server.** v3's `SSH_FXP_RENAME` has
+no overwrite flag, so the argument is the caller's answer to the conflict question from
+`docs/manager.md` §7. `overwrite = true` uses `posix-rename@openssh.com` when advertised
+— that extension *is* the atomic replace — and plain `SSH_FXP_RENAME` otherwise.
+`overwrite = false` always uses the plain packet, which fails if the destination appeared
+in the meantime: a "keep both" that raced with a new file therefore cannot clobber what
+it kept.
+
+**Upload writes the exact path it is given; publishing is the caller's rename.** The
+codec invents no `.part` convention — the transfer queue (`docs/manager.md` §8) uploads
+`<name>.part` and calls `rename(part, name, true)` to publish, which is also where
+`posix-rename@openssh.com` earns its keep. The queue also has to interleave a listing and
+answer a cancel *between* chunks, so the four segmented methods are public on their own
+and `upload` is only their loop: `begin_upload` opens and returns an `Upload` handle,
+`write_upload_chunk` sends one packet, `finish_upload`/`abort_upload` close it. On any
+error `upload` closes the handle before returning, so a failed transfer leaves no
+server-side open handle behind.
+
+**Bounds.** `CHUNK` is 64 KiB, exported because it is both the largest `READ`/`WRITE`
+payload in one packet and the segment size the 30 s per-answer deadline supports.
+`write_upload_chunk` refuses anything larger before writing it, and `statvfs`'s eleven
+`u64` fields are read strictly: a short reply is an error. The codec is tested through
+the fake `Wire` in `tests/mock.rs` — every new packet, and both extension states — plus a
+scripted wire in the unit tests for the malformed replies a real server would never send.
+
+---
+
 ## Appendix — commands that produced §3
 
 Scratch workspace: `/tmp/sftpprobe/` (throwaway; nothing in the repo changed).

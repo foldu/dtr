@@ -7,18 +7,26 @@
 //! top of it. That framing is the dozen packets below rather than a protocol
 //! crate: it was `russh-sftp`, which pulled `tokio` and `tokio-util` into a
 //! runtime that no longer has one (`docs/compio.md`). The operations dtr needs
-//! are `list`, `stat`, `download` and `home`, and v3 has one packet for each.
+//! are `list`, `stat`, `download`, `home` and the write verbs — `mkdir`,
+//! `rmdir`, `remove`, `rename`, `setstat` and a chunked `upload` built from
+//! `OPEN`/`WRITE`/`CLOSE` — and v3 has one packet for each. `rename` prefers
+//! `posix-rename@openssh.com` and `statvfs` needs `statvfs@openssh.com`; both
+//! are advertised in the server's `SSH_FXP_VERSION` and remembered here.
 //!
 //! The wire is a trait so the tests can drive the same code over a channel
 //! instead of a real server (`tests/mock.rs`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use compio::io::{AsyncRead as _, AsyncReadExt as _, AsyncWriteAtExt as _, AsyncWriteExt as _};
+use compio::io::{
+    AsyncRead as _, AsyncReadAtExt as _, AsyncReadExt as _, AsyncWriteAtExt as _,
+    AsyncWriteExt as _,
+};
 
 /// The version every OpenSSH server speaks, and the one this codec is written
 /// against.
@@ -30,15 +38,23 @@ const VERSION_PACKET: u8 = 2;
 const OPEN: u8 = 3;
 const CLOSE: u8 = 4;
 const READ: u8 = 5;
-const STAT: u8 = 17;
+const WRITE: u8 = 6;
+const SETSTAT: u8 = 9;
 const OPENDIR: u8 = 11;
 const READDIR: u8 = 12;
+const REMOVE: u8 = 13;
+const MKDIR: u8 = 14;
+const RMDIR: u8 = 15;
 const REALPATH: u8 = 16;
+const STAT: u8 = 17;
+const RENAME: u8 = 18;
+const EXTENDED: u8 = 200;
 const STATUS: u8 = 101;
 const HANDLE: u8 = 102;
 const DATA: u8 = 103;
 const NAME: u8 = 104;
 const ATTRS: u8 = 105;
+const EXTENDED_REPLY: u8 = 201;
 
 /// `SSH_FX_OK`: a status that is an answer, not a failure.
 const FX_OK: u32 = 0;
@@ -47,6 +63,21 @@ const FX_EOF: u32 = 1;
 
 /// `SSH_FXF_READ`.
 const FXF_READ: u32 = 0x0000_0001;
+/// `SSH_FXF_WRITE`.
+const FXF_WRITE: u32 = 0x0000_0002;
+/// `SSH_FXF_CREAT`.
+const FXF_CREAT: u32 = 0x0000_0008;
+/// `SSH_FXF_TRUNC`.
+const FXF_TRUNC: u32 = 0x0000_0010;
+
+/// The mode a directory created by [`Session::create_dir`] gets.
+const DIRECTORY_MODE: u32 = 0o755;
+
+/// The extension that makes a rename an atomic replace, instead of a rename
+/// that fails when the destination exists.
+pub const POSIX_RENAME: &str = "posix-rename@openssh.com";
+/// The extension that answers how much room a filesystem has left.
+pub const STATVFS: &str = "statvfs@openssh.com";
 
 /// Attribute flags.
 const ATTR_SIZE: u32 = 0x0000_0001;
@@ -59,6 +90,11 @@ const ATTR_EXTENDED: u32 = 0x8000_0000;
 /// `read` on a link that went away is otherwise forever.
 const ANSWER: Duration = Duration::from_secs(30);
 
+/// The most bytes one `READ` or `WRITE` packet carries. A read answer is
+/// bounded by [`ANSWER`] as well: a chunk that cannot cross the link in 30 s is
+/// a chunk too big, which is why the transfer queue's segments use this figure.
+pub const CHUNK: usize = 64 * 1024;
+
 /// One entry of a directory listing, or one file's attributes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -67,6 +103,72 @@ pub struct Entry {
     pub dir: bool,
     pub size: u64,
     pub modified: Option<u64>,
+}
+
+/// How full a remote filesystem is, from `statvfs@openssh.com`.
+///
+/// The extension reports blocks, the way `statvfs(2)` does; the byte figures
+/// here are the blocks multiplied by the fragment size, because "is there room
+/// for this file" is a byte question. `available_bytes` is the one a transfer
+/// may use — `free_bytes` counts what the superuser could write and can be
+/// larger than the space this account is allowed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatVfs {
+    /// `f_blocks × f_frsize`: the whole filesystem.
+    pub total_bytes: u64,
+    /// `f_bfree × f_frsize`: free blocks, including the root reserve.
+    pub free_bytes: u64,
+    /// `f_bavail × f_frsize`: free blocks this account may use.
+    pub available_bytes: u64,
+    /// `f_bsize`: the preferred block size.
+    pub block_size: u64,
+    /// `f_frsize`: the unit the block counts are in.
+    pub fragment_size: u64,
+}
+
+impl StatVfs {
+    /// The extension's version-2 answer is eleven `u64`s in `statvfs(2)`'s own
+    /// order. Every one is read, so a short reply is an error rather than a
+    /// struct with fields shifted underneath it.
+    fn of(payload: &[u8]) -> Result<Self> {
+        let mut reader = Reader::new(payload);
+        let block_size = reader.u64()?;
+        let fragment_size = reader.u64()?;
+        let blocks = reader.u64()?;
+        let bfree = reader.u64()?;
+        let bavail = reader.u64()?;
+        // f_files, f_ffree, f_favail, f_fsid, f_flag, f_namemax are read and
+        // dropped: a queue needs bytes, and the flag word is not a byte count.
+        for _ in 0..6 {
+            let _ignored = reader.u64()?;
+        }
+        // `f_frsize` is allowed to be zero; `f_bsize` is the fallback POSIX
+        // gives, and a zero unit would otherwise report every filesystem empty.
+        let unit = if fragment_size == 0 {
+            block_size
+        } else {
+            fragment_size
+        };
+        Ok(Self {
+            total_bytes: blocks.saturating_mul(unit),
+            free_bytes: bfree.saturating_mul(unit),
+            available_bytes: bavail.saturating_mul(unit),
+            block_size,
+            fragment_size,
+        })
+    }
+}
+
+/// An open remote file being written: the handle `SSH_FXP_OPEN` returned.
+///
+/// The handle itself is the server's; dtr only carries it. An `Upload` dropped
+/// without [`Session::finish_upload`] or [`Session::abort_upload`] leaves the
+/// server's handle open until the session closes — the `ssh` child is killed on
+/// drop, so nothing outlives the session, but a long-lived session leaks the
+/// handle, which is why the two closing methods take `self`.
+#[derive(Debug)]
+pub struct Upload {
+    handle: Vec<u8>,
 }
 
 /// Not `Send`: compio's handles carry a thread-local `Rc`, so a session belongs
@@ -83,14 +185,17 @@ pub trait Wire {
     fn read_exact<'a>(&'a mut self, len: usize) -> BoxFuture<'a, Result<Vec<u8>>>;
 }
 
-/// A live SFTP session: the ssh child, the protocol on top of it, and the id
-/// the next request will carry.
+/// A live SFTP session: the ssh child, the protocol on top of it, the id the
+/// next request will carry, and whatever the server advertised beyond v3.
 pub struct Session {
     wire: Box<dyn Wire>,
     /// `None` when the session was built on a wire instead of a child, which is
     /// how the tests drive the same code.
     child: Option<compio::process::Child>,
     next_id: u32,
+    /// `SSH_FXP_VERSION` extension name → its version string, which is the
+    /// whole of what the handshake says about optional verbs.
+    extensions: HashMap<String, Vec<u8>>,
 }
 
 impl Session {
@@ -121,6 +226,7 @@ impl Session {
             wire: Box::new(ChildWire { stdin, stdout }),
             child: Some(child),
             next_id: 1,
+            extensions: HashMap::new(),
         };
         match session.init().await {
             Ok(()) => Ok(session),
@@ -142,6 +248,7 @@ impl Session {
             wire,
             child: None,
             next_id: 1,
+            extensions: HashMap::new(),
         };
         session.init().await.context("sftp handshake")?;
         Ok(session)
@@ -276,7 +383,7 @@ impl Session {
         loop {
             let mut body = put_string(&handle);
             body.extend_from_slice(&total.to_be_bytes());
-            body.extend_from_slice(&(64u32 * 1024).to_be_bytes());
+            body.extend_from_slice(&(CHUNK as u32).to_be_bytes());
             let (kind, payload) = self
                 .request(READ, body)
                 .await
@@ -319,6 +426,228 @@ impl Session {
         Ok(total)
     }
 
+    /// Make one directory at `path`, mode 0755.
+    pub async fn create_dir(&mut self, path: &str) -> Result<()> {
+        let mut body = put_string(path.as_bytes());
+        body.extend_from_slice(&permissions(DIRECTORY_MODE));
+        self.status_only(MKDIR, body, &format!("mkdir {path}"))
+            .await
+    }
+
+    /// Delete one file. A directory is [`Session::remove_dir`]'s, and the
+    /// server refuses it; a recursive delete is a caller's decision, not a
+    /// codec's.
+    pub async fn remove(&mut self, path: &str) -> Result<()> {
+        self.status_only(
+            REMOVE,
+            put_string(path.as_bytes()),
+            &format!("remove {path}"),
+        )
+        .await
+    }
+
+    /// Delete one empty directory.
+    pub async fn remove_dir(&mut self, path: &str) -> Result<()> {
+        self.status_only(RMDIR, put_string(path.as_bytes()), &format!("rmdir {path}"))
+            .await
+    }
+
+    /// Rename `from` to `to`.
+    ///
+    /// `overwrite` is the caller's answer to the conflict question, and it is
+    /// not sent to the server: v3's `SSH_FXP_RENAME` has no flag for it. It
+    /// does choose the packet. `true` uses `posix-rename@openssh.com` when the
+    /// server advertised it — that extension *is* the atomic replace — and
+    /// falls back to `SSH_FXP_RENAME` otherwise. `false` always uses plain
+    /// `SSH_FXP_RENAME`, which fails if `to` exists, so a "keep both" that
+    /// raced with a new file cannot clobber what it kept.
+    pub async fn rename(&mut self, from: &str, to: &str, overwrite: bool) -> Result<()> {
+        let doing = format!("rename {from} to {to}");
+        if overwrite && self.supports(POSIX_RENAME) {
+            let mut body = put_string(POSIX_RENAME.as_bytes());
+            body.extend_from_slice(&put_string(from.as_bytes()));
+            body.extend_from_slice(&put_string(to.as_bytes()));
+            self.status_only(EXTENDED, body, &doing).await
+        } else {
+            let mut body = put_string(from.as_bytes());
+            body.extend_from_slice(&put_string(to.as_bytes()));
+            self.status_only(RENAME, body, &doing).await
+        }
+    }
+
+    /// Set one path's permission bits: `SSH_FXP_SETSTAT` with only the
+    /// permissions attribute, so the server changes nothing else.
+    pub async fn setstat(&mut self, path: &str, mode: u32) -> Result<()> {
+        let mut body = put_string(path.as_bytes());
+        body.extend_from_slice(&permissions(mode));
+        self.status_only(SETSTAT, body, &format!("setstat {path}"))
+            .await
+    }
+
+    /// [`Session::setstat`] under the name Unix gives it.
+    pub async fn chmod(&mut self, path: &str, mode: u32) -> Result<()> {
+        self.setstat(path, mode).await
+    }
+
+    /// How much room the filesystem holding `path` has left, when the server
+    /// advertises `statvfs@openssh.com`.
+    ///
+    /// Absent extension is an error the caller may ignore — a transfer that
+    /// cannot ask simply proceeds and lets `WRITE` fail — never a made-up
+    /// number.
+    pub async fn statvfs(&mut self, path: &str) -> Result<StatVfs> {
+        if !self.supports(STATVFS) {
+            bail!("the server does not advertise {STATVFS}");
+        }
+        let mut body = put_string(STATVFS.as_bytes());
+        body.extend_from_slice(&put_string(path.as_bytes()));
+        let (kind, payload) = self
+            .request(EXTENDED, body)
+            .await
+            .with_context(|| format!("statvfs {path}"))?;
+        match kind {
+            EXTENDED_REPLY => StatVfs::of(&payload),
+            STATUS => {
+                Status::of(&payload)?.into_result()?;
+                bail!("statvfs: the server sent no filesystem statistics")
+            }
+            other => bail!("statvfs: unexpected packet {other}"),
+        }
+    }
+
+    /// Open `remote` for writing, creating it and truncating what was there.
+    ///
+    /// This, [`Session::write_upload_chunk`] and [`Session::finish_upload`] are
+    /// the segmented upload a transfer queue needs: one packet per call, so the
+    /// queue can release the per-alias lock between segments, interleave a
+    /// listing and answer a cancel. The path is used exactly as given — no
+    /// `.part` convention lives in this crate; publishing is a
+    /// [`Session::rename`] the caller performs.
+    pub async fn begin_upload(&mut self, remote: &str) -> Result<Upload> {
+        let mut body = put_string(remote.as_bytes());
+        body.extend_from_slice(&(FXF_WRITE | FXF_CREAT | FXF_TRUNC).to_be_bytes());
+        // No attributes: the server's creation mode and umask are the right
+        // default, and a caller that wants a mode calls [`Session::chmod`].
+        body.extend_from_slice(&0u32.to_be_bytes());
+        let (kind, payload) = self
+            .request(OPEN, body)
+            .await
+            .with_context(|| format!("open {remote} for writing"))?;
+        Ok(Upload {
+            handle: handle_of(kind, &payload)?,
+        })
+    }
+
+    /// Write `data` at `offset`, one packet.
+    ///
+    /// At most [`CHUNK`] bytes: that is the segment size the 30 s per-answer
+    /// deadline supports, and refusing more here keeps one packet from growing
+    /// without a bound.
+    pub async fn write_upload_chunk(
+        &mut self,
+        upload: &Upload,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        if data.len() > CHUNK {
+            bail!(
+                "a write of {} bytes exceeds the {CHUNK}-byte chunk bound",
+                data.len()
+            );
+        }
+        let mut body = put_string(&upload.handle);
+        body.extend_from_slice(&offset.to_be_bytes());
+        body.extend_from_slice(&put_string(data));
+        self.status_only(WRITE, body, &format!("write at {offset}"))
+            .await
+    }
+
+    /// Close the handle: the server considers the file complete.
+    pub async fn finish_upload(&mut self, upload: Upload) -> Result<()> {
+        self.close_upload(upload, "finish the upload").await
+    }
+
+    /// Close the handle after a failure or a cancel, best effort. Whatever was
+    /// written stays on the server under the name given to
+    /// [`Session::begin_upload`]; removing it is the caller's business, because
+    /// the `.part` name is too.
+    pub async fn abort_upload(&mut self, upload: Upload) -> Result<()> {
+        self.close_upload(upload, "abandon the upload").await
+    }
+
+    /// Copy one local file up to `remote` in [`CHUNK`]-sized writes, then close
+    /// the handle. Returns the bytes written.
+    ///
+    /// `remote` is used exactly as given: the queue uploads `<name>.part` and
+    /// publishes with [`Session::rename`], so a cancelled or failed transfer
+    /// never leaves a short file under the real name. On failure the handle is
+    /// closed before the error is returned.
+    pub async fn upload(&mut self, local: &Path, remote: &str) -> Result<u64> {
+        let file = compio::fs::File::open(local)
+            .await
+            .with_context(|| format!("open {}", local.display()))?;
+        let len = file
+            .metadata()
+            .await
+            .with_context(|| format!("stat {}", local.display()))?
+            .len();
+        let upload = self.begin_upload(remote).await?;
+        let mut offset = 0u64;
+        while offset < len {
+            let wanted = (len - offset).min(CHUNK as u64) as usize;
+            let read = file.read_exact_at(vec![0u8; wanted], offset).await;
+            let bytes = match read.0 {
+                Ok(()) => read.1,
+                Err(err) => {
+                    let _ = self.abort_upload(upload).await;
+                    return Err(err)
+                        .with_context(|| format!("read {} at {offset}", local.display()));
+                }
+            };
+            if let Err(err) = self.write_upload_chunk(&upload, offset, &bytes).await {
+                let _ = self.abort_upload(upload).await;
+                return Err(err).with_context(|| {
+                    format!("upload {} to {remote} at {offset}", local.display())
+                });
+            }
+            offset += wanted as u64;
+        }
+        self.finish_upload(upload)
+            .await
+            .with_context(|| format!("finish uploading to {remote}"))?;
+        Ok(offset)
+    }
+
+    /// Whether the server advertised an `SSH_FXP_VERSION` extension.
+    pub fn supports(&self, extension: &str) -> bool {
+        self.extensions.contains_key(extension)
+    }
+
+    /// One request whose answer must be a status, and an OK one.
+    async fn status_only(&mut self, kind: u8, body: Vec<u8>, doing: &str) -> Result<()> {
+        let (answered, payload) = self
+            .request(kind, body)
+            .await
+            .with_context(|| doing.to_owned())?;
+        match answered {
+            STATUS => Status::of(&payload)?.into_result(),
+            other => bail!("{doing}: unexpected packet {other}"),
+        }
+    }
+
+    /// Close one upload handle. Finishing and aborting send the same packet;
+    /// only the caller's intent differs.
+    async fn close_upload(&mut self, upload: Upload, doing: &str) -> Result<()> {
+        let (answered, payload) = self
+            .request(CLOSE, put_string(&upload.handle))
+            .await
+            .with_context(|| format!("{doing} by closing its handle"))?;
+        match answered {
+            STATUS => Status::of(&payload)?.into_result(),
+            other => bail!("{doing}: closing the handle got packet {other}"),
+        }
+    }
+
     /// Kill the child: a session is a process, and an orphaned `ssh` would
     /// outlive the window that asked for it.
     pub fn close(mut self) {
@@ -343,6 +672,16 @@ impl Session {
         if version < VERSION {
             bail!("the server speaks SFTP {version}, and this client needs {VERSION}");
         }
+        // `SSH_FXP_VERSION` ends with zero or more (name, data) pairs: the
+        // extensions beyond v3 that this server offers. Remember them raw; what
+        // a version string means is the operation's business.
+        let mut extensions = HashMap::new();
+        while reader.remaining() > 0 {
+            let name = reader.string()?;
+            let data = reader.bytes()?;
+            extensions.insert(name, data);
+        }
+        self.extensions = extensions;
         Ok(())
     }
 
@@ -485,6 +824,11 @@ impl<'a> Reader<'a> {
         &self.bytes[self.at.min(self.bytes.len())..]
     }
 
+    /// Bytes left to read: the extension list is read until this is zero.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.at)
+    }
+
     fn u8(&mut self) -> Result<u8> {
         let Some(byte) = self.bytes.get(self.at) else {
             bail!("packet ended early");
@@ -557,6 +901,15 @@ fn put_string(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + bytes.len());
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     out.extend_from_slice(bytes);
+    out
+}
+
+/// The attributes blob for "these permission bits and nothing else": one flags
+/// word, then the fields the flags name.
+fn permissions(mode: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8);
+    out.extend_from_slice(&ATTR_PERMISSIONS.to_be_bytes());
+    out.extend_from_slice(&mode.to_be_bytes());
     out
 }
 
@@ -700,5 +1053,361 @@ mod ssh_args_tests {
         assert!(position("-o") < position("jupiter"));
         assert!(position("BatchMode=yes") < position("jupiter"));
         assert_eq!(args.last().map(String::as_str), Some("sftp"));
+    }
+}
+
+/// The write packets, driven by a wire that says exactly which bytes come back.
+///
+/// `tests/mock.rs` runs a whole server; this module is the scalpel. A canned
+/// answer that is malformed is how "a bad reply is an error, not a panic" is
+/// tested without needing a hostile server.
+#[cfg(test)]
+mod write_packets {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use anyhow::bail;
+
+    use super::*;
+
+    /// A wire that replays canned answer frames and records what was written.
+    struct Scripted {
+        incoming: Vec<u8>,
+        at: usize,
+        written: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl Wire for Scripted {
+        fn write_all<'a>(&'a mut self, bytes: Vec<u8>) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.written.borrow_mut().push(bytes);
+                Ok(())
+            })
+        }
+
+        fn read_exact<'a>(&'a mut self, len: usize) -> BoxFuture<'a, Result<Vec<u8>>> {
+            Box::pin(async move {
+                let end = self
+                    .at
+                    .checked_add(len)
+                    .context("the scripted wire ran out of answers")?;
+                if end > self.incoming.len() {
+                    bail!("the scripted wire ran out of answers");
+                }
+                let bytes = self.incoming[self.at..end].to_vec();
+                self.at = end;
+                Ok(bytes)
+            })
+        }
+    }
+
+    /// One frame: length first, then the packet.
+    fn frame(packet: &[u8]) -> Vec<u8> {
+        let mut out = (packet.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(packet);
+        out
+    }
+
+    /// One `SSH_FXP_VERSION`, with the server's extension list.
+    fn version(extensions: &[(&str, &str)]) -> Vec<u8> {
+        let mut packet = vec![VERSION_PACKET];
+        packet.extend_from_slice(&VERSION.to_be_bytes());
+        for (name, data) in extensions {
+            packet.extend_from_slice(&put_string(name.as_bytes()));
+            packet.extend_from_slice(&put_string(data.as_bytes()));
+        }
+        frame(&packet)
+    }
+
+    /// One answer packet, framed, with the id it answers.
+    fn answer(id: u32, kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![kind];
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.extend_from_slice(payload);
+        frame(&packet)
+    }
+
+    /// The payload of an `SSH_FXP_STATUS`.
+    fn status_payload(code: u32, message: &str) -> Vec<u8> {
+        let mut out = code.to_be_bytes().to_vec();
+        out.extend_from_slice(&put_string(message.as_bytes()));
+        // Language tag, which v3 sends and dtr never reads.
+        out.extend_from_slice(&put_string(b""));
+        out
+    }
+
+    fn ok(id: u32) -> Vec<u8> {
+        answer(id, STATUS, &status_payload(FX_OK, ""))
+    }
+
+    /// A session over the canned stream, plus what it wrote.
+    async fn session(
+        extensions: &[(&str, &str)],
+        answers: &[Vec<u8>],
+    ) -> (Session, Rc<RefCell<Vec<Vec<u8>>>>) {
+        let mut incoming = version(extensions);
+        for reply in answers {
+            incoming.extend_from_slice(reply);
+        }
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let wire = Scripted {
+            incoming,
+            at: 0,
+            written: written.clone(),
+        };
+        let session = Session::from_wire(Box::new(wire))
+            .await
+            .expect("a handshake");
+        (session, written)
+    }
+
+    /// The packet bodies written after the handshake, in order.
+    fn sent(written: &Rc<RefCell<Vec<Vec<u8>>>>) -> Vec<Vec<u8>> {
+        written
+            .borrow()
+            .iter()
+            .skip(1)
+            .map(|frame| frame[4..].to_vec())
+            .collect()
+    }
+
+    /// The consecutive string fields at the front of a payload.
+    fn strings(mut bytes: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        while bytes.len() >= 4 {
+            let len = u32::from_be_bytes(bytes[..4].try_into().expect("four bytes")) as usize;
+            if 4 + len > bytes.len() {
+                break;
+            }
+            out.push(String::from_utf8_lossy(&bytes[4..4 + len]).into_owned());
+            bytes = &bytes[4 + len..];
+        }
+        out
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_be_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    #[compio::test]
+    async fn the_handshake_remembers_the_extensions_the_server_advertised() {
+        let (session, _) = session(&[(POSIX_RENAME, "1"), (STATVFS, "2")], &[]).await;
+        assert!(session.supports(POSIX_RENAME));
+        assert!(session.supports(STATVFS));
+        assert!(!session.supports("limits@openssh.com"));
+    }
+
+    #[compio::test]
+    async fn rename_uses_posix_rename_when_the_server_advertised_it() {
+        let (mut session, written) = session(&[(POSIX_RENAME, "1")], &[ok(1)]).await;
+        session
+            .rename("/srv/old", "/srv/new", true)
+            .await
+            .expect("rename");
+        let packets = sent(&written);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0][0], EXTENDED);
+        assert_eq!(
+            strings(&packets[0][5..]),
+            [POSIX_RENAME, "/srv/old", "/srv/new"]
+        );
+    }
+
+    #[compio::test]
+    async fn rename_without_the_extension_uses_the_plain_packet() {
+        let (mut session, written) = session(&[], &[ok(1)]).await;
+        session
+            .rename("/srv/old", "/srv/new", true)
+            .await
+            .expect("rename");
+        let packets = sent(&written);
+        assert_eq!(packets[0][0], RENAME);
+        assert_eq!(strings(&packets[0][5..]), ["/srv/old", "/srv/new"]);
+    }
+
+    #[compio::test]
+    async fn rename_without_overwrite_never_uses_the_replacing_extension() {
+        // The extension *is* the atomic replace; a caller that answered "keep
+        // both" must not get it even when the server offers it.
+        let (mut session, written) = session(&[(POSIX_RENAME, "1")], &[ok(1)]).await;
+        session
+            .rename("/srv/old", "/srv/new", false)
+            .await
+            .expect("rename");
+        let packets = sent(&written);
+        assert_eq!(packets[0][0], RENAME);
+    }
+
+    #[compio::test]
+    async fn mkdir_sends_the_mode_it_creates() {
+        let (mut session, written) = session(&[], &[ok(1)]).await;
+        session.create_dir("/srv/new").await.expect("mkdir");
+        let packets = sent(&written);
+        assert_eq!(packets.len(), 1);
+        let packet = &packets[0];
+        assert_eq!(packet[0], MKDIR);
+        let payload = &packet[5..];
+        assert_eq!(
+            strings(payload).first().map(String::as_str),
+            Some("/srv/new")
+        );
+        let at = 4 + "/srv/new".len();
+        assert_eq!(u32_at(payload, at), ATTR_PERMISSIONS);
+        assert_eq!(u32_at(payload, at + 4), DIRECTORY_MODE);
+    }
+
+    #[compio::test]
+    async fn remove_and_remove_dir_are_their_own_packets() {
+        let (mut session, written) = session(&[], &[ok(1), ok(2)]).await;
+        session.remove("/srv/file").await.expect("remove");
+        session.remove_dir("/srv/dir").await.expect("rmdir");
+        let packets = sent(&written);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0][0], REMOVE);
+        assert_eq!(strings(&packets[0][5..]), ["/srv/file"]);
+        assert_eq!(packets[1][0], RMDIR);
+        assert_eq!(strings(&packets[1][5..]), ["/srv/dir"]);
+    }
+
+    #[compio::test]
+    async fn setstat_carries_only_the_permission_bits() {
+        let (mut session, written) = session(&[], &[ok(1)]).await;
+        session.setstat("/srv/file", 0o600).await.expect("setstat");
+        let packets = sent(&written);
+        assert_eq!(packets[0][0], SETSTAT);
+        let payload = &packets[0][5..];
+        assert_eq!(
+            strings(payload).first().map(String::as_str),
+            Some("/srv/file")
+        );
+        let at = 4 + "/srv/file".len();
+        assert_eq!(u32_at(payload, at), ATTR_PERMISSIONS);
+        assert_eq!(u32_at(payload, at + 4), 0o600);
+    }
+
+    #[compio::test]
+    async fn statvfs_multiplies_blocks_by_the_fragment_size() {
+        // f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree,
+        // f_favail, f_fsid, f_flag, f_namemax — the extension's own order.
+        let values: [u64; 11] = [512, 1024, 100, 40, 30, 7, 6, 5, 9, 0, 255];
+        let payload: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect();
+        let (mut session, written) =
+            session(&[(STATVFS, "2")], &[answer(1, EXTENDED_REPLY, &payload)]).await;
+        assert!(session.supports(STATVFS));
+        let stats = session.statvfs("/srv").await.expect("statvfs");
+        assert_eq!(stats.total_bytes, 100 * 1024);
+        assert_eq!(stats.free_bytes, 40 * 1024);
+        assert_eq!(stats.available_bytes, 30 * 1024);
+        assert_eq!(stats.block_size, 512);
+        assert_eq!(stats.fragment_size, 1024);
+        let packets = sent(&written);
+        assert_eq!(packets[0][0], EXTENDED);
+        assert_eq!(strings(&packets[0][5..]), [STATVFS, "/srv"]);
+    }
+
+    #[compio::test]
+    async fn statvfs_without_the_extension_does_not_invent_a_number() {
+        let (mut session, written) = session(&[], &[]).await;
+        assert!(!session.supports(STATVFS));
+        let err = session.statvfs("/srv").await.expect_err("no extension");
+        assert!(
+            format!("{err:#}").contains(STATVFS),
+            "the error names the missing extension: {err:#}"
+        );
+        assert!(
+            sent(&written).is_empty(),
+            "nothing is asked when the extension was not advertised"
+        );
+    }
+
+    #[compio::test]
+    async fn a_truncated_statvfs_reply_is_an_error() {
+        let (mut session, _) =
+            session(&[(STATVFS, "2")], &[answer(1, EXTENDED_REPLY, &[0u8; 8])]).await;
+        let err = session.statvfs("/srv").await.expect_err("truncated reply");
+        assert!(format!("{err:#}").contains("packet ended early"), "{err:#}");
+    }
+
+    #[compio::test]
+    async fn a_truncated_status_is_an_error_not_a_panic() {
+        let (mut session, _) = session(&[], &[answer(1, STATUS, &[0, 0])]).await;
+        let err = session
+            .remove("/srv/file")
+            .await
+            .expect_err("truncated status");
+        assert!(format!("{err:#}").contains("packet ended early"), "{err:#}");
+    }
+
+    #[compio::test]
+    async fn an_unexpected_packet_type_is_an_error() {
+        let (mut session, _) = session(&[], &[answer(1, 199, &[])]).await;
+        let err = session
+            .create_dir("/srv/new")
+            .await
+            .expect_err("wrong packet");
+        assert!(
+            format!("{err:#}").contains("unexpected packet 199"),
+            "{err:#}"
+        );
+    }
+
+    #[compio::test]
+    async fn an_oversized_chunk_is_refused_before_it_is_sent() {
+        let (mut session, written) = session(&[], &[answer(1, HANDLE, &put_string(b"h1"))]).await;
+        let upload = session.begin_upload("/srv/file").await.expect("open");
+        let err = session
+            .write_upload_chunk(&upload, 0, &vec![0u8; CHUNK + 1])
+            .await
+            .expect_err("oversized chunk");
+        assert!(format!("{err:#}").contains("chunk bound"), "{err:#}");
+        let packets = sent(&written);
+        assert_eq!(packets.len(), 1, "only the open was sent");
+        assert_eq!(packets[0][0], OPEN);
+        assert_eq!(strings(&packets[0][5..]), ["/srv/file"]);
+        let flags = u32_at(&packets[0][5..], 4 + "/srv/file".len());
+        assert_eq!(flags, FXF_WRITE | FXF_CREAT | FXF_TRUNC);
+    }
+
+    #[compio::test]
+    async fn an_upload_that_fails_midway_closes_its_handle_and_the_session_still_works() {
+        // OPEN, one good WRITE, one failing WRITE, the abort's CLOSE, then the
+        // STAT that proves the session is still healthy.
+        let mut attrs = ATTR_SIZE.to_be_bytes().to_vec();
+        attrs.extend_from_slice(&0u64.to_be_bytes());
+        let (mut session, written) = session(
+            &[],
+            &[
+                answer(1, HANDLE, &put_string(b"up")),
+                ok(2),
+                answer(3, STATUS, &status_payload(4, "no space")),
+                ok(4),
+                answer(5, ATTRS, &attrs),
+            ],
+        )
+        .await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local = dir.path().join("big.bin");
+        std::fs::write(&local, vec![7u8; 2 * CHUNK + 5]).expect("write the local file");
+
+        let err = session
+            .upload(&local, "/srv/big.bin.part")
+            .await
+            .expect_err("the second chunk fails");
+        assert!(format!("{err:#}").contains("no space"), "{err:#}");
+
+        let kinds: Vec<u8> = sent(&written).iter().map(|packet| packet[0]).collect();
+        assert_eq!(
+            kinds,
+            [OPEN, WRITE, WRITE, CLOSE],
+            "the failed upload closes its handle and sends nothing else"
+        );
+        let entry = session
+            .stat("/srv/notes.txt")
+            .await
+            .expect("a session after a failed upload is still a session");
+        assert_eq!(entry.size, 0);
     }
 }
