@@ -429,7 +429,14 @@ fn main() -> anyhow::Result<()> {
     // libghostty does not synchronize its installation, so installing it while
     // a pane thread could be inside the library is the one unsafe moment. See
     // `dtr::kitty::install_png_decoder`.
+
     dtr::kitty::install_png_decoder();
+    // Before any terminal exists too, and for a related reason: a shell pane gets
+    // its ConPTY from `portable-pty` on the first pane, lazily, and a pane may exist
+    // before the window's first frame. The bundled host has to be unpacked and on
+    // the DLL search path by then, or that first pane keeps the inbox one for the
+    // rest of the run. See `dtr::conpty`.
+    dtr::conpty::install();
 
     tracing::debug!(?args, "starting");
 

@@ -661,10 +661,11 @@ image renderer:
   into its own buffer and re-emits VT to dtr, dropping the unknown APC sequences
   the kitty protocol rides in. A raw capture of what dtr receives from
   `type kitty-emit.bin` in `cmd.exe` holds the text and **none** of the 29
-  `ESC _ G` sequences — the image never reaches the terminal. This is the same
-  reason Windows Terminal has no kitty images; it is a transport fact, not a
-  gap dtr can close. Serial panes read the COM port directly and `--replay`
-  feeds bytes straight into the core, so both paths do draw.
+  `ESC _ G` sequences — the image never reaches the terminal. It is the inbox
+  host's parser that eats them, not ConPTY as a transport: §12.1 carries a newer
+  host that forwards them, and that is now the build. Serial panes read the COM
+  port directly and `--replay` feeds bytes straight into the core, so both paths
+  drew before that.
 - **The replay path was losing early images.** Feeding the same payload with
   `--replay` bypasses ConPTY, and still placed nothing: `frame.images` was empty
   and no texture was ever uploaded, while the text drew normally. The cause was
@@ -678,5 +679,62 @@ image renderer:
   is `a_replayed_image_reaches_the_frame_after_the_first_fit`. On the fixed build
   the replay uploaded both textures (`texture_bytes=163904`) and the capture
   shows the 256×160 PNG over the text and the raw 4×4 block at exact
-  `(255,64,0)` pixels: the D3D12 image pass works, and ConPTY remains the one
-  path on Windows that cannot deliver an image.
+  `(255,64,0)` pixels: the D3D12 image pass works, and the **inbox** ConPTY
+  remained the one path on Windows that could not deliver an image — until §12.1
+  replaced it.
+
+### 12.1 The fix: carry a ConPTY that forwards
+
+Whether the sequences died in inbox conhost's parser or somewhere in the pipe was
+the open question, and two experiments settled it — both in the guest (11 Pro
+10.0.26300, no GPU) with the same 115501-byte payload: 20 rows of `UNDER-TEXT-…`
+text followed by 29 `ESC _ G` chunks, written by the child to its console.
+
+- **`PSEUDOCONSOLE_PASSTHROUGH_MODE` (0x8) is a dead end.** A standalone host
+  (a 400-line C probe calling `CreatePseudoConsole` itself, so the answer could
+  not be filtered through dtr) received 1693 bytes with flags `0x7`, 1692 with
+  `0xF` (adding 0x8) and 1731 with `0x8` alone — and **zero** `ESC _ G` in all
+  three. Every call answered `S_OK`, and a 26-byte text payload came through
+  byte-for-byte in every arm, so the pipe was fine: inbox conhost's parser eats
+  the APC whatever the flag says. (In the newer ConPTY that bit is not a
+  passthrough flag at all: `0x8` is part of a `0x18` glyph-width mask, and `0x20`
+  is ambiguous-is-wide.)
+- **Microsoft ships a ConPTY that forwards.** The Windows Terminal release
+  carries `Microsoft.Windows.Console.ConPTY` — a 1.7 MB MIT NuGet package with
+  `conpty.dll` and the `OpenConsole.exe` it starts. With those two next to the
+  exe, the host output held **all 29** `ESC _ G` chunks and the payload verbatim
+  (115643 bytes for dtr's own child, 115544 through `cmd /c type`), and 0x8
+  changed nothing there because nothing needed changing.
+- **dtr needed no pty work.** `portable-pty` 0.9 already prefers a sideloaded
+  `conpty.dll`; the same `dtr.exe` with the two files beside it drew the images
+  in a `cmd` pane, and without them drew the text alone. That A/B is the one that
+  matters: same binary, same `--shell "cmd.exe /k type …"`, only the presence of
+  the two files differed.
+
+So the exe now carries them: `crates/dtr/assets/conpty` holds the two binaries,
+`LICENSE` and a `README.md` with the package version, source tag, release URL,
+hashes and the exact update commands (deliberately no submodule and no build:
+rebuilding Windows Terminal means an MSVC toolchain for two files Microsoft
+already builds). `dtr::conpty::install` runs before the first terminal, because
+`portable-pty` resolves its ConPTY lazily on the first pane and a pane can exist
+before the first frame. It unpacks them into
+`%LOCALAPPDATA%\dtr\conpty\<package version>\` — staging file then rename, so a
+second instance can never load a half-written DLL — and puts that directory on
+the DLL search path with `SetDllDirectoryW`, the one API a plain `LoadLibrary`
+honours (which is what `portable-pty`'s `libloading` uses). The version in the
+directory name means an upgrade never reuses an old host. A read-only profile, a
+locked file or a quarantined DLL is a warning and the inbox ConPTY, not a failed
+start, and the Linux build does not compile the assets in at all
+(`#[cfg(windows)]`), so it pays nothing for them.
+
+Two things that cost time, worth knowing before writing such a probe:
+
+- **ConPTY will not attach a client until the host answers `ESC [ 6 n`.** The
+  first probe runs looked like they hung in `CreateProcessW`; the only bytes on
+  the wire were exactly `1b 5b 36 6e`. The host has to answer the cursor-position
+  (and device-attribute) queries through the input pipe or every child sits in
+  console initialization. dtr's VT core answers them, which is why its own panes
+  never showed this.
+- **That query is in the host output and is not the program's output**, so "bytes
+  received" includes a hundred-odd bytes of conhost's own initialisation; the
+  dtr-side comparison is the capture, not the count.
