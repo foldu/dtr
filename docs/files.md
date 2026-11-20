@@ -259,3 +259,140 @@ terminal's cursor stops being drawn, which is how the screenshot says who has it
 
 What the pane *is* — a grid of icons, places, writes, and the same browser serving as the
 desktop's file picker — is planned in `docs/manager.md`, and `PLAN.md` §3 (M4) is the order.
+
+## 14. The app executes the writes, and the pane's field owns the keyboard
+
+`docs/manager.md` §7 is the rules; `crates/dtr-files/src/write.rs` is the state machine. This
+section is the third piece that makes F6 real: the terminal app takes the requests, runs them
+off the UI thread, and answers the pane — the menu rows and `dtr-files`' tests stopped at
+"reports a `WriteRequest`", which is exactly one request short of a file on disk.
+
+**The worker is a `UserEvent`, and the machine is resolved on the UI thread.** After every
+frame, `App::pump_files` walks *every file pane in every tab* (not the focused one: a pane a
+link opened is deliberately unfocused, and the write is the pane's) and asks it for a request
+with `Browser::take_write`. `Vfs::backend(&request.backend)` is called there and then — it
+owns the connection pool, and a lookup is not I/O — and the `Arc<dyn Backend>` travels to the
+background worker with the op and the replace policy. `App::bg_spawn` builds the future on the
+worker's own compio runtime (a `JoinHandle` dropped there cancels a task, so it is detached),
+`execute_write` awaits the verb, and the answer comes back as
+`UserEvent::Write { leaf, result }`. The UI thread routes it by leaf id (unique for the window's
+life, `next_leaf` only counts up), so a pane closed while the operation ran drops its answer
+instead of answering somebody else's plan. `write_succeeded()` re-lists when it says the batch
+is done; `write_failed` re-lists on `Stopped`/`Idle` (what was written before the failure is on
+disk) and leaves the listing alone on `Asking` (the card is the frame) and `Answered` (the next
+request is pumped next frame). One request per pane per pump is `take_write`'s contract, and
+that sequence is what makes a conflict answerable at all: the question is about *the* request in
+flight, and its answer must land before the next one starts.
+
+**Replace is spelled in the worker, never in a backend.** `dtr-vfs` promises a backend never
+replaces an existing destination; the card's "replace" arrives as `replace: Some(how)`, and
+`execute_write` removes the destination with that removal *first* — the trash where the machine
+has one — ignores a destination that vanished between the question and the answer (the answer
+was "write over it"), and only then runs the verb. The conflict card's three answers therefore
+have three implementations and one meaning: skip writes nothing, keep both rebases the name
+(inside `dtr-files`), replace does the two steps above.
+
+**Caps come from the backend, at pane construction.** `file_browser` asks
+`Local::new().caps()` — `write: true`, `trash: cfg!(unix)` — so a local pane offers mkdir,
+rename, copy, move and delete on Unix, and only the confirmed permanent delete on Windows.
+`remote_file_browser` states read-only explicitly (`watch/dir_size/write/trash` all false)
+rather than inheriting it: **remote panes stay read-only in this milestone**. The ssh *VFS
+backend* is merged, but the app's remote pane still fills its listing through the older SFTP
+worker, so a write answered by the VFS would run on a connection the pane does not share. F7
+is the piece that switches the remote pane to `Vfs::backend` and flips those four flags; until
+then the four words are a statement, and the menu hides the verbs because the caps say they do
+not exist.
+
+**The chords are `[keys]` actions, and the six are terminal-safe.** `files-new-folder`
+(`ctrl-shift-n`), `files-rename` (`f2`), `files-delete` (`delete`),
+`files-delete-permanent` (`shift-delete`), `files-copy` (`ctrl-c`) and `files-paste`
+(`ctrl-v`) are the file manager's own chords and are in `DEFAULTS`, so the keyboard map lists
+them, `[keys]` can move or disable them, and the palette is a third way in. Dispatch answers
+them **only when a file pane is focused and returns `false` otherwise**, which is the
+difference from `files-grid`: `^C`, `Delete` and `F2` belong to the program in a terminal pane,
+and an action that swallowed them would take `^C` away. `App::browser_key` carries the same six
+as the pane's own path (the mapping that also has `djklr` and `Alt+Up`), so the listing keeps
+its chords even with the keymap rebuilt or absent; the `[keys]` path is the discoverable one and
+is checked by a unit test of the default map, the pane path by a pure-function test of
+`browser_key`.
+
+Two traps were measured here, not reasoned about:
+
+- **A key has two edges, and the listing was moving on both.** The terminal side encodes a
+  release to nothing inside `pane`'s encoder; a file pane has no encoder, and routing
+  `browser_key` on the release as well meant every `Down` moved *two* rows — the listing
+  "skated" under the fingers. The Xvfb run made it visible: `Home; Down` landed on the second
+  file, and `--capture` showed the row two below the intended one. The fix is the `pressed`
+  test on the listing's key path, which is also why `--keys` scripts (which emit presses only)
+  behave the same as before.
+- **A field is not a set of chords.** While `Browser::write_modal()` is true (rename field,
+  new-folder field, overwrite card, permanent-delete confirmation) `App::on_key` returns before
+  the alt-digit switch, the keymap resolution, the menus and the listing. egui has already been
+  fed the same event (`Frame::feed_event` runs before `on_key`), so the field types and the card
+  answers Enter/Escape; what the gate stops is the character also being an `Action` — `ctrl-c`
+  copying the selection under the field, `r` re-listing under the text, `ctrl-shift-p` opening
+  the palette over a half-typed name, or Escape closing a menu the field was not in.
+
+**The palette names obey the accelerator rule, so three of them are not the obvious words.**
+A command's first letter is its accelerator and `crates/dtr-complete` fails the build on a
+collision: `connect` owns `c`, `demo` owns `d`, `preferences` owns `p`, `replay` owns `r`,
+`theme` owns `t`. The five commands are therefore `mkdir` (NewFolder), `name` (Rename),
+`unlink` (Delete), `yank` (Copy) and `insert` (Paste) — the shell's and vim's words for the same
+verbs. Each maps in `palette::action_for` to a `palette::Action`, and each palette arm calls
+`App::dispatch` with the same `keys::Action` the chord uses, which calls the same `Browser`
+method the right-press menu calls. A command with no arm in `action_for` does not belong in the
+list, and the count test (`empty_input_ranks_every_command`) moved with them.
+
+The kittest baselines moved with the command list (`palette.png`, `palette_adwaita.png`) and
+with the two extra rows the keyboard map's left column gained before the rebind popup's row
+(`keymap_rebind.png`); they were regenerated through lavapipe in the devShell, which is the
+rasteriser that reads them back.
+
+### The live proof
+
+Xvfb (`Xvfb :124 -screen 0 1280x800x24`), a 900 × 620 window, and **real X11 input through
+`xdotool`** — `--keys` cannot type into the rename field because scripted strokes go to
+`App::on_key` only, while the field is egui's. `HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and
+`XDG_CONFIG_HOME` all pointed into a temp tree, so the trash was the temp tree's.
+
+- `--files /tmp/…/scratchA`, in list view: `ctrl-shift-n` **created `created-dir`**; `F2`,
+  `ctrl+a`, `renamed.txt`, `Enter` **renamed `alpha.txt` to `renamed.txt`**; `Home`,
+  `Down`×2, `Delete` **moved `beta.txt` into `$XDG_DATA_HOME/Trash`** (`Trash/files/beta.txt`
+  plus an `info/beta.txt.trashinfo` whose `Path=` is the original). Final directory:
+  `created-dir/`, `gamma.txt`, `renamed.txt`; `alpha.txt` is now `renamed.txt`; only `beta.txt`
+  is in the trash. This is exactly the sequence a person types; the first attempt failed on
+  the release bug above, which is how it was found.
+- `--files /tmp/…/scratchB --capture …/rename-field.png --capture-after 8000`: the rename
+  field open on `alpha.txt`, holding `renamed-in-the-field.txt`, footer *Enter renames ·
+  Escape cancels*. `ctrl-shift+p` was pressed while the field was open and the capture shows
+  **no palette** — the gate, in the picture. The run wrote nothing.
+- `--files /tmp/…/scratchC --capture …/overwrite-card.png --capture-after 8500`: `F2`,
+  `beta.txt`, `Enter` opened the one card — *replace existing file?*, source
+  `…/alpha.txt`, destination `…/beta.txt`, answers `skip` / `keep both` / `replace`.
+- The same scenario with a **real pointer click on `replace`** (`xdotool mousemove 608 324`,
+  `click 1`): the request came back as `write_succeeded`, the destination was trashed first and
+  then the rename ran. Final directory has only `beta.txt`, and its bytes are now
+  `alpha content`; the trash holds `beta.txt` with its old `beta content`. The capture after
+  the answer shows the listing refreshed to one row and no card.
+
+PNGs: `/tmp/dtr-evidence/rename-field.png` and `/tmp/dtr-evidence/overwrite-card.png`,
+`/tmp/dtr-evidence/overwrite-answered.png`, each 900 × 620 (the window's physical pixels at
+1×).
+
+### What F7 still needs for remote panes
+
+The ssh `Backend` is merged with `create_dir`/`rename`/`copy`/`move_to`/`remove(Permanent)`
+and `caps.write = true, caps.trash = false`. The app's remote pane is the missing piece:
+
+1. `remote_file_browser` asks `self.vfs.backend(&BackendId::Ssh(alias))?.caps()` instead of
+   the read-only literal — which needs the browser to be built where the `Vfs` is, i.e. the
+   three `remote_file_browser` call sites become `App` methods.
+2. The remote listing moves from the SFTP worker to `Vfs::backend(alias).list()` (streamed
+   batches, `take_request`/`apply_listing` already exist and route by host *and* directory),
+   because a write through the VFS connection while the listing is a separate SFTP session is
+   the disagreement this milestone refused to ship.
+3. `pump_writes` then needs nothing: it already resolves the request's backend through `Vfs`,
+   so the ssh backend executes `Rename`/`Remove` on the alias its pane declared.
+4. The remote menu then hides only what `trash` decides: the delete is permanent and asks, and
+   `replace` clears the destination with `Removal::Permanent` (a trash-less backend's rule),
+   which the worker already honours through `Writes::new`'s replace value.
