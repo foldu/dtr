@@ -21,7 +21,7 @@ until there is an on-screen counter.
 | 4 | Tabs should be in the header | **Design change**, decided in [chrome.md](chrome.md) | `app.rs:4396` | all | M |
 | 5 | Needs HiDPI support | **Bug**, and the config already promised it | `render.rs:677`, `lib.rs:42` | every DPI ≠ 100% | S–M |
 | 6 | Latency feels bad on Windows | **Unverified**; two known floors, one invisible today | `pane.rs:1155`, `app.rs:4639` | Windows worst | measure |
-| 7 | Debug UI for fps / frame timing | **Missing**, cheap, unblocks 6 and 10 | `app.rs:3235`, `app.rs:4069` | all | S |
+| 7 | Debug UI for fps / frame timing | **Built** — see §5.2 | `crates/dtr/src/stats.rs` | all | S |
 | 8 | Icons and Nerd Fonts render badly | **Partly reproduced**: an uncovered glyph draws *nothing*; a glyph wider than its cell overflows | `render.rs:367` | all | S–M |
 | 9 | "pi has artifacts" | **Unverified**; one trap ruled out, see §4.2 | — | ? | needs capture |
 | 10 | Windows resize is sluggish | **Real, partly inherent**; one avoidable cost found | `app.rs:4329` | Windows | S–M |
@@ -332,17 +332,48 @@ and the display's actual refresh mode matters (Windows will happily run a panel 
 
 ### 5.2 The debug counter (note 7)
 
-Everything needed already exists and is thrown away into `tracing`:
+**Built** (`crates/dtr/src/stats.rs`), drawn in the same egui pass as the rest of the chrome.
+It exists because the numbers were only in `tracing` — loop iterations / frames / wakes per
+second, per-frame CPU ms and glyph count, cell metrics, scale and adapter — and a person
+looking at a laggy window should not have to run `-v` on the machine they are looking at.
 
-- loop iterations / frames / wakes per second (`crates/dtr/src/app.rs:3235`);
-- per-frame CPU ms and glyph count, logged when over 8 ms (`crates/dtr/src/app.rs:4069`);
-- publish gate in microseconds, whenever the panel changes;
-- rx/tx rates (`Meter`), scrollback length, atlas size, cell metrics, scale factor, adapter.
-
-A small egui `Area` in a corner, off by default, toggled by a palette command (and optional
-config key), showing fps, frame ms, present wait, publish→frame latency, glyphs/frame, grid,
-scale and adapter would turn notes 6 and 10 from feelings into numbers. It should reuse the
-`LoopReport` rather than add a second set of counters, and it must cost nothing when closed.
+- **On** with `--stats` at startup, or the palette's `overlay` command. That command is not
+  called `stats` because a command's first letter is its accelerator and `s` is `ssh`'s
+  (`crates/dtr-complete` fails the build on a collision). Off by default; there is no config
+  key.
+- **Shows** five lines: `frame last/avg/p99` ms, `present last/avg/p99` ms, fps with loop
+  iterations and wakes per second, glyphs (rasterised this frame — 0 is steady state, a high
+  count is font work), grid columns × rows, cell pixels and scale, and the GPU adapter. The
+  two timings are separate on purpose: `cpu_ms` stops before `present` (§5.1), so the present
+  wait — the vblank this box exists to make visible — cannot be inferred from it. The
+  percentiles are over the last 120 frames (two seconds at 60 Hz). On an idle window the
+  box reads about ten fps (`-v` beside it says `frames_per_s=10..12`); feeding a shell a
+  line every 20 ms pushed the same run to `frames_per_s≈100`. Its own ten-a-second refresh is
+  counted as a frame, and `--capture` forces every frame while it waits, so a PNG of an idle
+  window shows the capture's rate rather than the idle one.
+- **Where**: the bottom-right of the pane area, above the status row, as an `egui::Area` in
+  `Order::Middle` — over the panes and under every card, so a preferences sheet still covers
+  it. It is `interactable(false)` with selectable labels off, so a click or a drag over it
+  belongs to the terminal underneath, and its colours and font are the skin's
+  (`palette.card`/`text`/`border`, `style.value_font`): readable at 4K/150 % for the same
+  reason the rest of the chrome is.
+- **Cost, and what idle looks like**: off, no sample is taken, no `Instant` is read around
+  `present`, and nothing is drawn — the only per-frame work is a bool. It reuses
+  `LoopReport`'s rates rather than keeping a second set of counters that could disagree with
+  `-v`. On, it refreshes its readout every 100 ms (`stats::REFRESH_INTERVAL`), **not every
+  frame**: ten frames a second, and its own refresh is one of them, so a quiet window reads
+  about ten fps rather than zero. Typing or an animation pushes the number to whatever dtr
+  really draws — and the two timings are the cost of a real frame, not of a forced one. A
+  counter that asked for a frame per refresh would measure itself: fps would pin to the
+  display's rate whether the app was idle or busy, and the fans would run for a number.
+  (While the window is occluded it still wakes ten times a second, finds no surface and draws
+  nothing; that is the cadence, not a spin.)
+- **One frame stale.** A frame's own cost is not known until it has been submitted and
+  presented, so the box shows the ring as it stood when the frame began.
+- **Not in `--screenshot`**: the offscreen path renders from injected state, at 1×, with no
+  window, no `present` and no loop — there are no numbers to show. `--capture` photographs
+  the live window and does show it (under lavapipe, the numbers are the software
+  rasteriser's, not the machine's GPU).
 
 ### 5.3 Resize (note 10)
 
@@ -394,7 +425,8 @@ was last in §7.
 
 ## 7. Order, and what each step unlocks
 
-1. **Debug counter (§5.2).** Small, and it is the instrument for 6 and 10.
+1. **Debug counter (§5.2) — done.** `--stats`, or the palette's `overlay`: the instrument for
+   6 and 10 is now on the screen it measures.
 2. **DPI: grid size + status bar (§2) — done.** `Fonts::load` takes the factor and the guest
    measures 102 × 34 cells at 125 % (§2.1); 8 and 9 were re-judged afterwards.
 3. **Glyph fitting (§4.1) — done.** `render::Constraint` decides the policy (clamp every

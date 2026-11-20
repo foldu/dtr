@@ -76,6 +76,13 @@ struct Args {
     #[arg(long)]
     keymap: bool,
 
+    /// Draw the debug overlay: fps, frame time, the present wait, glyphs, grid,
+    /// scale and the GPU adapter. Off by default; the palette's `overlay`
+    /// command toggles it too. A flag as well because the Windows build and the
+    /// VM are where it is wanted, and a palette is awkward there.
+    #[arg(long)]
+    stats: bool,
+
     /// List the installed families that can be a terminal grid, then exit
     #[arg(long)]
     fonts: bool,
@@ -762,6 +769,7 @@ fn main() -> anyhow::Result<()> {
             gpu: gpu.clone(),
             preferences: args.preferences,
             keymap: args.keymap,
+            stats: args.stats,
             serial_dialog: args.serial_dialog.as_deref().map(|port| {
                 dtr::serial_dialog::SerialDialog::from_store(port, "", store.as_deref())
             }),
@@ -805,6 +813,7 @@ fn main() -> anyhow::Result<()> {
         gpu,
         preferences: args.preferences,
         keymap: args.keymap,
+        stats: args.stats,
         serial_dialog: args
             .serial_dialog
             .as_deref()

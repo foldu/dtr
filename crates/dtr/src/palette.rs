@@ -30,6 +30,12 @@ pub enum Action {
     Preferences,
     /// The same page the strip's menu opens.
     About,
+    /// The debug overlay: fps, frame time and the vsync wait `present` hides.
+    ///
+    /// Named `overlay` and not `stats` because a command's first letter is its
+    /// accelerator and `s` is `ssh`'s — `crates/dtr-complete` fails the build on
+    /// a collision. The `--stats` flag is the other way in.
+    Stats,
 }
 
 pub struct Palette {
@@ -434,6 +440,8 @@ fn action_for(line: &str) -> Option<Action> {
         "keys" => Some(Action::Keys),
         "preferences" => Some(Action::Preferences),
         "about" => Some(Action::About),
+        // `stats` would share ssh's accelerator; see `Action::Stats`.
+        "overlay" => Some(Action::Stats),
         _ => None,
     }
 }
@@ -489,6 +497,13 @@ mod tests {
             action_for("preferences"),
             Some(Action::Preferences)
         ));
+    }
+
+    #[test]
+    fn overlay_toggles_the_debug_counter() {
+        // `stats` would collide with ssh's accelerator; the command is named for
+        // what it draws and the flag keeps the word the docs use.
+        assert!(matches!(action_for("overlay"), Some(Action::Stats)));
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub mod serial_dialog;
 pub mod settings;
 pub mod sources;
 pub mod sprite;
+pub mod stats;
 pub mod system;
 pub mod terminfo;
 pub mod theme;

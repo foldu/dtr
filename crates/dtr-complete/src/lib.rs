@@ -132,6 +132,13 @@ const COMMANDS: &[Command] = &[
         summary: "show the keyboard map",
         argument: Argument::None,
     },
+    // The debug counter of `docs/windows.md` §5.2. Not named `stats` because
+    // `s` is ssh's accelerator.
+    Command {
+        name: "overlay",
+        summary: "show frame time and fps",
+        argument: Argument::None,
+    },
     Command {
         name: "quit",
         summary: "close the window",

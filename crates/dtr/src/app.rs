@@ -302,6 +302,10 @@ pub struct Startup {
     pub preferences: bool,
     /// Open the keyboard map on start, the same way.
     pub keymap: bool,
+    /// Draw the debug overlay on start (`--stats`): fps, frame time, the present
+    /// wait, glyphs, grid, scale and adapter. Off by default, because a counter
+    /// over the terminal is a measurement and not decoration.
+    pub stats: bool,
     /// The serial connection sheet to show over the session, for reviewing the
     /// chrome before the connect path uses it (`--serial-dialog`).
     pub serial_dialog: Option<crate::serial_dialog::SerialDialog>,
@@ -629,6 +633,8 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             settings
         },
         about_open: false,
+        stats_overlay: startup.stats,
+        stats_due: std::time::Instant::now(),
         keymap_card: crate::keymap::Overlay {
             open: startup.keymap,
             edit: None,
@@ -1412,6 +1418,15 @@ struct App {
     settings: crate::settings::Settings,
     /// The about card: a page with no state, so a flag.
     about_open: bool,
+    /// Whether the debug overlay is on (`--stats`, or the palette's `overlay`).
+    /// The samples themselves live on `Gpu`, because the present wait is
+    /// measured where `present` is called.
+    stats_overlay: bool,
+    /// When the overlay's readout is next due. While it is on, this is the only
+    /// thing that asks for a frame — ten a second, not one per refresh: an
+    /// instrument that forced every frame would measure itself. See
+    /// [`crate::stats::REFRESH_INTERVAL`].
+    stats_due: std::time::Instant,
     /// The keyboard map: the card's own state (whether it is up, and which row is
     /// waiting for a key), plus the bindings it draws, which are rebuilt whenever
     /// one is written.
@@ -4963,6 +4978,20 @@ impl App {
                 self.about_open = true;
                 self.repaint("about");
             }
+            // The debug overlay: the same switch `--stats` flips at startup.
+            Action::Stats => {
+                self.stats_overlay = !self.stats_overlay;
+                // A window switched on now starts its window now: a p99 from
+                // ten minutes ago is not the p99 of what is being measured.
+                if self.stats_overlay {
+                    self.stats_due = std::time::Instant::now();
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.frame_samples.clear();
+                    }
+                }
+                tracing::debug!(on = self.stats_overlay, "debug overlay");
+                self.repaint("debug overlay toggled");
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -4974,6 +5003,10 @@ struct LoopReport {
     iterations: u64,
     frames: u64,
     wakes: u64,
+    /// The last completed second's rates, computed from the same counts the
+    /// `-v` line logs. The overlay reads them instead of keeping a second set of
+    /// counters that could disagree with the log.
+    rates: crate::stats::LoopRates,
 }
 
 impl Default for LoopReport {
@@ -4983,6 +5016,7 @@ impl Default for LoopReport {
             iterations: 0,
             frames: 0,
             wakes: 0,
+            rates: crate::stats::LoopRates::default(),
         }
     }
 }
@@ -5037,8 +5071,18 @@ fn report_loop(app: &App) {
         wakes = report.wakes,
         "loop"
     );
+    // The overlay shows the same second as rates rather than counts: a count
+    // and a rate differ by the window's length, and the window is this
+    // function's business, not the box's.
+    let seconds = elapsed.as_secs_f32().max(f32::EPSILON);
+    let rates = crate::stats::LoopRates {
+        iterations_per_s: report.iterations as f32 / seconds,
+        frames_per_s: report.frames as f32 / seconds,
+        wakes_per_s: report.wakes as f32 / seconds,
+    };
     *report = LoopReport {
         since: std::time::Instant::now(),
+        rates,
         ..LoopReport::default()
     };
     // Free check once a second: a Wayland move emits no `Moved`, so this is
@@ -5404,6 +5448,26 @@ impl ApplicationHandler<UserEvent> for App {
             }
             Some(due) => sooner(due, &mut deadline),
             None => {}
+        }
+
+        // The debug overlay refreshes its readout on a fixed low cadence, not
+        // once per frame. A counter that asked for a frame per refresh would
+        // measure itself: idle fps would be the display's rate, the fan would
+        // run for a number, and neither "is dtr idle?" nor "what does a frame
+        // cost?" would have an answer. Its own refresh counts as a frame, so a
+        // quiet window reads about ten a second, not zero; typing and animation
+        // push it to whatever dtr really draws. The redraw is requested directly
+        // rather than through `repaint`, because `repaint` also sets `wake`,
+        // which would make the loop spin between frames — and because it would
+        // log a line per frame under `-v`.
+        if self.stats_overlay {
+            if self.stats_due <= now {
+                self.stats_due = now + crate::stats::REFRESH_INTERVAL;
+                if let Some(gpu) = &self.gpu {
+                    gpu.window.request_redraw();
+                }
+            }
+            sooner(self.stats_due, &mut deadline);
         }
 
         // One value, every iteration: without this the last deadline stays set
@@ -6128,10 +6192,19 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut pick_cancel = None;
                     let mut keymap_event = None;
                     let mut about_close = false;
+                    // The overlay's zero-cost state: a bool, the last completed
+                    // second's rates (from `LoopReport`, the same numbers `-v`
+                    // logs) and the focused grid's size.
+                    let stats = crate::stats::Input {
+                        enabled: self.stats_overlay,
+                        rates: self.loop_report.borrow().rates,
+                        grid: self.session().map_or((0, 0), |session| session.grid),
+                    };
                     let rendered = gpu.render(
                         &panes,
                         self.frames_drawn,
                         self.started,
+                        stats,
                         &file_panes,
                         &status,
                         &mut palette,
@@ -6448,6 +6521,11 @@ impl ApplicationHandler<UserEvent> for App {
                             "slow frame"
                         );
                     }
+                    // Nothing here asks for another frame for the overlay. Its
+                    // readout runs on its own low cadence in `about_to_wait`: a
+                    // counter that forced a frame per refresh would measure
+                    // itself, and idle fps would be the display's rate rather
+                    // than dtr's (`crate::stats::REFRESH_INTERVAL`).
                     if let Err(err) = rendered {
                         tracing::error!(%err, "render");
                     }
@@ -6490,6 +6568,13 @@ struct Gpu {
     /// than waiting for the compositor.
     frame_began: std::time::Instant,
     cpu_ms: f32,
+    /// The debug overlay's rolling frame and present durations. Empty and never
+    /// written while the overlay is off — the `Instant` around `present` is not
+    /// even read then.
+    frame_samples: crate::stats::FrameSamples,
+    /// The adapter wgpu picked. `-v` logs it once at startup; the overlay names
+    /// the GPU that produced the numbers it is showing.
+    adapter_name: String,
     /// The title the window was last told, so a frame that changes nothing does
     /// not talk to the window manager — which on Wayland is a round trip.
     title: String,
@@ -6692,12 +6777,15 @@ impl Gpu {
             look,
             window.scale_factor() as f32,
         );
+        // Kept for the overlay: `-v` logs the adapter once at startup, and a
+        // counter should say which GPU produced the numbers it shows.
+        let adapter_name = adapter.get_info().name.clone();
         tracing::info!(
             format = ?config.format,
             width = config.width,
             height = config.height,
             present_mode = ?config.present_mode,
-            adapter = %adapter.get_info().name,
+            adapter = %adapter_name,
             "window surface"
         );
 
@@ -6718,6 +6806,8 @@ impl Gpu {
             egui_state,
             frame_began: std::time::Instant::now(),
             cpu_ms: 0.0,
+            frame_samples: crate::stats::FrameSamples::default(),
+            adapter_name,
             title: String::new(),
             installed_skin: Some(skin),
             window,
@@ -6799,6 +6889,10 @@ impl Gpu {
         panes: &[crate::render::PaneView<'_>],
         frames_drawn: u64,
         started: std::time::Instant,
+        // The debug overlay's inputs: whether to measure, the loop's rates from
+        // `LoopReport`, and the focused grid's size. Off means the `Instant`
+        // around `present` is not even read; see `crate::stats`.
+        stats: crate::stats::Input,
         files: &[FilePaneView<'_>],
         status: &Status,
         palette: &mut Palette,
@@ -7111,6 +7205,25 @@ impl Gpu {
                     *pick_cancel = Some(file.id);
                 }
             }
+            // The debug overlay (`--stats`, or the palette's `overlay`): one
+            // label of chrome text in the bottom-right of the pane area, above
+            // the status row. `crate::stats::overlay` puts it in `Order::Middle`
+            // — over the panes, under every card — and makes it
+            // `interactable(false)`, so a click over it still reaches the cell
+            // underneath. The numbers are the ring as it stood when this frame
+            // began: a frame's own cost is only known once it is presented.
+            if stats.enabled {
+                let metrics = self.grid.metrics();
+                let live = crate::stats::Live {
+                    input: stats,
+                    glyphs: self.grid.glyphs(),
+                    cell: (metrics.cell_width, metrics.cell_height),
+                    scale: self.scale(),
+                    adapter: &self.adapter_name,
+                    status_visible,
+                };
+                crate::stats::overlay(ui, look, &self.frame_samples, &live);
+            }
             // The composition box goes over the grid and under the
             // modals: it is part of typing, and a palette a composition
             // could cover would be a palette nobody could read.
@@ -7354,9 +7467,18 @@ impl Gpu {
             }
         }
         // Everything above is our work; `present` waits for the compositor and
-        // would otherwise be logged as a slow frame at 120 Hz.
+        // would otherwise be logged as a slow frame at 120 Hz. That is exactly
+        // the gap `docs/windows.md` §5.1 names: `cpu_ms` stops here, so the
+        // overlay measures the wait beside it — and only when the overlay is on,
+        // so a window nobody is measuring pays no `Instant` for a number nobody
+        // reads.
         self.cpu_ms = self.frame_began.elapsed().as_secs_f32() * 1000.0;
+        let present_began = stats.enabled.then(std::time::Instant::now);
         self.queue.present(output);
+        if let Some(began) = present_began {
+            self.frame_samples
+                .push(self.cpu_ms, began.elapsed().as_secs_f32() * 1000.0);
+        }
 
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
