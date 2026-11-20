@@ -396,6 +396,72 @@ What the window still owns: the history stacks, reading the mounts and the ssh c
 rows' pictures, the `Browser` in the content rectangle, the search's meaning (the chrome reports text,
 not a filter), and the keyboard. The chrome is mouse-only today and says so.
 
+### As built (F4)
+
+`crates/dtr-portal` grows a second window *kind* and a second binary. `dtr-files [PATH]` is a
+launcher, not an application: it calls `org.dtr.Files.OpenWindow(s path, a{sv} options) -> (s handle)`
+at `/org/dtr/Files`, served on the **same bus connection** as the file chooser, and the session bus
+activates the same `dtr-portal` process if it is not running. `org.dtr.Files.service` is the second
+activation file, installed with the same `Exec=` substitution as the picker's; `OpenWindow` answers
+only once the window exists (the loop acks the waiting method), and `CloseWindow(s handle)` takes it
+down. Handles are object-path-shaped (`/org/dtr/Files/window/3`) so a later `Close` can be an object
+method without changing the wire. The launcher has a timeout, says why when there is no session bus
+or no activatable daemon, and exits non-zero.
+
+The daemon's app becomes a **per-window screen registry**: `HashMap<WindowId, Screen>` where a screen
+is `Picker` or `Manager`, one `egui::Context` per window (as `dtr-frame` already guaranteed). The
+picker's window is created hidden at startup and is not a screen while hidden; its queue (`Desk`) is
+unchanged. A manager window is one `Frame` per request and **counts as a visible window** for the
+idle policy — a person looking at a file manager is not a daemon to shut down — so the process exits
+only when every window has been gone for the idle timeout. The capture hook
+(`DTR_PORTAL_CAPTURE`) photographs the first window shown: a picker run is unchanged, and a
+`dtr-files` run gives the manager's picture.
+
+The manager screen is `src/manager.rs` around `dtr_files::manager`: `ManagerLayout::new(client,
+&skin)` is computed once and shared by `manager_ui` and the `pane_ui` in `layout.content`; the
+toolbar's `ManagerAnswer` and the pane's `PaneOutcome` are folded into the browser, and a `Browser` on
+a host gets `Ssh`'s caps (write, no trash), so its menu offers the verbs the backend can run. History
+is a stack of `(machine, path)` — a sidebar host row is a new browser, and `back` returns to the
+other machine. The editable location has a draft (the chrome draws the field from
+`ManagerState.location`), resolves `~` and a `host:` prefix, and resolves a relative path against the
+directory on screen; a host's relative path is relative to that host's current directory, where `.`
+is the far account's home.
+
+Three data sources and one worker. `src/desktop.rs` reads `user-dirs.dirs` (`Places`), `/proc/mounts`
+(real mounts only: pseudo filesystems, the root and duplicate mount points dropped, octal-escaped
+mount points decoded) and `~/.ssh/config` (`dtr-sshconfig` aliases; a wildcard or negated pattern is
+not a host). `src/worker.rs` is one thread with a compio runtime: it lists remote directories through
+`dtr_vfs::Ssh`, counts local ones for the status bar, and runs the browser's `WriteRequest`s through
+the VFS verbs — `replace` clears the destination with that removal first, and a `Conflict` crosses
+the thread as its destination so the pane's overwrite card appears. Local browsing is the browser's
+own streamed `Local::list`; remote browsing is wired to the same pump.
+
+**Verified** under Xvfb through D-Bus activation: `examples/manager_call.rs` calls `OpenWindow` on a
+private bus whose activation directory names the debug binary, the daemon maps a 1000 × 700 manager
+window on the scratch directory, the client sends `Right`, `Enter` through **XTEST** (the X server's
+own input path, so the window's `KeyboardInput` handler runs), and the daemon's capture shows
+`/tmp/f4-scratch/pictures` with `inside.png` and `1 item` — the navigation, the grid, the sidebar
+(`Places`, real `Drives`) and the status bar in one picture. `dtr-files` itself opens, captures and is
+closed with `CloseWindow`; the picker's own capture and private-bus suite are unchanged.
+
+**Gaps, exactly.** The pane's `pane_ui` has no body-only seam, so the manager's content draws the
+pane's own header under the window toolbar: two breadcrumbs (the capture shows both). The status
+bar's count is a second listing in the worker because `Browser` exposes no public entry count, and
+the search box stores its text but does not filter (`dtr-files` has no search API) — both need a
+small addition to `crates/dtr-files`, which F4 was not allowed to touch. A selection's total size is
+`None` (the bar shows the count only). Host rows open at `.`: `dtr-vfs::Ssh` has no `home()` and the
+window does not guess one. Drives are `/proc/mounts`, so Windows has none. Sidebar rows are text (no
+theme icon resolver in this process), and the capture's grid icons are egui's missing-image
+placeholder because Xvfb has no icon theme — the same environment note the picker's capture carries.
+The write verbs have no chords in the manager window (the terminal's `[keys]` map is F6's business):
+they are reachable through the pane's right-click menu only. Opening a *remote* file sets the
+browser's download request, which this window does not pump (downloads are F5/F7); a local file goes
+to `xdg-open`. `CopyPath` uses egui's in-app clipboard, so it does not reach other applications.
+Remote browsing has no live ssh server in this task's evidence. `WindowOptions` grew no `visible`
+field — that would have required editing `crates/dtr`'s exhaustive literal — so the warm picker window
+is still created and hidden two calls later, the one map that can flash at daemon startup (inherited
+from F3).
+
 ## 7. Writes
 
 The half that can lose data, so it comes last and with rules rather than defaults:
@@ -630,3 +696,12 @@ known folders, the drives, and a `FindFirstFileW` walk whose attributes come wit
 `75cca68` (the two things the pane had been asking the wrong authority: hidden is a field of the
 listing, and the icon is the desktop's before it is the theme's). `docs/windows.md` §11 is the
 account, with the captures it was written from.
+
+**F4 landed.** `7d8670d` (the per-window screen registry, `org.dtr.Files` and its activation file,
+the `dtr-files` launcher, the manager screen, the sidebar's three sources, the worker, and the
+private-bus tests for the new interface) and `a42a0ad` (a typed location is relative to the directory
+on screen). The gate the milestone asks for — "the same browser in a third window, and a snapshot of
+the window" — is the Xvfb capture of the real manager window §6 describes: 1000 × 700, the scratch
+listing, the sidebar and the status bar, taken after an XTEST-driven navigation into `pictures/`.
+`nix build .#dtr-portal .#checks.x86_64-linux.dtr-portal-packaging` installs both binaries
+(`dtr-portal`, `dtr-files`) and both activation files, with `Exec=` naming the installed daemon.

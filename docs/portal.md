@@ -554,3 +554,199 @@ chrome is what the capture is for. The `first frame elapsed_ms=3015` line is mos
 client's deliberate three-second wait before it asked, not the window: the frame itself was
 drawn 20 ms after the request, which is what "warm" means. The daemon's exit status is 0
 because the idle timeout ended the loop — the same run proves the idle policy.
+
+## 10. The manager window, as built (F4)
+
+F4 puts a second window kind in this process, and a second binary beside the
+daemon. Neither is a second daemon: the point of the warm process is one wgpu
+device, one font set and one icon cache for the picker and the manager, so the
+manager's window is a `Frame` on the same loop and its D-Bus interface is on the
+same connection.
+
+### 10.1 Per-window screens
+
+`src/window.rs`'s app was written around one window id and one `Picker`. It is
+now a `HashMap<WindowId, Screen>` where a `Screen` is `ScreenKind::Picker` or
+`ScreenKind::Manager` plus that window's input state (pointer, click count,
+modifiers, the manager's last layout, its refresh deadline). `dtr_frame::Windows`
+was already a `Vec<Frame>` with one `egui::Context` per window, so the event
+dispatch is `frame.id()` → the screen → the picker's or the manager's handler.
+
+The two kinds have different lifecycles, and the map is about the *visible* ones:
+
+- **Picker** — one warm window, created hidden in `resumed` and reused. It is not
+  in the map while hidden, so the idle policy and the capture hook ask about
+  windows a person can see. `Desk` still queues requests, still answers a
+  `Close` that arrives first, and its unit tests are unchanged.
+- **Manager** — a `Frame` and a `Screen` per `OpenWindow`, created visible and
+  closed by the person (or by `CloseWindow`). A manager window *is* a visible
+  window, so the process stays alive while one is open: the memo's "idle-exit
+  when it owns no visible window" is `idle_exit(screens.len(), last_activity,
+  idle)` and nothing else. Closing a manager hides it in `window_event` and drops
+  the `Frame` in `about_to_wait` (`Windows::close` needs the collection, which the
+  event callback does not have). The run that verified F4 also proves the path:
+  `CloseWindow` → window gone → idle timeout → `event_loop.exit()`.
+
+The capture hook (`DTR_PORTAL_CAPTURE` / `DTR_PORTAL_CAPTURE_AFTER_MS`) now
+photographs **the first window shown**, whichever kind it is: a picker run is a
+picker capture as before, and a `dtr-files` run is the manager's.
+
+### 10.2 `org.dtr.Files` and `dtr-files`
+
+```
+org.dtr.Files                      at /org/dtr/Files, on the chooser's connection
+  OpenWindow  (s path, a{sv} options) -> (s handle)
+  CloseWindow (s handle)             -> ()
+```
+
+`src/files.rs` is the interface. The options are `title`, `parent_window` and
+`modal`; an unknown key is ignored (the interface may grow) and a known one of
+the wrong type is `InvalidArgs`. An empty `path` means the person's home — the
+interface says so rather than a launcher guessing in another process — and a path
+that names a file opens its parent with the file selected, which is the
+terminal's `--files some/file` rule.
+
+`OpenWindow` **waits for the loop's answer**: the D-Bus method posts an
+`Event::OpenManager(OpenWindowRequest)` and waits on the request's own ack
+channel, which the window loop fills when `Windows::open` succeeded (the handle)
+or failed (the reason). A launcher therefore learns that the window exists
+instead of a handle for nothing, and a machine with no display is an error the
+launcher prints. `CloseWindow` is the same shape and answers whether a window had
+that handle.
+
+Two files are needed for activation and both are installed, substituted and
+checked: the chooser's service file (unchanged) and
+`assets/org.dtr.Files.service`, both `Exec=$out/bin/dtr-portal`. The daemon owns
+both names: the builder owns `org.freedesktop.impl.portal.desktop.dtr`, and after
+registering the object at `/org/dtr/Files` it calls
+`Connection::request_name("org.dtr.Files")` — zbus's order for a name registered
+outside the builder.
+
+`dtr-files` is the second binary of the package (`src/bin/dtr-files.rs`). It
+takes an optional path, resolves it against the shell's directory, calls both
+`OpenWindow` and (after the capture, in the verification client) `CloseWindow`,
+has a 30 s timeout because a hung daemon must not hang a desktop, and exits
+non-zero with a sentence on no session bus, no activation, or a refusal. It does
+not link a window: a launcher that drew one would be the second process this
+crate exists to avoid.
+
+### 10.3 The manager screen, its data, and its worker
+
+`src/manager.rs` is the window half of `docs/manager.md` §6: `ManagerLayout::new`
+is computed once per frame and shared by `manager_ui` and `pane_ui`, the chrome's
+`ManagerAnswer` and the pane's `PaneOutcome` are folded into the `Browser`, and a
+browser on a host gets `Ssh`'s caps so its menu offers the verbs it can run.
+History is a stack of `(machine, path)` — a sidebar host row replaces the browser
+and `back` returns to the other machine. The editable location keeps a draft
+(the chrome draws the field from `ManagerState.location`), understands `~` and a
+`host:` prefix, and resolves a relative path against the directory on screen.
+
+`src/desktop.rs` reads the sidebar's data: `Places`, `/proc/mounts` filtered to
+real mounts (pseudo filesystems, the root and duplicate mount points dropped,
+octal escapes decoded) and `~/.ssh/config` through `dtr-sshconfig`. Every reader
+has a `from text` half, so the filters are unit tests without a machine. A host
+row opens at `.`; `dtr-vfs::Ssh` has no `home()` and the window will not invent
+one.
+
+`src/worker.rs` is the "UI thread asks for slow work" rule for this process: one
+thread, one compio runtime, three jobs. A remote listing through
+`dtr_vfs::Ssh::list` collected into one piece for `Browser::apply_listing`; a
+local count for the status bar; and the browser's `WriteRequest`s executed
+through the VFS verbs, with `replace` clearing the destination with that removal
+first. The conflict case is why the worker has its own result type: `dtr-files`
+chooses its overwrite card by downcasting to `dtr_vfs::Conflict`, and an
+`anyhow::Error` cannot cross a thread — so the worker carries the destination and
+the window rebuilds the typed error. Local browsing needs none of this: the
+browser streams `Local::list` itself, as in the picker.
+
+### 10.4 Tests and verification
+
+The devShell gate is unchanged and green:
+
+```sh
+nix develop .#default --command bash -c \
+  'cargo fmt --all && cargo test -p dtr-portal && cargo build -p dtr-portal'
+```
+
+New tests, all without a window: the mount reader (pseudo/root/duplicate
+filtering, octal escapes), the ssh-config reader (aliases, wildcards and
+negations, in file order once), the manager's history across machines, its
+sidebar tick, its count plumbing, a typed relative location, and the worker's
+counts, its five write verbs through the real backends, and the conflict
+boundary. The private-bus suite serves **both** interfaces on one private
+`dbus-daemon`: the new half asserts the `org.dtr.Files` introspection signature,
+that an `OpenWindow` reaches the headless opener with its path/title/parent/modal
+and answers the opener's handle, that `CloseWindow` reaches the same window, that
+an empty path is home and an unknown option is ignored, that a refused window is
+an `error` (with the reason), that a wrong-typed option is `InvalidArgs` before
+the opener, and that the shipped `dtr-files` binary exits non-zero on a bus with
+no daemon. `DTR_PORTAL_CAPTURE` is how the window itself is photographed; the
+Xvfb run is §10.5.
+
+The package grew by one binary and one activation file, and `nix build
+.#dtr-portal .#checks.x86_64-linux.dtr-portal-packaging` is the evidence that
+both binaries are installed and both service files name the installed daemon:
+
+```
+$ ls $out/bin
+dtr-files  dtr-portal
+```
+
+The packaging check now also asserts that `org.dtr.Files.service`'s `Name` is
+`org.dtr.Files`, that its `Exec=` is the same installed binary as the chooser's,
+and that `bin/dtr-files` exists.
+
+### 10.5 Verification, and what F4 does not do
+
+The window is verified under Xvfb through **D-Bus activation**, not a
+pre-started daemon: a private `dbus-run-session` bus is started with
+`XDG_DATA_DIRS` pointing at a directory holding both `.service` files whose
+`Exec=` is `target/debug/dtr-portal`; `examples/manager_call.rs` calls
+`OpenWindow`, which is the call that activates the daemon. The daemon maps a
+1000 × 700 manager window on a scratch directory whose `pictures/` holds
+`inside.png`; the client sets X input focus and sends `Right`, `Enter` with
+**XTEST** — the X server's own input path, so the window's `KeyboardInput`
+handler is what moves the listing — and the daemon's capture (4000 ms after the
+window appeared) shows `/tmp/f4-scratch/pictures`, `inside.png`, `1 item` and the
+status bar's path. The log's `manager key` lines were the check that the keys
+were *the window's*, and the PNG is the check that the surface, the skin, the
+sidebar, the grid and the bar agree. `dtr-files` itself is run the same way: its
+handle is printed, the window captured, `CloseWindow` sent with `dbus-send`, and
+the daemon exits at its idle timeout (exit 0). The picker's capture and the
+picker half of the private-bus suite still pass unchanged.
+
+What is *not* done, exactly:
+
+- **The pane's header is drawn inside the content.** `pane_ui` has no
+  body-only seam, so the manager window shows the window toolbar's breadcrumb and
+  the pane's own header breadcrumb (the capture has both). A `pane_body_ui` in
+  `dtr-files` is the fix, and that crate was out of scope.
+- **The status count is a second listing.** `Browser` has no public entry count,
+  so the worker counts the local directory in its own walk. The count can lag a
+  frame, and the search box stores text without filtering because `dtr-files`
+  exposes no search API either — the status bar's `shown of total` can
+  consequently never appear.
+- **The selection's total size is `None`.** `selected_paths()` gives the count
+  but not the sizes; the bar shows the count and drops the total, which the
+  chrome documents as the "size unknown" state.
+- **Host rows open at `.`** (`Ssh` has no `home()`), **drives are Linux-only**
+  (`/proc/mounts`; Windows has no drives section), and **sidebar rows are text** —
+  no theme icon resolver lives in this process.
+- **No write chords.** The browser's verbs are reachable through the pane's
+  right-click menu only; mapping `F2`/`Delete`/`Ctrl+Shift+N` is the terminal's
+  `[keys]` business (F6), not this window's.
+- **A remote file does not open.** `Enter`/the menu on a remote file sets the
+  browser's download request, which this window does not pump (downloads are
+  F5/F7); local files go to `xdg-open`. `CopyPath` uses egui's in-app clipboard,
+  so it does not reach other applications.
+- **Remote browsing has no live-server evidence.** The pump is wired to
+  `dtr_vfs::Ssh` (the same backend the terminal's panes use) but the verification
+  run had no ssh host; its list path is the one the VFS's own scripted-wire tests
+  cover.
+- **The warm picker window is still created visible and hidden two calls later.**
+  `dtr-frame::WindowOptions` has no `visible`, and adding it would have required
+  editing `crates/dtr`'s exhaustive struct literal, which this task could not
+  touch; the flash risk on a real window manager stays F3's documented gap.
+- **One manager window per call, no tabs, no splitter.** Several `dtr-files`
+  calls open several windows (the map and the worker route by id), but the
+  milestone's window has one content pane.
