@@ -422,6 +422,219 @@ a_multi_chunk_file_reports_monotonic_progress ... ok
 a_file_that_appears_after_the_answer_is_not_clobbered ... ok
 ```
 
+## 12. The ssh adapter, as built
+
+`crates/dtr-transfer-ssh` is the other half of the F5 seam: its `SshTransport`
+implements `Transport` for **every** job shape, so the wiring holds one transport
+beside one queue. It depends on `dtr-transfer` (the contract), `dtr-sftp` (the
+segmented codec), `dtr-vfs` (`Location`/`BackendId`/`Meta`), `compio` (its
+timers — the crate has no runtime of its own), `anyhow`, and `tracing` for the
+one reconnect line. Its dev-dependencies are `async-channel` (the fake wire's
+two ends) and `tempfile` (the local ends).
+
+```
+nix develop .#default --command bash -c \
+  'cargo fmt --all && cargo test -p dtr-transfer-ssh && cargo build -p dtr-transfer-ssh'
+```
+
+Eighteen integration tests pass (`tests/wire.rs`), driven through a fake SFTP
+server on an in-memory wire. There are no unit tests: the unit is the protocol
+conversation, and the fake is the smallest thing that has one.
+
+§9's closing sentence — "the segmented **read** API is the one gap this
+integration exposes" — is now historical. `begin_read`/`read_chunk`/
+`finish_read` landed in `dtr-sftp` (`dtr-vfs`'s remote copy uses them too), and
+this adapter's download and cross-host shapes are built on them.
+
+### 12.1 Routing is the endpoints', not the direction's
+
+| source | part (destination) | operation |
+| --- | --- | --- |
+| local | local | `LocalTransport`'s `LocalCopyOp`, untouched |
+| local | an alias | `StreamOp` over a local `File` and the alias's segmented upload (`OPEN`/`WRITE`/`CLOSE`) |
+| an alias | local | `StreamOp` over the alias's segmented read (`OPEN`/`READ`/`CLOSE`) and a local `File` |
+| one alias | the same alias | `StreamOp` with two handles on that one session |
+| one alias | another alias | `StreamOp` over a segmented read and a segmented write: v3 has no server-to-server copy, so the bytes pass through dtr |
+
+`OpenRequest::direction` is the card's word, not a routing hint: `Copy` covers a
+same-host remote copy, and `Move` is whatever the endpoints are (`Move` is
+copy → publish → remove, so the bytes still go the way the locations say). The
+adapter never branches on it. `stat`, `publish`, `discard`, `remove` and
+`preflight` route on the one `Location`'s `BackendId` by the same rule, and a
+local pair never opens an alias session — one queue of local jobs needs no
+network at all.
+
+### 12.2 The session: one per alias, created on the driver's thread
+
+The queue's driver already runs inside a compio runtime on one thread
+(`docs/compio.md` §10.3), and compio's handles are thread-local, so the adapter
+**starts no thread and owns no mailbox**. It is created on the thread that will
+poll its futures, and it keeps a `HashMap<String, Rc<RefCell<Option<Session>>>>`:
+one session per alias. An `Op` does not own the session — a `Session` is `!Send`
+and the op outlives one `open` — so it holds the alias's slot plus the codec's
+handle (`Upload`/`Read`), both plain values.
+
+A step borrows the slot for exactly the packets it needs and gives it back; a
+`stat`, a `discard`, or another job on a free machine can use the alias between
+segments. That is the interleaving measurement 5 of `docs/manager.md` §8 asks
+for, and it is why the queue can keep its per-step cancel granularity. The plain
+`RefCell` (rather than the per-alias thread `crates/dtr-vfs/src/ssh.rs` needs) is
+sound because the queue holds every machine a job touches for its whole run
+(§3): two ops never use one alias at once, so there is never a second borrower
+to panic on.
+
+Every request — and the `Session::connect` itself — has a 30 s deadline. The
+`ssh` child's args are the codec's (`BatchMode=yes`, `-s <alias> sftp`), and a
+child that hangs in connect is treated like a dead one.
+
+Two rules differ:
+
+- **A whole-session verb is retried once on a fresh child** — `stat`, `publish`,
+  `discard`, `remove`, `preflight`. A failed session is not a session, and
+  leaving a dead child in the slot makes every later call fail the same way,
+  which reads as "this host is down" long after it came back (the rule
+  `crates/dtr-vfs/src/ssh.rs` states). The first failure logs one
+  `sftp failed; reconnecting` line with the alias and the operation.
+- **A segment is never retried.** A reconnect loses the `SSH_FXP_OPEN` handle,
+  so a failed segment fails the file; the queue's retry reopens the part from
+  byte zero and `attempt` increments (§5). Resuming from an offset is not in the
+  codec's API yet.
+
+One session can serve more than one handle at a time, which is what a same-host
+copy uses: two `OPEN`s on one session, then one `READ` and one `WRITE` per
+segment. The requests are serialised by the codec's one-answer-at-a-time rule;
+the session is still released between steps.
+
+### 12.3 Publish, discard, remove, preflight
+
+| method | adapter |
+| --- | --- |
+| `stat(at)` | local: `LocalTransport`. Alias: `Session::stat`, with the server's "no such file" mapped to `Ok(None)` (§12.5) and every other error a real error. |
+| `open` | §12.1's four shapes. An upload creates the remote part with `begin_upload` *before* opening the local source, so a missing/unreadable source releases the session and leaves the server's part to the queue's `discard`; a download creates the local part after `begin_read` and does the same in reverse. |
+| `publish(part, real, overwrite)` | the codec's `Session::rename(part, real, overwrite)` verbatim. The part and the real name must be on one machine (they always are: the part is in the destination directory). `overwrite = true` — only after the user answered "replace" — uses `posix-rename@openssh.com` when the server advertised it and the plain packet otherwise; `overwrite = false` always uses plain `SSH_FXP_RENAME`, which fails if the name appeared, so a "keep both" that lost a race cannot clobber what it kept (`docs/sftp.md` §7). A no-replace race therefore spends one reconnect and one repeated rename before it fails — the reconnect rule cannot tell a status error from a dead child — and the files are untouched. |
+| `discard(part)` | `Session::remove(part)`; a missing part is `Ok(())`, classified inside the attempt so the normal "already gone" answer costs no reconnect. |
+| `remove(at)` | local: `LocalTransport`. Alias: `Session::stat` then `REMOVE` or `RMDIR`, because v3's `REMOVE` on a directory is the server's refusal rather than a rule (the same choice `crates/dtr-vfs/src/ssh.rs` makes). The queue only calls this for a move's source, which its prepare pass stat'ed as a file, but the stat keeps the verb honest for anything else. |
+| `preflight(dest_dir, bytes)` | local: the local transport's hook (the trait default: it cannot tell). Alias: one `Session::supports(STATVFS)` check — **a server that did not advertise the extension is `Ok(())` with no packet**, because a transfer that cannot ask proceeds and lets `WRITE` fail, never a made-up number. When it is advertised, `available_bytes < bytes` is an `Err` naming the host, path, available and needed bytes, so a 4 GB upload fails in one round trip. |
+
+### 12.4 `Op::abort` is synchronous; burning is the release
+
+`Op::abort` must not block and must not publish, so an op's `abort` takes the
+alias's session out of the slot and kills the child (`Session::close`). No
+destructor can await a `CLOSE`, and a fire-and-forget close would need a live
+runtime on the calling thread and would race the queue's following `discard`.
+Killing the child closes every server-side handle with the channel, and the next
+verb reconnects: the queue's `discard(part)` removes the half-written part, and
+a retry's `open` truncates it. The part itself is never deleted here — the
+queue owns the part's lifecycle (§5, §9).
+
+`RemoteRead`/`RemoteWrite` carry the same rule in their `Drop`/`abort`: a reader
+that is dropped with its handle still open burns the session, because a server
+handle left open would be spent by the next verb. A reader that reached EOF
+closes its handle itself, so the normal path leaves the session clean for the
+publish or the next job.
+
+### 12.5 `stat`'s "not found" is the one string match
+
+The queue asks "does the destination exist?" with `stat`, and `Ok(None)` is the
+answer that decides whether a conflict question is needed. The codec's `stat`
+error path decodes `SSH_FX_NO_SUCH_FILE` and then **formats the code into the
+message**; the code itself is not reachable from outside the codec, so the
+adapter classifies by the server's text (`no such file`, `not found`, or an
+empty message's `status 2`). OpenSSH's `status_to_message` says "No such file",
+and the fake server says the same thing. This is the adapter's one concession to
+that gap: a typed `Session::stat_opt` or an error carrying the status code would
+remove the match. It is reported here rather than patched into `dtr-sftp`,
+which is not this crate's to change. Every other error is a real error, and a
+missing path does not spend a reconnect.
+
+### 12.6 Tests, and the gaps
+
+`tests/wire.rs` drives the adapter through the real codec: a fake SFTP server
+speaks v3 over a pair of `async_channel`s (`Session::from_wire`, the same seam
+`crates/dtr-vfs/src/ssh.rs`'s tests and `dtr-sftp/tests/mock.rs` use), keeps a
+little filesystem so effects are asserted, and can advertise extensions, refuse
+a `WRITE`, or drop a connection after the handshake. The names worth quoting for
+the gate:
+
+```
+an_upload_writes_one_packet_per_segment_and_publishes_with_a_rename ... ok
+a_download_reads_a_segment_at_a_time_into_a_local_part ... ok
+a_download_respects_a_segment_buffer_smaller_than_the_codec_chunk ... ok
+a_cross_host_copy_streams_a_to_b_with_one_byte_count ... ok
+a_same_host_remote_copy_holds_two_handles_on_one_session ... ok
+a_no_replace_publish_fails_when_the_name_appeared_and_keeps_the_part ... ok
+a_replace_publish_uses_posix_rename_when_the_server_advertises_it ... ok
+a_discard_removes_the_part_and_a_missing_part_is_not_an_error ... ok
+remove_deletes_a_file_with_remove_and_a_directory_with_rmdir ... ok
+stat_answers_meta_and_maps_not_found_to_none ... ok
+a_dead_session_is_replaced_once_and_the_verb_succeeds ... ok
+preflight_refuses_when_statvfs_says_there_is_no_room ... ok
+preflight_is_ok_when_the_extension_is_absent ... ok
+an_abort_releases_the_alias_and_leaves_the_part_to_the_queue ... ok
+a_failed_segment_fails_the_job_and_a_retry_publishes_the_file ... ok
+the_queue_downloads_from_a_host_and_publishes_the_local_name ... ok
+a_local_to_local_job_stays_on_the_local_transport ... ok
+a_remote_request_never_touches_the_local_transport ... ok
+```
+
+The last two are the routing rule asserted rather than inferred: the local half
+is a recording in-memory `Transport` (no real files), and a dialer that fails if
+it is ever asked proves a local↔local job never opens a session. The two
+queue-driven tests use the real `Queue` from `dtr-transfer`, so the sequence
+stat → conflict → preflight → open → segment → finish → publish is exercised end
+to end, including a mid-transfer failure, the part the queue keeps, and the
+retry's restart from byte zero.
+
+The gaps:
+
+- **No real OpenSSH server.** The fake imitates the status texts, plain
+  `RENAME`'s refusal of an existing destination and `posix-rename`/`statvfs`;
+  the codec's own mock server covers a little more of that. An `#[ignore]`d run
+  against `$DTR_SSH_TEST_HOST` would close it, and it is not written — the same
+  gap `docs/sftp.md` §8 records, so it is claimed neither here nor there.
+- **The 30 s deadline is not exercised.** A test would wait half a minute; only
+  the reconnect-on-error path is (`a_dead_session_is_replaced_once…`). The
+  timeout path is the same code with the deadline's `Err` where the error is.
+- **`ssh` connect itself is untested here** (`BatchMode=yes`, `-s <alias>
+  sftp`, the child's stderr in the handshake error). That is the codec's
+  `connect`; its argument ordering has its own test there.
+
+### 12.7 What the F5 wiring task instantiates and drives
+
+On the worker thread that owns the compio runtime (the same place `dtr-bg`'s
+mailbox runs; the UI thread can neither own the runtime nor a `Session`):
+
+```rust
+let mut transport = dtr_transfer_ssh::SshTransport::new();
+let mut queue = dtr_transfer::Queue::new();
+// commands from the UI are the queue's synchronous methods (copy/answer/cancel/…)
+while queue.may_progress() {
+    let events = queue.step(&mut transport).await;
+    // fold events + queue.snapshot() into the frame, per §8
+}
+```
+
+- **One transport, one queue, every job shape.** The wiring does not route: a
+  local copy, an upload, a download, a same-host remote copy and a cross-host
+  copy all go through the same `&mut transport`. `Queue::copy`/`move_to` infer
+  the direction from the `Location`s, and this adapter infers the operation from
+  the same two.
+- **`SshTransport::new()` is production.** `with_parts` is the `#[doc(hidden)]`
+  test seam (fake local transport / scripted dialer) and is not for the app.
+- **Shutdown** is dropping the queue and then the transport: each `Session`'s
+  `Drop` kills its child, and a killed child closes the handles it still had.
+  Nothing in the transport needs a tick of its own: it has no timer, no thread
+  and no mailbox, so the driver loop is the queue's loop with
+  `queue.step(&mut transport)`.
+- **A cancel between steps is enough**: `Queue::cancel` sets the flag, the next
+  `step` aborts the op (a synchronous burn) and awaits `discard`, exactly as
+  the queue's own tests describe — the adapter does not have a cancellation
+  channel of its own.
+
+Everything the card draws, the events it reacts to and the commands it sends are
+§8's; this crate adds no UI-visible state.
+
+
 ## Appendix: decisions considered and rejected
 
 - **Per-source machine release** (let another job interleave between two files of

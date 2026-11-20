@@ -1275,6 +1275,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dtr-transfer-ssh"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "compio",
+ "dtr-sftp",
+ "dtr-transfer",
+ "dtr-vfs",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "dtr-ttl"
 version = "0.1.1"
 

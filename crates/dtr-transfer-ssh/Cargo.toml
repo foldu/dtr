@@ -1,0 +1,22 @@
+[package]
+name = "dtr-transfer-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The remote half of the transfer queue: a Transport over dtr-sftp and the local transport"
+
+[dependencies]
+anyhow.workspace = true
+compio.workspace = true
+dtr-sftp.workspace = true
+dtr-vfs.workspace = true
+# The contract, not a dependency to bend: `Transport`, `Op`, `StreamOp` and the
+# local copy stay in the queue's crate (`docs/transfers.md` §9).
+dtr-transfer = { path = "../dtr-transfer" }
+tracing.workspace = true
+
+[dev-dependencies]
+# The scripted wire's two ends, and temporary directories for the local ends.
+async-channel.workspace = true
+tempfile.workspace = true
