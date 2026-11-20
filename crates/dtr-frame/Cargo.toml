@@ -1,0 +1,18 @@
+[package]
+name = "dtr-frame"
+description = "The window, the wgpu surface and the egui loop, so a second frontend can open a window without re-solving the traps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+png.workspace = true
+pollster.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+winit.workspace = true

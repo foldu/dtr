@@ -23,6 +23,10 @@ crossbeam-channel.workspace = true
 dirs.workspace = true
 dtr-complete = { path = "../dtr-complete" }
 dtr-config = { path = "../dtr-config" }
+# The window, the surface and the egui loop, so the desktop's file picker
+# (`dtr-portal`) can open a window without a second copy of the traps: DPI,
+# surface loss, viewport commands, repaint carrying, drop order.
+dtr-frame = { path = "../dtr-frame" }
 # The file browser, in a crate of its own because the desktop's file picker is a
 # second process drawing the same listing (`docs/manager.md` §2).
 dtr-files = { path = "../dtr-files" }

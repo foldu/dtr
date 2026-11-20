@@ -1129,6 +1129,7 @@ dependencies = [
  "dtr-complete",
  "dtr-config",
  "dtr-files",
+ "dtr-frame",
  "dtr-sftp",
  "dtr-sshconfig",
  "dtr-store",
@@ -1198,6 +1199,21 @@ dependencies = [
  "image",
  "libc",
  "tempfile",
+]
+
+[[package]]
+name = "dtr-frame"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
+ "png 0.18.1",
+ "pollster 0.4.0",
+ "tracing",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

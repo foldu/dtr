@@ -14,7 +14,7 @@ use crate::pane::Frame;
 /// capturing one. Creates an adapter and a probe `GridRenderer`, so it is a
 /// screenshot-only cost.
 pub fn cell_metrics(width: u32, height: u32) -> anyhow::Result<crate::render::Metrics> {
-    let instance = crate::app::instance();
+    let instance = dtr_frame::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
@@ -85,7 +85,7 @@ pub fn capture(
     // this from the platform; a headless run cannot.
     preedit: Option<&crate::ime::Preedit>,
 ) -> anyhow::Result<()> {
-    let instance = crate::app::instance();
+    let instance = dtr_frame::instance();
     // Same preference as the window: a capture from a different adapter than
     // the one the window would use is a capture of a different renderer, and
     // anti-aliasing and colour handling really do differ between RADV and

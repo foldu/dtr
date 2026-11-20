@@ -1,4 +1,12 @@
-//! Window, GPU and egui plumbing.
+//! The application: the terminal's panes and tabs, the file browser, the
+//! palette, and the draw pass that lays them out in egui.
+//!
+//! The *window* side — winit, the wgpu surface, the egui context, the render
+//! passes and the event loop — is `dtr_frame` (`crates/dtr-frame`, documented in
+//! `docs/frame.md`). This file keeps the application state and implements
+//! `dtr_frame::App`: the frame hands over a `&egui::Context`, the screens here
+//! draw into it, and every trap the two used to share (DPI, surface loss,
+//! viewport commands, repaint carrying, drop order) lives in that crate instead.
 //!
 //! Deliberately not `eframe` (PLAN D6): we need winit events for the terminal
 //! as well as for egui, and we want to redraw on bytes rather than on egui's
@@ -7,12 +15,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
+use winit::window::Window;
 
 use libghostty_vt::mouse::{Action as MouseAction, Button as MouseButton};
 
@@ -449,61 +455,9 @@ pub fn capture_headless(
     )
 }
 
-/// The adapter wgpu picks when nobody asked for one.
-fn request_default_adapter(
-    instance: &wgpu::Instance,
-    surface: &wgpu::Surface<'static>,
-) -> anyhow::Result<wgpu::Adapter> {
-    Ok(pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        },
-    ))?)
-}
-
-/// The adapter whose name contains `pattern`, case-insensitively.
-///
-/// Matching by name is crude, but it is the only handle wgpu offers that a
-/// person can type: "nvidia", "radeon", "arc". Every adapter that cannot
-/// present to this window is skipped, so a match cannot brick the window.
-fn pick_adapter(
-    instance: &wgpu::Instance,
-    surface: &wgpu::Surface<'static>,
-    pattern: &str,
-) -> Option<wgpu::Adapter> {
-    let needle = pattern.to_lowercase();
-    let mut names = Vec::new();
-    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-    for adapter in adapters {
-        let info = adapter.get_info();
-        names.push(info.name.clone());
-        if info.name.to_lowercase().contains(&needle) && adapter.is_surface_supported(surface) {
-            return Some(adapter);
-        }
-    }
-    tracing::debug!(?names, "adapters seen");
-    None
-}
-
-/// One place that decides which backends wgpu may use.
-///
-/// `WGPU_BACKEND` overrides the set, which is how a broken driver stack (or
-/// Wine, which finds dx12 first and then cannot compile egui's shader through
-/// FXC) is worked around without a rebuild.
-pub(crate) fn instance() -> wgpu::Instance {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    if let Some(backends) = wgpu::Backends::from_env() {
-        descriptor.backends = backends;
-    }
-    wgpu::Instance::new(descriptor)
-}
-
 pub fn run(startup: Startup) -> anyhow::Result<()> {
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-    let proxy: EventLoopProxy<UserEvent> = event_loop.create_proxy();
+    let frames = dtr_frame::FrameLoop::<UserEvent>::new()?;
+    let proxy: EventLoopProxy<UserEvent> = frames.proxy();
     let label = startup.transport.describe();
     let serial = matches!(startup.transport, Transport::Serial(_));
     let startup_alias = ssh_alias(&startup.transport);
@@ -595,6 +549,9 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         active: 0,
         next_leaf: 2,
         gpu: None,
+        window: None,
+        egui_ctx: None,
+        size: (0, 0),
         modifiers: ModifiersState::empty(),
         fatal: None,
         quit: false,
@@ -634,6 +591,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         },
         about_open: false,
         stats_overlay: startup.stats,
+        frame_samples: crate::stats::FrameSamples::default(),
         stats_due: std::time::Instant::now(),
         key_delay: false,
         keymap_card: crate::keymap::Overlay {
@@ -721,11 +679,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
             async {}
         });
     }
-    event_loop.run_app(&mut app)?;
-    match app.fatal {
-        Some(err) => anyhow::bail!("{err}"),
-        None => Ok(()),
-    }
+    frames.run(app)
 }
 
 /// The next tab after wrapping; `count < 2` has nowhere to go.
@@ -1306,7 +1260,24 @@ struct App {
     listing_due: std::time::Instant,
     active: usize,
     next_leaf: crate::layout::LeafId,
+    /// dtr's half of the frame: the grid renderer and the chrome choices a
+    /// frame is drawn with. The window, surface and egui context are the
+    /// event loop's (`dtr_frame::Frame`).
     gpu: Option<Gpu>,
+    /// The window this app draws into, cloned out of its `dtr_frame::Frame`.
+    ///
+    /// `repaint` is called from everywhere and the event loop owns the frame, so
+    /// the app keeps the one handle that can ask for a redraw between frames
+    /// without borrowing it.
+    window: Option<Arc<Window>>,
+    /// The window's egui context, for the few questions asked between frames:
+    /// `pixels_per_point`, `layer_id_at`, and a texture upload for a preview.
+    egui_ctx: Option<egui::Context>,
+    /// The last configured surface size, in physical pixels: what the last
+    /// drawn frame laid out against, and what a hit test between frames answers.
+    /// At the top of a redraw the frame reconfigures a pending resize, and the
+    /// app copies the new size here before it measures anything.
+    size: (u32, u32),
     modifiers: ModifiersState,
     /// Set when the pane fails; `run` returns it once the loop has stopped.
     fatal: Option<String>,
@@ -1420,9 +1391,14 @@ struct App {
     /// The about card: a page with no state, so a flag.
     about_open: bool,
     /// Whether the debug overlay is on (`--stats`, or the palette's `overlay`).
-    /// The samples themselves live on `Gpu`, because the present wait is
-    /// measured where `present` is called.
+    /// The samples themselves are pushed after each frame from the
+    /// `dtr_frame::FrameTiming` the frame returns, which is where the present
+    /// wait is measured.
     stats_overlay: bool,
+    /// The debug overlay's rolling frame and present durations. Empty and never
+    /// written while the overlay is off — the `Instant` around `present` is not
+    /// even read then.
+    frame_samples: crate::stats::FrameSamples,
     /// When the overlay's readout is next due. While it is on, this is the only
     /// thing that asks for a frame — ten a second, not one per refresh: an
     /// instrument that forced every frame would measure itself. See
@@ -1491,9 +1467,9 @@ impl App {
     /// stored where every pane already reads it.
     fn refresh_frame_budget(&self) {
         let refresh = self
-            .gpu
+            .window
             .as_ref()
-            .and_then(|gpu| gpu.window.current_monitor())
+            .and_then(|window| window.current_monitor())
             .and_then(|monitor| monitor.refresh_rate_millihertz());
         let budget = crate::pane::frame_budget(refresh);
         let nanos = budget.as_nanos() as u64;
@@ -2016,9 +1992,9 @@ impl App {
     fn pane_pixels(&self, x: f64, y: f64) -> Option<(f32, f32)> {
         let gpu = self.gpu.as_ref()?;
         let tab = &self.tabs[self.active];
-        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        let screen = self.screen();
         let rect = self
-            .pane_views(tab, gpu.metrics(), screen, gpu.scale())
+            .pane_views(tab, gpu.metrics(), screen, self.scale())
             .into_iter()
             .find(|(id, _)| *id == tab.focus)
             .map(|(_, pane)| pane.rect)?;
@@ -2057,14 +2033,12 @@ impl App {
     /// bar are painted into the root layer, not areas of their own, so they are
     /// the cell mapping's business: `cell_at` refuses a point outside the pane.
     fn over_egui(&self, at: (f64, f64)) -> bool {
-        let Some(gpu) = self.gpu.as_ref() else {
+        let Some(ctx) = self.egui_ctx.as_ref() else {
             return false;
         };
         let scale = self.scale();
         let points = egui::pos2(at.0 as f32 / scale, at.1 as f32 / scale);
-        gpu.egui_state
-            .egui_ctx()
-            .layer_id_at(points)
+        ctx.layer_id_at(points)
             .is_some_and(dtr_widgets::above_the_root)
     }
 
@@ -2197,7 +2171,10 @@ impl App {
     /// egui works in points and winit's pointer arrives in physical pixels, so
     /// every hand-off between them needs this — once, not twice.
     fn scale(&self) -> f32 {
-        self.gpu.as_ref().map(|gpu| gpu.scale()).unwrap_or(1.0)
+        self.window
+            .as_ref()
+            .map(|window| window.scale_factor() as f32)
+            .unwrap_or(1.0)
     }
 
     /// The right button on a link: a menu, because a link that is a file can be
@@ -2350,7 +2327,7 @@ impl App {
         }
         let default = save_target(&location.path);
         let parent = self.proxy.clone();
-        let window = self.gpu.as_ref().map(|gpu| Arc::clone(gpu.window()));
+        let window = self.window.clone();
         self.picking_save = true;
         self.bg_blocking(move || {
             let chosen = pick_save_path(window, &default);
@@ -2546,11 +2523,9 @@ impl App {
     /// The texture is cloned rather than borrowed because the draw function is
     /// already holding `&mut` the fields around it — a handle is a reference
     /// count, not a copy of the pixels.
-    fn hover_thumbnail(
-        &mut self,
-        scale: f32,
-        ctx: &egui::Context,
-    ) -> Option<(egui::TextureHandle, egui::Vec2)> {
+    fn hover_thumbnail(&mut self, scale: f32) -> Option<(egui::TextureHandle, egui::Vec2)> {
+        let ctx = self.egui_ctx.clone();
+        let ctx = ctx.as_ref()?;
         // An overlay owns the window while it is open; a tooltip over it would be
         // a picture of a file the user is not pointing at. The link menu is a
         // sharper case: it opens *at* the pointer, exactly where the preview would
@@ -2751,8 +2726,8 @@ impl App {
     fn file_pane_point(&self, at: (f64, f64)) -> Option<egui::Pos2> {
         let gpu = self.gpu.as_ref()?;
         let tab = &self.tabs[self.active];
-        let screen = (gpu.config.width as f32, gpu.config.height as f32);
-        let scale = gpu.scale();
+        let screen = self.screen();
+        let scale = self.scale();
         let (id, _) = self
             .pane_views(tab, gpu.metrics(), screen, scale)
             .into_iter()
@@ -2764,7 +2739,7 @@ impl App {
         // absolute points and records its layout in that same space, so a local
         // point would be compared against rectangles measured from a different
         // origin — the bug that made the first click select nothing.
-        let points = gpu.egui_ctx.pixels_per_point();
+        let points = self.pixels_per_point();
         Some(egui::pos2(at.0 as f32 / points, at.1 as f32 / points))
     }
 
@@ -3858,15 +3833,36 @@ impl App {
         // distinct per caller, and a flood of one of them is the answer.
         self.wake_why.set(why);
         tracing::debug!(why, "request redraw");
-        if let Some(gpu) = &self.gpu {
-            gpu.window.request_redraw();
-        }
+        self.request_redraw();
         // `request_redraw` alone is not enough on Wayland: a request made from
         // inside a redraw waits for the compositor's next frame callback, so the
         // change only appears when something else wakes the loop — a closed tab
         // that vanishes when the mouse moves. `about_to_wait` turns this flag
         // into a deadline, which wakes the loop at once.
         self.wake.set(true);
+    }
+
+    /// Ask the window for a frame, when there is one. Between frames this is
+    /// the only handle on the window the app keeps (`repaint` is called from
+    /// everywhere).
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The configured surface size in physical pixels, as a float pair for the
+    /// layout code: what the last frame drew at.
+    fn screen(&self) -> (f32, f32) {
+        (self.size.0 as f32, self.size.1 as f32)
+    }
+
+    /// egui's pixels per point: the window's context, as the last frame left it.
+    fn pixels_per_point(&self) -> f32 {
+        self.egui_ctx
+            .as_ref()
+            .map(|ctx| ctx.pixels_per_point())
+            .unwrap_or_else(|| self.scale())
     }
 
     /// The focused terminal, when the focused pane is one. A file pane makes
@@ -4213,13 +4209,10 @@ impl App {
     /// on a pane nobody can see would take the keyboard out of the one that is
     /// on screen, and the person typing would see nothing happen.
     fn focus_direction(&mut self, direction: crate::layout::Direction) {
-        let (screen, scale) = match self.gpu.as_ref() {
-            Some(gpu) => (
-                (gpu.config.width as f32, gpu.config.height as f32),
-                gpu.scale(),
-            ),
-            None => return,
-        };
+        if self.window.is_none() {
+            return;
+        }
+        let (screen, scale) = (self.screen(), self.scale());
         let area = self.pane_area(screen, scale);
         let tab = &mut self.tabs[self.active];
         if tab.zoom.is_some() {
@@ -4247,14 +4240,13 @@ impl App {
     /// than a fraction: the step is the same size at every window size and font,
     /// which is also what `resize-pane` in a mux means.
     fn resize_pane(&mut self, direction: crate::layout::Direction) {
-        let (screen, scale, metrics) = match self.gpu.as_ref() {
-            Some(gpu) => (
-                (gpu.config.width as f32, gpu.config.height as f32),
-                gpu.scale(),
-                gpu.metrics(),
-            ),
-            None => return,
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
         };
+        if self.window.is_none() {
+            return;
+        }
+        let (screen, scale, metrics) = (self.screen(), self.scale(), gpu.metrics());
         if self.tabs[self.active].zoom.is_some() {
             return;
         }
@@ -4783,7 +4775,9 @@ impl App {
     /// Returns whether it applied. It cannot before the first frame has measured
     /// a cell, and the caller keeps the request rather than losing it.
     fn resize_window_to(&mut self, rows: Option<u16>, cols: Option<u16>) -> bool {
-        let (Some(gpu), Some(session)) = (&self.gpu, self.session()) else {
+        let (Some(gpu), Some(session), Some(window)) =
+            (&self.gpu, self.session(), self.window.as_ref())
+        else {
             return false;
         };
         let (current_cols, current_rows) = session.grid;
@@ -4792,7 +4786,7 @@ impl App {
             return false;
         }
         let cell = gpu.metrics();
-        let mut size = gpu.window.inner_size();
+        let mut size = window.inner_size();
         if let Some(cols) = cols {
             let delta = (f32::from(cols) - f32::from(current_cols)) * cell.cell_width;
             size.width = (size.width as f32 + delta).max(MIN_WINDOW.0) as u32;
@@ -4810,9 +4804,7 @@ impl App {
         );
         // `request_` because a compositor may refuse a size, and a terminal that
         // insisted would be fighting the window manager.
-        let _ = gpu
-            .window
-            .request_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
         true
     }
 
@@ -4848,8 +4840,8 @@ impl App {
     fn pane_at(&self, x: f64, y: f64) -> Option<crate::layout::LeafId> {
         let gpu = self.gpu.as_ref()?;
         let tab = &self.tabs[self.active];
-        let screen = (gpu.config.width as f32, gpu.config.height as f32);
-        self.pane_views(tab, gpu.metrics(), screen, gpu.scale())
+        let screen = self.screen();
+        self.pane_views(tab, gpu.metrics(), screen, self.scale())
             .into_iter()
             .find(|(_, pane)| pane.rect.contains(x as f32, y as f32))
             .map(|(id, _)| id)
@@ -4861,13 +4853,13 @@ impl App {
     /// only pane on screen owns the whole window, so a press in the middle of it
     /// must reach the program rather than move a border nobody can see.
     fn divider_at_point(&self, at: (f64, f64)) -> Option<crate::layout::Divider> {
-        let gpu = self.gpu.as_ref()?;
+        self.gpu.as_ref()?;
         let tab = &self.tabs[self.active];
         if tab.zoom.is_some() {
             return None;
         }
-        let scale = gpu.scale();
-        let screen = (gpu.config.width as f32, gpu.config.height as f32);
+        let scale = self.scale();
+        let screen = self.screen();
         tab.layout.divider_at(
             self.pane_area(screen, scale),
             crate::ui::SPLIT_GAP * scale,
@@ -4916,8 +4908,8 @@ impl App {
         let gpu = self.gpu.as_ref()?;
         let metrics = gpu.metrics();
         let tab = &self.tabs[self.active];
-        let screen = (gpu.config.width as f32, gpu.config.height as f32);
-        self.pane_views(tab, metrics, screen, gpu.scale())
+        let screen = self.screen();
+        self.pane_views(tab, metrics, screen, self.scale())
             .into_iter()
             .find(|(id, _)| *id == tab.focus)
             .map(|(_, pane)| pane.rect)
@@ -5052,9 +5044,7 @@ impl App {
                 // ten minutes ago is not the p99 of what is being measured.
                 if self.stats_overlay {
                     self.stats_due = std::time::Instant::now();
-                    if let Some(gpu) = self.gpu.as_mut() {
-                        gpu.frame_samples.clear();
-                    }
+                    self.frame_samples.clear();
                 }
                 tracing::debug!(on = self.stats_overlay, "debug overlay");
                 self.repaint("debug overlay toggled");
@@ -5194,9 +5184,11 @@ fn window_icon() -> Option<winit::window::Icon> {
     }
 }
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gpu.is_some() {
+impl dtr_frame::App for App {
+    type Event = UserEvent;
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop, windows: &mut dtr_frame::Windows) {
+        if !windows.is_empty() {
             return;
         }
 
@@ -5205,89 +5197,105 @@ impl ApplicationHandler<UserEvent> for App {
         // compositor may refuse, and on X11 the motif hint is a hint, so
         // "switch it later" is not something that can be promised.
         let client_frame = self.config.chrome == dtr_config::Chrome::Client;
-        let attrs = Window::default_attributes()
-            .with_title("dtr")
-            .with_decorations(!client_frame)
+        // The caption's maximise button must answer Windows' hit test as
+        // `HTMAXBUTTON`, or Windows 11 never offers the snap-layout flyout.
+        // winit has no hook for a hit test, so the window procedure is
+        // subclassed — once, when the window exists and before its first frame.
+        #[cfg(target_os = "windows")]
+        let on_created: Option<Box<dyn FnOnce(&Arc<Window>)>> = client_frame.then(|| {
+            Box::new(|window: &Arc<Window>| {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = window.window_handle() {
+                    if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                        // `raw-window-handle` hands the handle over as a non-zero
+                        // `isize`; Win32 wants the pointer it really is.
+                        let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
+                        // SAFETY: the window was just created on this thread and
+                        // lives for as long as the process uses it.
+                        unsafe { crate::chrome::windows::install(hwnd) };
+                    }
+                }
+            })
+        });
+        #[cfg(not(target_os = "windows"))]
+        let on_created = None;
+
+        let options = dtr_frame::WindowOptions {
+            title: String::from("dtr"),
+            inner_size: (900.0, 620.0),
+            decorations: !client_frame,
             // The same artwork the desktop entry names. Without it Windows draws
             // a generic blank next to the title, and a window list has nothing
             // to show but the name.
-            .with_window_icon(window_icon())
-            .with_inner_size(LogicalSize::new(900.0, 620.0));
-        // A frameless window with no shadow reads as a rectangle pasted onto the
-        // desktop; winit draws one only when asked, and only for a window whose
-        // decorations are off.
-        #[cfg(target_os = "windows")]
-        let attrs = if client_frame {
-            use winit::platform::windows::WindowAttributesExtWindows as _;
-            attrs.with_undecorated_shadow(true)
-        } else {
-            attrs
+            icon: window_icon(),
+            // The desktop entry says `StartupWMClass=dtr` and `Icon=dtr`, so the
+            // window has to say it is called that. Without a name, X11 derives
+            // `WM_CLASS` from argv[0] — which under the nix wrapper is
+            // `.dtr-unwrapped` — and Wayland gets no `app_id` at all, so a
+            // running window lands in the dock as a second, iconless application.
+            app_id: Some((String::from("dtr"), String::from("dtr"))),
+            // A terminal is where CJK is typed: composition, the candidate
+            // window and the caret report all hang off this.
+            ime_allowed: true,
+            // A frameless window with no shadow reads as a rectangle pasted onto
+            // the desktop.
+            undecorated_shadow: client_frame,
+            adapter_hint: self.gpu_hint.clone(),
+            on_created,
         };
-        // The desktop entry says `StartupWMClass=dtr` and `Icon=dtr`, so the
-        // window has to say it is called that. Without a name, X11 derives
-        // `WM_CLASS` from argv[0] — which under the nix wrapper is
-        // `.dtr-unwrapped` — and Wayland gets no `app_id` at all, so a running
-        // window lands in the dock as a second, iconless application. Both
-        // platforms read the same field, which is why one call is enough.
-        #[cfg(target_os = "linux")]
-        let attrs = {
-            use winit::platform::wayland::WindowAttributesExtWayland as _;
-            attrs.with_name("dtr", "dtr")
-        };
-        let window = match event_loop.create_window(attrs) {
-            Ok(window) => Arc::new(window),
+        let frame = match windows.open(event_loop, options) {
+            Ok(frame) => frame,
             Err(err) => {
                 tracing::error!(%err, "create window");
                 event_loop.exit();
                 return;
             }
         };
-        // A terminal is where CJK is typed, and without this the platform never
-        // offers its input method: no composition, no candidate window, and a
-        // pinyin keyboard types latin letters at the shell. Enabling it is not
-        // enough on its own — the caret has to be reported as it moves
-        // (`set_ime_cursor_area` in the redraw) or the candidate window lands in
-        // the corner of the screen.
-        window.set_ime_allowed(true);
 
-        // The caption's maximise button must answer Windows' hit test as
-        // `HTMAXBUTTON`, or Windows 11 never offers the snap-layout flyout.
-        // winit has no hook for a hit test, so the window procedure is
-        // subclassed — once, here, for the lifetime of the window.
-        #[cfg(target_os = "windows")]
-        if client_frame {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Ok(handle) = window.window_handle() {
-                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                    // `raw-window-handle` hands the handle over as a non-zero
-                    // `isize`; Win32 wants the pointer it really is.
-                    let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
-                    // SAFETY: the window was just created on this thread and
-                    // lives for as long as the process uses it.
-                    unsafe { crate::chrome::windows::install(hwnd) };
-                }
-            }
-        }
-
-        match Gpu::new(
-            window,
-            &self.look,
-            self.gpu_hint.as_deref(),
-            self.config.chrome == dtr_config::Chrome::Client,
-        ) {
-            Ok(gpu) => {
-                gpu.window.request_redraw();
-                self.gpu = Some(gpu);
-                self.refresh_frame_budget();
-            }
-            Err(err) => {
-                tracing::error!(%err, "initialise GPU");
-                event_loop.exit();
-            }
-        }
+        // dtr's half of the frame: the caption's glyph source, the egui style
+        // and the grid renderer. The frame's context exists by now, and loading
+        // the image loader and the fonts here is still before the first frame —
+        // the only deadline either has.
+        let ctx = frame.context().clone();
+        crate::ui::install_image_loaders(&ctx);
+        // Whether the platform's caption-glyph font is there: the buttons draw
+        // with it when it is, and paint their shapes when it is not. Asked here
+        // because a missing glyph is a panic, not a fallback.
+        let caption_font = self.look.install(&ctx);
+        // The window's style is the skin from the first frame — installed here
+        // so nothing reads egui's own defaults.
+        let skin = self.look.skin();
+        skin.apply(&ctx);
+        let gpu = Gpu {
+            grid: crate::render::GridRenderer::new(
+                frame.device(),
+                frame.format(),
+                &self.look,
+                frame.scale(),
+            ),
+            format: frame.format(),
+            client_frame,
+            caption_glyphs: if caption_font {
+                crate::chrome::Glyphs::Font
+            } else {
+                crate::chrome::Glyphs::Painted
+            },
+            installed_skin: Some(skin),
+        };
+        self.gpu = Some(gpu);
+        self.window = Some(frame.window().clone());
+        self.egui_ctx = Some(ctx);
+        self.size = frame.size();
+        frame.request_redraw();
+        self.refresh_frame_budget();
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _windows: &mut dtr_frame::Windows,
+        deadlines: &mut dtr_frame::Deadlines,
+    ) {
         report_loop(self);
         self.check_exit_deadline(event_loop);
 
@@ -5300,27 +5308,19 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         // The control flow is **sticky**: winit keeps the last value until
-        // something sets it again. Every deadline set below is in the past by
-        // the time the next iteration runs, so leaving one in place makes every
-        // `poll` time out instantly — 55,000 loop iterations a second with 20
-        // frames drawn. So this collects the earliest deadline and sets exactly
-        // one value at the end, defaulting to `Wait`.
-        let mut deadline: Option<std::time::Instant> = None;
-        let sooner = |at: std::time::Instant, deadline: &mut Option<std::time::Instant>| {
-            *deadline = Some(match *deadline {
-                Some(current) => current.min(at),
-                None => at,
-            });
-        };
+        // something sets it again. Every deadline collected below is in the past
+        // by the time the next iteration runs, so leaving one in place makes
+        // every `poll` time out instantly — 55,000 loop iterations a second with
+        // 20 frames drawn. `deadlines` keeps the earliest of them, and the
+        // event loop sets exactly one value after this returns, defaulting to
+        // `Wait` (`dtr_frame::Deadlines`).
 
         // A repaint asked for while the loop was idle: wake now rather than at
         // the next input event.
         if self.wake.replace(false) {
             self.loop_report.borrow_mut().wakes += 1;
-            sooner(std::time::Instant::now(), &mut deadline);
-            if let Some(gpu) = &self.gpu {
-                gpu.window.request_redraw();
-            }
+            deadlines.soon(std::time::Instant::now());
+            self.request_redraw();
         }
 
         // The bell is a fade, so it needs frames while it runs: a tint painted
@@ -5334,13 +5334,8 @@ impl ApplicationHandler<UserEvent> for App {
         });
         if ringing {
             self.repaint("bell fading");
-            sooner(
-                std::time::Instant::now() + std::time::Duration::from_millis(16),
-                &mut deadline,
-            );
-            if let Some(gpu) = &self.gpu {
-                gpu.window.request_redraw();
-            }
+            deadlines.soon(std::time::Instant::now() + std::time::Duration::from_millis(16));
+            self.request_redraw();
         }
 
         // A listing on its way in is the other state with no event to announce
@@ -5355,13 +5350,8 @@ impl ApplicationHandler<UserEvent> for App {
         });
         if listing {
             self.repaint("a file listing is arriving");
-            sooner(
-                std::time::Instant::now() + std::time::Duration::from_millis(16),
-                &mut deadline,
-            );
-            if let Some(gpu) = &self.gpu {
-                gpu.window.request_redraw();
-            }
+            deadlines.soon(std::time::Instant::now() + std::time::Duration::from_millis(16));
+            self.request_redraw();
         }
 
         // A pane waiting for its connection is a state that changes with the
@@ -5374,13 +5364,8 @@ impl ApplicationHandler<UserEvent> for App {
         });
         if waiting {
             self.repaint("a pane is waiting for its connection");
-            sooner(
-                std::time::Instant::now() + std::time::Duration::from_millis(500),
-                &mut deadline,
-            );
-            if let Some(gpu) = &self.gpu {
-                gpu.window.request_redraw();
-            }
+            deadlines.soon(std::time::Instant::now() + std::time::Duration::from_millis(500));
+            self.request_redraw();
         }
 
         // A directory that gained or lost an entry is a state with no event: no
@@ -5402,7 +5387,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Set every iteration, because the control flow is sticky: a deadline
         // left in the past makes every `poll` time out instantly.
-        sooner(self.listing_due, &mut deadline);
+        deadlines.soon(self.listing_due);
 
         // A scan is cheap to *ask* for and expensive to *do*, so asking never
         // blocks the frame: the work goes to the worker runtime and comes back
@@ -5446,10 +5431,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(stroke) = self.script.pop_front() {
             self.on_key(&stroke);
             self.repaint("scripted key");
-            sooner(
-                std::time::Instant::now() + std::time::Duration::from_millis(16),
-                &mut deadline,
-            );
+            deadlines.soon(std::time::Instant::now() + std::time::Duration::from_millis(16));
         }
 
         // A pending capture needs a frame at its deadline. Without this the
@@ -5457,7 +5439,7 @@ impl ApplicationHandler<UserEvent> for App {
         // happens: the deadline passes with nothing drawing.
         if let Some((_, when)) = self.capture.as_ref().map(|(_, when)| ((), *when)) {
             self.repaint("capture pending");
-            sooner(when, &mut deadline);
+            deadlines.soon(when);
         }
 
         // A half-typed binding must not wait forever. One second, like Zed,
@@ -5476,17 +5458,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.repaint("pending flushed");
             } else {
-                sooner(pending_deadline, &mut deadline);
+                deadlines.soon(pending_deadline);
             }
         }
         // Wake up when the deadline is due, rather than hoping some other
         // event brings the loop back: an idle window that never wakes would
         // never take its own exit.
         if let Some(after) = self.exit_after {
-            sooner(
-                self.started + std::time::Duration::from_millis(after),
-                &mut deadline,
-            );
+            deadlines.soon(self.started + std::time::Duration::from_millis(after));
         }
 
         // A preview of a remote picture waits for the pointer to settle, and the
@@ -5494,7 +5473,7 @@ impl ApplicationHandler<UserEvent> for App {
         // a request nobody wakes for would never be made.
         match self.thumb_pending.as_ref().map(|pending| pending.due) {
             Some(due) if std::time::Instant::now() >= due => self.due_thumbnail(),
-            Some(due) => sooner(due, &mut deadline),
+            Some(due) => deadlines.soon(due),
             None => {}
         }
 
@@ -5512,7 +5491,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.repaint("config file changed");
             }
         }
-        sooner(self.config_due, &mut deadline);
+        deadlines.soon(self.config_due);
 
         // The config file, once it has been quiet for a moment. A change that
         // arrives while the preferences card is open waits for it: the sheet owns
@@ -5529,7 +5508,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            Some(due) => sooner(due, &mut deadline),
+            Some(due) => deadlines.soon(due),
             None => {}
         }
 
@@ -5546,26 +5525,25 @@ impl ApplicationHandler<UserEvent> for App {
         if self.stats_overlay {
             if self.stats_due <= now {
                 self.stats_due = now + crate::stats::REFRESH_INTERVAL;
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
-                }
+                self.request_redraw();
             }
-            sooner(self.stats_due, &mut deadline);
+            deadlines.soon(self.stats_due);
         }
 
-        // One value, every iteration: without this the last deadline stays set
-        // and every poll times out immediately.
-        event_loop.set_control_flow(match deadline {
-            Some(at) => winit::event_loop::ControlFlow::WaitUntil(at),
-            None => winit::event_loop::ControlFlow::Wait,
-        });
+        // `dtr_frame` sets the one value, from the earliest of the deadlines
+        // above, as soon as this returns.
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
         self.check_exit_deadline(event_loop);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _windows: &mut dtr_frame::Windows,
+        event: UserEvent,
+    ) {
         match event {
             UserEvent::Sftp(event) => {
                 self.sftp_event(event);
@@ -5709,8 +5687,8 @@ impl ApplicationHandler<UserEvent> for App {
         if bell_behind {
             // The window, not the speaker: dtr never plays a sound, and a hint
             // to the taskbar is the only thing a hidden tab can do.
-            if let Some(gpu) = &self.gpu {
-                gpu.window
+            if let Some(window) = &self.window {
+                window
                     .request_user_attention(Some(winit::window::UserAttentionType::Informational));
             }
         }
@@ -5724,19 +5702,25 @@ impl ApplicationHandler<UserEvent> for App {
         self.repaint("pane frame");
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        frame: &mut dtr_frame::Frame,
+        event: WindowEvent,
+    ) {
         if matches!(event, WindowEvent::RedrawRequested) {
             self.egui_redraw_pending = false;
         }
-        let Some(gpu) = self.gpu.as_mut() else {
+        if self.gpu.is_none() {
             return;
-        };
+        }
 
         // egui sees every event except the one asking for a frame: fed
         // `RedrawRequested`, egui asks for another frame, and the loop runs at
         // the refresh rate forever — which is exactly the CPU burn this cost.
+        // `Frame::feed_event` drops that event itself, so this cannot regress.
         if !matches!(event, WindowEvent::RedrawRequested) {
-            let response = gpu.egui_state.on_window_event(&gpu.window, &event);
+            let response_repaint = frame.feed_event(&event);
             // **egui asks for a frame for a click, not for a move**, and every
             // control that changes on hover — a tab chip, the menu button, a
             // file pane's sort control — is a picture of a control until
@@ -5748,9 +5732,9 @@ impl ApplicationHandler<UserEvent> for App {
                     | WindowEvent::MouseInput { .. }
                     | WindowEvent::MouseWheel { .. }
             );
-            if response.repaint || pointer {
+            if response_repaint || pointer {
                 tracing::debug!(why = "egui", "request redraw");
-                gpu.window.request_redraw();
+                frame.request_redraw();
             }
         }
 
@@ -5769,7 +5753,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // The refresh-rate budget is not refreshed here: it follows the
                 // monitor (`Moved`), not the factor.
                 self.fonts_dirty = true;
-                gpu.window.request_redraw();
+                frame.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             // `?1004`: a program can ask to be told when the window is focused,
@@ -5809,12 +5793,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::Resized(size) => {
                 // Remembered, not applied: Windows delivers one `WM_SIZE` per
-                // mouse move during a drag, and `Gpu::configure_pending_resize`
+                // mouse move during a drag, and `dtr_frame::Frame::configure_pending_resize`
                 // turns however many arrive between two frames into one
                 // `surface.configure` — each of which waits for the present
                 // queue to go idle on DX12 (docs/windows.md §5.3). The pty is
                 // re-fitted by the frame that draws the new size, not here.
-                gpu.resize(size);
+                frame.resize(size);
                 self.repaint("resize");
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -5937,717 +5921,1075 @@ impl ApplicationHandler<UserEvent> for App {
                 // Taken out for the draw: the renderer needs `&mut gpu` while
                 // the frame needs `&self`, and one borrow cannot be split
                 // across a field and the whole struct.
-                let mut gpu = self.gpu.take();
-                if let Some(gpu) = gpu.as_mut() {
-                    // One swapchain reconfigure for however many `Resized`
-                    // events arrived since the last frame, before anything in
-                    // this frame reads the size.
-                    gpu.configure_pending_resize();
-                    // The status strip follows the focused pane. A file pane has
-                    // no byte counters, and saying so is more honest than showing
-                    // the terminal beside it as if it were focused.
-                    let mut label = String::from("files");
-                    let (mut rx, mut tx) = (0u64, 0u64);
-                    let (mut rx_rate, mut tx_rate) = (0.0f64, 0.0f64);
-                    let mut scrollback = 0u64;
-                    let mut modem = None;
-                    let mut counters = false;
-                    let mut serial = false;
+                let Some(mut gpu) = self.gpu.take() else {
+                    return;
+                };
+                // One swapchain reconfigure for however many `Resized`
+                // events arrived since the last frame, before anything in
+                // this frame reads the size, and the size the frame will
+                // draw at is the one every hit test in this pass answers.
+                frame.configure_pending_resize();
+                self.size = frame.size();
+                // The status strip follows the focused pane. A file pane has
+                // no byte counters, and saying so is more honest than showing
+                // the terminal beside it as if it were focused.
+                let mut label = String::from("files");
+                let (mut rx, mut tx) = (0u64, 0u64);
+                let (mut rx_rate, mut tx_rate) = (0.0f64, 0.0f64);
+                let mut scrollback = 0u64;
+                let mut modem = None;
+                let mut counters = false;
+                let mut serial = false;
+                if let Some(session) = self.session() {
+                    let stats = session.pane.stats().clone();
+                    label = session.label.clone();
+                    (rx, tx) = (stats.rx(), stats.tx());
+                    scrollback = stats.scrollback();
+                    modem = session.serial.then(|| (stats.dtr(), stats.rts()));
+                    counters = session.counters;
+                    serial = session.serial;
+                    if let Some(session) = self.session_mut() {
+                        session.meter.sample(rx, tx);
+                    }
                     if let Some(session) = self.session() {
-                        let stats = session.pane.stats().clone();
-                        label = session.label.clone();
-                        (rx, tx) = (stats.rx(), stats.tx());
-                        scrollback = stats.scrollback();
-                        modem = session.serial.then(|| (stats.dtr(), stats.rts()));
-                        counters = session.counters;
-                        serial = session.serial;
-                        if let Some(session) = self.session_mut() {
-                            session.meter.sample(rx, tx);
-                        }
-                        if let Some(session) = self.session() {
-                            rx_rate = session.meter.rx_rate;
-                            tx_rate = session.meter.tx_rate;
-                        }
-                    } else if let Some(browser) = self.focused_browser() {
-                        label = browser.title();
+                        rx_rate = session.meter.rx_rate;
+                        tx_rate = session.meter.tx_rate;
                     }
-                    let tabs = (self.active + 1, self.tabs.len());
-                    let status = Status {
-                        label: &label,
-                        tabs,
-                        rx,
-                        tx,
-                        rx_rate,
-                        tx_rate,
-                        scrollback,
-                        modem,
-                        counters,
-                        // Only a serial pane has bytes to space, and only its
-                        // line needs the chip: a shell telling the strip it is
-                        // delayed would be a mode that is doing nothing.
-                        key_delay: if self.key_delay && serial {
-                            self.key_delay_period()
-                        } else {
-                            None
-                        },
-                    };
-                    let mut action = None;
-                    let mut copied = None;
-                    let mut copied_text = self
-                        .session_mut()
-                        .and_then(|session| session.pane.take_copied());
-                    let captured = self
-                        .session_mut()
-                        .and_then(|session| session.pane.take_captured());
-                    // The pane answered the hover question. Only accept it if the
-                    // pointer is still on the cell it was asked about: a reply that
-                    // arrives a frame late must not open the wrong link.
-                    if let Some(reply) = self
-                        .session_mut()
-                        .and_then(|session| session.pane.take_link())
-                    {
-                        if self.hover_cell == Some((reply.x, reply.y)) {
-                            let uri = reply.uri;
-                            self.hover_link = uri.as_deref().map(|uri| LinkHover {
-                                x: reply.x,
-                                y: reply.y,
-                                uri: uri.to_owned(),
-                            });
-                            // Only when the link *changes*: the reply is edge-triggered
-                            // by the pane, so this is once per hovered cell, not once
-                            // per frame.
-                            if let Some(uri) = uri.as_deref() {
-                                self.request_thumbnail(uri);
-                            }
-                        }
-                    }
-                    // A pointing hand is the whole affordance for a link, and a
-                    // resize arrow the whole affordance for a divider: neither
-                    // has an underline or a handle to draw. While a divider is
-                    // being dragged the arrow stays put, because the pointer
-                    // running ahead of the split does not mean the drag ended.
-                    // An overlay takes both affordances with the window: a hand
-                    // over a card is pointing at a link the card covers.
-                    let resizing = if self.overlay_open() {
-                        None
+                } else if let Some(browser) = self.focused_browser() {
+                    label = browser.title();
+                }
+                let tabs = (self.active + 1, self.tabs.len());
+                let status = Status {
+                    label: &label,
+                    tabs,
+                    rx,
+                    tx,
+                    rx_rate,
+                    tx_rate,
+                    scrollback,
+                    modem,
+                    counters,
+                    // Only a serial pane has bytes to space, and only its
+                    // line needs the chip: a shell telling the strip it is
+                    // delayed would be a mode that is doing nothing.
+                    key_delay: if self.key_delay && serial {
+                        self.key_delay_period()
                     } else {
-                        let held = self.divider.as_ref().map(|divider| divider.axis);
-                        held.or_else(|| {
-                            self.cursor_position
-                                .and_then(|at| self.divider_at_point(at))
-                                .map(|divider| divider.axis)
-                        })
-                    };
-                    let wanted = match resizing {
-                        Some(crate::layout::Axis::Horizontal) => {
-                            winit::window::CursorIcon::ColResize
-                        }
-                        Some(crate::layout::Axis::Vertical) => winit::window::CursorIcon::RowResize,
-                        None if self.hover_link.is_some() && !self.overlay_open() => {
-                            winit::window::CursorIcon::Pointer
-                        }
-                        None => winit::window::CursorIcon::Default,
-                    };
-                    if self.cursor_icon != Some(wanted) {
-                        self.cursor_icon = Some(wanted);
-                        gpu.window.set_cursor(wanted);
-                    }
-                    // A toast lives for 1.8 s and fades over its last 400 ms.
-                    const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
-                    // Owned, because the draw mutably borrows `self` further down.
-                    let toast_text: Option<(String, f32)> =
-                        self.toast.as_ref().and_then(|(text, at)| {
-                            let age = at.elapsed();
-                            if age > TOAST {
-                                return None;
-                            }
-                            let fade = std::time::Duration::from_millis(450);
-                            let alpha = if age + fade > TOAST {
-                                (TOAST - age).as_secs_f32() / fade.as_secs_f32()
-                            } else {
-                                1.0
-                            };
-                            Some((text.clone(), alpha))
+                        None
+                    },
+                };
+                let mut action = None;
+                let mut copied = None;
+                let mut copied_text = self
+                    .session_mut()
+                    .and_then(|session| session.pane.take_copied());
+                let captured = self
+                    .session_mut()
+                    .and_then(|session| session.pane.take_captured());
+                // The pane answered the hover question. Only accept it if the
+                // pointer is still on the cell it was asked about: a reply that
+                // arrives a frame late must not open the wrong link.
+                if let Some(reply) = self
+                    .session_mut()
+                    .and_then(|session| session.pane.take_link())
+                {
+                    if self.hover_cell == Some((reply.x, reply.y)) {
+                        let uri = reply.uri;
+                        self.hover_link = uri.as_deref().map(|uri| LinkHover {
+                            x: reply.x,
+                            y: reply.y,
+                            uri: uri.to_owned(),
                         });
-                    let palette_open = self.palette.open;
-                    // Split the borrows explicitly: the palette is `&mut` while the
-                    // frame, pane and look are `&`, and taking them out one by one
-                    // is what makes that legal.
-                    // `take` rather than building a placeholder: `Palette::new`
-                    // reads the machine, and this runs every frame.
-                    let mut palette = std::mem::take(&mut self.palette);
-                    let screen = (gpu.config.width as f32, gpu.config.height as f32);
-                    let scale = gpu.scale();
-                    if std::mem::take(&mut self.fonts_dirty) {
-                        gpu.rebuild_grid(&self.look);
+                        // Only when the link *changes*: the reply is edge-triggered
+                        // by the pane, so this is once per hovered cell, not once
+                        // per frame.
+                        if let Some(uri) = uri.as_deref() {
+                            self.request_thumbnail(uri);
+                        }
                     }
-                    self.pump_files();
-                    self.log_strip_geometry(scale);
-                    self.fit_panes(gpu.metrics(), screen, scale);
-                    // Before the borrows below: uploading a texture needs `&mut self`
-                    // (the cache turns pixels into a texture once) and `settings` is
-                    // about to lend `self` out for the whole frame.
-                    let thumbnail = self.hover_thumbnail(scale, &gpu.egui_ctx);
-                    // A menu opened before the startup font probe finished picks
-                    // the list up here, on the first frame it exists. Before the
-                    // borrows, because filling it in needs `&mut self`.
-                    if self.settings.open {
-                        self.settings.refresh_families();
+                }
+                // A pointing hand is the whole affordance for a link, and a
+                // resize arrow the whole affordance for a divider: neither
+                // has an underline or a handle to draw. While a divider is
+                // being dragged the arrow stays put, because the pointer
+                // running ahead of the split does not mean the drag ended.
+                // An overlay takes both affordances with the window: a hand
+                // over a card is pointing at a link the card covers.
+                let resizing = if self.overlay_open() {
+                    None
+                } else {
+                    let held = self.divider.as_ref().map(|divider| divider.axis);
+                    held.or_else(|| {
+                        self.cursor_position
+                            .and_then(|at| self.divider_at_point(at))
+                            .map(|divider| divider.axis)
+                    })
+                };
+                let wanted = match resizing {
+                    Some(crate::layout::Axis::Horizontal) => winit::window::CursorIcon::ColResize,
+                    Some(crate::layout::Axis::Vertical) => winit::window::CursorIcon::RowResize,
+                    None if self.hover_link.is_some() && !self.overlay_open() => {
+                        winit::window::CursorIcon::Pointer
                     }
-                    let settings = if self.settings.open {
-                        Some(&self.settings)
-                    } else {
+                    None => winit::window::CursorIcon::Default,
+                };
+                if self.cursor_icon != Some(wanted) {
+                    self.cursor_icon = Some(wanted);
+                    frame.window().set_cursor(wanted);
+                }
+                // A toast lives for 1.8 s and fades over its last 400 ms.
+                const TOAST: std::time::Duration = std::time::Duration::from_millis(2200);
+                // Owned, because the draw mutably borrows `self` further down.
+                let toast_text: Option<(String, f32)> =
+                    self.toast.as_ref().and_then(|(text, at)| {
+                        let age = at.elapsed();
+                        if age > TOAST {
+                            return None;
+                        }
+                        let fade = std::time::Duration::from_millis(450);
+                        let alpha = if age + fade > TOAST {
+                            (TOAST - age).as_secs_f32() / fade.as_secs_f32()
+                        } else {
+                            1.0
+                        };
+                        Some((text.clone(), alpha))
+                    });
+                let palette_open = self.palette.open;
+                // Split the borrows explicitly: the palette is `&mut` while the
+                // frame, pane and look are `&`, and taking them out one by one
+                // is what makes that legal.
+                // `take` rather than building a placeholder: `Palette::new`
+                // reads the machine, and this runs every frame.
+                let mut palette = std::mem::take(&mut self.palette);
+                let screen = (frame.size().0 as f32, frame.size().1 as f32);
+                let scale = frame.scale();
+                if std::mem::take(&mut self.fonts_dirty) {
+                    gpu.rebuild_grid(frame.device(), &self.look, scale);
+                }
+                self.pump_files();
+                self.log_strip_geometry(scale);
+                self.fit_panes(gpu.metrics(), screen, scale);
+                // Before the borrows below: uploading a texture needs `&mut self`
+                // (the cache turns pixels into a texture once) and `settings` is
+                // about to lend `self` out for the whole frame.
+                let thumbnail = self.hover_thumbnail(scale);
+                // A menu opened before the startup font probe finished picks
+                // the list up here, on the first frame it exists. Before the
+                // borrows, because filling it in needs `&mut self`.
+                if self.settings.open {
+                    self.settings.refresh_families();
+                }
+                let settings = if self.settings.open {
+                    Some(&self.settings)
+                } else {
+                    None
+                };
+                // Taken out for the frame for the same reason the pager is:
+                // the sheet borrows itself while it draws, and the answer is
+                // applied after the egui pass.
+                let serial_dialog = self.serial_dialog.take();
+                let mut serial_event = None;
+                let mut tmux_pick = None;
+                // A window capture is due once, then never again.
+                // The active tab follows its focused session; the others keep
+                // the label they had, so a background session cannot rename
+                // itself under the eye.
+                if let Some(session) = self.tabs[self.active].focused_terminal() {
+                    let label = tab_name(&session.program_title, &session.label).to_owned();
+                    self.tabs[self.active].title = label;
+                }
+                let tabs: Vec<String> = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        if tab.title.is_empty() {
+                            format!("tab {}", index + 1)
+                        } else {
+                            tab.title.clone()
+                        }
+                    })
+                    .collect();
+                // The strip is the title bar now, so the active tab is the
+                // window's name too: the taskbar and Alt-Tab read this, and
+                // with several sessions "dtr" names none of them.
+                if let Some(label) = tabs.get(self.active) {
+                    frame.set_title(&format!("{label} — dtr"));
+                }
+                // One stripe per chip: what the tab's program says it is
+                // doing. The activity lives on the session, because the
+                // strip is drawn from labels and a label cannot carry it.
+                let activity: Vec<crate::pane::Activity> = self
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        tab.focused_terminal()
+                            .map(|session| session.activity)
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                let mut tab_click = None;
+                let mut settings_reply = None;
+                let capture_path = match self.capture.take() {
+                    Some((path, when)) if std::time::Instant::now() >= when => Some(path),
+                    other => {
+                        self.capture = other;
                         None
-                    };
-                    // Taken out for the frame for the same reason the pager is:
-                    // the sheet borrows itself while it draws, and the answer is
-                    // applied after the egui pass.
-                    let serial_dialog = self.serial_dialog.take();
-                    let mut serial_event = None;
-                    let mut tmux_pick = None;
-                    // A window capture is due once, then never again.
-                    // The active tab follows its focused session; the others keep
-                    // the label they had, so a background session cannot rename
-                    // itself under the eye.
-                    if let Some(session) = self.tabs[self.active].focused_terminal() {
-                        let label = tab_name(&session.program_title, &session.label).to_owned();
-                        self.tabs[self.active].title = label;
                     }
-                    let tabs: Vec<String> = self
-                        .tabs
-                        .iter()
-                        .enumerate()
-                        .map(|(index, tab)| {
-                            if tab.title.is_empty() {
-                                format!("tab {}", index + 1)
-                            } else {
-                                tab.title.clone()
-                            }
-                        })
-                        .collect();
-                    // The strip is the title bar now, so the active tab is the
-                    // window's name too: the taskbar and Alt-Tab read this, and
-                    // with several sessions "dtr" names none of them.
-                    if let Some(label) = tabs.get(self.active) {
-                        gpu.set_window_title(label);
-                    }
-                    // One stripe per chip: what the tab's program says it is
-                    // doing. The activity lives on the session, because the
-                    // strip is drawn from labels and a label cannot carry it.
-                    let activity: Vec<crate::pane::Activity> = self
-                        .tabs
-                        .iter()
-                        .map(|tab| {
-                            tab.focused_terminal()
-                                .map(|session| session.activity)
-                                .unwrap_or_default()
-                        })
-                        .collect();
-                    let mut tab_click = None;
-                    let mut settings_reply = None;
-                    let capture_path = match self.capture.take() {
-                        Some((path, when)) if std::time::Instant::now() >= when => Some(path),
-                        other => {
-                            self.capture = other;
-                            None
+                };
+                let tab = &self.tabs[self.active];
+                // The focused pane's rectangle, kept while the views are built:
+                // the IME box hangs off its caret.
+                let mut focused_rect = None;
+                let panes: Vec<_> = self
+                    .pane_views(tab, gpu.metrics(), screen, scale)
+                    .into_iter()
+                    .map(|(id, pane)| {
+                        if id == tab.focus {
+                            focused_rect = Some(pane.rect);
                         }
-                    };
-                    let tab = &self.tabs[self.active];
-                    // The focused pane's rectangle, kept while the views are built:
-                    // the IME box hangs off its caret.
-                    let mut focused_rect = None;
-                    let panes: Vec<_> = self
-                        .pane_views(tab, gpu.metrics(), screen, scale)
-                        .into_iter()
-                        .map(|(id, pane)| {
-                            if id == tab.focus {
-                                focused_rect = Some(pane.rect);
-                            }
-                            pane
+                        pane
+                    })
+                    .collect();
+                // File panes have no cells: they are painted with egui over
+                // the rectangle the grid pass reserved for them.
+                let area = self.pane_area(screen, scale);
+                let points = frame.context().pixels_per_point();
+                let file_panes: Vec<FilePaneView<'_>> = tab
+                    .layout
+                    .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom)
+                    .into_iter()
+                    .filter_map(|(id, rect)| match tab.leaves.get(&id) {
+                        Some(Pane::Files(browser)) => Some(FilePaneView {
+                            id,
+                            rect: to_points(rect, points),
+                            browser,
+                            focused: id == tab.focus,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                // A pane whose connection is not there has no cells worth
+                // reading and a state worth showing: it is drawn over the
+                // rectangle the grid pass reserved, once per pane, so a
+                // split says which half is waiting.
+                // A fold is remembered per pane, and only while that pane is
+                // waiting: the next drop is a new notice and starts covered.
+                let still_waiting: std::collections::BTreeSet<_> = tab
+                    .leaves
+                    .iter()
+                    .filter_map(|(id, pane)| {
+                        let session = pane.terminal()?;
+                        session.pane.stats().retry()?;
+                        Some(*id)
+                    })
+                    .collect();
+                self.folded_notices.retain(|id| still_waiting.contains(id));
+                let waiting: Vec<crate::ui::Waiting> = tab
+                    .layout
+                    .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom)
+                    .into_iter()
+                    .filter_map(|(id, rect)| {
+                        let session = tab.leaves.get(&id)?.terminal()?;
+                        Some(crate::ui::Waiting {
+                            id,
+                            rect,
+                            retry: session.pane.stats().retry()?,
+                            folded: self.folded_notices.contains(&id),
                         })
-                        .collect();
-                    // File panes have no cells: they are painted with egui over
-                    // the rectangle the grid pass reserved for them.
-                    let area = self.pane_area(screen, gpu.scale());
-                    let scale = gpu.scale();
-                    let points = gpu.egui_ctx.pixels_per_point();
-                    let file_panes: Vec<FilePaneView<'_>> = tab
-                        .layout
-                        .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom)
-                        .into_iter()
-                        .filter_map(|(id, rect)| match tab.leaves.get(&id) {
-                            Some(Pane::Files(browser)) => Some(FilePaneView {
-                                id,
-                                rect: to_points(rect, points),
-                                browser,
-                                focused: id == tab.focus,
-                            }),
-                            _ => None,
-                        })
-                        .collect();
-                    // A pane whose connection is not there has no cells worth
-                    // reading and a state worth showing: it is drawn over the
-                    // rectangle the grid pass reserved, once per pane, so a
-                    // split says which half is waiting.
-                    // A fold is remembered per pane, and only while that pane is
-                    // waiting: the next drop is a new notice and starts covered.
-                    let still_waiting: std::collections::BTreeSet<_> = tab
-                        .leaves
-                        .iter()
-                        .filter_map(|(id, pane)| {
-                            let session = pane.terminal()?;
-                            session.pane.stats().retry()?;
-                            Some(*id)
-                        })
-                        .collect();
-                    self.folded_notices.retain(|id| still_waiting.contains(id));
-                    let waiting: Vec<crate::ui::Waiting> = tab
-                        .layout
-                        .visible(area, crate::ui::SPLIT_GAP * gpu.scale(), tab.zoom)
-                        .into_iter()
-                        .filter_map(|(id, rect)| {
-                            let session = tab.leaves.get(&id)?.terminal()?;
-                            Some(crate::ui::Waiting {
-                                id,
-                                rect,
-                                retry: session.pane.stats().retry()?,
-                                folded: self.folded_notices.contains(&id),
-                            })
-                        })
-                        .collect();
-                    let mut reconnect_ask = None;
-                    let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
-                    // The composition box hangs off the caret of the focused
-                    // terminal, and the platform's candidate window is told the same
-                    // place: one geometry, two consumers, so they cannot disagree
-                    // about where the person is typing.
-                    let mut ime_anchor = None;
-                    // Not while an overlay owns the keyboard: a dialogue's text field
-                    // shows the composition itself (egui-winit feeds it), and a box
-                    // hanging off the terminal cursor would claim the composition
-                    // belongs to a pane that is not receiving it.
-                    if self.preedit.is_composing() && self.terminal_owns_keys() {
-                        if let (Some(rect), Some(session)) = (focused_rect, tab.focused_terminal())
-                        {
-                            let cursor = session.frame.as_ref().and_then(|frame| frame.cursor);
-                            if let Some(cursor) = cursor {
-                                let (col, row) = (cursor.x, cursor.y);
-                                let metrics = gpu.metrics();
-                                let cell = crate::layout::Rect::new(
-                                    rect.x + f32::from(col) * metrics.cell_width,
-                                    rect.y + f32::from(row) * metrics.cell_height,
-                                    metrics.cell_width,
-                                    metrics.cell_height,
+                    })
+                    .collect();
+                let mut reconnect_ask = None;
+                let terminal_pane = tab.focused_terminal().map(|session| &session.pane);
+                // The composition box hangs off the caret of the focused
+                // terminal, and the platform's candidate window is told the same
+                // place: one geometry, two consumers, so they cannot disagree
+                // about where the person is typing.
+                let mut ime_anchor = None;
+                // Not while an overlay owns the keyboard: a dialogue's text field
+                // shows the composition itself (egui-winit feeds it), and a box
+                // hanging off the terminal cursor would claim the composition
+                // belongs to a pane that is not receiving it.
+                if self.preedit.is_composing() && self.terminal_owns_keys() {
+                    if let (Some(rect), Some(session)) = (focused_rect, tab.focused_terminal()) {
+                        let cursor = session.frame.as_ref().and_then(|frame| frame.cursor);
+                        if let Some(cursor) = cursor {
+                            let (col, row) = (cursor.x, cursor.y);
+                            let metrics = gpu.metrics();
+                            let cell = crate::layout::Rect::new(
+                                rect.x + f32::from(col) * metrics.cell_width,
+                                rect.y + f32::from(row) * metrics.cell_height,
+                                metrics.cell_width,
+                                metrics.cell_height,
+                            );
+                            // Physical pixels: winit's IME area is in them, and
+                            // repeating an unchanged one would send a request
+                            // per frame on Wayland.
+                            let key = [cell.x, cell.y, cell.width, cell.height];
+                            if self.ime_caret != Some(key) {
+                                self.ime_caret = Some(key);
+                                frame.window().set_ime_cursor_area(
+                                    winit::dpi::PhysicalPosition::new(cell.x as i32, cell.y as i32),
+                                    winit::dpi::PhysicalSize::new(
+                                        cell.width as u32,
+                                        cell.height as u32,
+                                    ),
                                 );
-                                // Physical pixels: winit's IME area is in them, and
-                                // repeating an unchanged one would send a request
-                                // per frame on Wayland.
-                                let key = [cell.x, cell.y, cell.width, cell.height];
-                                if self.ime_caret != Some(key) {
-                                    self.ime_caret = Some(key);
-                                    gpu.window.set_ime_cursor_area(
-                                        winit::dpi::PhysicalPosition::new(
-                                            cell.x as i32,
-                                            cell.y as i32,
-                                        ),
-                                        winit::dpi::PhysicalSize::new(
-                                            cell.width as u32,
-                                            cell.height as u32,
-                                        ),
-                                    );
-                                }
-                                // egui draws in points; the grid is laid out in
-                                // physical pixels. One conversion, here.
-                                let points = gpu.egui_ctx.pixels_per_point();
-                                ime_anchor = Some(crate::ime::Anchor {
-                                    caret: to_points(cell, points),
-                                    pane: to_points(rect, points),
-                                });
                             }
+                            // egui draws in points; the grid is laid out in
+                            // physical pixels. One conversion, here.
+                            let points = frame.context().pixels_per_point();
+                            ime_anchor = Some(crate::ime::Anchor {
+                                caret: to_points(cell, points),
+                                pane: to_points(rect, points),
+                            });
                         }
                     }
-                    let ime = ime_anchor.map(|anchor| (anchor, &self.preedit));
-                    let look = self.look.clone();
-                    // Taken out for the frame for the same reason the palette is: the
-                    // pager mutates itself while it draws, and `self` is borrowed.
-                    let mut pager = std::mem::take(&mut self.pager);
-                    let mut link_menu = std::mem::take(&mut self.link_menu);
-                    let mut menu_choice = None;
-                    let mut close_window = false;
-                    // The file pane whose close button was pressed, if any: the
-                    // drawing code says *which* pane, and only the app can take
-                    // a leaf out of the layout.
-                    let mut close_file = None;
-                    let mut sort_change = None;
-                    let mut place_choice = None;
-                    let mut file_menu = None;
-                    let mut pick_answer = None;
-                    let mut pick_cancel = None;
-                    let mut keymap_event = None;
-                    let mut about_close = false;
-                    // The overlay's zero-cost state: a bool, the last completed
-                    // second's rates (from `LoopReport`, the same numbers `-v`
-                    // logs) and the focused grid's size.
-                    let stats = crate::stats::Input {
-                        enabled: self.stats_overlay,
-                        rates: self.loop_report.borrow().rates,
-                        grid: self.session().map_or((0, 0), |session| session.grid),
-                    };
-                    let rendered = gpu.render(
-                        &panes,
-                        self.frames_drawn,
-                        self.started,
-                        stats,
-                        &file_panes,
-                        &status,
-                        &mut palette,
-                        &mut action,
-                        terminal_pane,
-                        palette_open,
-                        &mut pager,
-                        thumbnail.as_ref().map(|(texture, size)| (texture, *size)),
-                        &mut link_menu,
-                        &mut menu_choice,
-                        &mut copied_text,
-                        &mut copied,
-                        toast_text
-                            .as_ref()
-                            .map(|(text, alpha)| (text.as_str(), *alpha)),
-                        settings,
-                        self.keymap_card.open.then_some(&self.keymap_card),
-                        &self.keymap,
-                        &mut keymap_event,
-                        self.about_open,
-                        &mut about_close,
-                        serial_dialog.as_ref(),
-                        &mut serial_event,
-                        self.tmux_chooser.is_open().then_some(&self.tmux_chooser),
-                        &mut tmux_pick,
-                        &tabs,
-                        &activity,
-                        self.active,
-                        &self.destinations,
-                        &mut tab_click,
-                        self.status_visible(),
-                        &mut settings_reply,
-                        capture_path.as_deref(),
-                        &look,
-                        ime,
-                        &mut close_window,
-                        &waiting,
-                        &mut reconnect_ask,
-                        &mut close_file,
-                        &mut sort_change,
-                        &mut place_choice,
-                        &mut file_menu,
-                        &mut pick_answer,
-                        &mut pick_cancel,
+                }
+                let ime = ime_anchor.map(|anchor| (anchor, &self.preedit));
+                let look = &self.look;
+                // Taken out for the frame for the same reason the palette is: the
+                // pager mutates itself while it draws, and `self` is borrowed.
+                let mut pager = std::mem::take(&mut self.pager);
+                let mut link_menu = std::mem::take(&mut self.link_menu);
+                let mut menu_choice = None;
+                let mut close_window = false;
+                // The file pane whose close button was pressed, if any: the
+                // drawing code says *which* pane, and only the app can take
+                // a leaf out of the layout.
+                let mut close_file = None;
+                let mut sort_change = None;
+                let mut place_choice = None;
+                let mut file_menu = None;
+                let mut pick_answer = None;
+                let mut pick_cancel = None;
+                let mut keymap_event = None;
+                let mut about_close = false;
+                // The overlay's zero-cost state: a bool, the last completed
+                // second's rates (from `LoopReport`, the same numbers `-v`
+                // logs) and the focused grid's size.
+                let stats = crate::stats::Input {
+                    enabled: self.stats_overlay,
+                    rates: self.loop_report.borrow().rates,
+                    grid: self.session().map_or((0, 0), |session| session.grid),
+                };
+                // The debug frame line, before the scene borrows `panes` for
+                // the draw: nothing after the render may use them.
+                if self.frames_drawn < 3 || self.frames_drawn % 120 == 0 {
+                    let with_content = panes.iter().filter(|pane| pane.frame.is_some()).count();
+                    tracing::debug!(
+                        frames_drawn = self.frames_drawn,
+                        panes = panes.len(),
+                        with_content,
+                        instances = gpu.grid.instances(),
+                        "frame"
                     );
-                    // The keyboard map's answers. Its Escape and its captured
-                    // key are handled where the keys are; a click has to come back
-                    // from the frame, because only the frame knows the card was
-                    // drawn.
-                    if let Some(asked) = keymap_event {
-                        self.keymap_event(asked);
-                    }
-                    if about_close {
-                        self.about_open = false;
-                        self.repaint("about closed");
-                    }
-                    if let Some(picked) = tmux_pick {
-                        self.tmux_pick(picked);
-                    }
-                    // What the notice over a waiting pane was asked for. Both
-                    // answers are the app's: the pane can hurry its own wait, and
-                    // only the app can close a tab.
-                    if let Some((id, ask)) = reconnect_ask {
-                        match ask {
-                            crate::ui::ReconnectAsk::Now => {
-                                let command = crate::pane::Command::Retry;
-                                if let Some(session) = self.tabs[self.active]
-                                    .leaves
-                                    .get(&id)
-                                    .and_then(Pane::terminal)
-                                {
-                                    session.pane.send(command);
-                                }
-                            }
-                            crate::ui::ReconnectAsk::Close => self.close_tab(self.active),
-                            crate::ui::ReconnectAsk::Fold => {
-                                self.folded_notices.insert(id);
-                            }
-                            crate::ui::ReconnectAsk::Unfold => {
-                                self.folded_notices.remove(&id);
-                            }
-                        }
-                        self.repaint("a waiting pane was answered");
-                    }
-                    // A file pane's own close button. The pane cannot close
-                    // itself — a leaf is the layout's — so the answer comes back
-                    // here, the same way a clicked tab's does.
-                    if let Some(id) = close_file {
-                        self.close_pane(id);
-                        self.repaint("file pane closed");
-                    }
-                    if let Some((id, change)) = sort_change {
-                        self.apply_sort_change(id, change);
-                        self.repaint("files sorted");
-                    }
-                    if let Some((id, path)) = place_choice {
-                        // The places popup chose a directory: the pane that owns
-                        // the button goes there, which may be another machine.
-                        if let Some(Pane::Files(browser)) =
-                            self.tabs[self.active].leaves.get_mut(&id)
-                        {
-                            browser.navigate(path);
-                        }
-                        self.repaint("files place");
-                    }
-                    if let Some((id, choice)) = file_menu {
-                        self.file_menu_choice(id, choice);
-                    }
-                    if let Some((id, outcome)) = pick_answer {
-                        self.apply_pick(id, outcome);
-                    }
-                    if let Some(id) = pick_cancel {
-                        // A cancel inside a `replace` question closes the
-                        // question, not the picker, and that is the browser's
-                        // rule: one button, one word, two depths.
-                        if let Some(Pane::Files(browser)) =
-                            self.tabs[self.active].leaves.get_mut(&id)
-                        {
-                            browser.cancel_pick();
-                        }
-                        self.repaint("pick cancelled");
-                    }
-                    // The caption's × is the window's close button. Same exit as
-                    // the window manager's, so there is one shutdown path.
-                    if close_window {
-                        event_loop.exit();
-                        return;
-                    }
-                    self.palette = palette;
-                    // The pager comes back with the scroll the frame measured, which is
-                    // the only place that knows how tall the text turned out.
-                    self.pager = pager;
-                    self.link_menu = link_menu;
-                    self.serial_dialog = serial_dialog;
-                    if let Some(asked) = serial_event {
-                        match asked {
-                            crate::serial_dialog::Event::Connect(settings) => {
-                                if let Some(dialog) = self.serial_dialog.take() {
-                                    self.connect_serial_sheet(dialog, settings);
-                                }
-                            }
-                            crate::serial_dialog::Event::Cancel => {
-                                self.serial_dialog = None;
-                                tracing::info!("serial connection sheet cancelled");
-                            }
-                            crate::serial_dialog::Event::Save => {
-                                // The sheet owns the list; the store owns the
-                                // file. Only a named save is written.
-                                if let Some(dialog) = self.serial_dialog.as_mut() {
-                                    if let Some((name, settings)) = dialog.save() {
-                                        if let Some(store) = self.store.as_ref() {
-                                            if let Err(err) = store.save_profile(&name, &settings) {
-                                                tracing::warn!(%name, %err, "could not save the profile");
+                }
+                // The resolved skin is the window's style, and installing
+                // it before the egui pass is what makes every dialog a
+                // guest: a dialog that installs its own style on the
+                // context used to leave the strip under the card's row
+                // height. It is a no-op while the skin is unchanged.
+                gpu.install_skin(frame.context(), &self.look);
+                // The draw pass needs a few things from the renderer and
+                // the frame copied out first: the scene below holds
+                // `&mut gpu.grid`, so the closure cannot borrow `gpu` too.
+                let metrics = gpu.metrics();
+                let glyphs = gpu.glyphs();
+                let client_frame = gpu.client_frame;
+                let caption_glyphs = gpu.caption_glyphs;
+                let adapter_name = frame.adapter_name().to_owned();
+                let window = self.window.clone();
+                let status_visible = self.status_visible();
+                // The grid is dtr's underlay: the scene draws the terminal
+                // and the frame lays egui over it.
+                let mut scene = GridScene {
+                    grid: &mut gpu.grid,
+                    panes: &panes,
+                    look: &look,
+                };
+                let rendered = frame.render(
+                    &mut scene,
+                    dtr_frame::RenderOptions {
+                        frames_drawn: self.frames_drawn,
+                        started: self.started,
+                        capture: capture_path.as_deref(),
+                        measure_present: self.stats_overlay,
+                    },
+                    |ui| {
+                        // The strip is the title bar when this window paints its own frame, so
+                        // its height is the platform's own caption — 46 points for a GNOME
+                        // header bar, Windows' queried band — and the chip follows it. With
+                        // the window manager drawing a title bar the strip is only a tab row.
+                        let title_height = if client_frame {
+                            crate::chrome::title_height(scale)
+                        } else {
+                            crate::ui::TAB_HEIGHT
+                        };
+                        let chip_height = crate::ui::tab_chip_height(title_height);
+                        // A client-side frame must exist even with no tabs, or the window
+                        // has no way to be moved or closed while the last tab is going away.
+                        if !tabs.is_empty() || client_frame {
+                            // The panel is the strip's full height and the chips are
+                            // shorter than it, so nothing egui rounds or grows can paint
+                            // over the first terminal row. Same lesson as the status bar.
+                            egui::Panel::top("dtr-tabs")
+                                // Points, not physical pixels: egui is in points and `scale`
+                                // is applied by egui itself. Multiplying here made the strip
+                                // grow with DPI twice, so at scale 2 it was 60 points tall
+                                // over a 60 *pixel* reservation and the first rows slid
+                                // underneath it — invisible at scale 1.
+                                .exact_size(title_height)
+                                // No inner margin: with a client-side frame the buttons run
+                                // the strip's full height and the drag region is the whole
+                                // row, so the inset belongs to the chips alone (below).
+                                .frame(egui::Frame::new().fill(look.skin().palette.card))
+                                .show(ui, |ui| {
+                                    let strip = ui.max_rect();
+                                    // The chips keep the inset the panel used to give them,
+                                    // except on Windows, where the caption icon's square
+                                    // comes first.
+                                    let left = if client_frame {
+                                        crate::chrome::chips_left()
+                                    } else {
+                                        6.0
+                                    };
+                                    let inset = egui::vec2(
+                                        left,
+                                        ((title_height - chip_height) / 2.0).floor(),
+                                    );
+                                    let mut chips = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .max_rect(strip.shrink2(inset))
+                                            .layout(egui::Layout::left_to_right(
+                                                egui::Align::Center,
+                                            )),
+                                    );
+                                    let bar = crate::ui::tab_bar(
+                                        &mut chips,
+                                        &tabs,
+                                        self.active,
+                                        &self.destinations,
+                                        &look,
+                                        chip_height,
+                                        &activity,
+                                    );
+                                    if let Some(hit) = bar.hit {
+                                        tab_click = Some(hit);
+                                    }
+                                    // The window's own menu, at the right end of the strip
+                                    // beside the caption buttons — or at the strip's own
+                                    // right edge in `native` mode, where there are none. The
+                                    // same place on both platforms: the left is where tabs
+                                    // start, and a button there would move them.
+                                    let menu_edge = if client_frame {
+                                        crate::chrome::buttons_rect(strip, crate::chrome::kind())
+                                            .left()
+                                    } else {
+                                        strip.right()
+                                    };
+                                    let menu_rect = egui::Rect::from_min_max(
+                                        egui::pos2(
+                                            (menu_edge - 4.0 - 32.0).max(strip.left()),
+                                            strip.top(),
+                                        ),
+                                        egui::pos2(menu_edge - 4.0, strip.bottom()),
+                                    );
+                                    let skin = look.skin();
+                                    if let Some(chosen) =
+                                        crate::ui::app_menu(ui, menu_rect, &skin, &self.keymap)
+                                    {
+                                        tab_click = Some(crate::ui::TabHit::Menu(chosen));
+                                    }
+                                    // The rest of the row is the title bar. In `native` mode
+                                    // the window manager already gave us one, and a strip
+                                    // that also moved the window would be two title bars in
+                                    // one place.
+                                    if client_frame {
+                                        let maximized =
+                                            ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                                        // The app icon, where Windows puts it, and doing what
+                                        // Windows does with it: a click is the system menu.
+                                        if let Some(at) =
+                                            crate::chrome::caption_icon(ui, strip, &look)
+                                        {
+                                            if let Some(window) = &window {
+                                                dtr_frame::show_system_menu(window, at);
                                             }
+                                        }
+                                        // The drag region stops at the menu's left edge: the
+                                        // menu and the buttons are both inside the caption
+                                        // area, and a press on either that also started a
+                                        // drag would move the window instead of pressing it.
+                                        let caption = egui::Rect::from_min_max(
+                                            strip.min,
+                                            egui::pos2(menu_rect.left(), strip.bottom()),
+                                        );
+                                        match crate::chrome::drag_area(ui, caption, bar.used) {
+                                            Some(crate::chrome::Drag::Move) => {
+                                                ui.ctx().send_viewport_cmd(
+                                                    egui::ViewportCommand::StartDrag,
+                                                );
+                                            }
+                                            Some(crate::chrome::Drag::ToggleMaximize) => {
+                                                ui.ctx().send_viewport_cmd(
+                                                    egui::ViewportCommand::Maximized(!maximized),
+                                                );
+                                            }
+                                            None => {}
+                                        }
+                                        match crate::chrome::buttons(
+                                            ui,
+                                            strip,
+                                            maximized,
+                                            &look,
+                                            caption_glyphs,
+                                        ) {
+                                            Some(crate::chrome::Hit::Minimize) => {
+                                                ui.ctx().send_viewport_cmd(
+                                                    egui::ViewportCommand::Minimized(true),
+                                                );
+                                            }
+                                            Some(crate::chrome::Hit::Maximize) => {
+                                                ui.ctx().send_viewport_cmd(
+                                                    egui::ViewportCommand::Maximized(!maximized),
+                                                );
+                                            }
+                                            Some(crate::chrome::Hit::Close) => close_window = true,
+                                            None => {}
+                                        }
+                                        // Where the maximise button is this frame, for the
+                                        // Win32 hit test that offers the snap layouts.
+                                        #[cfg(target_os = "windows")]
+                                        crate::chrome::windows::set_maximize_rect(
+                                            crate::chrome::maximize_rect(
+                                                strip,
+                                                crate::chrome::kind(),
+                                            ),
+                                            scale,
+                                        );
+                                    }
+                                });
+                        }
+                        if status_visible {
+                            egui::Panel::bottom("dtr-status")
+                                // Exactly the height the grid reserves. Left to itself the panel
+                                // sizes to its content and its margins, comes out a couple of
+                                // pixels taller than STATUS_HEIGHT, and covers the bottom row —
+                                // which is where a shell puts its prompt.
+                                //
+                                // In *points*, because that is what egui sizes a panel in: it
+                                // multiplies by `pixels_per_point` itself. Doing it here too
+                                // made the bar `24 × scale²` pixels tall over a `24 × scale`
+                                // reservation, so at 150 % it covered most of the bottom row
+                                // (`docs/windows.md` §2.2).
+                                .exact_size(crate::ui::STATUS_HEIGHT)
+                                .frame(
+                                    egui::Frame::new()
+                                        .fill(look.skin().palette.card)
+                                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                                )
+                                .show(ui, |ui| crate::ui::status_bar(ui, &status, look));
+                        }
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                            .show(ui, |ui| {
+                                // The notice over a pane that is waiting for its connection,
+                                // one per pane, drawn here rather than over the whole window:
+                                // the pane's rectangle is the one thing that says *which*
+                                // session is not there.
+                                for pane in &waiting {
+                                    if let Some(ask) = crate::ui::reconnect(ui, pane, look) {
+                                        reconnect_ask = Some((pane.id, ask));
+                                    }
+                                }
+                            });
+                        // A frameless window's borders. The window manager's grip went with
+                        // the frame, so the strips are ours — added after the panels so the
+                        // few pixels at the edge belong to the resize and not to whatever
+                        // happens to be drawn underneath them.
+                        if client_frame {
+                            if let Some(direction) = crate::chrome::resize_edges(ui, ui.max_rect())
+                            {
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                                        direction,
+                                    ));
+                            }
+                        }
+                        // File panes sit over the grid rectangle their leaf owns. They
+                        // are areas rather than windows: fixed position, no dragging.
+                        for file in &file_panes {
+                            let outcome = dtr_files::pane_ui(
+                                ui,
+                                egui::Id::unique(("dtr-files", file.id)),
+                                file.rect,
+                                file.browser,
+                                &look.skin(),
+                                file.focused,
+                            );
+                            if outcome.close {
+                                close_file = Some(file.id);
+                            }
+                            if let Some(change) = outcome.sort {
+                                sort_change = Some((file.id, change));
+                            }
+                            if let Some(path) = outcome.navigate {
+                                place_choice = Some((file.id, path));
+                            }
+                            if let Some(choice) = outcome.menu {
+                                file_menu = Some((file.id, choice));
+                            }
+                            if let Some(outcome) = outcome.pick {
+                                pick_answer = Some((file.id, outcome));
+                            }
+                            if outcome.pick_cancel {
+                                pick_cancel = Some(file.id);
+                            }
+                        }
+                        // The debug overlay (`--stats`, or the palette's `overlay`): one
+                        // label of chrome text in the bottom-right of the pane area, above
+                        // the status row. `crate::stats::overlay` puts it in `Order::Middle`
+                        // — over the panes, under every card — and makes it
+                        // `interactable(false)`, so a click over it still reaches the cell
+                        // underneath. The numbers are the ring as it stood when this frame
+                        // began: a frame's own cost is only known once it is presented.
+                        if stats.enabled {
+                            let live = crate::stats::Live {
+                                input: stats,
+                                glyphs,
+                                cell: (metrics.cell_width, metrics.cell_height),
+                                scale,
+                                adapter: &adapter_name,
+                                status_visible,
+                            };
+                            crate::stats::overlay(ui, look, &self.frame_samples, &live);
+                        }
+                        // The composition box goes over the grid and under the
+                        // modals: it is part of typing, and a palette a composition
+                        // could cover would be a palette nobody could read.
+                        if let Some((anchor, preedit)) = ime {
+                            preedit.ui(ui, anchor, look);
+                        }
+                        // The palette is an overlay above the panes: a file listing
+                        // must not cover the command line it sits beside.
+                        if let Some(settings) = settings {
+                            if let Some(asked) = settings.ui(ui, look) {
+                                settings_reply = Some(asked);
+                            }
+                        }
+                        // The keyboard map sits above the palette and the pager: it is the
+                        // thing a person opens precisely because they do not know what is
+                        // open behind it.
+                        if self.about_open {
+                            crate::ui::overlay(ui, "dtr-about", |ui| {
+                                if crate::about::ui(ui, look) == Some(crate::about::Event::Close) {
+                                    about_close = true;
+                                }
+                            });
+                        }
+                        if let Some(keymap) = self.keymap_card.open.then_some(&self.keymap_card) {
+                            crate::ui::overlay(ui, "dtr-keymap", |ui| {
+                                if let Some(asked) =
+                                    crate::keymap::ui(ui, look, &self.keymap, keymap)
+                                {
+                                    keymap_event = Some(asked);
+                                }
+                            });
+                        }
+                        if palette_open {
+                            crate::ui::overlay(ui, "dtr-palette", |ui| {
+                                if let Some(chosen) = palette.ui(ui, look) {
+                                    action = Some(chosen);
+                                }
+                            });
+                        }
+                        // Above the panes, in the same foreground layer as the palette: a
+                        // pager a file pane could cover would be a pager nobody could
+                        // read.
+                        if pager.is_open() {
+                            crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
+                        }
+                        // A preview of the image the pointer is on. Last, so it is over
+                        // the panes, and in the tooltip layer, so a file pane cannot hide
+                        // it.
+                        if let Some((texture, size)) = &thumbnail {
+                            crate::thumb::draw(ui, texture, *size, look);
+                        }
+                        // A right-click's menu. "Save as" on it opens the desktop's own
+                        // dialog, which is not drawn here at all.
+                        if link_menu.is_open() {
+                            menu_choice = link_menu.ui(ui, look);
+                        }
+                        // The serial sheet is the topmost surface while it is up: it is a
+                        // question about the session, not a decoration on it.
+                        if let Some(serial_dialog) = &serial_dialog {
+                            if let Some(asked) = serial_dialog.ui(ui, look) {
+                                serial_event = Some(asked);
+                            }
+                        }
+                        // Which tmux session to open, when the host had more than one to
+                        // offer. Above the sheet and the palette: it is the only surface
+                        // that will *open* a tab, and a tab opened behind a card would be a
+                        // card hiding its own consequence.
+                        if let Some(chooser) =
+                            self.tmux_chooser.is_open().then_some(&self.tmux_chooser)
+                        {
+                            if let Some(picked) = chooser.ui(ui, look) {
+                                tmux_pick = Some(picked);
+                            }
+                        }
+                        // Clipboard in and out. egui hands paste over as an event; the
+                        // pane hands copied text back through a slot it fills itself.
+                        let pasted: Vec<String> = ui.ctx().input(|input| {
+                            input
+                                .events
+                                .iter()
+                                .filter_map(|event| match event {
+                                    egui::Event::Paste(text) => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .collect()
+                        });
+                        for text in pasted {
+                            if !palette_open && serial_dialog.is_none() {
+                                if let Some(pane) = terminal_pane {
+                                    pane.send(crate::pane::Command::Paste(text.into_bytes()));
+                                }
+                            }
+                        }
+                        if let Some(text) = copied_text.take() {
+                            ui.ctx().copy_text(text.clone());
+                            copied = Some(text);
+                        }
+                        if let Some((text, alpha)) = toast_text
+                            .as_ref()
+                            .map(|(text, alpha)| (text.as_str(), *alpha))
+                        {
+                            crate::ui::toast(ui, look, text, alpha);
+                        }
+                    },
+                );
+                // The overlay's samples: the frame measured the present
+                // wait where it presented, and only because the overlay
+                // asked for it. A frame that was skipped measured nothing.
+                let timing = rendered.as_ref().ok().and_then(|timing| *timing);
+                if let Some(timing) = timing {
+                    if let Some(present_ms) = timing.present_ms {
+                        self.frame_samples.push(timing.cpu_ms, present_ms);
+                    }
+                }
+                // The keyboard map's answers. Its Escape and its captured
+                // key are handled where the keys are; a click has to come back
+                // from the frame, because only the frame knows the card was
+                // drawn.
+                if let Some(asked) = keymap_event {
+                    self.keymap_event(asked);
+                }
+                if about_close {
+                    self.about_open = false;
+                    self.repaint("about closed");
+                }
+                if let Some(picked) = tmux_pick {
+                    self.tmux_pick(picked);
+                }
+                // What the notice over a waiting pane was asked for. Both
+                // answers are the app's: the pane can hurry its own wait, and
+                // only the app can close a tab.
+                if let Some((id, ask)) = reconnect_ask {
+                    match ask {
+                        crate::ui::ReconnectAsk::Now => {
+                            let command = crate::pane::Command::Retry;
+                            if let Some(session) = self.tabs[self.active]
+                                .leaves
+                                .get(&id)
+                                .and_then(Pane::terminal)
+                            {
+                                session.pane.send(command);
+                            }
+                        }
+                        crate::ui::ReconnectAsk::Close => self.close_tab(self.active),
+                        crate::ui::ReconnectAsk::Fold => {
+                            self.folded_notices.insert(id);
+                        }
+                        crate::ui::ReconnectAsk::Unfold => {
+                            self.folded_notices.remove(&id);
+                        }
+                    }
+                    self.repaint("a waiting pane was answered");
+                }
+                // A file pane's own close button. The pane cannot close
+                // itself — a leaf is the layout's — so the answer comes back
+                // here, the same way a clicked tab's does.
+                if let Some(id) = close_file {
+                    self.close_pane(id);
+                    self.repaint("file pane closed");
+                }
+                if let Some((id, change)) = sort_change {
+                    self.apply_sort_change(id, change);
+                    self.repaint("files sorted");
+                }
+                if let Some((id, path)) = place_choice {
+                    // The places popup chose a directory: the pane that owns
+                    // the button goes there, which may be another machine.
+                    if let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) {
+                        browser.navigate(path);
+                    }
+                    self.repaint("files place");
+                }
+                if let Some((id, choice)) = file_menu {
+                    self.file_menu_choice(id, choice);
+                }
+                if let Some((id, outcome)) = pick_answer {
+                    self.apply_pick(id, outcome);
+                }
+                if let Some(id) = pick_cancel {
+                    // A cancel inside a `replace` question closes the
+                    // question, not the picker, and that is the browser's
+                    // rule: one button, one word, two depths.
+                    if let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) {
+                        browser.cancel_pick();
+                    }
+                    self.repaint("pick cancelled");
+                }
+                // The caption's × is the window's close button. Same exit as
+                // the window manager's, so there is one shutdown path.
+                if close_window {
+                    event_loop.exit();
+                    return;
+                }
+                self.palette = palette;
+                // The pager comes back with the scroll the frame measured, which is
+                // the only place that knows how tall the text turned out.
+                self.pager = pager;
+                self.link_menu = link_menu;
+                self.serial_dialog = serial_dialog;
+                if let Some(asked) = serial_event {
+                    match asked {
+                        crate::serial_dialog::Event::Connect(settings) => {
+                            if let Some(dialog) = self.serial_dialog.take() {
+                                self.connect_serial_sheet(dialog, settings);
+                            }
+                        }
+                        crate::serial_dialog::Event::Cancel => {
+                            self.serial_dialog = None;
+                            tracing::info!("serial connection sheet cancelled");
+                        }
+                        crate::serial_dialog::Event::Save => {
+                            // The sheet owns the list; the store owns the
+                            // file. Only a named save is written.
+                            if let Some(dialog) = self.serial_dialog.as_mut() {
+                                if let Some((name, settings)) = dialog.save() {
+                                    if let Some(store) = self.store.as_ref() {
+                                        if let Err(err) = store.save_profile(&name, &settings) {
+                                            tracing::warn!(%name, %err, "could not save the profile");
                                         }
                                     }
                                 }
                             }
-                            other => {
-                                if let Some(dialog) = self.serial_dialog.as_mut() {
-                                    dialog.apply(other);
-                                }
-                            }
                         }
-                        self.repaint("serial dialog");
-                    }
-                    // The answers come back after the frame, like a clicked tab: the
-                    // drawing code knows what was clicked, the app knows what to do
-                    // about it.
-                    if let Some(choice) = menu_choice {
-                        self.link_menu_choice(choice);
-                    }
-                    if let Some(reply) = settings_reply {
-                        // A mouse edit updates the draft *and* the window: every
-                        // row previews, and the file is written when the menu is
-                        // saved — same as a keyboard edit. The card's own buttons
-                        // are the keyboard's Enter and Esc, so the mouse and the
-                        // keyboard leave through one door.
-                        match reply {
-                            crate::settings::Reply::Change(change) => {
-                                // The theme is the one row that has to re-resolve
-                                // the terminals' colours; everything else leaves
-                                // them alone.
-                                let themed = matches!(change, crate::settings::Change::Theme(_));
-                                self.settings.apply(change);
-                                self.preview_settings(themed);
-                            }
-                            crate::settings::Reply::Apply => self.apply_settings(),
-                            crate::settings::Reply::Cancel => {
-                                self.settings.cancel();
-                                // The draft is the file's again — `cancel`
-                                // restores it — and so is the window: a preview
-                                // is not a change until Save.
-                                self.preview_settings(true);
-                                self.repaint("preferences closed");
+                        other => {
+                            if let Some(dialog) = self.serial_dialog.as_mut() {
+                                dialog.apply(other);
                             }
                         }
                     }
-                    match tab_click {
-                        // A click on a tab is a switch, exactly like the chord.
-                        Some(crate::ui::TabHit::Select(index)) if index < self.tabs.len() => {
-                            self.set_active(index, "chip clicked");
-                            self.repaint("tab clicked");
+                    self.repaint("serial dialog");
+                }
+                // The answers come back after the frame, like a clicked tab: the
+                // drawing code knows what was clicked, the app knows what to do
+                // about it.
+                if let Some(choice) = menu_choice {
+                    self.link_menu_choice(choice);
+                }
+                if let Some(reply) = settings_reply {
+                    // A mouse edit updates the draft *and* the window: every
+                    // row previews, and the file is written when the menu is
+                    // saved — same as a keyboard edit. The card's own buttons
+                    // are the keyboard's Enter and Esc, so the mouse and the
+                    // keyboard leave through one door.
+                    match reply {
+                        crate::settings::Reply::Change(change) => {
+                            // The theme is the one row that has to re-resolve
+                            // the terminals' colours; everything else leaves
+                            // them alone.
+                            let themed = matches!(change, crate::settings::Change::Theme(_));
+                            self.settings.apply(change);
+                            self.preview_settings(themed);
                         }
-                        Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
-                        // The strip's menu: the three commands that belong to the
-                        // window rather than to a tab. Each opens the same surface
-                        // its chord does, so the menu is a second way in, never a
-                        // second implementation.
-                        Some(crate::ui::TabHit::Menu(menu)) => match menu {
-                            crate::ui::Menu::Preferences => {
-                                self.dispatch(crate::keys::Action::Preferences);
-                            }
-                            crate::ui::Menu::Keymap => {
-                                self.dispatch(crate::keys::Action::Keymap);
-                            }
-                            crate::ui::Menu::About => {
-                                self.about_open = true;
-                                self.repaint("about");
-                            }
-                        },
-                        Some(crate::ui::TabHit::New(destination)) => match destination {
-                            // A port goes through the palette's own connect, because
-                            // somebody may have set a baud rate or CR translation for
-                            // this device and it is remembered per port. Opening a
-                            // bare `Transport::Serial` here would ignore both.
-                            Some(crate::sources::Destination::Serial { path, .. }) => {
-                                self.apply(Action::Connect(path))
-                            }
-                            Some(crate::sources::Destination::Ssh { alias, .. }) => {
-                                self.open_ssh(alias)
-                            }
-                            // A shell the menu named: the program is opened
-                            // explicitly, because the row said which one it was.
-                            Some(crate::sources::Destination::Shell { program, .. }) => {
-                                self.open_shell(Some(program))
-                            }
-                            None => self.open_shell(None),
-                        },
-                        _ => {}
-                    }
-                    drop(toast_text);
-                    if let Some(text) = captured {
-                        // An empty block stays a toast: an empty pager would look like
-                        // a bug rather than a shell without prompt marks.
-                        if text.is_empty() {
-                            self.toast = Some((
-                                "nothing to capture — the shell has not marked a prompt".to_owned(),
-                                std::time::Instant::now(),
-                            ));
-                        } else {
-                            tracing::info!(lines = text.lines().count(), "paging a block");
-                            self.pager.show(text, "the last command block");
-                            // The pointer may be over a link; the pager is not a
-                            // terminal, so the pointing hand has to go.
-                            self.cursor_icon = Some(winit::window::CursorIcon::Default);
-                            self.repaint("pager opened");
+                        crate::settings::Reply::Apply => self.apply_settings(),
+                        crate::settings::Reply::Cancel => {
+                            self.settings.cancel();
+                            // The draft is the file's again — `cancel`
+                            // restores it — and so is the window: a preview
+                            // is not a change until Save.
+                            self.preview_settings(true);
+                            self.repaint("preferences closed");
                         }
-                    }
-                    if let Some(text) = copied {
-                        // Both paths: egui's, so its own paste and IME state agree,
-                        // and ours, so the text reaches the desktop either way.
-                        self.set_clipboard(&text);
-                        let chars = text.chars().count();
-                        let bytes = text.len();
-                        // An empty copy is not a success: "copied 0 chars" claims
-                        // work that did not happen, and the usual cause is a click
-                        // that selected one blank cell.
-                        let note = if chars == 0 {
-                            "nothing to copy".to_owned()
-                        } else if chars < 40 {
-                            format!("copied {chars} chars")
-                        } else {
-                            format!("copied {bytes} bytes")
-                        };
-                        self.toast = Some((note, std::time::Instant::now()));
-                    }
-                    if self
-                        .toast
-                        .as_ref()
-                        .is_some_and(|(_, at)| at.elapsed() > TOAST)
-                    {
-                        self.toast = None;
-                    }
-                    // egui asks for another frame when something it drew needs one —
-                    // opening a popup, an animation, a hover highlight. Nobody calls
-                    // `repaint` for those, so the request has to reach the event
-                    // loop. It does **not** set the `wake` flag: a wake means "this
-                    // is due now" and a zero-delay wait, and egui asks again every
-                    // frame while anything animates, which spins the loop at 100% CPU
-                    // instead of idling. A plain redraw request is enough — the
-                    // compositor delivers it.
-                    // Once per drawn frame, not once per check: egui keeps asking
-                    // while anything animates, and a `request_redraw` that is never
-                    // answered (the Wayland backend waits for a frame callback)
-                    // makes winit's pump loop busy-poll — 55k iterations a second
-                    // with 20 frames.
-                    // Hover feedback is worth the redraw: the strip lights up under
-                    // the pointer, and a frame per refresh while the mouse moves is
-                    // what that costs.
-                    if gpu.egui_ctx.has_requested_repaint() && !self.egui_redraw_pending {
-                        self.egui_redraw_pending = true;
-                        gpu.window.request_redraw();
-                    }
-                    self.loop_report.borrow_mut().frames += 1;
-                    self.frames_drawn = self.frames_drawn.wrapping_add(1);
-                    // A frame that took long enough to feel is worth a line: the
-                    // glyph count says whether it was font work or drawing.
-                    let frame_ms = gpu.cpu_ms;
-                    if frame_ms > 8.0 {
-                        tracing::debug!(
-                            ms = format!("{frame_ms:.1}"),
-                            glyphs = gpu.grid.glyphs(),
-                            "slow frame"
-                        );
-                    }
-                    // Nothing here asks for another frame for the overlay. Its
-                    // readout runs on its own low cadence in `about_to_wait`: a
-                    // counter that forced a frame per refresh would measure
-                    // itself, and idle fps would be the display's rate rather
-                    // than dtr's (`crate::stats::REFRESH_INTERVAL`).
-                    if let Err(err) = rendered {
-                        tracing::error!(%err, "render");
-                    }
-                    if let Some(action) = action {
-                        self.apply(action);
-                    }
-                    if self.quit {
-                        event_loop.exit();
                     }
                 }
-                self.gpu = gpu;
+                match tab_click {
+                    // A click on a tab is a switch, exactly like the chord.
+                    Some(crate::ui::TabHit::Select(index)) if index < self.tabs.len() => {
+                        self.set_active(index, "chip clicked");
+                        self.repaint("tab clicked");
+                    }
+                    Some(crate::ui::TabHit::Close(index)) => self.close_tab(index),
+                    // The strip's menu: the three commands that belong to the
+                    // window rather than to a tab. Each opens the same surface
+                    // its chord does, so the menu is a second way in, never a
+                    // second implementation.
+                    Some(crate::ui::TabHit::Menu(menu)) => match menu {
+                        crate::ui::Menu::Preferences => {
+                            self.dispatch(crate::keys::Action::Preferences);
+                        }
+                        crate::ui::Menu::Keymap => {
+                            self.dispatch(crate::keys::Action::Keymap);
+                        }
+                        crate::ui::Menu::About => {
+                            self.about_open = true;
+                            self.repaint("about");
+                        }
+                    },
+                    Some(crate::ui::TabHit::New(destination)) => match destination {
+                        // A port goes through the palette's own connect, because
+                        // somebody may have set a baud rate or CR translation for
+                        // this device and it is remembered per port. Opening a
+                        // bare `Transport::Serial` here would ignore both.
+                        Some(crate::sources::Destination::Serial { path, .. }) => {
+                            self.apply(Action::Connect(path))
+                        }
+                        Some(crate::sources::Destination::Ssh { alias, .. }) => {
+                            self.open_ssh(alias)
+                        }
+                        // A shell the menu named: the program is opened
+                        // explicitly, because the row said which one it was.
+                        Some(crate::sources::Destination::Shell { program, .. }) => {
+                            self.open_shell(Some(program))
+                        }
+                        None => self.open_shell(None),
+                    },
+                    _ => {}
+                }
+                drop(toast_text);
+                if let Some(text) = captured {
+                    // An empty block stays a toast: an empty pager would look like
+                    // a bug rather than a shell without prompt marks.
+                    if text.is_empty() {
+                        self.toast = Some((
+                            "nothing to capture — the shell has not marked a prompt".to_owned(),
+                            std::time::Instant::now(),
+                        ));
+                    } else {
+                        tracing::info!(lines = text.lines().count(), "paging a block");
+                        self.pager.show(text, "the last command block");
+                        // The pointer may be over a link; the pager is not a
+                        // terminal, so the pointing hand has to go.
+                        self.cursor_icon = Some(winit::window::CursorIcon::Default);
+                        self.repaint("pager opened");
+                    }
+                }
+                if let Some(text) = copied {
+                    // Both paths: egui's, so its own paste and IME state agree,
+                    // and ours, so the text reaches the desktop either way.
+                    self.set_clipboard(&text);
+                    let chars = text.chars().count();
+                    let bytes = text.len();
+                    // An empty copy is not a success: "copied 0 chars" claims
+                    // work that did not happen, and the usual cause is a click
+                    // that selected one blank cell.
+                    let note = if chars == 0 {
+                        "nothing to copy".to_owned()
+                    } else if chars < 40 {
+                        format!("copied {chars} chars")
+                    } else {
+                        format!("copied {bytes} bytes")
+                    };
+                    self.toast = Some((note, std::time::Instant::now()));
+                }
+                if self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() > TOAST)
+                {
+                    self.toast = None;
+                }
+                // egui asks for another frame when something it drew needs one —
+                // opening a popup, an animation, a hover highlight. Nobody calls
+                // `repaint` for those, so the request has to reach the event
+                // loop. It does **not** set the `wake` flag: a wake means "this
+                // is due now" and a zero-delay wait, and egui asks again every
+                // frame while anything animates, which spins the loop at 100% CPU
+                // instead of idling. A plain redraw request is enough — the
+                // compositor delivers it.
+                // Once per drawn frame, not once per check: egui keeps asking
+                // while anything animates, and a `request_redraw` that is never
+                // answered (the Wayland backend waits for a frame callback)
+                // makes winit's pump loop busy-poll — 55k iterations a second
+                // with 20 frames.
+                // Hover feedback is worth the redraw: the strip lights up under
+                // the pointer, and a frame per refresh while the mouse moves is
+                // what that costs.
+                if frame.context().has_requested_repaint() && !self.egui_redraw_pending {
+                    self.egui_redraw_pending = true;
+                    frame.request_redraw();
+                }
+                self.loop_report.borrow_mut().frames += 1;
+                self.frames_drawn = self.frames_drawn.wrapping_add(1);
+                // A frame that took long enough to feel is worth a line: the
+                // glyph count says whether it was font work or drawing.
+                let frame_ms = timing.map_or(0.0, |timing| timing.cpu_ms);
+                if frame_ms > 8.0 {
+                    tracing::debug!(
+                        ms = format!("{frame_ms:.1}"),
+                        glyphs = gpu.grid.glyphs(),
+                        "slow frame"
+                    );
+                }
+                // Nothing here asks for another frame for the overlay. Its
+                // readout runs on its own low cadence in `about_to_wait`: a
+                // counter that forced a frame per refresh would measure
+                // itself, and idle fps would be the display's rate rather
+                // than dtr's (`crate::stats::REFRESH_INTERVAL`).
+                if let Err(err) = rendered {
+                    tracing::error!(%err, "render");
+                }
+                if let Some(action) = action {
+                    self.apply(action);
+                }
+                if self.quit {
+                    event_loop.exit();
+                }
+                self.gpu = Some(gpu);
             }
             _ => {}
         }
     }
+
+    /// The process's exit status: a pane's failure is the loop's error, and it
+    /// is reported here, before the app and its GPU resources are dropped.
+    fn finished(&self) -> anyhow::Result<()> {
+        match &self.fatal {
+            Some(err) => anyhow::bail!("{err}"),
+            None => Ok(()),
+        }
+    }
 }
 
+/// dtr's half of a frame: the grid renderer and the chrome choices a frame is
+/// drawn with.
+///
+/// The window, the surface, the egui context and the render passes belong to
+/// `dtr_frame::Frame`. This is what dtr adds on top, and it is dropped before
+/// the frame's device because `dtr_frame` drops the application before its
+/// windows — the other half of the wgpu drop-order rule.
 struct Gpu {
-    // Fields drop in declaration order, and that order is load-bearing here.
-    // Anything holding a texture, buffer or pipeline must go before the device
-    // that owns them, the surface must go before the window it is a view of, and
-    // the window must go last. Getting it wrong segfaults on close rather than
-    // failing loudly, which is why it is written down.
-    egui_renderer: egui_wgpu::Renderer,
+    /// The grid holds wgpu buffers and textures: it must drop before the device
+    /// that owns them, which the drop order above guarantees.
     grid: crate::render::GridRenderer,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+    /// The surface format the pipeline was built for: a rebuild after a face or
+    /// size change must match the swapchain the frame draws into.
+    format: wgpu::TextureFormat,
     /// Whether dtr paints the window frame, from `[window] chrome`. Read once,
     /// at creation: it decides whether the strip is a drag region and whether
     /// the buttons are drawn.
@@ -6655,119 +6997,28 @@ struct Gpu {
     /// Where the caption buttons get their symbols: the platform's icon font
     /// when it resolved at startup, drawn shapes when it did not.
     caption_glyphs: crate::chrome::Glyphs,
-    egui_ctx: egui::Context,
-    egui_state: egui_winit::State,
-    /// When the current frame started, and how much of it was CPU work rather
-    /// than waiting for the compositor.
-    frame_began: std::time::Instant,
-    cpu_ms: f32,
-    /// The debug overlay's rolling frame and present durations. Empty and never
-    /// written while the overlay is off — the `Instant` around `present` is not
-    /// even read then.
-    frame_samples: crate::stats::FrameSamples,
-    /// The adapter wgpu picked. `-v` logs it once at startup; the overlay names
-    /// the GPU that produced the numbers it is showing.
-    adapter_name: String,
-    /// The window's last reported size, until the next drawn frame configures
-    /// the surface for it. A drag reports many; only the last one is drawn.
-    pending_size: Option<winit::dpi::PhysicalSize<u32>>,
-    /// The title the window was last told, so a frame that changes nothing does
-    /// not talk to the window manager — which on Wayland is a round trip.
-    title: String,
     /// The skin whose `egui::Style` is installed on the context. Kept so a
     /// frame that resolves the same skin again does not rebuild the style.
     installed_skin: Option<dtr_widgets::Skin>,
-    window: Arc<Window>,
 }
 
 impl Gpu {
-    /// Copy the frame that was just drawn into a PNG.
-    ///
-    /// The surface is configured `COPY_SRC` for this: an offscreen capture of
-    /// the same state is not the same picture, and twice now the difference
-    /// mattered (a menu that only drew in the window, a font that only broke
-    /// there).
-    fn write_capture(
-        &self,
-        output: &wgpu::SurfaceTexture,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let (width, height) = (self.config.width, self.config.height);
-        // Copy rows must be a multiple of 256 bytes.
-        let unpadded = width * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded = unpadded.div_ceil(align) * align;
-
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("dtr-capture"),
-            size: u64::from(padded) * u64::from(height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("dtr-capture"),
-            });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &output.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-
-        let mut pixels = Vec::with_capacity((unpadded * height) as usize);
-        {
-            let Ok(view) = slice.get_mapped_range() else {
-                anyhow::bail!("could not map the capture buffer");
-            };
-            for row in 0..height {
-                let start = (row * padded) as usize;
-                let end = start + unpadded as usize;
-                pixels.extend_from_slice(&view[start..end]);
-            }
-        }
-        buffer.unmap();
-
-        // The surface is BGRA; PNG wants RGBA.
-        if self.config.format == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-        }
-        crate::screenshot::write_png(path, width, height, &pixels)?;
-        tracing::info!(path = %path.display(), width, height, "captured the window");
-        Ok(())
+    /// Cell size in physical pixels, for hit-testing.
+    fn metrics(&self) -> crate::render::Metrics {
+        self.grid.metrics()
     }
 
-    /// Rebuild the grid for a new face or size. Cheap enough to do on a preferences
-    /// change: it is a fresh atlas, not a reload of the whole renderer.
-    fn rebuild_grid(&mut self, look: &Look) {
-        let scale = self.scale();
-        self.grid = crate::render::GridRenderer::new(&self.device, self.config.format, look, scale);
+    /// Glyphs the last frame rasterised: a large number means the frame is
+    /// paying for font work, not for drawing.
+    fn glyphs(&self) -> usize {
+        self.grid.glyphs()
+    }
+
+    /// Rebuild the grid for a new face or size. Cheap enough to do on a
+    /// preferences change: it is a fresh atlas, not a reload of the whole
+    /// renderer.
+    fn rebuild_grid(&mut self, device: &wgpu::Device, look: &Look, scale: f32) {
+        self.grid = crate::render::GridRenderer::new(device, self.format, look, scale);
         tracing::info!(
             family = ?look.family,
             size = look.size,
@@ -6776,853 +7027,57 @@ impl Gpu {
         );
     }
 
-    fn new(
-        window: Arc<Window>,
-        look: &Look,
-        hint: Option<&str>,
-        client_frame: bool,
-    ) -> anyhow::Result<Self> {
-        let size = window.inner_size();
-        let instance = instance();
-        let surface = instance.create_surface(Arc::clone(&window))?;
-
-        // HighPerformance, not LowPower: this is a terminal someone stares at,
-        // and asking for the low-power adapter hands it the integrated GPU of a
-        // machine that has a real one sitting there.
-        let adapter = match hint {
-            Some(pattern) => match pick_adapter(&instance, &surface, pattern) {
-                Some(adapter) => adapter,
-                None => {
-                    tracing::warn!(pattern, "no adapter matched; falling back");
-                    request_default_adapter(&instance, &surface)?
-                }
-            },
-            None => request_default_adapter(&instance, &surface)?,
-        };
-        tracing::info!(
-            adapter = %adapter.get_info().name,
-            backend = ?adapter.get_info().backend,
-            "GPU adapter"
-        );
-
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("dtr"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            }))?;
-
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .ok_or_else(|| anyhow::anyhow!("adapter cannot present to this surface"))?;
-        config.present_mode = wgpu::PresentMode::AutoVsync;
-        // One frame in the compositor's queue, not two.
-        //
-        // On DX12 — the backend a Windows machine gets — wgpu waits for a
-        // swapchain buffer inside `get_current_texture`, on this thread, through
-        // the frame-latency waitable object (`wgpu-hal`'s DX12 surface). A depth
-        // of two lets the CPU run a frame ahead, so a keystroke's echo can sit
-        // behind a whole refresh before it is even drawn; one is the lowest the
-        // API allows and the terminal draws at most one frame per vblank, so
-        // nothing is lost in throughput. Vulkan ignores the field, so Linux is
-        // unchanged.
-        config.desired_maximum_frame_latency = 1;
-        // Copyable so the window can photograph itself: that is the only way to
-        // verify what the *window* draws, as opposed to what the offscreen
-        // capture path draws — and the two have disagreed before.
-        config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
-        // egui prefers a non-sRGB target and handles the conversion itself.
-        if let Some(format) = surface
-            .get_capabilities(&adapter)
-            .formats
-            .iter()
-            .copied()
-            .find(|f| {
-                matches!(
-                    f,
-                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
-                )
-            })
-        {
-            config.format = format;
-        }
-        surface.configure(&device, &config);
-
-        let egui_ctx = egui::Context::default();
-        // Before any image is drawn: the SVG loader is what decodes the icons.
-        crate::ui::install_image_loaders(&egui_ctx);
-        // Whether the platform's caption-glyph font is there: the buttons draw
-        // with it when it is, and paint their shapes when it is not. Asked here
-        // because a missing glyph is a panic, not a fallback.
-        let caption_font = look.install(&egui_ctx);
-        // The window's style is the skin from the first frame — installed here so
-        // nothing reads egui's own defaults, and again in `render` whenever the
-        // resolved skin changes (the platform palette is live).
-        let skin = look.skin();
-        skin.apply(&egui_ctx);
-
-        let egui_state = egui_winit::State::new(
-            egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            window.theme(),
-            Some(2048),
-        );
-
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &device,
-            config.format,
-            egui_wgpu::RendererOptions::default(),
-        );
-        let grid = crate::render::GridRenderer::new(
-            &device,
-            config.format,
-            look,
-            window.scale_factor() as f32,
-        );
-        // Kept for the overlay: `-v` logs the adapter once at startup, and a
-        // counter should say which GPU produced the numbers it shows.
-        let adapter_name = adapter.get_info().name.clone();
-        tracing::info!(
-            format = ?config.format,
-            width = config.width,
-            height = config.height,
-            present_mode = ?config.present_mode,
-            adapter = %adapter_name,
-            "window surface"
-        );
-
-        Ok(Self {
-            egui_renderer,
-            grid,
-            surface,
-            device,
-            queue,
-            config,
-            client_frame,
-            caption_glyphs: if caption_font {
-                crate::chrome::Glyphs::Font
-            } else {
-                crate::chrome::Glyphs::Painted
-            },
-            egui_ctx,
-            egui_state,
-            frame_began: std::time::Instant::now(),
-            cpu_ms: 0.0,
-            frame_samples: crate::stats::FrameSamples::default(),
-            adapter_name,
-            pending_size: None,
-            title: String::new(),
-            installed_skin: Some(skin),
-            window,
-        })
-    }
-
-    /// Keep the OS title in step with the active tab.    ///
-    /// With a client-side frame the strip is the only place the session's name
-    /// is written, so this is what the taskbar and Alt-Tab show. A window called
-    /// `dtr` is anonymous when three sessions are open, and `set_title` is a
-    /// window-manager round trip on Wayland, hence the comparison.
-    fn set_window_title(&mut self, label: &str) {
-        let title = format!("{label} — dtr");
-        if self.title == title {
-            return;
-        }
-        self.window.set_title(&title);
-        self.title = title;
-    }
-
-    /// Ask Windows for the window's system menu, at a point in egui points.
+    /// Install the resolved skin's `egui::Style` when it changed.
     ///
-    /// The menu is the one a native caption shows on a right-click or on its
-    /// title-bar icon, and winit exposes exactly that as `show_window_menu`.
-    /// Windows only, so everything else compiles to nothing.
-    fn show_system_menu(&self, at: egui::Pos2) {
-        #[cfg(target_os = "windows")]
-        {
-            let scale = self.scale();
-            if let Ok(inner) = self.window.inner_position() {
-                self.window
-                    .show_window_menu(winit::dpi::PhysicalPosition::new(
-                        inner.x + (at.x * scale) as i32,
-                        inner.y + (at.y * scale) as i32,
-                    ));
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        let _ = at;
-    }
-
-    /// Cell size in physical pixels, for hit-testing.
-    fn metrics(&self) -> crate::render::Metrics {
-        self.grid.metrics()
-    }
-
-    /// The window a native dialog is parented to.
-    ///
-    /// A file picker is the one piece of the UI egui does not draw, and a dialog
-    /// with no parent is a window that can open behind this one — or, on a
-    /// Wayland session, in a corner with the compositor's idea of where a
-    /// transient belongs rather than ours.
-    fn window(&self) -> &Arc<Window> {
-        &self.window
-    }
-
-    /// Backing-store pixels per logical point, for chrome measurements.
-    fn scale(&self) -> f32 {
-        // The DPI factor, not a ratio of two physical sizes: `inner_size` is
-        // already physical in winit 0.30, so dividing the surface width by it is
-        // always 1.0 and everything that multiplies by `scale` — the tab strip's
-        // reservation, split gaps, the status bar — reserved half the space it
-        // needed on a HiDPI display.
-        self.window.scale_factor() as f32
-    }
-
-    fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
-            return;
-        }
-        self.pending_size = Some(size);
-    }
-
-    /// Push the last reported window size into the swapchain, once per drawn
-    /// frame.
-    ///
-    /// `WindowEvent::Resized` only records the size, because a window drag on
-    /// Windows delivers a `WM_SIZE` per mouse move and every `surface.configure`
-    /// waits for the present queue to go idle (wgpu's DX12 backend does), so a
-    /// configure per event is a vblank wait per event. Configuring at the top of
-    /// the frame that draws the new size gives the same picture once, and the
-    /// frame is the thing that was going to be limited anyway.
-    fn configure_pending_resize(&mut self) {
-        let Some(size) = self.pending_size.take() else {
-            return;
-        };
-        if size.width == self.config.width && size.height == self.config.height {
-            return;
-        }
-        self.config.width = size.width;
-        self.config.height = size.height;
-        let began = std::time::Instant::now();
-        self.surface.configure(&self.device, &self.config);
-        tracing::debug!(
-            width = size.width,
-            height = size.height,
-            us = began.elapsed().as_micros() as u64,
-            "surface resized"
-        );
-    }
-
-    fn render(
-        &mut self,
-        panes: &[crate::render::PaneView<'_>],
-        frames_drawn: u64,
-        started: std::time::Instant,
-        // The debug overlay's inputs: whether to measure, the loop's rates from
-        // `LoopReport`, and the focused grid's size. Off means the `Instant`
-        // around `present` is not even read; see `crate::stats`.
-        stats: crate::stats::Input,
-        files: &[FilePaneView<'_>],
-        status: &Status,
-        palette: &mut Palette,
-        action: &mut Option<Action>,
-        pane: Option<&TermPane>,
-        palette_open: bool,
-        pager: &mut crate::pager::Pager,
-        thumbnail: Option<(&egui::TextureHandle, egui::Vec2)>,
-        link_menu: &mut crate::linkmenu::LinkMenu,
-        menu_choice: &mut Option<crate::linkmenu::Choice>,
-        copied_text: &mut Option<String>,
-        copied: &mut Option<String>,
-        toast: Option<(&str, f32)>,
-        settings: Option<&crate::settings::Settings>,
-        keymap: Option<&crate::keymap::Overlay>,
-        keymap_bindings: &crate::keys::Keymap,
-        keymap_event: &mut Option<crate::keymap::Event>,
-        about: bool,
-        about_close: &mut bool,
-        serial_dialog: Option<&crate::serial_dialog::SerialDialog>,
-        serial_event: &mut Option<crate::serial_dialog::Event>,
-        tmux_chooser: Option<&crate::tmux::Chooser>,
-        tmux_pick: &mut Option<crate::tmux::Pick>,
-        tabs: &[String],
-        activity: &[crate::pane::Activity],
-        active_tab: usize,
-        destinations: &[crate::sources::Destination],
-        tab_click: &mut Option<crate::ui::TabHit>,
-        status_visible: bool,
-        settings_reply: &mut Option<crate::settings::Reply>,
-        capture: Option<&std::path::Path>,
-        look: &Look,
-        // The composition being typed, and where its box belongs. Both are
-        // absent unless an input method is in the middle of something.
-        ime: Option<(crate::ime::Anchor, &crate::ime::Preedit)>,
-        // The caption's close button: the drawing code knows it was pressed, but
-        // only the event loop can close the window.
-        close: &mut bool,
-        // Panes whose connection is not there, and where the answers go.
-        waiting: &[crate::ui::Waiting],
-        reconnect_ask: &mut Option<(crate::layout::LeafId, crate::ui::ReconnectAsk)>,
-        // A file pane's close button. The pane draws it; taking the leaf out of
-        // the layout is the app's, exactly like a tab's cross.
-        close_file: &mut Option<crate::layout::LeafId>,
-        sort_change: &mut Option<(crate::layout::LeafId, dtr_files::SortChange)>,
-        place_choice: &mut Option<(crate::layout::LeafId, std::path::PathBuf)>,
-        // A file pane's right-press menu: the pane says which row, the app does
-        // the verb. It lives on the pane, so the answer comes back with the id
-        // that owns it rather than with whoever happens to be focused.
-        file_menu: &mut Option<(crate::layout::LeafId, dtr_files::MenuChoice)>,
-        // A picker's answer, and the pane whose cancel button was pressed. Both
-        // carry the id for the same reason: a picker answers a question that
-        // belonged to the pane it was asked in.
-        pick_answer: &mut Option<(crate::layout::LeafId, dtr_files::Outcome)>,
-        pick_cancel: &mut Option<crate::layout::LeafId>,
-    ) -> anyhow::Result<()> {
-        // The first few frames at debug, then every 120th: enough to see a
-        // wedged surface without drowning the log at 60 Hz.
-        let loud = frames_drawn < 3 || frames_drawn % 120 == 0;
-        self.frame_began = std::time::Instant::now();
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                if loud {
-                    tracing::warn!("surface outdated; reconfiguring");
-                }
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            // Nothing to draw into this instant; try again on the next wake.
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => return Ok(()),
-        };
-
-        // The window's style is the skin, and this is where it is installed —
-        // not in a dialog. A dialog has to put its skin on the *context*,
-        // because the stock widgets egui draws inside a popup read the context
-        // style rather than the one the dialog was given, and that install
-        // outlives the frame that made it: closing the preferences card used to
-        // leave the window with the card's row height, and the tab strip's
-        // chips under it were centred in a 34-point row and clipped by the
-        // panel. Installing the resolved skin first makes the window the
-        // authority and every dialog a guest.
+    /// This is where the window becomes the authority on the style, and every
+    /// dialog a guest: a dialog that installed its own style on the context
+    /// used to leave the tab strip under the card's row height after it closed.
+    fn install_skin(&mut self, ctx: &egui::Context, look: &Look) {
         let skin = look.skin();
         if self.installed_skin.as_ref() != Some(&skin) {
-            skin.apply(&self.egui_ctx);
+            skin.apply(ctx);
             self.installed_skin = Some(skin);
         }
-        // egui talks to the window through `ViewportCommand`s — start a drag,
-        // begin a resize, maximise, minimise — and it only knows what the window
-        // is doing (focused? maximised?) if it is told every frame. Both halves
-        // are easy to leave out by hand: without `update_viewport_info` the
-        // maximised flag is always `None`, so the restore glyph never appears,
-        // and without `process_viewport_commands` every command is silently
-        // dropped, which is a title bar that does not move and a window that
-        // does not resize on Windows.
-        let mut viewport_info = egui::ViewportInfo::default();
-        egui_winit::update_viewport_info(&mut viewport_info, &self.egui_ctx, &self.window, false);
-        let mut raw_input = self.egui_state.take_egui_input(&self.window);
-        raw_input
-            .viewports
-            .insert(egui::ViewportId::ROOT, viewport_info.clone());
-        let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            // The strip is the title bar when this window paints its own frame, so
-            // its height is the platform's own caption — 46 points for a GNOME
-            // header bar, Windows' queried band — and the chip follows it. With
-            // the window manager drawing a title bar the strip is only a tab row.
-            let title_height = if self.client_frame {
-                crate::chrome::title_height(self.scale())
-            } else {
-                crate::ui::TAB_HEIGHT
-            };
-            let chip_height = crate::ui::tab_chip_height(title_height);
-            // A client-side frame must exist even with no tabs, or the window
-            // has no way to be moved or closed while the last tab is going away.
-            if !tabs.is_empty() || self.client_frame {
-                // The panel is the strip's full height and the chips are
-                // shorter than it, so nothing egui rounds or grows can paint
-                // over the first terminal row. Same lesson as the status bar.
-                egui::Panel::top("dtr-tabs")
-                    // Points, not physical pixels: egui is in points and `scale`
-                    // is applied by egui itself. Multiplying here made the strip
-                    // grow with DPI twice, so at scale 2 it was 60 points tall
-                    // over a 60 *pixel* reservation and the first rows slid
-                    // underneath it — invisible at scale 1.
-                    .exact_size(title_height)
-                    // No inner margin: with a client-side frame the buttons run
-                    // the strip's full height and the drag region is the whole
-                    // row, so the inset belongs to the chips alone (below).
-                    .frame(egui::Frame::new().fill(look.skin().palette.card))
-                    .show(ui, |ui| {
-                        let strip = ui.max_rect();
-                        // The chips keep the inset the panel used to give them,
-                        // except on Windows, where the caption icon's square
-                        // comes first.
-                        let left = if self.client_frame {
-                            crate::chrome::chips_left()
-                        } else {
-                            6.0
-                        };
-                        let inset = egui::vec2(left, ((title_height - chip_height) / 2.0).floor());
-                        let mut chips = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(strip.shrink2(inset))
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        let bar = crate::ui::tab_bar(
-                            &mut chips,
-                            tabs,
-                            active_tab,
-                            destinations,
-                            &look,
-                            chip_height,
-                            &activity,
-                        );
-                        if let Some(hit) = bar.hit {
-                            *tab_click = Some(hit);
-                        }
-                        // The window's own menu, at the right end of the strip
-                        // beside the caption buttons — or at the strip's own
-                        // right edge in `native` mode, where there are none. The
-                        // same place on both platforms: the left is where tabs
-                        // start, and a button there would move them.
-                        let menu_edge = if self.client_frame {
-                            crate::chrome::buttons_rect(strip, crate::chrome::kind()).left()
-                        } else {
-                            strip.right()
-                        };
-                        let menu_rect = egui::Rect::from_min_max(
-                            egui::pos2((menu_edge - 4.0 - 32.0).max(strip.left()), strip.top()),
-                            egui::pos2(menu_edge - 4.0, strip.bottom()),
-                        );
-                        let skin = look.skin();
-                        if let Some(chosen) =
-                            crate::ui::app_menu(ui, menu_rect, &skin, keymap_bindings)
-                        {
-                            *tab_click = Some(crate::ui::TabHit::Menu(chosen));
-                        }
-                        // The rest of the row is the title bar. In `native` mode
-                        // the window manager already gave us one, and a strip
-                        // that also moved the window would be two title bars in
-                        // one place.
-                        if self.client_frame {
-                            let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-                            // The app icon, where Windows puts it, and doing what
-                            // Windows does with it: a click is the system menu.
-                            if let Some(at) = crate::chrome::caption_icon(ui, strip, &look) {
-                                self.show_system_menu(at);
-                            }
-                            // The drag region stops at the menu's left edge: the
-                            // menu and the buttons are both inside the caption
-                            // area, and a press on either that also started a
-                            // drag would move the window instead of pressing it.
-                            let caption = egui::Rect::from_min_max(
-                                strip.min,
-                                egui::pos2(menu_rect.left(), strip.bottom()),
-                            );
-                            match crate::chrome::drag_area(ui, caption, bar.used) {
-                                Some(crate::chrome::Drag::Move) => {
-                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                                }
-                                Some(crate::chrome::Drag::ToggleMaximize) => {
-                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
-                                        !maximized,
-                                    ));
-                                }
-                                None => {}
-                            }
-                            match crate::chrome::buttons(
-                                ui,
-                                strip,
-                                maximized,
-                                &look,
-                                self.caption_glyphs,
-                            ) {
-                                Some(crate::chrome::Hit::Minimize) => {
-                                    ui.ctx()
-                                        .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                                }
-                                Some(crate::chrome::Hit::Maximize) => {
-                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
-                                        !maximized,
-                                    ));
-                                }
-                                Some(crate::chrome::Hit::Close) => *close = true,
-                                None => {}
-                            }
-                            // Where the maximise button is this frame, for the
-                            // Win32 hit test that offers the snap layouts.
-                            #[cfg(target_os = "windows")]
-                            crate::chrome::windows::set_maximize_rect(
-                                crate::chrome::maximize_rect(strip, crate::chrome::kind()),
-                                self.scale(),
-                            );
-                        }
-                    });
-            }
-            if status_visible {
-                egui::Panel::bottom("dtr-status")
-                    // Exactly the height the grid reserves. Left to itself the panel
-                    // sizes to its content and its margins, comes out a couple of
-                    // pixels taller than STATUS_HEIGHT, and covers the bottom row —
-                    // which is where a shell puts its prompt.
-                    //
-                    // In *points*, because that is what egui sizes a panel in: it
-                    // multiplies by `pixels_per_point` itself. Doing it here too
-                    // made the bar `24 × scale²` pixels tall over a `24 × scale`
-                    // reservation, so at 150 % it covered most of the bottom row
-                    // (`docs/windows.md` §2.2).
-                    .exact_size(crate::ui::STATUS_HEIGHT)
-                    .frame(
-                        egui::Frame::new()
-                            .fill(look.skin().palette.card)
-                            .inner_margin(egui::Margin::symmetric(8, 4)),
-                    )
-                    .show(ui, |ui| crate::ui::status_bar(ui, status, look));
-            }
-            egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
-                .show(ui, |ui| {
-                    // The notice over a pane that is waiting for its connection,
-                    // one per pane, drawn here rather than over the whole window:
-                    // the pane's rectangle is the one thing that says *which*
-                    // session is not there.
-                    for pane in waiting {
-                        if let Some(ask) = crate::ui::reconnect(ui, pane, look) {
-                            *reconnect_ask = Some((pane.id, ask));
-                        }
-                    }
-                });
-            // A frameless window's borders. The window manager's grip went with
-            // the frame, so the strips are ours — added after the panels so the
-            // few pixels at the edge belong to the resize and not to whatever
-            // happens to be drawn underneath them.
-            if self.client_frame {
-                if let Some(direction) = crate::chrome::resize_edges(ui, ui.max_rect()) {
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
-                }
-            }
-            // File panes sit over the grid rectangle their leaf owns. They
-            // are areas rather than windows: fixed position, no dragging.
-            for file in files {
-                let outcome = dtr_files::pane_ui(
-                    ui,
-                    egui::Id::unique(("dtr-files", file.id)),
-                    file.rect,
-                    file.browser,
-                    &look.skin(),
-                    file.focused,
-                );
-                if outcome.close {
-                    *close_file = Some(file.id);
-                }
-                if let Some(change) = outcome.sort {
-                    *sort_change = Some((file.id, change));
-                }
-                if let Some(path) = outcome.navigate {
-                    *place_choice = Some((file.id, path));
-                }
-                if let Some(choice) = outcome.menu {
-                    *file_menu = Some((file.id, choice));
-                }
-                if let Some(outcome) = outcome.pick {
-                    *pick_answer = Some((file.id, outcome));
-                }
-                if outcome.pick_cancel {
-                    *pick_cancel = Some(file.id);
-                }
-            }
-            // The debug overlay (`--stats`, or the palette's `overlay`): one
-            // label of chrome text in the bottom-right of the pane area, above
-            // the status row. `crate::stats::overlay` puts it in `Order::Middle`
-            // — over the panes, under every card — and makes it
-            // `interactable(false)`, so a click over it still reaches the cell
-            // underneath. The numbers are the ring as it stood when this frame
-            // began: a frame's own cost is only known once it is presented.
-            if stats.enabled {
-                let metrics = self.grid.metrics();
-                let live = crate::stats::Live {
-                    input: stats,
-                    glyphs: self.grid.glyphs(),
-                    cell: (metrics.cell_width, metrics.cell_height),
-                    scale: self.scale(),
-                    adapter: &self.adapter_name,
-                    status_visible,
-                };
-                crate::stats::overlay(ui, look, &self.frame_samples, &live);
-            }
-            // The composition box goes over the grid and under the
-            // modals: it is part of typing, and a palette a composition
-            // could cover would be a palette nobody could read.
-            if let Some((anchor, preedit)) = ime {
-                preedit.ui(ui, anchor, look);
-            }
-            // The palette is an overlay above the panes: a file listing
-            // must not cover the command line it sits beside.
-            if let Some(settings) = settings {
-                if let Some(asked) = settings.ui(ui, look) {
-                    *settings_reply = Some(asked);
-                }
-            }
-            // The keyboard map sits above the palette and the pager: it is the
-            // thing a person opens precisely because they do not know what is
-            // open behind it.
-            if about {
-                crate::ui::overlay(ui, "dtr-about", |ui| {
-                    if crate::about::ui(ui, look) == Some(crate::about::Event::Close) {
-                        *about_close = true;
-                    }
-                });
-            }
-            if let Some(keymap) = keymap {
-                crate::ui::overlay(ui, "dtr-keymap", |ui| {
-                    if let Some(asked) = crate::keymap::ui(ui, look, keymap_bindings, keymap) {
-                        *keymap_event = Some(asked);
-                    }
-                });
-            }
-            if palette_open {
-                crate::ui::overlay(ui, "dtr-palette", |ui| {
-                    if let Some(chosen) = palette.ui(ui, look) {
-                        *action = Some(chosen);
-                    }
-                });
-            }
-            // Above the panes, in the same foreground layer as the palette: a
-            // pager a file pane could cover would be a pager nobody could
-            // read.
-            if pager.is_open() {
-                crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
-            }
-            // A preview of the image the pointer is on. Last, so it is over
-            // the panes, and in the tooltip layer, so a file pane cannot hide
-            // it.
-            if let Some((texture, size)) = thumbnail {
-                crate::thumb::draw(ui, texture, size, look);
-            }
-            // A right-click's menu. "Save as" on it opens the desktop's own
-            // dialog, which is not drawn here at all.
-            if link_menu.is_open() {
-                *menu_choice = link_menu.ui(ui, look);
-            }
-            // The serial sheet is the topmost surface while it is up: it is a
-            // question about the session, not a decoration on it.
-            if let Some(serial_dialog) = serial_dialog {
-                if let Some(asked) = serial_dialog.ui(ui, look) {
-                    *serial_event = Some(asked);
-                }
-            }
-            // Which tmux session to open, when the host had more than one to
-            // offer. Above the sheet and the palette: it is the only surface
-            // that will *open* a tab, and a tab opened behind a card would be a
-            // card hiding its own consequence.
-            if let Some(chooser) = tmux_chooser {
-                if let Some(picked) = chooser.ui(ui, look) {
-                    *tmux_pick = Some(picked);
-                }
-            }
-            // Clipboard in and out. egui hands paste over as an event; the
-            // pane hands copied text back through a slot it fills itself.
-            let pasted: Vec<String> = ui.ctx().input(|input| {
-                input
-                    .events
-                    .iter()
-                    .filter_map(|event| match event {
-                        egui::Event::Paste(text) => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            });
-            for text in pasted {
-                if !palette_open && serial_dialog.is_none() {
-                    if let Some(pane) = pane {
-                        pane.send(crate::pane::Command::Paste(text.into_bytes()));
-                    }
-                }
-            }
-            if let Some(text) = copied_text.take() {
-                ui.ctx().copy_text(text.clone());
-                *copied = Some(text);
-            }
-            if let Some((text, alpha)) = toast {
-                crate::ui::toast(ui, look, text, alpha);
-            }
-        });
+    }
+}
 
-        self.egui_state
-            .handle_platform_output(&self.window, full_output.platform_output);
+/// dtr's underlay for [`dtr_frame::Frame::render`]: the terminal grid.
+///
+/// The frame owns the passes and the surface; this hands it the grid's
+/// per-frame vertex data and its two draw calls. A frontend with no underlay
+/// would answer the same trait with a background colour and nothing else.
+struct GridScene<'a> {
+    grid: &'a mut crate::render::GridRenderer,
+    panes: &'a [crate::render::PaneView<'a>],
+    look: &'a Look,
+}
 
-        // The other half of the viewport conversation: drag, resize, maximise,
-        // minimise, title and decorations all arrive here as commands, and a
-        // backend that drops them leaves the window's own caption dead.
-        let mut actions_requested = Vec::new();
-        if let Some(output) = full_output.viewport_output.remove(&egui::ViewportId::ROOT) {
-            if !output.commands.is_empty() {
-                // A caption press that does nothing is easiest to see here: the
-                // command is either in this list or the frame never asked.
-                tracing::debug!(commands = ?output.commands, "viewport commands");
-            }
-            egui_winit::process_viewport_commands(
-                &self.egui_ctx,
-                &mut viewport_info,
-                output.commands,
-                &self.window,
-                &mut actions_requested,
-            );
+impl dtr_frame::Scene for GridScene<'_> {
+    fn clear_color(&self) -> wgpu::Color {
+        wgpu::Color {
+            r: f64::from(self.look.background[0]) / 255.0,
+            g: f64::from(self.look.background[1]) / 255.0,
+            b: f64::from(self.look.background[2]) / 255.0,
+            a: 1.0,
         }
-        for action in actions_requested {
-            // dtr handles its clipboard and screenshots itself, so an action
-            // here is a request the keymap does not make. Log it rather than
-            // pretend it happened.
-            tracing::debug!(?action, "egui asked for an action dtr does not take");
-        }
+    }
 
-        let pixels_per_point = full_output.pixels_per_point;
-        let clipped = self
-            .egui_ctx
-            .tessellate(full_output.shapes, pixels_per_point);
-
-        for (id, deltas) in &full_output.textures_delta.set {
-            for delta in deltas {
-                self.egui_renderer
-                    .update_texture(&self.device, &self.queue, *id, delta);
-            }
-        }
-
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point,
-        };
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("dtr") });
-        let user_cmds = self.egui_renderer.update_buffers(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &clipped,
-            &screen,
-        );
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+    fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, size: (u32, u32)) {
         self.grid.prepare(
-            &self.device,
-            &self.queue,
-            panes,
-            look,
-            (self.config.width as f32, self.config.height as f32),
+            device,
+            queue,
+            self.panes,
+            self.look,
+            (size.0 as f32, size.1 as f32),
         );
-        if frames_drawn == 0 {
-            // Startup is the one cost a user feels directly: the window appears
-            // when this line is logged, and everything before it is what they
-            // stared at.
-            tracing::info!(elapsed_ms = started.elapsed().as_millis(), "first frame");
-        }
-        if loud {
-            let with_content = panes.iter().filter(|pane| pane.frame.is_some()).count();
-            tracing::debug!(
-                frames_drawn,
-                panes = panes.len(),
-                with_content,
-                instances = self.grid.instances(),
-                "frame"
-            );
-        }
+    }
 
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("grid"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: f64::from(look.background[0]) / 255.0,
-                                g: f64::from(look.background[1]) / 255.0,
-                                b: f64::from(look.background[2]) / 255.0,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-            self.grid.draw(&mut pass);
-        }
+    fn draw(&mut self, pass: &mut wgpu::RenderPass<'_>) {
+        self.grid.draw(pass);
+    }
 
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("egui"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            // Keep the grid underneath.
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-            // Images that asked to be over the text, before egui: a menu or a
-            // card is still above the picture, and `--capture` photographs the
-            // same pass.
-            self.grid.draw_above(&mut pass);
-            self.egui_renderer.render(&mut pass, &clipped, &screen);
-        }
-
-        self.queue.submit(
-            user_cmds
-                .into_iter()
-                .chain(std::iter::once(encoder.finish())),
-        );
-        if let Some(path) = capture {
-            if let Err(err) = self.write_capture(&output, path) {
-                tracing::warn!(%err, path = %path.display(), "could not capture the window");
-            }
-        }
-        // Everything above is our work; `present` waits for the compositor and
-        // would otherwise be logged as a slow frame at 120 Hz. That is exactly
-        // the gap `docs/windows.md` §5.1 names: `cpu_ms` stops here, so the
-        // overlay measures the wait beside it — and only when the overlay is on,
-        // so a window nobody is measuring pays no `Instant` for a number nobody
-        // reads.
-        self.cpu_ms = self.frame_began.elapsed().as_secs_f32() * 1000.0;
-        let present_began = stats.enabled.then(std::time::Instant::now);
-        self.queue.present(output);
-        if let Some(began) = present_began {
-            self.frame_samples
-                .push(self.cpu_ms, began.elapsed().as_secs_f32() * 1000.0);
-        }
-
-        for id in &full_output.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
-        // TexturesDelta panics if dropped with unapplied entries.
-        full_output.textures_delta.clear();
-        Ok(())
+    fn draw_above(&mut self, pass: &mut wgpu::RenderPass<'_>) {
+        self.grid.draw_above(pass);
     }
 }
 
