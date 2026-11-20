@@ -76,6 +76,35 @@ fn new_terminal(
 pub const COLS: u16 = 80;
 pub const ROWS: u16 = 24;
 
+/// How long terminal output may wait for the window's first fit.
+///
+/// The first `Command::Resize` is what tells the terminal what a cell is in
+/// pixels, and an image transmitted before that has nothing to be placed against
+/// — the core drops it. A replay feeds its bytes immediately and a board's boot
+/// splash arrives before the first frame, so output is held until the fit
+/// instead of losing the picture. A pane with no UI to fit it (a test, a run
+/// with no window) must still be able to print, so the hold expires.
+const EARLY_OUTPUT_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// How long a serial line's or a replay's output may wait for the first fit.
+///
+/// Those are the transports whose *first* burst can be a picture: a board's boot
+/// logo arrives before the window opens, and a replay is a captured stream whose
+/// images have to be placed. On a cold Windows start the first D3D12 frame can
+/// take seconds (shader compilation, swapchain creation), and a one-second hold
+/// would expire before the fit and drop exactly the image the mode exists for.
+/// A shell or ssh pane gets [`EARLY_OUTPUT_WAIT`] instead: its first bytes are a
+/// prompt or text, and holding those for ten seconds would read as a hung
+/// terminal.
+const EARLY_OUTPUT_WAIT_IMAGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How much output may be held for the first fit, in bytes.
+///
+/// A program can print faster than a window opens; past this there is more text
+/// than a startup screen, and holding it is worse than losing an early image
+/// that was never going to be looked at.
+const EARLY_OUTPUT_MAX: usize = 4 * 1024 * 1024;
+
 /// What `CSI > q` (XTVERSION) answers.
 ///
 /// The core answers with the *library* it is built from, which is true and
@@ -1448,6 +1477,12 @@ async fn run(
     // frame; the pixels are copied out of the terminal only when a generation
     // changes (`ImageCache`).
     let mut images = ImageCache::new()?;
+    // Output held until the window's first fit, because an image transmitted
+    // before the terminal knows its cell size has nothing to be placed against
+    // (see `EARLY_OUTPUT_WAIT`). `None` means the hold is over: a fit arrived, or
+    // it expired, or there was more than `EARLY_OUTPUT_MAX` of it.
+    let mut early_output: Option<Vec<u8>> = Some(Vec::new());
+    let mut early_output_at: Option<std::time::Instant> = None;
     // Declared before the first publish: publishing is where a selection that
     // has scrolled out of the frame is dropped.
     let mut selection: Option<SelectionAnchors> = None;
@@ -1566,6 +1601,16 @@ async fn run(
     // or the demo screen has no program to type at. One answer for the pane's
     // life, because the transport is the pane's.
     let serial_transport = matches!(transport, Transport::Serial(_));
+
+    // How long output may be held for the first fit. A serial line or a replay
+    // can carry a picture in its first burst, so those wait through a slow first
+    // frame; a shell's first bytes are text, and holding them long makes a cold
+    // start read as a hung terminal.
+    let early_output_wait = if matches!(&transport, Transport::Serial(_) | Transport::Replay(_)) {
+        EARLY_OUTPUT_WAIT_IMAGE
+    } else {
+        EARLY_OUTPUT_WAIT
+    };
 
     match transport {
         Transport::Serial(cfg) => {
@@ -1718,7 +1763,33 @@ async fn run(
                                     }
                                 }
                             }
-                            marks.write(&mut term, &bytes)?;
+                            match early_output.as_mut() {
+                                // The first fit is a frame away; until it says
+                                // what a cell is in pixels, an image in here
+                                // would be dropped by the core rather than
+                                // placed, so the bytes wait.
+                                Some(held) => {
+                                    held.extend_from_slice(&bytes);
+                                    if early_output_at.is_none() {
+                                        early_output_at = Some(
+                                            std::time::Instant::now() + early_output_wait,
+                                        );
+                                    }
+                                    if held.len() > EARLY_OUTPUT_MAX {
+                                        // More than a startup screen: give up the
+                                        // hold and parse it at once rather than
+                                        // buffer a flood.
+                                        let held = early_output.take().unwrap_or_default();
+                                        early_output_at = None;
+                                        tracing::debug!(
+                                            bytes = held.len(),
+                                            "early output over the hold; writing it"
+                                        );
+                                        marks.write(&mut term, &held)?;
+                                    }
+                                }
+                                None => marks.write(&mut term, &bytes)?,
+                            }
                             if std::time::Instant::now() >= deadline {
                                 break;
                             }
@@ -2002,6 +2073,39 @@ async fn run(
                 } else {
                     Some(std::time::Instant::now() + tick)
                 };
+            }
+            // A pane with no UI to fit it must still print: the hold expires
+            // rather than swallowing the session's first output.
+            _ = when(
+                early_output_at.is_some(),
+                compio::time::sleep_until(early_output_at.unwrap_or_else(std::time::Instant::now))
+            )
+            .fuse() => {
+                early_output_at = None;
+                if let Some(held) = early_output.take() {
+                    if !held.is_empty() {
+                        tracing::debug!(
+                            bytes = held.len(),
+                            "output held for the first fit timed out"
+                        );
+                        marks.write(&mut term, &held)?;
+                        flush_replies(&replies, &mut sink).await;
+                        // The bytes went in outside the burst path, so the frame
+                        // they changed has to be published here.
+                        publish(
+                            &mut term,
+                            &mut state,
+                            &mut rows,
+                            &mut cells,
+                            &out,
+                            &wake,
+                            true,
+                            &mut selection,
+                            &mut shown,
+                            &mut images,
+                        )?;
+                    }
+                }
             }
             // Delayed input: one byte per period, re-armed from the write rather
             // than from the old deadline, so a write that took longer than the
@@ -2299,6 +2403,21 @@ async fn run(
                         // in-band report is produced by `resize` itself, and the
                         // batch path's flush only covers bytes from the session.
                         flush_replies(&replies, &mut sink).await;
+                        // The first fit is the cell's measurement: output held
+                        // for it can be parsed now, and an image in it is placed
+                        // at the real cell instead of being dropped for having no
+                        // size to be placed against (`EARLY_OUTPUT_WAIT`).
+                        if let Some(held) = early_output.take() {
+                            early_output_at = None;
+                            if !held.is_empty() {
+                                tracing::debug!(
+                                    bytes = held.len(),
+                                    "output held for the first fit"
+                                );
+                                marks.write(&mut term, &held)?;
+                                flush_replies(&replies, &mut sink).await;
+                            }
+                        }
                         // The shell needs the size too, or it wraps for the old
                         // width and the terminal shows a staircase. The size is
                         // remembered even with no pty behind it: a connection
@@ -4958,6 +5077,21 @@ mod session_tests {
         pane_given(script, remote, args, None, false)
     }
 
+    /// Tell the pane what a cell is, as the window's first frame does.
+    ///
+    /// Output is held for the first fit (`EARLY_OUTPUT_WAIT`): a test that needs
+    /// a program's mode-setting output parsed before it types must fit the pane
+    /// first, exactly as a real window has been fitted before anything is typed
+    /// at it. Tests that care about the hold itself do not call this.
+    fn fit(pane: &Pane) {
+        pane.send(Command::Resize {
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        });
+    }
+
     /// A pane whose clipboard the UI has already filled, and a policy for
     /// whether a program may read it.
     fn pane_given(
@@ -5232,6 +5366,7 @@ mod session_tests {
             // assertion that says what the program was actually handed.
             let script = reader(prologue, &out);
             let pane = pane(script, None, Vec::new());
+            fit(&pane);
             // The program has started when it has said something (the mode
             // report) and its redirection exists.
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -5271,6 +5406,7 @@ mod session_tests {
             let out = dir.path().join("keys");
             let script = reader(prologue, &out);
             let pane = pane(script, None, Vec::new());
+            fit(&pane);
             let deadline = Instant::now() + Duration::from_secs(10);
             // The program has started when it has said something (its mode
             // report) and its redirection exists.
@@ -5304,6 +5440,7 @@ mod session_tests {
         let out = dir.path().join("keys");
         let script = reader(r"printf '\033[>1u'; ", &out);
         let pane = pane(script, None, Vec::new());
+        fit(&pane);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() || pane.stats().rx() == 0 {
             assert!(Instant::now() < deadline, "the program never started");
@@ -5438,6 +5575,7 @@ mod session_tests {
         let out = dir.path().join("keys");
         let script = reader(prologue, &out);
         let pane = pane(script, None, Vec::new());
+        fit(&pane);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() {
             assert!(Instant::now() < deadline, "the program never started");
@@ -5475,6 +5613,7 @@ mod session_tests {
         let out = dir.path().join("keys");
         let script = reader(r"printf '\033[>3u'; ", &out);
         let pane = pane(script, None, Vec::new());
+        fit(&pane);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !out.exists() || pane.stats().rx() == 0 {
             assert!(Instant::now() < deadline, "the program never started");
@@ -5705,14 +5844,17 @@ mod session_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("hold");
         let script = reader(
-            r"printf 'before\r\n'; sleep 1; printf '\033[?2026h'; printf 'halfway'; sleep 2; \
+            r"printf 'before\r\n'; sleep 1; printf '\033[?2026h'; printf 'halfway'; sleep 4; \
               printf '\033[?2026l'; printf 'after\r\n'; sleep 5; ",
             &out,
         );
         let pane = pane(script, None, Vec::new());
+        fit(&pane);
         wait_for(&pane, "before", Duration::from_secs(20));
-        // Past the hold's start (1 s) and well before its release (3 s): any
-        // frame published in this window would be the half-drawn one.
+        // Past the hold's start (1 s) and well before its release (5 s): any
+        // frame published in this window would be the half-drawn one. The margin
+        // is wide because a starved pane thread can delay the release frame and
+        // this waits on wall-clock time.
         std::thread::sleep(Duration::from_millis(1200));
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -5825,6 +5967,7 @@ mod session_tests {
             &out,
         );
         let pane = pane(script, None, Vec::new());
+        fit(&pane);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let activity = pane.activity();
@@ -5901,6 +6044,7 @@ mod session_tests {
         let out = dir.path().join("focus");
         let script = reader(r"printf '\033[?1004h'; ", &out);
         let pane = pane(script, None, Vec::new());
+        fit(&pane);
         // The mode is parsed a step behind the child, so wait for the pane to
         // have seen it before asking: `note_modes` runs with the batch.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -6359,6 +6503,7 @@ mod session_tests {
     fn hiding_the_cursor_republishes_by_itself() {
         let script = r"printf 'btop'; sleep 0.3; printf '\033[?25l'; exec cat > /dev/null";
         let pane = pane(script.to_owned(), None, Vec::new());
+        fit(&pane);
         wait_for(&pane, "btop", Duration::from_secs(10));
         // Long enough for the mode to arrive and be parsed.
         std::thread::sleep(Duration::from_millis(500));
@@ -6500,6 +6645,106 @@ mod session_tests {
                 "nvim stayed in a bar cursor after Escape: {seen:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Output is held until the window's first fit, because an image arrives in
+    /// it before the terminal knows a cell's pixel size and the core would drop
+    /// it. A pane that is never fitted (a test, a run with no window) must still
+    /// print: the hold expires.
+    ///
+    /// This is the replay and boot-splash case — the bytes are there before
+    /// `fit_panes` has ever run.
+    #[test]
+    fn output_waits_for_the_first_fit_and_then_appears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("early");
+        let pane = pane(reader("printf early; ", &out), None, Vec::new());
+        // The program has printed, so the bytes are in the pane's hands.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pane.stats().rx() == 0 {
+            assert!(Instant::now() < deadline, "the program never printed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut text = String::new();
+        while let Some(frame) = pane.take_frame() {
+            text = frame_text(&frame);
+        }
+        assert!(
+            !text.contains("early"),
+            "output ran ahead of the first fit: {text:?}"
+        );
+
+        // The fit is what lets it through, and the text arrives intact.
+        pane.send(Command::Resize {
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        });
+        wait_for(&pane, "early", Duration::from_secs(5));
+    }
+
+    /// The hold has a deadline, so a pane no UI ever fits does not swallow its
+    /// session's output: with no resize at all, the text still arrives.
+    #[test]
+    fn output_held_for_a_fit_that_never_comes_is_written_anyway() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("early");
+        let pane = pane(reader("printf later; ", &out), None, Vec::new());
+        wait_for(&pane, "later", Duration::from_secs(5));
+    }
+
+    /// The whole replay path, end to end: the feeder sends the bytes at once,
+    /// the first fit arrives after them as a real window's does, and the image
+    /// still reaches the frame. This is the regression test for the case a
+    /// Windows run found with `--replay`: the payload was parsed but the image
+    /// was dropped because the terminal had no cell size yet.
+    #[test]
+    fn a_replayed_image_reaches_the_frame_after_the_first_fit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("replay.bin");
+        // A 1x1 opaque red raw-RGBA image, placed above the text at the cursor.
+        std::fs::write(
+            &path,
+            b"\x1b_Ga=T,f=32,i=1,s=1,v=1,c=2,r=2,q=2;/wAA/w==\x1b\\",
+        )
+        .expect("write the replay");
+        let budget: FrameBudget = Arc::new(std::sync::atomic::AtomicU64::new(
+            frame_budget(None).as_nanos() as u64,
+        ));
+        let pane = Pane::spawn(
+            Transport::Replay(path),
+            None,
+            None,
+            dtr_config::SCROLLBACK_LIMIT,
+            budget,
+            Arc::new(Mutex::new(None)),
+            false,
+            || {},
+        )
+        .expect("a replay pane");
+        // A real window sends this on its first frame; without it the pane is the
+        // "no UI" case and the hold expires before the image is placed.
+        std::thread::sleep(Duration::from_millis(100));
+        pane.send(Command::Resize {
+            cols: 80,
+            rows: 24,
+            width_px: 800,
+            height_px: 480,
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(frame) = pane.take_frame() {
+                if !frame.images.is_empty() {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the replayed image never reached a frame"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 }

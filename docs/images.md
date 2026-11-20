@@ -70,6 +70,24 @@ scroll or being deleted changes no cell, exactly like a cursor or a title, so
 publishes when it differs. Without that, a delete would leave the picture
 showing an image the program has already removed.
 
+**Output waits for the first fit.** A placement is worked out in pixels against
+the terminal's cell, and before `fit_panes` has sent its first
+`Command::Resize` the terminal has no cell size — the core drops an image
+transmitted then. That ordering is not rare: a replay feeds its captured bytes
+immediately, a board's boot splash arrives before the first frame, and a
+program can print before the window is up. So a pane holds terminal output until
+the first resize and then parses it, placing any image at the measured cell
+rather than at a guess. `EARLY_OUTPUT_WAIT_IMAGE` (ten seconds) bounds the hold
+on the two transports whose first burst can be a picture — a serial line (a
+board's boot logo arrives before the window) and a replay (a captured stream) —
+because a cold Windows start's first D3D12 frame can take seconds; a shell or
+ssh pane uses `EARLY_OUTPUT_WAIT` (one second) instead, since its first bytes are
+a prompt and holding those reads as a hung terminal. `EARLY_OUTPUT_MAX` (4 MiB)
+bounds the memory. A pane nobody fits — a test, a screenless run — still prints
+when the wait expires. This is what makes `--replay` show images; before it, the
+payload was parsed and every image in it was dropped for having no size to be
+placed against.
+
 ## 4. Geometry, in one place
 
 `kitty::placement_rect` and `kitty::image_quad` are pure functions of the
@@ -173,6 +191,19 @@ the user still wants to see the picture.
   placement geometry (including Unicode placeholders and relative placements),
   and dtr uses the list as given; it deliberately does not reimplement any of
   it.
+* **Kitty graphics through a Windows shell pane.** ConPTY is a terminal
+  emulator: it renders a child's output into its own buffer and re-emits VT to
+  the client, and it drops the unknown APC sequences that carry kitty graphics.
+  A program in a shell tab on Windows therefore cannot deliver an image to dtr at
+  all — a raw capture of what dtr receives shows the text and none of the
+  `ESC _ G` sequences. Serial panes read the COM port directly (no ConPTY), and
+  `--replay` feeds bytes straight into the core, so both draw; a Linux shell (a
+  real pty) draws too. This is a Windows transport fact, not a renderer gap.
+* **An image in output that overruns the first-fit hold.** If a pane's first fit
+  never arrives, or more than `EARLY_OUTPUT_MAX` is printed before it, the hold
+  is released and an image in that early output may have been transmitted before
+  the cell was known, so the core drops it. In the app the fit is one frame
+  away; this is the no-UI case.
 
 ## 9. Evidence
 
@@ -197,6 +228,25 @@ chunks, twice (z=0 and z=-1), plus a raw `f=32` image:
   of a vertical split's left pane: it is cut at the pane's edge (image pixels up
   to x=584, the window's background from x=590) and the right pane is untouched,
   so one pane's image cannot cover another.
+* **Replay.** `dtr --replay /tmp/winverify/kitty-emit.bin` — the same chunked
+  PNG and raw block, fed before any fit — now logs `output held for the first
+  fit bytes=3072`, then `image placements images=2` and `images prepared
+  images=2 textures=2 texture_bytes=163904`, and the capture shows both. Before
+  the hold existed, the same replay placed nothing at all: the bytes were parsed
+  and the images dropped. `a_replayed_image_reaches_the_frame_after_the_first_fit`
+  is the regression test.
+* **Windows.** A guest run (winvm, 100 %, D3D12 surface, `Bgra8Unorm` 900×620)
+  found both facts §8 documents: ConPTY dropped the APC sequences in a shell
+  pane (the raw received-byte log had the text and none of the `ESC _ G`), and
+  the replay path lost its images to the no-cell-size ordering above. Shell panes
+  are therefore not an instrument for this feature on Windows; `--replay` (and a
+  serial pane's direct COM read) is the path that bypasses ConPTY. On the fixed
+  build the replay drew both images on D3D12: `image placements images=2`,
+  `images prepared images=2 textures=2 texture_bytes=163904` (256×160×4 +
+  4×4×4, exactly), the gradient at row 4/col 3 over the text and the raw block at
+  row 13 with exact `(255,64,0)` pixels. One recipe note for that guest: its
+  ~15.6 ms timer tick stretches the replay feeder's 5 ms chunk sleep, so the
+  115 KB payload takes seconds to arrive — capture after 12 s, not 3.5 s.
 
 The script is `/tmp/kitty-evidence/keep.sh` (`keep` or `delete`), run through
 `/tmp/kitty-evidence/run.sh`; the artefacts are evidence, not fixtures, and do

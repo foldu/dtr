@@ -646,3 +646,37 @@ the places popup is words where Explorer's has icons beside them; and none of th
 pure halves (drive labels, mask-to-alpha, `FILETIME` to `SystemTime`) are unit-tested on any machine,
 and the rest is this capture. That is also the answer to "is it native now": the pictures and the
 places are Explorer's own, and the windows, the buttons, the footer and the tiles are still dtr's.
+
+---
+
+## 12. Kitty graphics: ConPTY is not a pipe
+
+Measured 2026-11-20 on the guest at 100 %, D3D12 surface (`Microsoft Basic
+Render Driver`), with a payload that transmits a real PNG in protocol chunks
+plus a raw RGBA image. Two findings, both about the path and neither about the
+image renderer:
+
+- **A shell pane cannot deliver a kitty image.** dtr's shell panes are ConPTY,
+  and ConPTY is a terminal emulator in the middle: it renders the child's output
+  into its own buffer and re-emits VT to dtr, dropping the unknown APC sequences
+  the kitty protocol rides in. A raw capture of what dtr receives from
+  `type kitty-emit.bin` in `cmd.exe` holds the text and **none** of the 29
+  `ESC _ G` sequences — the image never reaches the terminal. This is the same
+  reason Windows Terminal has no kitty images; it is a transport fact, not a
+  gap dtr can close. Serial panes read the COM port directly and `--replay`
+  feeds bytes straight into the core, so both paths do draw.
+- **The replay path was losing early images.** Feeding the same payload with
+  `--replay` bypasses ConPTY, and still placed nothing: `frame.images` was empty
+  and no texture was ever uploaded, while the text drew normally. The cause was
+  ordering, not Windows — a replay feeds its bytes before `fit_panes` has sent
+  the first `Command::Resize`, so the terminal had no cell size in pixels and the
+  core dropped the images (the same happened on Linux). A pane now holds output
+  until the first fit (`docs/images.md` §3) — ten seconds for a serial line or a
+  replay, because a cold first D3D12 frame took 3.4 s in this guest, and one
+  second for a shell — bounded by 4 MiB, and the replay draws.
+  `docs/images.md` §9 is the evidence and the regression test
+  is `a_replayed_image_reaches_the_frame_after_the_first_fit`. On the fixed build
+  the replay uploaded both textures (`texture_bytes=163904`) and the capture
+  shows the 256×160 PNG over the text and the raw 4×4 block at exact
+  `(255,64,0)` pixels: the D3D12 image pass works, and ConPTY remains the one
+  path on Windows that cannot deliver an image.
