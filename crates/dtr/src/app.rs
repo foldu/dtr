@@ -3136,6 +3136,35 @@ impl App {
             dtr_files::MenuChoice::CopyPath => {
                 self.copy_file_path();
             }
+            // The write rows open the pane's own field, card or confirmation;
+            // the request they produce is taken by the worker pump, not here.
+            // A row only exists when the backend can do the verb, so there is
+            // no availability check in this match (`docs/manager.md` §7).
+            choice => {
+                let Some(Pane::Files(browser)) = self.tabs[self.active].leaves.get_mut(&id) else {
+                    return;
+                };
+                match choice {
+                    dtr_files::MenuChoice::NewFolder => browser.begin_new_folder(),
+                    dtr_files::MenuChoice::Rename => browser.begin_rename(),
+                    dtr_files::MenuChoice::Copy => browser.copy_selection(),
+                    dtr_files::MenuChoice::Paste => browser.paste(),
+                    dtr_files::MenuChoice::MakeCopy => browser.make_copy(),
+                    // The row's word is the machine's answer: a pane on a
+                    // backend with no trash says "delete permanently", so the
+                    // request is the permanent one either way; `delete(false)`
+                    // is the trash flavour and asks only where a card must.
+                    dtr_files::MenuChoice::Delete => {
+                        let permanent = !browser.caps().trash;
+                        browser.delete(permanent);
+                    }
+                    // The outer arm already took the two read-only rows; a new
+                    // `MenuChoice` that is read-only must be added there, not
+                    // here, and the compiler cannot see the partition.
+                    _ => unreachable!("the read-only rows are handled above"),
+                }
+                self.repaint("file menu write");
+            }
         }
     }
 
