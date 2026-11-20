@@ -4980,6 +4980,33 @@ mod session_tests {
         assert_eq!(got, ":#A", "a shifted character has to arrive as itself");
     }
 
+    /// Delayed input is a serial-line mode, and a shell pane must never pace —
+    /// even when something tells it to. The UI already refuses the switch
+    /// outside a serial pane and sends the setting only to serial sessions;
+    /// this is the pane's half of the same guarantee, and it is what would
+    /// catch a future caller that forgot. A pty has a buffer, and pacing one is
+    /// the one thing the mode exists not to do.
+    #[test]
+    fn a_shell_pane_never_paces_its_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("keys");
+        let pane = pane(reader("", &out), None, Vec::new());
+        // Long enough that a paced byte would miss the deadline by a mile:
+        // `wait_for_bytes` gives up after ten seconds.
+        pane.send(Command::KeyDelay(Some(Duration::from_secs(60))));
+        // Let the command reach the loop before the key does, so this is a test
+        // of the transport gate rather than of command order.
+        std::thread::sleep(Duration::from_millis(100));
+        let mut typed = key(
+            winit::keyboard::Key::Character("x".into()),
+            KeyCode::KeyX,
+            ModifiersState::empty(),
+        );
+        typed.text = Some("x".to_owned());
+        pane.send(Command::Key(Box::new(typed)));
+        wait_for_bytes(&pane, &out, "x", "a shell key with delayed input set");
+    }
+
     /// Caps Lock is not a key a program ever asks for: everybody turns it into
     /// something else, and `caps:escape` is the common one. winit then reports
     /// the position `CapsLock` with the logical key `Escape`, and the position

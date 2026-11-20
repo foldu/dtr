@@ -352,7 +352,10 @@ paces, because there is one cable — and it is **unavailable anywhere else**. W
 ssh, file or demo pane focused the chord and the palette command both refuse, with the toast
 `delayed input is for serial sessions`: a pty has a buffer and pacing it only makes typing
 feel broken, and no other kind of pane has the strip the red chip is drawn on. Focus a
-serial pane to change it. **The status strip says so in red**: a full-height `DELAY 1 ms`
+serial pane to change it. That is the UI's half; the guarantee is also structural: the app
+sends the setting only to serial sessions, and a pane whose transport is not serial ignores
+`Command::KeyDelay` outright, so no path can pace an `ssh` or shell tab even if a future
+caller forgot the filter. **The status strip says so in red**: a full-height `DELAY 1 ms`
 chip at the far right, where it never moves the label or the counters.
 
 The period is `[serial] key_delay_ms`, 1–1000 with a default of 1. **One byte per period,
