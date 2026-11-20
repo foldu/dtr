@@ -16,6 +16,10 @@ one.
 
 ## The smallest consumer
 
+A runnable one is `crates/dtr-frame/examples/hello.rs`: one window, one label,
+closes after three seconds or on the window's close button. Run it with
+`cargo run -p dtr-frame --example hello` under a display (or Xvfb). The shape:
+
 A frontend implements `dtr_frame::App` — winit's `ApplicationHandler` with the
 windows handed to it and the control flow collected rather than set — and hands
 it to `FrameLoop::run`:
@@ -69,7 +73,7 @@ impl dtr_frame::App for Picker {
                 // frame, never divide two physical sizes.
                 let scale = frame.scale();
                 let size = frame.size();
-                let mut scene = NoScene { clear: wgpu::Color::BLACK };
+                let mut scene = Empty; // `Scene` with no underlay
                 let _ = frame.render(
                     &mut scene,
                     dtr_frame::RenderOptions {
