@@ -5845,7 +5845,16 @@ mod session_tests {
         while (!prologue.is_empty() && !pane.stats().mouse()) || !out.exists() {
             assert!(
                 Instant::now() < deadline,
-                "the program never started (prologue {prologue:?})"
+                // The two halves of the condition are different failures — the
+                // child never ran, or it ran and the pane never parsed its
+                // modes — so say which one stalled, and what the pane thinks is
+                // wrong, rather than leaving the next person to guess from a
+                // generic "never started".
+                "the program never started (prologue {prologue:?}): mouse={} output={} error={:?} ended={}",
+                pane.stats().mouse(),
+                out.exists(),
+                pane.error(),
+                pane.ended()
             );
             std::thread::sleep(Duration::from_millis(10));
         }
