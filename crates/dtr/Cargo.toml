@@ -29,6 +29,11 @@ dtr-frame = { path = "../dtr-frame" }
 # The file browser, in a crate of its own because the desktop's file picker is a
 # second process drawing the same listing (`docs/manager.md` §2).
 dtr-files = { path = "../dtr-files" }
+# The frontend glue the portal shares: the winit key table, the click-run
+# counter, the listing pump and the write executor. One copy, because a picker
+# and a manager disagreeing about what a key or a write means is the drift this
+# crate exists to stop.
+dtr-pane-host = { path = "../dtr-pane-host" }
 dtr-sshconfig = { path = "../dtr-sshconfig" }
 dtr-store = { path = "../dtr-store" }
 # The transfer queue's core and its ssh adapter: one `Queue` driven on a worker

@@ -141,6 +141,15 @@ impl Manager {
         self.browser.alias()
     }
 
+    /// Whether the backend has the write verbs, for the keyboard's scope.
+    ///
+    /// The menu is already filtered by this (`Browser::caps`); the key table asks
+    /// the same question so a read-only pane cannot take a chord that would only
+    /// fail.
+    pub fn can_write(&self) -> bool {
+        self.browser.caps().write
+    }
+
     /// Where this window is, as a history entry.
     fn current(&self) -> Where {
         Where {

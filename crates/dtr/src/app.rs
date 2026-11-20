@@ -620,8 +620,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         drag_origin: None,
         drag_multi: false,
         mouse_button: None,
-        last_press: None,
-        clicks: 0,
+        gestures: dtr_pane_host::Gestures::new(),
         cursor_position: None,
         frames_drawn: 0,
         exit_after: startup.exit_after,
@@ -1152,102 +1151,6 @@ fn remote_file_browser(
     browser
 }
 
-fn browser_key(
-    key: &winit::keyboard::Key,
-    mods: winit::keyboard::ModifiersState,
-) -> Option<dtr_files::Key> {
-    use winit::keyboard::{Key, NamedKey};
-
-    let (ctrl, alt, shift, sup) = (
-        mods.control_key(),
-        mods.alt_key(),
-        mods.shift_key(),
-        mods.super_key(),
-    );
-
-    // The chords a file manager has and a shell has too. They reach here only
-    // when the focused pane *is* a file pane (`App::on_key` asks for the listing
-    // only when `session()` is `None`), and only when the keymap did not claim
-    // them first: the same six are `[keys]` actions (`files-rename`,
-    // `files-delete`, …) whose dispatch declines them when no listing has focus,
-    // so a terminal keeps `^C`, `Delete` and `F2` while a listing keeps its own.
-    //
-    // Keeping them here as well is the pane's own path — the one that works when
-    // the keymap is rebuilt, disabled or absent — and it is why an unmodified
-    // `djklr` still walks a listing without being in `[keys]` at all.
-    if ctrl || alt || sup {
-        // One chord with alt, and it is the one every file manager has: the
-        // parent directory is `Alt+Up`, because in a grid `Left` is a movement and
-        // "up a level" needed somewhere to live.
-        if alt && !ctrl && !sup {
-            if matches!(key, Key::Named(NamedKey::ArrowUp)) {
-                return Some(dtr_files::Key::Parent);
-            }
-        }
-        // `ctrl-shift-n` is the desktop's new-folder chord. Its key event is the
-        // *character* `N` because shift is held, which is why the comparison
-        // ignores case.
-        if ctrl && !alt && !sup && shift {
-            if let Key::Character(text) = key {
-                if text.eq_ignore_ascii_case("n") {
-                    return Some(dtr_files::Key::NewFolder);
-                }
-            }
-        }
-        // `ctrl-c` and `ctrl-v`: vim's yank and put, and the file manager's copy
-        // and paste. Without shift, so `ctrl-shift-c` stays the terminal's copy
-        // selection (which dispatch declines for a file pane rather than
-        // pretending a path is text).
-        if ctrl && !alt && !sup && !shift {
-            if let Key::Character(text) = key {
-                if text.eq_ignore_ascii_case("c") {
-                    return Some(dtr_files::Key::Copy);
-                }
-                if text.eq_ignore_ascii_case("v") {
-                    return Some(dtr_files::Key::Paste);
-                }
-            }
-        }
-        return None;
-    }
-
-    // `Shift+Delete` asks first and destroys for good; plain `Delete` trashes
-    // where the machine has a trash and asks where it does not (`Browser::delete`).
-    if shift {
-        if let Key::Named(NamedKey::Delete) = key {
-            return Some(dtr_files::Key::DeletePermanently);
-        }
-    }
-
-    match key {
-        Key::Named(NamedKey::F2) => Some(dtr_files::Key::Rename),
-        Key::Named(NamedKey::Delete) => Some(dtr_files::Key::Delete),
-        Key::Named(NamedKey::ArrowUp) => Some(dtr_files::Key::Up),
-        Key::Named(NamedKey::ArrowDown) => Some(dtr_files::Key::Down),
-        Key::Named(NamedKey::ArrowLeft) => Some(dtr_files::Key::Left),
-        Key::Named(NamedKey::ArrowRight) => Some(dtr_files::Key::Right),
-        Key::Named(NamedKey::PageUp) => Some(dtr_files::Key::PageUp),
-        Key::Named(NamedKey::PageDown) => Some(dtr_files::Key::PageDown),
-        Key::Named(NamedKey::Home) => Some(dtr_files::Key::Top),
-        Key::Named(NamedKey::End) => Some(dtr_files::Key::Bottom),
-        Key::Named(NamedKey::Enter) => Some(dtr_files::Key::Enter),
-        // `Backspace` is the parent in both views; `h` is vim's left, which is
-        // the parent in a list and a movement in a grid.
-        Key::Named(NamedKey::Backspace) => Some(dtr_files::Key::Parent),
-        Key::Character(text) => match text.as_str() {
-            "h" => Some(dtr_files::Key::Left),
-            "j" => Some(dtr_files::Key::Down),
-            "k" => Some(dtr_files::Key::Up),
-            "l" => Some(dtr_files::Key::Right),
-            "r" => Some(dtr_files::Key::Reload),
-            "g" => Some(dtr_files::Key::Top),
-            "G" => Some(dtr_files::Key::Bottom),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// What the strip calls a session: the title a program set, else who it is.
 ///
 /// The program wins because it knows more — a shell reports its directory, nvim
@@ -1615,14 +1518,13 @@ struct App {
     script: std::collections::VecDeque<crate::keys::KeyStroke>,
     /// Where to write a PNG of the live window, and when. Set by `--capture`.
     capture: Option<(std::path::PathBuf, std::time::Instant)>,
+    /// The click run: how many presses in a row this is, from the shared rule
+    /// in `dtr-pane-host` (400 ms and four pixels), so a window and a terminal
+    /// cannot count the same hand two ways.
+    gestures: dtr_pane_host::Gestures,
     /// The key the menu thinks is down. A second press for the same key without
     /// a release in between is a duplicate the compositor sent, not a second
     /// keystroke, and acting on it moves the selection two rows.
-    /// The last press, and how many presses in a row it was: winit reports no
-    /// click count, so a double-click is a second press in the same place
-    /// within `DOUBLE_CLICK`.
-    last_press: Option<(std::time::Instant, (f64, f64))>,
-    clicks: u8,
     held: Option<winit::keyboard::Key>,
     /// The preferences card, and the config it edits.
     settings: crate::settings::Settings,
@@ -2151,7 +2053,16 @@ impl App {
                     // as nothing" rule lives), and a listing has no encoder: a
                     // `Down` that ran on both edges moved two rows, which is
                     // what made every arrow key feel like it skated.
-                    if pressed && let Some(key) = browser_key(&stroke.key, stroke.mods) {
+                    // The table is the shared one (`dtr-pane-host`), gated by
+                    // what this pane is: a picker or a read-only backend gets
+                    // movement and nothing that would change a file.
+                    let scope = self
+                        .focused_browser()
+                        .map(dtr_pane_host::Scope::of)
+                        .unwrap_or_default();
+                    if pressed
+                        && let Some(key) = dtr_pane_host::pane_key(&stroke.key, stroke.mods, scope)
+                    {
                         let chosen = self
                             .focused_browser_mut()
                             .and_then(|browser| browser.handle(key));
@@ -3105,19 +3016,11 @@ impl App {
     /// How many presses in a row this is: one starts a selection, two take the
     /// word under the pointer, three take the line.
     ///
-    /// winit has no click count, so it is counted here — a press within
-    /// `DOUBLE_CLICK` and a few pixels of the last one continues the run, and
-    /// the fourth press starts over.
+    /// The rule is `dtr_pane_host::Gestures`'; this is only the name the terminal
+    /// knows it by. winit reports no click count, so it is counted from the same
+    /// 400 ms and four pixels a manager window's content uses.
     fn count_clicks(&mut self, at: (f64, f64)) -> u8 {
-        const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
-        const SLOP: f64 = 4.0;
-        let again = self.last_press.is_some_and(|(when, (x, y))| {
-            when.elapsed() <= DOUBLE_CLICK && (x - at.0).abs() <= SLOP && (y - at.1).abs() <= SLOP
-        });
-        let clicks = if again { self.clicks % 3 + 1 } else { 1 };
-        self.clicks = clicks;
-        self.last_press = Some((std::time::Instant::now(), at));
-        clicks
+        self.gestures.press_now(at)
     }
 
     /// The pointer moved while down: move the selection's head with it.
@@ -3753,8 +3656,8 @@ impl App {
                 true
             }
             // The six write verbs. Each is one `Browser` call — the same one the
-            // pane's right-press menu makes, and the same one `browser_key`
-            // makes when the keymap did not claim the chord — so a menu row, a
+            // pane's right-press menu makes, and the same one the shared key table
+            // (`dtr_pane_host::pane_key`) makes when the keymap did not claim the chord — so a menu row, a
             // chord and a palette command cannot drift into three behaviours.
             //
             // **Declined when no file pane has focus**, not toasted: see
@@ -7856,75 +7759,11 @@ impl dtr_frame::Scene for GridScene<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BELL_FLASH, RemoteListing, WriteOp, WriteRequest, bell_alpha, browser_key, cell_of, closed,
-        copy_to, cycled, execute_write, listing_waiter, mouse_goes_to_program, remote_caps,
-        save_name, tab_name, wheel_reaches_the_terminal,
+        BELL_FLASH, RemoteListing, WriteOp, WriteRequest, bell_alpha, cell_of, closed, copy_to,
+        cycled, execute_write, listing_waiter, mouse_goes_to_program, remote_caps, save_name,
+        tab_name, wheel_reaches_the_terminal,
     };
     use std::path::{Path, PathBuf};
-
-    /// A file pane's keys are its own, and the one with a modifier is the one
-    /// every file manager has. The traps are the chords around it: `ctrl-alt-up`
-    /// moves the *focus* between panes, so stealing it for the parent directory
-    /// would make a window command stop working inside a listing.
-    #[test]
-    fn a_file_pane_gets_two_dimensional_keys_and_alt_up() {
-        use dtr_files::Key as PaneKey;
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
-
-        let none = ModifiersState::empty();
-        for (named, wanted) in [
-            (NamedKey::ArrowRight, PaneKey::Right),
-            (NamedKey::ArrowLeft, PaneKey::Left),
-            (NamedKey::ArrowUp, PaneKey::Up),
-            (NamedKey::ArrowDown, PaneKey::Down),
-            (NamedKey::PageUp, PaneKey::PageUp),
-            (NamedKey::PageDown, PaneKey::PageDown),
-            (NamedKey::Home, PaneKey::Top),
-            (NamedKey::End, PaneKey::Bottom),
-            (NamedKey::Backspace, PaneKey::Parent),
-        ] {
-            assert_eq!(
-                browser_key(&Key::Named(named.clone()), none),
-                Some(wanted),
-                "{named:?} is not the key it should be"
-            );
-        }
-        for (text, wanted) in [
-            ("h", PaneKey::Left),
-            ("j", PaneKey::Down),
-            ("k", PaneKey::Up),
-            ("l", PaneKey::Right),
-        ] {
-            assert_eq!(
-                browser_key(&Key::Character(text.into()), none),
-                Some(wanted),
-                "{text} is not the key it should be"
-            );
-        }
-
-        // Alt+Up is the parent; ctrl+alt+Up belongs to the window.
-        let alt = ModifiersState::ALT;
-        assert_eq!(
-            browser_key(&Key::Named(NamedKey::ArrowUp), alt),
-            Some(PaneKey::Parent)
-        );
-        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
-        assert_eq!(browser_key(&Key::Named(NamedKey::ArrowUp), ctrl_alt), None);
-        // And no other chord with a modifier is the pane's — except the six the
-        // write verbs own. `ctrl-shift-c` in particular is **not** the pane's:
-        // it is the terminal's copy selection, and a listing gets `ctrl-c`.
-        let ctrl = ModifiersState::CONTROL;
-        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
-        assert_eq!(
-            browser_key(&Key::Character("c".into()), ctrl),
-            Some(PaneKey::Copy)
-        );
-        assert_eq!(
-            browser_key(&Key::Character("C".into()), ctrl_shift),
-            None,
-            "ctrl-shift-c is the terminal's copy, not the listing's"
-        );
-    }
 
     /// A bell is a flash that fades and then stops: `Some` while it rings, `None`
     /// once it is over, and never a fixed alpha that the window could leave on
@@ -8269,76 +8108,6 @@ mod tests {
         assert_eq!(
             std::fs::read(root.join("dest.txt")).expect("the copy"),
             b"bytes"
-        );
-    }
-
-    /// The six chords a file pane owns, mapped as a pure function: which chord
-    /// opens the field and which trashes a file is the app's decision, and a
-    /// listing is the only thing they mean anything to.
-    #[test]
-    fn the_file_pane_maps_its_write_chords() {
-        use winit::keyboard::{Key, ModifiersState, NamedKey};
-
-        let mods = |ctrl, alt, shift| {
-            let mut state = ModifiersState::empty();
-            state.set(ModifiersState::CONTROL, ctrl);
-            state.set(ModifiersState::ALT, alt);
-            state.set(ModifiersState::SHIFT, shift);
-            state
-        };
-        let none = mods(false, false, false);
-        let ctrl = mods(true, false, false);
-        let shift = mods(false, false, true);
-        let alt = mods(false, true, false);
-
-        assert_eq!(
-            browser_key(&Key::Named(NamedKey::F2), none),
-            Some(dtr_files::Key::Rename)
-        );
-        assert_eq!(
-            browser_key(&Key::Named(NamedKey::Delete), none),
-            Some(dtr_files::Key::Delete)
-        );
-        assert_eq!(
-            browser_key(&Key::Named(NamedKey::Delete), shift),
-            Some(dtr_files::Key::DeletePermanently),
-            "shift is the difference between the trash and the delete"
-        );
-        assert_eq!(
-            browser_key(&Key::Named(NamedKey::Delete), ctrl),
-            None,
-            "ctrl+delete is not a binding"
-        );
-        assert_eq!(
-            browser_key(&Key::Character("n".into()), mods(true, false, true)),
-            Some(dtr_files::Key::NewFolder)
-        );
-        // Shift makes the event report the character a keyboard produces.
-        assert_eq!(
-            browser_key(&Key::Character("N".into()), mods(true, false, true)),
-            Some(dtr_files::Key::NewFolder)
-        );
-        assert_eq!(
-            browser_key(&Key::Character("c".into()), ctrl),
-            Some(dtr_files::Key::Copy)
-        );
-        assert_eq!(
-            browser_key(&Key::Character("v".into()), ctrl),
-            Some(dtr_files::Key::Paste)
-        );
-        assert_eq!(
-            browser_key(&Key::Character("C".into()), mods(true, false, true)),
-            None,
-            "ctrl-shift-c stays the terminal's copy selection"
-        );
-        assert_eq!(
-            browser_key(&Key::Named(NamedKey::ArrowUp), alt),
-            Some(dtr_files::Key::Parent),
-            "the chord that was already there"
-        );
-        assert_eq!(
-            browser_key(&Key::Character("j".into()), none),
-            Some(dtr_files::Key::Down)
         );
     }
 

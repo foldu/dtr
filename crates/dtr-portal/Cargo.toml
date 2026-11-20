@@ -21,6 +21,10 @@ async-channel.workspace = true
 # The manager window (F4) is the same crate again: `manager_ui` is the chrome,
 # `pane_ui` the content, and `Browser` the listing.
 dtr-files = { path = "../dtr-files" }
+# The frontend glue the terminal shares: the winit key table and the click-run
+# counter. One copy, because a picker and a terminal disagreeing about what a
+# key means is the drift this crate exists to stop.
+dtr-pane-host = { path = "../dtr-pane-host" }
 # The manager window browses other machines, so it needs the same `Vfs` the
 # terminal's file panes use: `Local` for this one, `Ssh` for an alias. The
 # picker deliberately does not (a portal request names a path, not a host).

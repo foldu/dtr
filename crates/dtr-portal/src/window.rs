@@ -63,10 +63,11 @@ use std::time::{Duration, Instant};
 use dtr_files::manager::{Band, ManagerLayout};
 use dtr_files::{Browser, Key, Outcome, PaneOutcome, Select, SortChange};
 use dtr_frame::{Deadlines, Frame, FrameLoop, RenderOptions, Scene, WindowOptions, Windows};
+use dtr_pane_host::{Gestures, Scope, pane_key};
 use dtr_widgets::Skin;
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
+use winit::keyboard::{Key as WinitKey, NamedKey};
 use winit::window::WindowId;
 
 use crate::desktop::Desktop;
@@ -86,11 +87,6 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long after a window appears the capture hook photographs it.
 const CAPTURE_AFTER: Duration = Duration::from_millis(700);
-
-/// A click this soon after the last one, and this close to it, is the second
-/// click of a double-click: the same numbers dtr's own panes use.
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-const DOUBLE_CLICK_SLOP: f32 = 4.0;
 
 /// The manager window's requested size, in points.
 ///
@@ -469,7 +465,9 @@ struct Screen {
     kind: ScreenKind,
     /// The last pointer position, in points, from `CursorMoved`.
     pointer: Option<egui::Pos2>,
-    last_click: Option<(Instant, egui::Pos2)>,
+    /// The click run, from the shared 400 ms / four-pixel rule: a picker and a
+    /// manager count a hand the same way dtr's file panes do.
+    gestures: Gestures,
     modifiers: Modifiers,
     /// The manager's bands from the last frame, in points: the wheel and the
     /// presses ask this instead of recomputing the layout (`AGENTS.md`,
@@ -483,7 +481,7 @@ impl Screen {
         Self {
             kind,
             pointer: None,
-            last_click: None,
+            gestures: Gestures::new(),
             modifiers: Modifiers::default(),
             layout: None,
             next_refresh: now + REFRESH,
@@ -1021,7 +1019,7 @@ impl PickerApp {
         let Screen {
             kind: ScreenKind::Picker(mut picker),
             pointer,
-            last_click,
+            gestures,
             modifiers,
             layout,
             next_refresh,
@@ -1088,7 +1086,7 @@ impl PickerApp {
             Screen {
                 kind: ScreenKind::Picker(picker),
                 pointer,
-                last_click,
+                gestures,
                 modifiers,
                 layout,
                 next_refresh,
@@ -1142,7 +1140,7 @@ impl PickerApp {
         let Screen {
             kind: ScreenKind::Manager(mut manager),
             pointer,
-            last_click,
+            gestures,
             modifiers,
             layout: _,
             next_refresh,
@@ -1218,7 +1216,7 @@ impl PickerApp {
             Screen {
                 kind: ScreenKind::Manager(manager),
                 pointer,
-                last_click,
+                gestures,
                 modifiers,
                 layout,
                 next_refresh,
@@ -1235,28 +1233,18 @@ impl PickerApp {
         let Some(at) = self.screens.get(&window).and_then(|screen| screen.pointer) else {
             return;
         };
+        // The click run is counted by the shared rule, in the same place the
+        // pointer lives: the last press and the window's modifiers are the
+        // window's state, not the model's.
         let (modifiers, layout, clicks) = {
-            let Some(screen) = self.screens.get(&window) else {
-                return;
-            };
-            let now = Instant::now();
-            let clicks = match screen.last_click {
-                Some((when, last))
-                    if now.duration_since(when) < DOUBLE_CLICK
-                        && last.distance(at) < DOUBLE_CLICK_SLOP =>
-                {
-                    2
-                }
-                _ => 1,
-            };
-            (screen.modifiers.state(), screen.layout, clicks)
-        };
-        {
             let Some(screen) = self.screens.get_mut(&window) else {
                 return;
             };
-            screen.last_click = Some((Instant::now(), at));
-        }
+            let clicks = screen
+                .gestures
+                .press((at.x as f64, at.y as f64), Instant::now());
+            (screen.modifiers.state(), screen.layout, clicks)
+        };
         // The content band is the pane's; the toolbar, sidebar and status bar are
         // egui widgets and their presses are already the chrome's. A card or a
         // menu in a layer above the root owns the press too.
@@ -1296,7 +1284,10 @@ impl PickerApp {
             WinitKey::Named(NamedKey::Escape) => self.cancel(window, frame),
             WinitKey::Named(NamedKey::Enter) => self.accept(window, frame),
             _ if !typing => {
-                if let Some(key) = browser_key(&event.logical_key, modifiers) {
+                // A picker is a read-only question: the shared table gives it
+                // movement and refuses the write chords, and `Enter`/`Escape`
+                // above are its footer's.
+                if let Some(key) = pane_key(&event.logical_key, modifiers, Scope::picker()) {
                     if let Some(picker) = self.screens.get_mut(&window).and_then(Screen::picker) {
                         let _ = picker.browser.handle(key);
                     }
@@ -1395,7 +1386,16 @@ impl PickerApp {
                 _ => {}
             },
             _ => {
-                if let Some(key) = browser_key(&event.logical_key, modifiers) {
+                // The manager's content, through the shared table: movement
+                // always, the write chords only when the backend has the verbs.
+                // Before F6 this window had a copy of the table that never
+                // learned `F2`, `Delete`, `Ctrl+C`, `Ctrl+V` or `Ctrl+Shift+N`,
+                // so a manager could not rename from the keyboard at all.
+                if let Some(key) = pane_key(
+                    &event.logical_key,
+                    modifiers,
+                    Scope::manager(manager.can_write()),
+                ) {
                     manager.handle(key);
                     repaint = true;
                 }
@@ -1696,27 +1696,14 @@ impl PickerApp {
             return;
         };
         let (modifiers, clicks) = {
-            let Some(screen) = self.screens.get(&window) else {
-                return;
-            };
-            let now = Instant::now();
-            let clicks = match screen.last_click {
-                Some((when, last))
-                    if now.duration_since(when) < DOUBLE_CLICK
-                        && last.distance(at) < DOUBLE_CLICK_SLOP =>
-                {
-                    2
-                }
-                _ => 1,
-            };
-            (screen.modifiers.state(), clicks)
-        };
-        {
             let Some(screen) = self.screens.get_mut(&window) else {
                 return;
             };
-            screen.last_click = Some((Instant::now(), at));
-        }
+            let clicks = screen
+                .gestures
+                .press((at.x as f64, at.y as f64), Instant::now());
+            (screen.modifiers.state(), clicks)
+        };
         if let Some(picker) = self.screens.get_mut(&window).and_then(Screen::picker) {
             // `clicked` opens a folder on its second click and reports the file a
             // single one would open in a manager; in a picker neither is an answer,
@@ -1836,49 +1823,6 @@ fn title(call: &Call) -> String {
         Select::Save => "Save a file",
     }
     .to_owned()
-}
-
-/// One key of a listing, from one key of the keyboard.
-///
-/// The picker's own keys are `Enter` and `Escape`; everything else here is
-/// movement, and it is the same mapping dtr's file panes use so a person does not
-/// have to learn a second one. `Alt+Up` is the parent in a grid, where `Left` is a
-/// movement.
-fn browser_key(key: &WinitKey, modifiers: ModifiersState) -> Option<Key> {
-    if modifiers.alt_key() || modifiers.control_key() || modifiers.super_key() {
-        return match key {
-            WinitKey::Named(NamedKey::ArrowUp)
-                if modifiers.alt_key() && !modifiers.control_key() =>
-            {
-                Some(Key::Parent)
-            }
-            _ => None,
-        };
-    }
-    match key {
-        WinitKey::Named(NamedKey::ArrowUp) => Some(Key::Up),
-        WinitKey::Named(NamedKey::ArrowDown) => Some(Key::Down),
-        WinitKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
-        WinitKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
-        WinitKey::Named(NamedKey::PageUp) => Some(Key::PageUp),
-        WinitKey::Named(NamedKey::PageDown) => Some(Key::PageDown),
-        WinitKey::Named(NamedKey::Home) => Some(Key::Top),
-        WinitKey::Named(NamedKey::End) => Some(Key::Bottom),
-        // `Enter` is the accept button in a picker and "open" in a manager; each
-        // window handles its own.
-        WinitKey::Named(NamedKey::Backspace) => Some(Key::Parent),
-        WinitKey::Character(text) => match text.as_str() {
-            "h" => Some(Key::Left),
-            "j" => Some(Key::Down),
-            "k" => Some(Key::Up),
-            "l" => Some(Key::Right),
-            "r" => Some(Key::Reload),
-            "g" => Some(Key::Top),
-            "G" => Some(Key::Bottom),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 /// A running window loop, and the hosts the D-Bus side was given.

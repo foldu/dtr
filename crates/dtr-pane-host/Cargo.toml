@@ -1,0 +1,31 @@
+[package]
+name = "dtr-pane-host"
+description = "The glue between a window frontend and dtr-files' browser: the key table, the click-run rule, the listing pump and the write executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The browser a frontend drives: `Key` is the vocabulary the key table maps
+# into, `WriteRequest` the plan the executor runs, and `Browser` the model the
+# listing pump hands its answers back to.
+dtr-files = { path = "../dtr-files" }
+# The verbs the executor runs and the batches a remote listing arrives in. The
+# host layer resolves no `Vfs` and opens no connection: the frontend hands it a
+# backend, because the connection pool belongs to the frontend.
+dtr-vfs = { path = "../dtr-vfs" }
+# winit is the event vocabulary both frontends already speak: a key is a
+# `winit::keyboard::Key` with `ModifiersState` when it reaches this table.
+winit.workspace = true
+# A remote walk is batched, and the pump drains the same channel the browser's
+# local listing does.
+async-channel.workspace = true
+# `execute` carries the VFS's error through so the caller can recognise a
+# `dtr_vfs::Conflict`; the browser's failure path takes the same type.
+anyhow.workspace = true
+
+[dev-dependencies]
+# `Memory` is the fake ssh host: the listing pump and the write executor tests
+# run the real `Backend` trait with no server, no disk and no window.
+compio.workspace = true
