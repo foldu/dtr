@@ -14,19 +14,20 @@
 //!
 //! Every other button stays a client-area widget and behaves like the tabs.
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU32, Ordering};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
-use windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi;
+use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetSystemMetricsForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, SM_CXPADDEDBORDER, SM_CYCAPTION,
-    SM_CYSIZEFRAME, WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-    WM_NCMOUSELEAVE, WM_SETTINGCHANGE, WM_SYSCOMMAND, WM_THEMECHANGED,
+    GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, HTMAXBUTTON, IsZoomed, PostMessageW, SC_MAXIMIZE,
+    SC_RESTORE, SM_CXPADDEDBORDER, SM_CYCAPTION, SM_CYSIZEFRAME, WM_DWMCOLORIZATIONCOLORCHANGED,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMOUSELEAVE, WM_SETTINGCHANGE, WM_SYSCOMMAND,
+    WM_THEMECHANGED,
 };
 
 /// `WM_MOUSELEAVE`. windows-sys files it under `UI::Controls`, and this crate
@@ -41,6 +42,15 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// metrics even when the system is 96, and `GetSystemMetrics` would keep
 /// answering for the system's monitor — a caption that is the wrong height on
 /// exactly the display the window is on.
+///
+/// The answer is the OS's own, asked through [`client_origin`], because that is
+/// the number the window manager's `WM_NCCALCSIZE` calculation starts from for
+/// the style winit actually kept. The three metrics are the fallback for a
+/// window that is not there yet (the offscreen capture path never has one) and
+/// for a call that refuses. On the Windows 11 guest (build 26300) the two agree
+/// at 96/120/144/192 DPI — measured, so the sum is not losing a pixel at a
+/// fractional scale — which is why this is a robustness change and not what
+/// makes a 150 % caption taller.
 pub fn caption_height(scale: f32) -> Option<f32> {
     let dpi = (f64::from(scale) * 96.0).round().clamp(48.0, 768.0) as u32;
     // SAFETY: the three indices are Windows' own constants and the call only
@@ -53,8 +63,66 @@ pub fn caption_height(scale: f32) -> Option<f32> {
             GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi),
         )
     };
-    super::caption_band(caption, frame, padded, scale)
+    let sum = caption + frame + padded;
+    let client = client_origin(dpi);
+    // Once per display, not once per frame: this is the line that says whether a
+    // caption is short because the OS answered short or because we drew it short.
+    if LOGGED_DPI.swap(dpi, Ordering::Relaxed) != dpi {
+        tracing::debug!(
+            dpi,
+            caption,
+            frame,
+            padded,
+            sum,
+            client_origin = client,
+            "caption band"
+        );
+    }
+    super::band_points(client.unwrap_or(sum), scale)
 }
+
+/// The DPI whose caption band was last logged, so `-v` gets one line per display.
+static LOGGED_DPI: AtomicU32 = AtomicU32::new(0);
+
+/// Where *this* window's client area would start, in physical pixels, for the
+/// style winit retained.
+///
+/// A window with `decorations(false)` keeps `WS_CAPTION | WS_BORDER | WS_SYSMENU
+/// | WS_SIZEBOX` and hides the frame in `WM_NCCALCSIZE` (`docs/chrome.md` §2),
+/// so the question dtr has to answer — where would the client area start? — is
+/// the one `AdjustWindowRectExForDpi` already answers, with the window's own
+/// style rather than a generic one this file would have to guess. `None` before
+/// the window exists, or if the call refuses; the caller falls back to summing
+/// `SM_CYCAPTION`, `SM_CYSIZEFRAME` and `SM_CXPADDEDBORDER`.
+fn client_origin(dpi: u32) -> Option<i32> {
+    let hwnd = WINDOW.load(Ordering::Relaxed) as HWND;
+    if hwnd.is_null() {
+        return None;
+    }
+    // SAFETY: `hwnd` is the live window `install` was handed, on this thread; the
+    // style reads and the rect adjustment only read per-window state.
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // A terminal has no menu bar, so `bmenu` is false.
+        if AdjustWindowRectExForDpi(&mut rect, style, 0, ex, dpi) == 0 {
+            return None;
+        }
+        let top = -rect.top;
+        (top > 0).then_some(top)
+    }
+}
+
+/// The window this module was installed on, as an integer: the atomics the window
+/// procedure reads cannot carry a raw pointer, and this is only ever used on the
+/// thread that created the window.
+static WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// Identifies dtr's subclass, in case anything else subclasses the window too.
 const SUBCLASS: usize = 0x6474_7200;
@@ -132,6 +200,9 @@ pub fn set_maximize_rect(rect: egui::Rect, scale: f32) {
 /// `hwnd` must be a live top-level window on the calling thread, which is what
 /// the caller passes immediately after winit created it.
 pub unsafe fn install(hwnd: HWND) {
+    // Kept for the caption band: `AdjustWindowRectExForDpi` needs the style the
+    // window really has, and this is the one place that is handed the handle.
+    WINDOW.store(hwnd as isize, Ordering::Relaxed);
     // SAFETY: the caller guarantees a live window; the procedure only reads
     // atomics and otherwise defers to the previous one.
     unsafe {

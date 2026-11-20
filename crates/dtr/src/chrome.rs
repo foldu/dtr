@@ -118,13 +118,50 @@ fn caption_height(_scale: f32) -> Option<f32> {
 /// A WinForms window in the same guest put its client area 31 pixels below the
 /// window's top at 96 DPI — `caption + frame + padded`, not the 32 some sources
 /// quote (that count includes the 1-pixel top border, which dtr draws itself, and
-/// which is part of the strip's own hairline).
+/// which is part of the strip's own hairline). `AdjustWindowRectExForDpi` on the
+/// guest's own window style gives the same 31/38/45/58, so the sum is not losing
+/// a pixel at the fractional scales either; `chrome/windows.rs` asks that API
+/// because it is the OS's answer for the style winit kept.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn caption_band(caption: i32, frame: i32, padded: i32, scale: f32) -> Option<f32> {
-    if caption <= 0 || frame < 0 || padded < 0 || scale <= 0.0 {
+    if caption <= 0 || frame < 0 || padded < 0 {
         return None;
     }
-    Some((caption + frame + padded) as f32 / scale)
+    band_points(caption + frame + padded, scale)
+}
+
+/// A caption band's physical pixels as points on a `scale` display.
+///
+/// The band is a *measurement in pixels*; everything egui draws is in points and
+/// egui applies the factor itself, so this division and egui's multiplication
+/// must be the only two places the scale appears. A band of no pixels or a
+/// scale of nothing is `None` — a strip of no height is not a fallback.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn band_points(pixels: i32, scale: f32) -> Option<f32> {
+    (pixels > 0 && scale > 0.0).then(|| pixels as f32 / scale)
+}
+
+/// The physical pixels a strip of `title_height` points reserves above the grid,
+/// gap included.
+///
+/// The points→pixels boundary, crossed exactly once on the reservation side:
+/// `fit_panes` sizes the pty in pixels, egui draws the strip in points, and
+/// `top_inset` is the difference. `(height + gap) * scale`, never
+/// `height * scale * scale` — a second factor is what put the status bar over
+/// the bottom row on every display above 1× (`docs/windows.md` §2.2), and the
+/// caption is reserved and drawn by the same rule.
+pub fn reserved_pixels(title_height: f32, gap: f32, scale: f32) -> f32 {
+    (title_height + gap) * scale
+}
+
+/// The physical pixels the strip is *drawn* at, from its height in points.
+///
+/// The other side of the same boundary: egui is handed points and applies the
+/// factor itself (`.exact_size(title_height)`), so this is only what the log and
+/// the tests compare the reservation against — it is not a second multiplication
+/// to draw with.
+pub fn strip_pixels(title_height: f32, scale: f32) -> f32 {
+    title_height * scale
 }
 
 /// A window button.
@@ -628,19 +665,94 @@ mod tests {
         );
         assert_eq!(caption_band(0, 0, 0, 1.0), None, "a metric of nothing");
         assert_eq!(caption_band(23, 4, 4, 0.0), None, "no scale");
+        assert_eq!(caption_band(-1, 4, 4, 1.0), None, "a negative caption");
+        assert_eq!(caption_band(23, -1, 4, 1.0), None, "a negative frame");
+        assert_eq!(caption_band(23, 4, -1, 1.0), None, "a negative padding");
+        assert_eq!(band_points(0, 1.0), None, "no pixels");
+        assert_eq!(band_points(-31, 1.0), None, "negative pixels");
+        assert_eq!(band_points(31, 0.0), None, "no scale");
+        assert_eq!(band_points(31, -1.5), None, "a negative scale");
     }
 
-    /// Windows' caption band is three metrics summed and divided by the window's
-    /// scale. The numbers are the guest's, read with `GetSystemMetricsForDpi`:
-    /// 31 pixels at 100 %, 38 at 125 % — 30.4 points, because Windows rounds each
-    /// metric to whole pixels and the band shrinks a little in points as the
-    /// display scales.
+    /// Windows' caption band, for the four DPIs the guest was measured at, and
+    /// `AdjustWindowRectExForDpi` — asked with the window's own retained style —
+    /// returned the same pixel count at every one of them (Windows 11 build
+    /// 26300). So a caption that reads short at 150 % is not a pixel lost to the
+    /// per-DPI rounding of three metrics; the band really is 45 px there, and the
+    /// comparison target is taller than a plain `SM_CYCAPTION` title bar.
     #[test]
-    fn a_windows_caption_is_three_metrics_in_points() {
-        assert_eq!(caption_band(23, 4, 4, 1.0), Some(31.0));
-        assert_eq!(caption_band(29, 4, 5, 1.25), Some(30.4));
-        assert_eq!(caption_band(34, 5, 6, 1.5), Some(30.0));
-        assert_eq!(caption_band(45, 5, 8, 2.0), Some(29.0));
+    fn the_windows_caption_is_the_guests_band_at_every_dpi() {
+        for (dpi, caption, frame, padded) in [
+            (96, 23, 4, 4),
+            (120, 29, 4, 5),
+            (144, 34, 5, 6),
+            (192, 45, 5, 8),
+        ] {
+            let scale = f64::from(dpi) as f32 / 96.0;
+            let pixels = (caption + frame + padded) as f32;
+            assert_eq!(
+                caption_band(caption, frame, padded, scale),
+                Some(pixels / scale),
+                "the band at {dpi} DPI"
+            );
+            // The chip follows the strip: never smaller than the 20-point chip,
+            // never taller than Adwaita's own tab.
+            let chip = crate::ui::tab_chip_height(pixels / scale);
+            assert!(
+                (crate::ui::TAB_CHIP_HEIGHT..=26.0).contains(&chip),
+                "{dpi} DPI: a chip of {chip} points"
+            );
+        }
+    }
+
+    /// The strip is reserved in pixels and drawn in points, and each crosses the
+    /// boundary once. A second factor on either side is the status bar's
+    /// grow-by-scale² bug (`docs/windows.md` §2.2) moved to the caption: at 200 %
+    /// a 31-point caption is 31 points tall over 70 pixels reserved, not 124.
+    #[test]
+    fn the_caption_is_scaled_once_on_each_side_of_the_boundary() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let height = 31.0;
+            let drawn = strip_pixels(height, scale);
+            let reserved = reserved_pixels(height, crate::ui::GRID_GAP, scale);
+            assert!(
+                (reserved - drawn - crate::ui::GRID_GAP * scale).abs() < 1e-3,
+                "at {scale}: reserved {reserved} is not the strip {drawn} plus the gap"
+            );
+            assert!(
+                drawn <= reserved,
+                "at {scale}: the strip is drawn over the grid: {drawn} > {reserved}"
+            );
+        }
+        assert_eq!(strip_pixels(31.0, 2.0), 62.0);
+        assert_eq!(
+            reserved_pixels(31.0, crate::ui::GRID_GAP, 2.0),
+            70.0,
+            "a scale applied twice would reserve 124"
+        );
+        // And at 150 %, the guest's 45-pixel band is 30 points, drawn 45 pixels.
+        let band = caption_band(34, 5, 6, 1.5).unwrap();
+        assert_eq!(band, 30.0);
+        assert_eq!(strip_pixels(band, 1.5), 45.0);
+        assert_eq!(
+            reserved_pixels(band, crate::ui::GRID_GAP, 1.5),
+            51.0,
+            "45 px of strip and 6 px of gap"
+        );
+    }
+
+    /// The Windows buttons are the platform's: 46 points wide and the full height
+    /// of the caption band, so at 150 % they draw as 69 × 45 pixels — the
+    /// rectangle Explorer's own caption buttons occupy.
+    #[test]
+    fn windows_caption_buttons_are_46_points_by_the_band() {
+        let strip = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 30.0));
+        for (_, rect) in boxes(strip, Kind::Windows) {
+            assert_eq!(rect.width(), 46.0);
+            assert_eq!(rect.height(), strip.height());
+            assert_eq!(strip_pixels(rect.width(), 1.5), 69.0);
+            assert_eq!(strip_pixels(rect.height(), 1.5), 45.0);
+        }
     }
 
     #[test]

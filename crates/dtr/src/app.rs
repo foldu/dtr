@@ -4646,8 +4646,8 @@ impl App {
         let strip = self.title_height(scale);
         tracing::debug!(
             scale,
-            reserved_px = (strip + crate::ui::GRID_GAP) * scale,
-            strip_px = strip * scale,
+            reserved_px = crate::chrome::reserved_pixels(strip, crate::ui::GRID_GAP, scale),
+            strip_px = crate::chrome::strip_pixels(strip, scale),
             strip_points = strip,
             chip_points = crate::ui::tab_chip_height(strip),
             "strip geometry"
@@ -4672,7 +4672,7 @@ impl App {
         // for one tab (it is where the session is named, now that a shell has no
         // status bar), and reserving space only sometimes is how the prompt ended
         // up underneath it.
-        (self.title_height(scale) + crate::ui::GRID_GAP) * scale
+        crate::chrome::reserved_pixels(self.title_height(scale), crate::ui::GRID_GAP, scale)
     }
 
     /// The rectangle panes live in: below the strip, above the status bar.
