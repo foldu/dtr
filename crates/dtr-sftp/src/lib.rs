@@ -171,6 +171,17 @@ pub struct Upload {
     handle: Vec<u8>,
 }
 
+/// An open remote file being read: the mirror of [`Upload`].
+///
+/// This is the primitive a remote-to-remote copy needs: read one [`CHUNK`] here
+/// and write it there, with no local file in between. An `Upload` dropped
+/// without [`Session::finish_read`] leaves the server's handle open until the
+/// session closes, on the same terms as an upload.
+#[derive(Debug)]
+pub struct Read {
+    handle: Vec<u8>,
+}
+
 /// Not `Send`: compio's handles carry a thread-local `Rc`, so a session belongs
 /// to the thread that opened it — one thread per connection, messages between.
 type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
@@ -364,6 +375,51 @@ impl Session {
     /// Copy one file down. Bytes land in `local` only when the transfer
     /// finished, so a cancelled download cannot truncate a good file.
     pub async fn download(&mut self, remote: &str, local: &Path) -> Result<u64> {
+        let reading = self
+            .begin_read(remote)
+            .await
+            .with_context(|| format!("open {remote}"))?;
+
+        let temporary = local.with_extension("part");
+        let mut out = compio::fs::File::create(&temporary)
+            .await
+            .with_context(|| format!("create {}", temporary.display()))?;
+        let mut total = 0u64;
+        loop {
+            let Some(bytes) = self
+                .read_chunk(&reading, total)
+                .await
+                .with_context(|| format!("read {remote} at {total}"))?
+            else {
+                break;
+            };
+            let len = bytes.len() as u64;
+            // `File` is positional: there is no sequential write, so the
+            // offset the protocol already carries is the cursor.
+            out.write_all_at(bytes, total)
+                .await
+                .0
+                .with_context(|| format!("write {}", temporary.display()))?;
+            total += len;
+        }
+        out.sync_all()
+            .await
+            .with_context(|| format!("flush {}", temporary.display()))?;
+        drop(out);
+        // A close that fails after every byte arrived does not make the copy
+        // wrong, so it is reported the way it was before: ignored.
+        let _ = self.finish_read(reading).await.context("close the file");
+        compio::fs::rename(&temporary, local)
+            .await
+            .with_context(|| format!("rename into {}", local.display()))?;
+        Ok(total)
+    }
+
+    /// Open `remote` for reading: [`Session::read_chunk`] hands the bytes back a
+    /// [`CHUNK`] at a time, so a caller can stream them somewhere other than a
+    /// local file — a remote-to-remote copy writes each chunk straight back with
+    /// [`Session::write_upload_chunk`].
+    pub async fn begin_read(&mut self, remote: &str) -> Result<Read> {
         let mut body = put_string(remote.as_bytes());
         body.extend_from_slice(&FXF_READ.to_be_bytes());
         // No attributes on open: creation flags are what would need them, and
@@ -373,57 +429,57 @@ impl Session {
             .request(OPEN, body)
             .await
             .with_context(|| format!("open {remote}"))?;
-        let handle = handle_of(kind, &payload)?;
+        Ok(Read {
+            handle: handle_of(kind, &payload)?,
+        })
+    }
 
-        let temporary = local.with_extension("part");
-        let mut out = compio::fs::File::create(&temporary)
+    /// The next at most [`CHUNK`] bytes of `read`, starting at `offset`, or
+    /// `None` at end of file.
+    ///
+    /// A `DATA` packet that carries no bytes is reported as the end: v3 ends a
+    /// read with `SSH_FX_EOF`, and an offset that did not move would ask for the
+    /// same packet for ever. A server that answers more than the [`CHUNK`] it was
+    /// asked for is a protocol error, not something to grow a buffer with.
+    pub async fn read_chunk(&mut self, read: &Read, offset: u64) -> Result<Option<Vec<u8>>> {
+        let mut body = put_string(&read.handle);
+        body.extend_from_slice(&offset.to_be_bytes());
+        body.extend_from_slice(&(CHUNK as u32).to_be_bytes());
+        let (kind, payload) = self
+            .request(READ, body)
             .await
-            .with_context(|| format!("create {}", temporary.display()))?;
-        let mut total = 0u64;
-        loop {
-            let mut body = put_string(&handle);
-            body.extend_from_slice(&total.to_be_bytes());
-            body.extend_from_slice(&(CHUNK as u32).to_be_bytes());
-            let (kind, payload) = self
-                .request(READ, body)
-                .await
-                .with_context(|| format!("read {remote} at {total}"))?;
-            match kind {
-                DATA => {
-                    let mut reader = Reader::new(&payload);
-                    let bytes = reader.bytes()?;
-                    let len = bytes.len() as u64;
-                    // `File` is positional: there is no sequential write, so
-                    // the offset the protocol already carries is the cursor.
-                    out.write_all_at(bytes, total)
-                        .await
-                        .0
-                        .with_context(|| format!("write {}", temporary.display()))?;
-                    total += len;
+            .with_context(|| format!("read at {offset}"))?;
+        match kind {
+            DATA => {
+                let mut reader = Reader::new(&payload);
+                let bytes = reader.bytes()?;
+                if bytes.is_empty() {
+                    return Ok(None);
                 }
-                STATUS => {
-                    let status = Status::of(&payload)?;
-                    if status.is_eof() {
-                        break;
-                    }
-                    status.into_result()?;
-                    break;
+                if bytes.len() > CHUNK {
+                    bail!(
+                        "a read of {} bytes exceeds the {CHUNK}-byte chunk bound",
+                        bytes.len()
+                    );
                 }
-                other => bail!("read: unexpected packet {other}"),
+                Ok(Some(bytes))
             }
+            STATUS => {
+                let status = Status::of(&payload)?;
+                if status.is_eof() {
+                    Ok(None)
+                } else {
+                    status.into_result()?;
+                    bail!("read: the server sent neither data nor an end of file")
+                }
+            }
+            other => bail!("read: unexpected packet {other}"),
         }
-        out.sync_all()
-            .await
-            .with_context(|| format!("flush {}", temporary.display()))?;
-        drop(out);
-        let _ = self
-            .request(CLOSE, put_string(&handle))
-            .await
-            .context("close the file");
-        compio::fs::rename(&temporary, local)
-            .await
-            .with_context(|| format!("rename into {}", local.display()))?;
-        Ok(total)
+    }
+
+    /// Close the read handle: the server can forget the file.
+    pub async fn finish_read(&mut self, read: Read) -> Result<()> {
+        self.close_handle(&read.handle, "finish the read").await
     }
 
     /// Make one directory at `path`, mode 0755.
@@ -638,8 +694,14 @@ impl Session {
     /// Close one upload handle. Finishing and aborting send the same packet;
     /// only the caller's intent differs.
     async fn close_upload(&mut self, upload: Upload, doing: &str) -> Result<()> {
+        self.close_handle(&upload.handle, doing).await
+    }
+
+    /// Close one `SSH_FXP_OPEN` handle: reads and uploads differ only in what
+    /// the caller calls it.
+    async fn close_handle(&mut self, handle: &[u8], doing: &str) -> Result<()> {
         let (answered, payload) = self
-            .request(CLOSE, put_string(&upload.handle))
+            .request(CLOSE, put_string(handle))
             .await
             .with_context(|| format!("{doing} by closing its handle"))?;
         match answered {
@@ -1189,6 +1251,10 @@ mod write_packets {
         u32::from_be_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
     }
 
+    fn u64_at(bytes: &[u8], at: usize) -> u64 {
+        u64::from_be_bytes(bytes[at..at + 8].try_into().expect("eight bytes"))
+    }
+
     #[compio::test]
     async fn the_handshake_remembers_the_extensions_the_server_advertised() {
         let (session, _) = session(&[(POSIX_RENAME, "1"), (STATVFS, "2")], &[]).await;
@@ -1348,6 +1414,104 @@ mod write_packets {
             .create_dir("/srv/new")
             .await
             .expect_err("wrong packet");
+        assert!(
+            format!("{err:#}").contains("unexpected packet 199"),
+            "{err:#}"
+        );
+    }
+
+    #[compio::test]
+    async fn a_segmented_read_asks_at_the_offset_it_is_given() {
+        // OPEN, a DATA answer, the EOF that ends it, then the CLOSE.
+        let (mut session, written) = session(
+            &[],
+            &[
+                answer(1, HANDLE, &put_string(b"r1")),
+                answer(2, DATA, &put_string(b"abc")),
+                answer(3, STATUS, &status_payload(FX_EOF, "eof")),
+                ok(4),
+            ],
+        )
+        .await;
+        let reading = session.begin_read("/srv/a.bin").await.expect("open");
+        assert_eq!(
+            session.read_chunk(&reading, 0).await.expect("first chunk"),
+            Some(b"abc".to_vec())
+        );
+        assert_eq!(
+            session
+                .read_chunk(&reading, 3)
+                .await
+                .expect("the end of the file"),
+            None
+        );
+        session.finish_read(reading).await.expect("close");
+
+        let packets = sent(&written);
+        let kinds: Vec<u8> = packets.iter().map(|packet| packet[0]).collect();
+        assert_eq!(kinds, [OPEN, READ, READ, CLOSE]);
+        // `READ` is handle, offset, length — the offset is the caller's, and the
+        // length is the chunk bound.
+        let payload = &packets[1][5..];
+        assert_eq!(strings(payload).first().map(String::as_str), Some("r1"));
+        let at = 4 + "r1".len();
+        assert_eq!(u64_at(payload, at), 0);
+        assert_eq!(u32_at(payload, at + 8), CHUNK as u32);
+        assert_eq!(u64_at(&packets[2][5..], at), 3);
+    }
+
+    #[compio::test]
+    async fn a_data_packet_with_no_bytes_is_the_end_not_a_loop() {
+        // A server that answers `DATA 0` instead of `SSH_FX_EOF` must not keep
+        // the caller asking at an offset that never moves.
+        let (mut session, written) = session(
+            &[],
+            &[
+                answer(1, HANDLE, &put_string(b"r1")),
+                answer(2, DATA, &put_string(b"")),
+            ],
+        )
+        .await;
+        let reading = session.begin_read("/srv/empty").await.expect("open");
+        assert_eq!(
+            session.read_chunk(&reading, 0).await.expect("the end"),
+            None
+        );
+        let kinds: Vec<u8> = sent(&written).iter().map(|packet| packet[0]).collect();
+        assert_eq!(kinds, [OPEN, READ], "one read, and no second ask");
+    }
+
+    #[compio::test]
+    async fn a_read_bigger_than_the_chunk_bound_is_refused() {
+        let oversized = vec![7u8; CHUNK + 1];
+        let (mut session, _) = session(
+            &[],
+            &[
+                answer(1, HANDLE, &put_string(b"r1")),
+                answer(2, DATA, &put_string(&oversized)),
+            ],
+        )
+        .await;
+        let reading = session.begin_read("/srv/a.bin").await.expect("open");
+        let err = session
+            .read_chunk(&reading, 0)
+            .await
+            .expect_err("a server cannot answer more than it was asked");
+        assert!(format!("{err:#}").contains("chunk bound"), "{err:#}");
+    }
+
+    #[compio::test]
+    async fn a_read_of_the_wrong_packet_is_an_error() {
+        let (mut session, _) = session(
+            &[],
+            &[answer(1, HANDLE, &put_string(b"r1")), answer(2, 199, &[])],
+        )
+        .await;
+        let reading = session.begin_read("/srv/a.bin").await.expect("open");
+        let err = session
+            .read_chunk(&reading, 0)
+            .await
+            .expect_err("unexpected packet");
         assert!(
             format!("{err:#}").contains("unexpected packet 199"),
             "{err:#}"

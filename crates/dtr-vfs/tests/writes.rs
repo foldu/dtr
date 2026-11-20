@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use dtr_vfs::{Backend as _, Caps, Local, Memory, Removal, Ssh, is_conflict};
+use dtr_vfs::{
+    Backend as _, BackendId, Batches, BoxFuture, Caps, Local, Memory, Meta, Removal, Ssh,
+    is_conflict,
+};
 
 /// A local backend whose trash lives under the test's own directory.
 fn local(dir: &Path) -> Local {
@@ -51,35 +54,80 @@ fn the_caps_say_what_each_backend_can_write() {
         Caps {
             watch: false,
             dir_size: false,
-            write: false,
+            write: true,
             trash: false,
         },
-        "the sftp codec has no write verbs yet, and never a remote trash"
+        "the sftp codec writes, and there is never a remote trash"
     );
 }
 
-/// A backend with `write: false` implements nothing: the default methods are the
-/// refusal, and they name the verb and the path rather than saying "unsupported".
+/// A backend that declares `write: false` and implements none of the verbs, the
+/// way a read-only machine would: the trait's defaults are the refusal, and they
+/// name the verb and the path rather than saying "unsupported".
+struct ReadOnly {
+    id: BackendId,
+}
+
+impl ReadOnly {
+    fn new() -> Self {
+        Self {
+            id: BackendId::Local,
+        }
+    }
+}
+
+impl dtr_vfs::Backend for ReadOnly {
+    fn id(&self) -> &BackendId {
+        &self.id
+    }
+
+    fn caps(&self) -> Caps {
+        Caps {
+            watch: false,
+            dir_size: false,
+            write: false,
+            trash: false,
+        }
+    }
+
+    fn stat<'a>(&'a self, _path: &'a Path) -> BoxFuture<'a, anyhow::Result<Meta>> {
+        Box::pin(async { anyhow::bail!("a read-only test backend does not stat") })
+    }
+
+    fn fetch<'a>(&'a self, _path: &'a Path, _dest: &'a Path) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async { anyhow::bail!("a read-only test backend does not fetch") })
+    }
+
+    fn list(&self, _path: &Path) -> Batches {
+        let (_tx, rx) = async_channel::bounded(1);
+        rx
+    }
+}
+
 #[compio::test]
 async fn a_read_only_backend_refuses_each_verb_by_name() {
-    let ssh = Ssh::new("jupyter");
+    let read_only = ReadOnly::new();
+    assert!(!read_only.caps().write, "and it declares itself read-only");
     let from = Path::new("/srv/a");
     let to = Path::new("/srv/b");
 
-    let err = ssh.create_dir(from).await.unwrap_err();
+    let err = read_only.create_dir(from).await.unwrap_err();
     assert!(
         err.to_string().contains("cannot create a directory"),
         "{err}"
     );
-    let err = ssh.rename(from, to).await.unwrap_err();
+    let err = read_only.rename(from, to).await.unwrap_err();
     assert!(err.to_string().contains("cannot rename"), "{err}");
-    let err = ssh.copy(from, to).await.unwrap_err();
+    let err = read_only.copy(from, to).await.unwrap_err();
     assert!(err.to_string().contains("cannot copy"), "{err}");
-    let err = ssh.move_to(from, to).await.unwrap_err();
+    let err = read_only.move_to(from, to).await.unwrap_err();
     assert!(err.to_string().contains("cannot move"), "{err}");
-    let err = ssh.remove(from, Removal::Trash).await.unwrap_err();
+    let err = read_only.remove(from, Removal::Trash).await.unwrap_err();
     assert!(err.to_string().contains("cannot trash"), "{err}");
-    let err = ssh.remove(from, Removal::Permanent).await.unwrap_err();
+    let err = read_only
+        .remove(from, Removal::Permanent)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("cannot delete"), "{err}");
 }
 

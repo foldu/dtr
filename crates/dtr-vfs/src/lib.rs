@@ -252,9 +252,10 @@ pub trait Backend: Send + Sync {
     // ---- writes -------------------------------------------------------------
     //
     // The default for every verb is the same refusal, which is what lets a
-    // read-only backend (`Ssh` today) declare `write: false` and implement
-    // nothing. Callers gate on [`Caps::write`] first; the error is the
-    // belt-and-braces answer for a call that got through anyway.
+    // backend that cannot write declare `write: false` and implement nothing —
+    // the in-memory one in its early days, and any future read-only mount.
+    // Callers gate on [`Caps::write`] first; the error is the belt-and-braces
+    // answer for a call that got through anyway.
 
     /// Make one directory at `path`.
     ///

@@ -596,6 +596,36 @@ async fn a_download_is_renamed_into_place() {
 }
 
 #[compio::test]
+async fn a_segmented_read_streams_the_whole_file_and_closes() {
+    // The remote-to-remote copy reads here and writes there, one chunk at a
+    // time: the same server answers both, so this is the read half proved on
+    // its own.
+    let mut mock = connect(&[]).await;
+    let reading = mock
+        .session
+        .begin_read("/home/user/notes.txt")
+        .await
+        .expect("open for reading");
+    let mut bytes = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let Some(chunk) = mock
+            .session
+            .read_chunk(&reading, offset)
+            .await
+            .expect("a chunk")
+        else {
+            break;
+        };
+        offset += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+    }
+    mock.session.finish_read(reading).await.expect("close");
+    assert_eq!(bytes, BODY, "every byte arrived, in order");
+    assert_eq!(mock.closed().len(), 1, "the read handle is closed once");
+}
+
+#[compio::test]
 async fn stat_answers_without_listing_the_directory() {
     let mut mock = connect(&[]).await;
     let entry = mock.session.stat("/home/user/src").await.expect("stat");

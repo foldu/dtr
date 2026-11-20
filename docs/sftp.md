@@ -427,6 +427,8 @@ packet type matched — a malformed reply is an `Err`, never a panic.
 | `statvfs(path)` | `SSH_FXP_EXTENDED` (`statvfs@openssh.com`) | typed `StatVfs`; `Err` when not advertised |
 | `begin_upload` / `write_upload_chunk` / `finish_upload` / `abort_upload` | `SSH_FXP_OPEN` (`WRITE\|CREAT\|TRUNC`), `SSH_FXP_WRITE`, `SSH_FXP_CLOSE` | one packet per call: the queue's segment boundary |
 | `upload(local, remote)` | the same four, in a loop | chunks of `CHUNK` (64 KiB), closes on success and on failure |
+| `begin_read` / `read_chunk` / `finish_read` | `SSH_FXP_OPEN` (`READ`), `SSH_FXP_READ`, `SSH_FXP_CLOSE` | the mirror of the upload primitives: one chunk per call, `None` at end of file |
+| `download(remote, local)` | the same three, in a loop | writes `<local>.part`, then renames; a failed download cannot truncate a good file |
 
 **Extensions are remembered from `SSH_FXP_VERSION`.** The handshake reads the
 `(name, version)` pairs after the version number into the session and
@@ -459,6 +461,58 @@ payload in one packet and the segment size the 30 s per-answer deadline supports
 `u64` fields are read strictly: a short reply is an error. The codec is tested through
 the fake `Wire` in `tests/mock.rs` — every new packet, and both extension states — plus a
 scripted wire in the unit tests for the malformed replies a real server would never send.
+
+---
+
+## 8. The ssh backend writes
+
+`crates/dtr-vfs/src/ssh.rs` now implements the write half of the `Backend` trait
+over the codec above, through the alias's existing thread: one session, one
+operation at a time, the same 30 s `DEADLINE` and the same "a failure drops the
+child and retries once" rule as `stat`, `fetch` and `list`.
+
+| verb | mapping | notes |
+|---|---|---|
+| `caps()` | — | `write: true`, `trash: false`; watch and directory size stay false |
+| `create_dir(path)` | `MKDIR` | a failed `MKDIR` plus a stat that now succeeds is the trait's `Conflict` |
+| `rename(from, to)` / `move_to(from, to)` | stat(to), then plain `RENAME` (`overwrite = false`) | never replaces; a taken name is `Conflict`, and `from == to` is a no-op that never opens a connection |
+| `remove(path, Permanent)` | stat, then `REMOVE`, or `RMDIR` when the stat says directory | an empty directory only: a recursive delete is a tree operation for the transfer queue |
+| `remove(path, Trash)` | refused | before a connection is opened: a remote delete that cannot be undone must not be emulated |
+| `copy(from, to)` | stat both ends, `begin_read` + `begin_upload`, one `READ` and one `WRITE` per `CHUNK`, close both, plain `RENAME` the `<to>.part` onto `to` | see below |
+
+**Copy streams through the client.** v3 has no server-to-server copy, so the
+bytes go `READ` → dtr → `WRITE`: two packet round trips per 64 KiB, all of them
+on the alias's one session, so a copy stalls a listing of that host and cannot
+be cancelled between chunks. The codec's segmented read is exactly the mirror of
+the segmented upload for this reason, and the transfer queue (`docs/manager.md`
+§8) is where a big copy becomes segments that interleave and cancel.
+
+**A copy is published, never written in place.** It lands under `<to>.part` and
+a non-replacing rename puts it at the real name, so a failed or cancelled copy
+leaves no half file under it, and a destination that appeared mid-copy is
+refused (the plain `RENAME` fails) rather than replaced. `stat(to)` before the
+first byte is the fast conflict answer; the rename is the race-free one.
+
+**The 30 s deadline is the operation's, as it already is for `fetch`.** A copy
+that cannot finish in 30 s times out like a large download does and belongs to
+the segmented queue. `Conflict` is the one answer that does *not* spend the
+reconnect: it is a decision (`dtr_vfs::is_conflict`), so the session stays and
+the caller gets the replace/keep-both/skip card instead of a second identical
+question on a new connection.
+
+**Tests run the real thread over a scripted wire.** `Ssh` takes an optional
+"open a session" hook (`Conn::spawn_over`) that replaces `Session::connect`; the
+unit tests in `ssh.rs` pass `Session::from_wire` scripts and exercise caps, op
+dispatch, the exact packets of every verb, the `Conflict` cases, the trash
+refusal (asserting no connection was made) and one reconnect on a protocol
+failure. What that cannot cover is a real OpenSSH server: its status codes, and
+in particular that plain `SSH_FXP_RENAME` refuses an existing destination, are
+asserted by the codec's mock server (`crates/dtr-sftp/tests/mock.rs`, which
+refuses an existing destination the way OpenSSH's link-then-unlink does) rather
+than measured against a host, and the 30 s timeout itself is not exercised
+because a test would wait 30 s.
+An `#[ignore]`d run against `$DTR_SSH_TEST_HOST` would close both gaps; it is
+not written yet.
 
 ---
 
