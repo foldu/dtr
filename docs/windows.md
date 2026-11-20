@@ -508,7 +508,7 @@ These came from a Windows run and cannot be judged from this tree alone:
 | Whether the Nerd Font is even visible to dtr | `dtr --fonts` on that machine, and the configured family |
 | Is latency the gate, vsync, or the panel | `-v` (`loop`, `publish gate`, `slow frame`) and the counter from §5.2 |
 | How much of resize is ConPTY | the same drag on Linux under a pty, plus timing from §5.2 |
-| Whether the 46-point client caption looks right beside Explorer/Settings | `-v` `strip geometry strip_points=46 chip_points=26 reserved_px=…` and a screenshot at 150 % — `chrome.md` §5 has the heights it is matched against |
+| Whether the 40-point client caption looks right beside Explorer/Settings | `-v` `strip geometry strip_points=40.0 chip_points=26.0 reserved_px=… strip_px=…` and a screenshot at 150 % — `chrome.md` §5 has the heights it is matched against |
 
 Answered: **Windows DPI is reported as expected** — `winit` hands dtr 1.25, and since §2.1
 the grid uses it too (102 × 34 cells at 125 %, against 125 × 43 before). The scale itself is

@@ -69,20 +69,30 @@ pub fn kind() -> Kind {
 /// GNOME Terminal, Settings — are 46 points tall.
 pub const ADWAITA_TITLEBAR: f32 = 46.0;
 
-/// How tall a caption that *holds the tabs* is, in points.
+/// How tall a caption that *holds the tabs* is on Windows, in points.
 ///
 /// The strip is not a plain title bar: the tabs live in it, so it has to be a
-/// *tabbed* caption's height, and 46 points is the same number the GNOME header
-/// bar asks for ([`ADWAITA_TITLEBAR`]) — the app's caption is one height on every
-/// platform. It is a native height on Windows too: at 96 DPI Explorer's caption
-/// row (the one its tabs live in) measures ~48 px and Windows Terminal's tab row
-/// is 40 effective pixels (`TerminalWindow.cpp`: `static constexpr auto
-/// titlebarHeight = 40`), so 46 sits inside the range a title bar with tabs in it
-/// occupies. What it is *not* is a plain `SM_CAPTION` band: that is 31 px at
-/// 96 DPI and *shrinks* in points as the display scales (31, 30.4, 30, 29 at
-/// 96/120/144/192 DPI), so at 150 % it is a 45-pixel ribbon beside a tabbed
-/// caption's 69 — which is exactly the report this answers.
-pub const TABBED_TITLEBAR: f32 = 46.0;
+/// *tabbed* caption's height, and 40 points is the height the platform's own
+/// tabbed terminal asks for — Windows Terminal's row is 40 effective pixels
+/// (`TerminalWindow.cpp`: `static constexpr auto titlebarHeight = 40`). It is also
+/// where the guest's other tabbed captions sit, measured post-reset with
+/// `winverify` (the 150 % screenshot is `/tmp/winverify/150-side.png`):
+///
+/// | | 96 dpi (100 %) | 144 dpi (150 %) |
+/// | --- | --- | --- |
+/// | a plain Win32 caption (`SM_CAPTION` band) | 31 | 45 |
+/// | Explorer's title/tab band | 40 | 58 |
+/// | Settings' application-frame bar | 41 | ~61 |
+/// | Notepad's tabbed caption | 42 | 62 |
+/// | Windows Terminal's row (`titlebarHeight`) | 40 | 60 |
+/// | **dtr's client caption** | **40** | **60** |
+///
+/// What it is *not* is the plain band: that is 31 px at 96 DPI and *shrinks* in
+/// points as the display scales (31, 30.4, 30, 29), so at 150 % it is a 45-pixel
+/// ribbon beside the 58–62-pixel tabbed captions around it — exactly the report
+/// this answers. GNOME keeps its own header bar ([`ADWAITA_TITLEBAR`], 46): the
+/// platform's tabbed caption is the one to match, and GNOME's is a different one.
+pub const TABBED_TITLEBAR: f32 = 40.0;
 
 /// How tall the title bar is, in points, as the platform would have drawn it.
 ///
@@ -743,10 +753,10 @@ mod tests {
         }
     }
 
-    /// The Windows strip is a *tabbed* caption: 46 points at every scale, the same
-    /// height as the GNOME header bar, and the platform's own band only raises it
-    /// when a person has made their title bars taller than that — it can never
-    /// shorten it.
+    /// The Windows strip is a *tabbed* caption: 40 points at every scale (Windows
+    /// Terminal's row, and where the guest's Explorer/Settings/Notepad captions
+    /// sit), and the platform's own band only raises it when a person has made
+    /// their title bars taller than that — it can never shorten it.
     #[test]
     fn the_windows_caption_is_a_tabbed_one() {
         assert_eq!(windows_caption_height(None), TABBED_TITLEBAR);
@@ -767,7 +777,7 @@ mod tests {
             assert_eq!(
                 crate::ui::tab_chip_height(strip),
                 26.0,
-                "a tabbed caption gets Adwaita's tab, not a pill"
+                "a 40-point caption gets Adwaita's tab, not a pill"
             );
         }
         assert_eq!(
@@ -775,11 +785,11 @@ mod tests {
             50.0,
             "a system caption a person made taller wins"
         );
-        // At 150 %: 69 pixels over the platform's 45, and 75 reserved with the gap.
-        assert_eq!(strip_pixels(windows_caption_height(Some(30.0)), 1.5), 69.0);
+        // At 150 %: 60 pixels over the platform's 45, and 66 reserved with the gap.
+        assert_eq!(strip_pixels(windows_caption_height(Some(30.0)), 1.5), 60.0);
         assert_eq!(
             reserved_pixels(windows_caption_height(Some(30.0)), crate::ui::GRID_GAP, 1.5),
-            75.0
+            66.0
         );
     }
 
@@ -790,7 +800,7 @@ mod tests {
     #[test]
     fn the_caption_is_scaled_once_on_each_side_of_the_boundary() {
         // Both captions dtr can have: the 96-DPI band in points (31) and the
-        // tabbed caption it uses on Windows (46). The maximised window is not a
+        // tabbed caption it uses on Windows (40). The maximised window is not a
         // second geometry: winit clamps the *client area* to the monitor's work
         // area, and the strip still starts at its top and reserves the same
         // `top_inset`, so the same two numbers cover it.
@@ -828,13 +838,13 @@ mod tests {
             51.0,
             "45 px of strip and 6 px of gap"
         );
-        // And the tabbed caption at 150 %: 69 px drawn over 75 reserved, which is
+        // And the tabbed caption at 150 %: 60 px drawn over 66 reserved, which is
         // what `-v` prints and what the pane area's top is. A doubled factor
-        // would reserve (46 * 1.5 + 4) * 1.5 = 109.5.
-        assert_eq!(strip_pixels(TABBED_TITLEBAR, 1.5), 69.0);
+        // would reserve (40 * 1.5 + 4) * 1.5 = 96.
+        assert_eq!(strip_pixels(TABBED_TITLEBAR, 1.5), 60.0);
         assert_eq!(
             reserved_pixels(TABBED_TITLEBAR, crate::ui::GRID_GAP, 1.5),
-            75.0
+            66.0
         );
     }
 
@@ -853,24 +863,24 @@ mod tests {
             "no window: the three metrics are the band"
         );
         assert_eq!(
-            band_pixels(Some(46), 34, 5, 6),
-            46,
+            band_pixels(Some(47), 34, 5, 6),
+            47,
             "the OS's answer wins over the sum"
         );
         assert_eq!(band_pixels(None, 0, 0, 0), 0);
     }
 
     /// The Windows buttons are the platform's: 46 points wide and the full height
-    /// of the caption band, so at 150 % they draw as 69 × 45 pixels — the
+    /// of the tabbed caption, so at 150 % they draw as 69 × 60 pixels — the
     /// rectangle Explorer's own caption buttons occupy.
     #[test]
     fn windows_caption_buttons_are_46_points_by_the_band() {
-        let strip = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 30.0));
+        let strip = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, TABBED_TITLEBAR));
         for (_, rect) in boxes(strip, Kind::Windows) {
             assert_eq!(rect.width(), 46.0);
-            assert_eq!(rect.height(), strip.height());
+            assert_eq!(rect.height(), TABBED_TITLEBAR);
             assert_eq!(strip_pixels(rect.width(), 1.5), 69.0);
-            assert_eq!(strip_pixels(rect.height(), 1.5), 45.0);
+            assert_eq!(strip_pixels(rect.height(), 1.5), 60.0);
         }
     }
 

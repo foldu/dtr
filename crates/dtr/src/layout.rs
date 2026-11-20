@@ -654,11 +654,11 @@ mod tests {
     /// The pane area starts where the caption's reservation ends, at a fractional
     /// scale too.
     ///
-    /// The 46-point tabbed caption at 150 % draws 69 physical pixels and *reserves*
-    /// 75 (the 4-point gap included), and the split tiles the area below that line.
+    /// The 40-point tabbed caption at 150 % draws 60 physical pixels and *reserves*
+    /// 66 (the 4-point gap included), and the split tiles the area below that line.
     /// The inset is `chrome::reserved_pixels`, the one spelling `App::pane_area`
     /// uses: a scale applied twice — `(height × scale + gap) × scale` — would put
-    /// the panes at 109.5 and lose a row's worth of grid, which is the bug
+    /// the panes at 96 and lose a row's worth of grid, which is the bug
     /// `docs/windows.md` §2.2 records for the status bar.
     #[test]
     fn the_pane_area_starts_below_the_caption_at_a_fractional_scale() {
@@ -668,7 +668,7 @@ mod tests {
             crate::ui::GRID_GAP,
             scale,
         );
-        assert_eq!(inset, 75.0, "69 px of strip and 6 of gap");
+        assert_eq!(inset, 66.0, "60 px of strip and 6 of gap");
         let screen = Rect::new(0.0, 0.0, 1350.0, 930.0);
         let area = Rect::new(0.0, inset, screen.width, screen.height - inset);
         let mut layout = Layout::leaf(1);

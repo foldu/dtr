@@ -156,7 +156,7 @@ Three independent levers.
 | button | 46×32 pt, butted together, full strip height | 24×24 pt circles, ~6 pt gaps, centred |
 | glyph | 10 pt | 16 pt |
 | caption icon | 16 pt, 8 pt in, opens the system menu | 20 pt, 8 pt in, a mark |
-| strip height | a tabbed caption: 46 pt, the queried band as a floor | 46 pt (libadwaita) |
+| strip height | a tabbed caption: 40 pt, the queried band as a floor | 46 pt (libadwaita) |
 | hover | flat fill per button | circle behind the glyph |
 | close | `#C42B1C` fill, white glyph | the same grey as the others |
 
@@ -186,29 +186,32 @@ the only evidence:
   `GetSystemMetrics`: winit's windows are per-monitor DPI aware, and a window dragged to a
   125 % monitor has 120-DPI metrics.
 
-  **That band is a floor, not the answer, because this strip carries the tabs.** Everything
-  a person compares a title bar with at 100 % on that guest, measured the same way:
+  **That band is a floor, not the answer, because this strip carries the tabs.** Measured in
+  the same guest (`winverify`, clean guest, exclusive window fits; the 150 % screenshots are
+  `/tmp/winverify/150-side.png`):
 
-  | caption | at 96 DPI |
-  | --- | --- |
-  | a plain Win32 caption (`SM_CAPTION` + frame + padded) | 31 px |
-  | Settings' application-frame title bar | 32 px |
-  | Windows Terminal's tabbed row (`titlebarHeight = 40`) | 40 px |
-  | Notepad's Windows 11 tabbed caption | ~42 px |
-  | Explorer's caption row, the one its tabs live in | ~48 px |
-  | libadwaita's GNOME header bar | 46 pt |
-  | **dtr's own client caption** | **46 pt** |
+  | caption | 96 dpi (100 %) | 144 dpi (150 %), windowed | 144 dpi, maximised |
+  | --- | --- | --- | --- |
+  | a plain Win32 caption (`SM_CAPTION` + frame + padded) | 31 px | 45 px | — |
+  | Explorer's title/tab band | 40 px | 58 px | 49 px |
+  | Settings' application-frame bar | 41 px | ~61 px | 61 px |
+  | Notepad's tabbed caption | 42 px | 62 px | 49 px |
+  | Windows Terminal's row (`titlebarHeight = 40`) | 40 px | 60 px | 60 px |
+  | libadwaita's GNOME header bar | 46 pt | — | — |
+  | **dtr's own client caption** | **40 px** | **60 px** | **60 px** |
 
   The comparison behind "titlebar too small (4k hidpi 150%)" was one of the *tabbed* rows,
   and the band dtr was using shrinks in points as the display scales — 31, 30.4, 30, 29 — so
-  at 150 % it drew a 45-pixel ribbon beside a 69-pixel tabbed caption. **46 is a design
-  choice, not a measurement**: Windows' own tabbed captions span 40–48 px, GNOME's header bar
-  is 46, and dtr takes 46 so its caption is one height on every platform — inside the native
-  range and within two points of Explorer's. The queried band stays as a floor, so the strip
-  is never shorter than the platform's own caption at any scale, and a person who has made
-  their system captions taller than 46 keeps theirs. At 150 % that is 69 px of strip over a
-  75-pixel reservation (with the 4-point gap between strip and grid); at 100 %, 46 over 50.
-  The maximised window is not a second geometry: winit clamps the client area to the
+  at 150 % it drew a 45-pixel ribbon beside the 58–62-pixel tabbed captions around it.
+  **40 is Windows Terminal's row**, and it is the middle of the native tabbed range: windowed
+  it is within two pixels of Explorer, Settings and Notepad; maximised it is ~11 px taller
+  than Explorer and Notepad, which is only because the Win10/11 hidden frame's top 11 px are
+  off screen — do not lower the constant to their 49. Windows Terminal is 60 px in both
+  states, which is what a terminal with tabs should be. The queried band stays as a floor, so
+  the strip is never shorter than the platform's own caption at any scale, and a person who
+  has made their system captions taller than 40 keeps theirs. At 150 % that is 60 px of strip
+  over a 66-pixel reservation (with the 4-point gap between strip and grid); at 100 %, 40
+  over 44. The maximised window is not a second geometry: winit clamps the client area to the
   monitor's work area, and the strip still starts at its top and reserves the same inset.
 - **GNOME** is a constant, because the number is in libadwaita's CSS and dtr does not parse
   CSS (`system/linux.rs` says why): libadwaita 1.9.3's `window:not(.ssd-frame) >
@@ -219,10 +222,11 @@ the only evidence:
 
 **The chip follows the strip.** `ui::tab_chip_height` is the strip less six points of air
 above and below, floored at the 20-point chip and capped at Adwaita's own tab
-(`tabbar tab { min-height: 26px }`): a tabbed 46-point caption gets a 26-point chip — the
-same number on both platforms, Adwaita's tab, tall enough that the row reads as a place for
-tabs rather than a pill in a caption. With `chrome = "native"` the strip is only a tab row
-under the window manager's own title bar, and stays 30 points.
+(`tabbar tab { min-height: 26px }`): the 40-point Windows caption would give 28 points, so
+the cap keeps its chip at Adwaita's 26 — tall enough that the row reads as a place for tabs
+rather than a pill in a caption — and GNOME's 46-point bar gets the same 26. With
+`chrome = "native"` the strip is only a tab row under the window manager's own title bar,
+and stays 30 points.
 
 **Glyphs** — the lever that matters most, because shape is what the eye recognises:
 
@@ -415,17 +419,31 @@ unverified on real hardware; the hit test and the button itself are not affected
 
 **The 150 % caption** (2026-11-20). "Titlebar too small (4k hidpi 150%)" was measured
 against title bars that have tabs in them, not against a plain `SM_CYCAPTION` band, and the
-gap is real: at 96 DPI the guest's own Explorer caption row is ~48 px, Notepad's tabbed
-caption ~42, Windows Terminal's row 40 and Settings' application-frame title bar 32, while
-a plain Win32 caption is 31 — and the band dtr was using *shrinks* in points as DPI rises
-(31 / 30.4 / 30 / 29), so at 150 % it drew 45 px where Explorer's kind of caption is ~72.
+gap is real. Measured by `winverify` in the clean guest (windowed and maximised, 144 dpi;
+screenshots `/tmp/winverify/150-side.png`):
+
+| caption | 100 % | 150 % windowed | 150 % maximised |
+| --- | --- | --- | --- |
+| dtr, before | 31 px | 45 px | 45 px |
+| Explorer | 40 px | 58 px | 49 px |
+| Settings | 41 px | ~61 px | 61 px |
+| Notepad | 42 px | 62 px | 49 px |
+| Windows Terminal's row | 40 px | 60 px | 60 px |
+
+The band dtr was using *shrinks* in points as DPI rises (31 / 30.4 / 30 / 29), so at 150 % it
+drew a 45-pixel band where the tabbed captions around it are 58–62; maximised, Explorer and
+Notepad only drop to 49 because the Win10/11 hidden frame's top 11 px are then off screen —
+a terminal with tabs should follow Windows Terminal's 60 px in both states, not their 49.
 `GetSystemMetricsForDpi` and `AdjustWindowRectExForDpi` agree at 96/120/144/192 DPI
 (31/38/45/58), so no pixels were lost to rounding; the strip was sized as the wrong *kind*
-of caption. It is now a tabbed caption's 46 points (§5) — 69 px at 150 %, 46 at 100 % —
-with the queried band as a floor. The drawing side was never in doubt: on Linux at
-`WINIT_X11_SCALE_FACTOR=1.5` the Adwaita path was already 46 pt = 69 physical px, logged as
-`strip geometry strip_points=46 chip_points=26 reserved_px=75` and measured in the capture.
-The 46-point Windows strip was cross-built (`.#windows`) but **not re-run in the guest**;
+of caption. It is now a tabbed caption's 40 points (§5) — 60 px at 150 %, 40 at 100 %, i.e.
+within two pixels of Explorer/Settings/Notepad windowed and exactly Windows Terminal — with
+the queried band as a floor. The drawing side was never in doubt: on Linux at
+`WINIT_X11_SCALE_FACTOR=1.5` the Adwaita path was 46 pt = 69 physical px, logged as
+`strip geometry strip_points=46 chip_points=26 reserved_px=75` and measured in the capture;
+after the change the Windows path is 40 pt, so `-v` should print
+`strip_points=40.0 chip_points=26.0 reserved_px=66.0 strip_px=60.0` at 150 %. The 40-point
+Windows strip was cross-built (`.#windows`) but **not re-run in the guest**;
 `the_windows_caption_is_a_tabbed_one` and `the_caption_is_scaled_once_on_each_side_of_the_boundary`
 cover the arithmetic until it is.
 
