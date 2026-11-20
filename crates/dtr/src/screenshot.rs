@@ -379,6 +379,11 @@ pub fn capture(
                 multiview_mask: None,
             })
             .forget_lifetime();
+        // The offscreen path renders from injected state, which never carries
+        // image pixels, so this is a no-op — but it is the same pass the window
+        // runs, and a future captured image would show here without a second
+        // code path.
+        grid.draw_above(&mut pass);
         renderer.render(&mut pass, &clipped, &screen);
     }
 

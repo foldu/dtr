@@ -641,8 +641,15 @@ pub struct GridRenderer {
     instances: Vec<Instance>,
     instance_buffer: Option<wgpu::Buffer>,
     instance_capacity: usize,
+    /// How many of `instances` are backgrounds (the pane fill, cell backgrounds
+    /// and a block cursor's inverted cell), which is where the below-text image
+    /// layer goes. See `prepare`.
+    background_instances: usize,
     uniform: wgpu::Buffer,
     screen: [f32; 2],
+    /// The Kitty graphics layer: its own pipeline, its textures and its byte
+    /// budget. Owned here so `Gpu`'s drop order keeps it before the device.
+    images: crate::kitty::ImageRenderer,
 }
 
 /// One pane to draw: where it goes, what it shows, and whether it has focus.
@@ -872,8 +879,10 @@ impl GridRenderer {
             instances: Vec::new(),
             instance_buffer: None,
             instance_capacity: 0,
+            background_instances: 0,
             uniform,
             screen: [1.0, 1.0],
+            images: crate::kitty::ImageRenderer::new(device, format),
         };
         renderer
     }
@@ -923,22 +932,41 @@ impl GridRenderer {
         let metrics = self.fonts.metrics;
         let (cell_w, cell_h) = (metrics.cell_width, metrics.cell_height);
 
+        // Backgrounds for every pane first, then every pane's foreground: the
+        // image layer draws the below-text group between those two ranges, so
+        // an image that asked to be under the text really is under it — above
+        // the cell backgrounds, below the glyphs. (A pane's own fill and its
+        // cell backgrounds are both opaque, which is why the below-background
+        // group is drawn before them and a background image is hidden: that is
+        // what that layer means.)
         for pane in panes {
-            self.prepare_pane(device, queue, pane, look, cell_w, cell_h);
+            self.prepare_pane_backgrounds(pane, look, cell_w, cell_h);
+        }
+        self.background_instances = self.instances.len();
+        for pane in panes {
+            self.prepare_pane_text(device, queue, pane, look, cell_w, cell_h);
         }
 
         self.upload_instances(device, queue);
+        self.images.prepare(
+            device,
+            queue,
+            panes,
+            (cell_w, cell_h),
+            (self.screen[0], self.screen[1]),
+        );
         tracing::debug!(
             instances = self.instances.len(),
+            images = self.images.len(),
             glyphs = self.glyphs.len(),
             "grid prepared"
         );
     }
 
-    fn prepare_pane(
+    /// Every instance that belongs under the text: the pane's fill, the
+    /// backgrounds cells carry, and a block cursor's inverted cell.
+    fn prepare_pane_backgrounds(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
         pane: &PaneView<'_>,
         look: &Look,
         cell_w: f32,
@@ -946,14 +974,7 @@ impl GridRenderer {
     ) {
         let Some(frame) = pane.frame else { return };
         let (origin_x, origin_y) = (pane.rect.x, pane.rect.y);
-        // Cells outside the pane are simply not emitted: cheaper than a scissor
-        // rect and it cannot smear into a neighbour.
-        let cols_fit = (pane.rect.width / cell_w).floor().max(1.0) as usize;
-        let rows_fit = (pane.rect.height / cell_h).floor().max(1.0) as usize;
-        let visible = |index: usize| -> bool {
-            let cols = usize::from(frame.cols).max(1);
-            (index / cols) < rows_fit && (index % cols) < cols_fit
-        };
+        let visible = visible_cells(pane, frame, cell_w, cell_h);
 
         // The pane's own background, before anything else. The window clears to
         // *one* colour and a split can have a different one, and a program that
@@ -971,14 +992,10 @@ impl GridRenderer {
         // is drawn in `cursor-text` above it. Painted afterwards it hid the
         // character it sat on, which made a block cursor a solid square and a
         // prompt's cursor a hole in the text.
-        let block = match (pane.cursor, frame.cursor) {
-            (true, Some(cursor)) => block_span(frame, &cursor),
-            _ => None,
-        };
+        let block = block_span_of(pane, frame);
         let under_block =
             |index: usize| block.is_some_and(|(head, span)| index >= head && index < head + span);
 
-        // Backgrounds first: a glyph must never sit under a later rectangle.
         for (index, cell) in frame.cells.iter().enumerate() {
             if !visible(index) {
                 continue;
@@ -995,9 +1012,28 @@ impl GridRenderer {
             self.instances
                 .push(Instance::solid([x, y, cell_w, cell_h], colour, 1.0));
         }
+    }
 
-        // Then the glyphs. One size for the whole frame: the physical size the
-        // grid was loaded at, which is the point size times the display's scale.
+    /// Every instance that sits over the backgrounds: glyphs, the selection
+    /// wash, a bar or underline cursor and the bell flash.
+    fn prepare_pane_text(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pane: &PaneView<'_>,
+        look: &Look,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        let Some(frame) = pane.frame else { return };
+        let (origin_x, origin_y) = (pane.rect.x, pane.rect.y);
+        let visible = visible_cells(pane, frame, cell_w, cell_h);
+        let block = block_span_of(pane, frame);
+        let under_block =
+            |index: usize| block.is_some_and(|(head, span)| index >= head && index < head + span);
+
+        // One size for the whole frame: the physical size the grid was loaded
+        // at, which is the point size times the display's scale.
         let size = self.fonts.size;
         for (index, cell) in frame.cells.iter().enumerate() {
             // A concealed cell keeps its characters and loses its ink: xterm
@@ -1126,17 +1162,40 @@ impl GridRenderer {
         }
     }
 
-    pub fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        let Some(buffer) = self.instance_buffer.as_ref() else {
-            return;
-        };
-        if self.instances.is_empty() {
-            return;
+    /// Draw the grid, with the images that belong under it in two places.
+    ///
+    /// `BelowBackground` images go down before the pane's fill; `BelowText`
+    /// images between the background instances and the glyph instances. The
+    /// caller clears the pass, so the first thing drawn lands over the clear
+    /// colour.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.images.draw(pass, crate::kitty::Layer::BelowBackground);
+        let background = self.background_instances.min(self.instances.len());
+        if background > 0 {
+            if let Some(buffer) = self.instance_buffer.as_ref() {
+                self.set_grid_state(pass, buffer);
+                pass.draw(0..6, 0..background as u32);
+            }
         }
+        self.images.draw(pass, crate::kitty::Layer::BelowText);
+        if background < self.instances.len() {
+            if let Some(buffer) = self.instance_buffer.as_ref() {
+                self.set_grid_state(pass, buffer);
+                pass.draw(0..6, background as u32..self.instances.len() as u32);
+            }
+        }
+    }
+
+    /// Draw the images that sit over the text: the caller runs this in the same
+    /// pass as egui, before it, so a menu is still over the picture.
+    pub fn draw_above(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.images.draw(pass, crate::kitty::Layer::AboveText);
+    }
+
+    fn set_grid_state(&self, pass: &mut wgpu::RenderPass<'_>, buffer: &wgpu::Buffer) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, buffer.slice(..));
-        pass.draw(0..6, 0..self.instances.len() as u32);
     }
 
     /// Rasterise a character if the atlas does not have it yet.
@@ -1399,6 +1458,32 @@ fn constraint_width(frame: &Frame, index: usize) -> u8 {
         None => 2,
         Some(next) if next.is_whitespace() => 2,
         Some(_) => 1,
+    }
+}
+
+/// Which cells of a frame fit inside its pane.
+///
+/// Cells outside the pane are simply not emitted: cheaper than a scissor rect
+/// and it cannot smear into a neighbour.
+fn visible_cells<'a>(
+    pane: &PaneView<'a>,
+    frame: &'a Frame,
+    cell_w: f32,
+    cell_h: f32,
+) -> impl Fn(usize) -> bool + 'a {
+    let cols_fit = (pane.rect.width / cell_w).floor().max(1.0) as usize;
+    let rows_fit = (pane.rect.height / cell_h).floor().max(1.0) as usize;
+    move |index: usize| {
+        let cols = usize::from(frame.cols).max(1);
+        (index / cols) < rows_fit && (index % cols) < cols_fit
+    }
+}
+
+/// The cells a block cursor inverts, when this pane draws one.
+fn block_span_of(pane: &PaneView<'_>, frame: &Frame) -> Option<(usize, usize)> {
+    match (pane.cursor, frame.cursor) {
+        (true, Some(cursor)) => block_span(frame, &cursor),
+        _ => None,
     }
 }
 
@@ -2477,6 +2562,7 @@ mod font_tests {
                     ..Cell::default()
                 })
                 .collect(),
+            images: std::sync::Arc::from(Vec::new()),
         }
     }
 
@@ -2814,6 +2900,7 @@ mod font_tests {
             selection: None,
             cells: Vec::new(),
             title: String::new(),
+            images: std::sync::Arc::from(Vec::new()),
         }
     }
 

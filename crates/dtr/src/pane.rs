@@ -23,7 +23,7 @@ use libghostty_vt::mouse;
 // iteration without every future type having to implement `FusedFuture`.
 use futures_util::FutureExt as _;
 use libghostty_vt::render::{
-    CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator, Snapshot,
+    CellIterator, CursorVisualStyle, Dirty, ImageIterator, RenderState, RowIterator, Snapshot,
 };
 use libghostty_vt::screen::TrackedGridRef;
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
@@ -31,9 +31,11 @@ use libghostty_vt::terminal::{
     ClipboardReadError, ClipboardReplyContent, ColorScheme, Mode, Point, PointCoordinate,
     PointSpace, ProgramStatusState, ProgressState, ResizeWindow, SizeReportSize,
 };
+use libghostty_vt::{kitty::graphics::Graphics, render::ImageLayer};
 use portable_pty::MasterPty;
 
 use crate::keys::KeyStroke;
+use crate::kitty::{ImagePixels, KITTY_IMAGE_STORAGE_LIMIT, Layer, Placement};
 use crate::pty;
 use crate::serial::{self, CrToCrlf};
 
@@ -52,10 +54,20 @@ fn new_terminal(
 ) -> anyhow::Result<Terminal<'static, 'static>> {
     let mut term = Terminal::new(cols, rows)?;
     term.set_scrollback_max_bytes(Some(scrollback))?;
+    // Kitty graphics are off until a limit is set; the limit is also the bound,
+    // for the same reason the scrollback limit is one (`crate::kitty`). The core
+    // applies it to the main and the alternate screen separately. A core built
+    // without Kitty graphics (upstream can be built that way) refuses the
+    // option; a terminal that cannot show images is still a usable terminal, so
+    // that is a warning, not a failed session.
+    if let Err(err) = term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT) {
+        tracing::warn!(%err, "kitty image storage limit not available; images will not be drawn");
+    }
     tracing::info!(
         cols,
         rows,
         scrollback_bytes = scrollback,
+        image_storage_bytes = KITTY_IMAGE_STORAGE_LIMIT,
         "terminal created"
     );
     Ok(term)
@@ -225,6 +237,15 @@ pub struct Frame {
     /// cells and changes at the same rate, and because the pane is the only
     /// thing holding the terminal that parsed it.
     pub title: String,
+    /// Kitty graphics images on screen, in the order the render state lists
+    /// them: position, size, source rectangle, layer and z-index, plus the
+    /// decoded pixels behind an `Arc`.
+    ///
+    /// The list is rebuilt only when the core's placements generation changes
+    /// and each image's pixels only when its own generation does, so an ordinary
+    /// frame carries the previous `Arc`s and costs a refcount. A terminal that
+    /// never receives an image carries an empty slice, which allocates nothing.
+    pub images: std::sync::Arc<[crate::kitty::Placement]>,
 }
 
 /// A connection that is not there right now: what the pane is doing about it,
@@ -1423,6 +1444,10 @@ async fn run(
         })?;
     }
     let mut state = RenderState::new()?;
+    // The render state's image list is read here and carried to the UI in the
+    // frame; the pixels are copied out of the terminal only when a generation
+    // changes (`ImageCache`).
+    let mut images = ImageCache::new()?;
     // Declared before the first publish: publishing is where a selection that
     // has scrolled out of the frame is dropped.
     let mut selection: Option<SelectionAnchors> = None;
@@ -1644,6 +1669,7 @@ async fn run(
         true,
         &mut selection,
         &mut shown,
+        &mut images,
     )?;
 
     let mut sniffer = CwdSniffer::default();
@@ -1732,7 +1758,7 @@ async fn run(
                             // and the release arrives in the batch that says so.
                             publish_pending = true;
                         } else if std::time::Instant::now() >= next_publish {
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown, &mut images)?;
                             next_publish = std::time::Instant::now() + gate;
                             publish_pending = false;
                         } else {
@@ -1747,7 +1773,7 @@ async fn run(
                 }
             }
             _ = when(publish_pending && !held.get(), compio::time::sleep_until(next_publish)).fuse() => {
-                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
+                publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown, &mut images)?;
                 next_publish = std::time::Instant::now()
                     + std::time::Duration::from_nanos(budget.load(Ordering::Relaxed));
                 publish_pending = false;
@@ -2102,7 +2128,7 @@ async fn run(
                         // second wire.
                         if echo {
                             term.vt_write(&bytes);
-                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown)?;
+                            publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, false, &mut selection, &mut shown, &mut images)?;
                         }
                     }
                     Command::Key(stroke) => {
@@ -2290,14 +2316,18 @@ async fn run(
                             }
                         }
                         tracing::debug!(cols = new_cols, rows = new_rows, "resized");
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
+                        // A placement's pixel size is a function of the cell, so
+                        // the list is re-read on the frame that draws the new
+                        // size rather than trusting the core's generation.
+                        images.invalidate();
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown, &mut images)?;
                     }
                     Command::Scroll(lines) => {
                         term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(lines));
                         // Forced: a viewport move does not necessarily mark the
                         // render state dirty, and a scroll that does not repaint
                         // looks like a broken wheel.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown, &mut images)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::ScrollPrompt(delta) => {
@@ -2306,7 +2336,7 @@ async fn run(
                         );
                         // Forced, for the same reason as `Scroll`: a viewport
                         // move does not necessarily dirty the render state.
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown, &mut images)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::CaptureBlock => {
@@ -2334,7 +2364,7 @@ async fn run(
                         } else {
                             libghostty_vt::terminal::ScrollViewport::Bottom
                         });
-                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
+                        publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown, &mut images)?;
                         note_scrollback(&term, &stats);
                     }
                     Command::Echo(on) => echo = on,
@@ -2404,7 +2434,7 @@ async fn run(
                             match next.apply(&mut term) {
                                 Ok(()) => {
                                     tracing::info!(theme = %next.name, "theme switched");
-                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown)?;
+                                    publish(&mut term, &mut state, &mut rows, &mut cells, &out, &wake, true, &mut selection, &mut shown, &mut images)?;
                                 }
                                 Err(err) => tracing::warn!(%err, "could not switch theme"),
                             }
@@ -2416,7 +2446,7 @@ async fn run(
                                 selection = Some(anchors);
                                 publish(
                                     &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                    true, &mut selection, &mut shown,
+                                    true, &mut selection, &mut shown, &mut images,
                                 )?;
                             }
                             Err(err) => tracing::warn!(%err, "could not start a selection"),
@@ -2438,7 +2468,7 @@ async fn run(
                         if moved {
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, &mut selection, &mut shown,
+                                true, &mut selection, &mut shown, &mut images,
                             )?;
                         }
                     }
@@ -2447,7 +2477,7 @@ async fn run(
                             selection = Some(anchors);
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, &mut selection, &mut shown,
+                                true, &mut selection, &mut shown, &mut images,
                             )?;
                         }
                     }
@@ -2456,7 +2486,7 @@ async fn run(
                             selection = Some(anchors);
                             publish(
                                 &mut term, &mut state, &mut rows, &mut cells, &out, &wake,
-                                true, &mut selection, &mut shown,
+                                true, &mut selection, &mut shown, &mut images,
                             )?;
                         }
                     }
@@ -2785,6 +2815,7 @@ fn copy_text(
         selection: None,
         cells: Vec::with_capacity(usize::from(snapshot.cols()?) * usize::from(snapshot.rows()?)),
         title: String::new(),
+        images: Arc::from(Vec::new()),
     };
     fill_cells(&snapshot, rows, cells, &mut frame)?;
     Ok(frame_text(&frame))
@@ -2974,6 +3005,359 @@ fn clean_title(bytes: &[u8]) -> String {
         .to_owned()
 }
 
+/// A pane thread's copy of the render state's image list.
+///
+/// The render state only says *where* to draw; the pixels live in the
+/// terminal's image storage, which is borrowed from the terminal and only valid
+/// until the next mutating call. The UI thread owns neither, so the pane copies
+/// them out — but only when something changed, which is what makes this cheap:
+///
+///   - The list itself is re-read when `image_placements_generation` changes,
+///     which includes an image moving because the text around it scrolled.
+///   - An image's pixels are copied when its own `image_generation` changes,
+///     which is a re-transmission or an animation frame.
+///
+/// The frame then carries the `Arc`s, so publishing is a refcount and the GPU
+/// cache can key on (image id, generation) without ever looking at a terminal.
+struct ImageCache {
+    iterator: ImageIterator<'static>,
+    /// The last list generation read, or `None` before the first read: a fresh
+    /// render state reports 0, and starting at `Some(0)` would skip the first
+    /// list.
+    generation: Option<u64>,
+    /// Decoded pixels by image id, with the generation they were decoded at.
+    pixels: std::collections::HashMap<u32, (u64, Arc<ImagePixels>)>,
+    /// The list the last frame carried, kept so an unchanged frame shares it.
+    placements: Arc<[Placement]>,
+}
+
+impl ImageCache {
+    fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            iterator: ImageIterator::new()?,
+            generation: None,
+            pixels: std::collections::HashMap::new(),
+            placements: Arc::from(Vec::new()),
+        })
+    }
+
+    /// Forget the last list generation, so the next publish re-reads it.
+    ///
+    /// A cell resize changes every placement's pixel size, and the core does not
+    /// promise to bump the placements generation for a resize the way it does
+    /// for a move. The list is cheap to read and the pixels are still cached per
+    /// image generation, so forcing one read is the safe side of that promise.
+    fn invalidate(&mut self) {
+        self.generation = None;
+    }
+
+    /// Re-read the list if the render state says it changed, and return what the
+    /// frame should carry.
+    fn refresh(
+        &mut self,
+        term: &Terminal<'_, '_>,
+        snapshot: &Snapshot<'static, '_>,
+    ) -> anyhow::Result<Arc<[Placement]>> {
+        let generation = snapshot.image_placements_generation()?;
+        if self.generation == Some(generation) {
+            return Ok(Arc::clone(&self.placements));
+        }
+        self.generation = Some(generation);
+
+        let mut list: Vec<Placement> = Vec::new();
+        // An image placed on a screen the terminal is not showing has no entry
+        // in this list, so its pixels are not kept here either (the terminal
+        // still has them; a re-read copies them again when it comes back).
+        let mut kept: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        if let Some(graphics) = term.kitty_graphics()? {
+            let mut iteration = self.iterator.update(snapshot)?;
+            while let Some(placement) = iteration.next() {
+                // One unreadable placement is skipped, not fatal: a protocol or
+                // layer this build does not know about (the core adds them over
+                // time) must not stop the other images or the frame from being
+                // drawn, and must not end the session.
+                let Some(parsed) = placement_of(placement, &graphics, &mut self.pixels) else {
+                    continue;
+                };
+                kept.insert(parsed.image_id);
+                list.push(parsed);
+            }
+        }
+        self.pixels.retain(|id, _| kept.contains(id));
+        self.placements = Arc::from(list);
+        if !self.placements.is_empty() {
+            tracing::debug!(
+                images = self.placements.len(),
+                cached = self.pixels.len(),
+                "image placements"
+            );
+        }
+        Ok(Arc::clone(&self.placements))
+    }
+}
+
+/// One placement from the render state's image list, or `None` when this build
+/// cannot draw it.
+///
+/// The list is protocol- and layer-tagged, and the core adds both over time.
+/// Everything unknown is skipped with a debug line: an image from a protocol
+/// dtr has never heard of is not a reason to drop the picture, and it is
+/// certainly not a reason to end the session.
+fn placement_of(
+    placement: &libghostty_vt::render::ImageIteration<'_, '_>,
+    graphics: &Graphics<'_>,
+    pixels: &mut std::collections::HashMap<u32, (u64, Arc<ImagePixels>)>,
+) -> Option<Placement> {
+    match placement.protocol() {
+        Ok(libghostty_vt::render::ImageProtocol::Kitty) => {}
+        Ok(other) => {
+            tracing::debug!(?other, "image from a protocol dtr does not draw");
+            return None;
+        }
+        Err(err) => {
+            tracing::debug!(%err, "unrecognised image protocol");
+            return None;
+        }
+    }
+    let layer = match placement.layer() {
+        Ok(ImageLayer::BelowBackground) => Layer::BelowBackground,
+        Ok(ImageLayer::BelowText) => Layer::BelowText,
+        Ok(ImageLayer::AboveText) => Layer::AboveText,
+        Err(err) => {
+            tracing::debug!(%err, "unrecognised image layer");
+            return None;
+        }
+    };
+    let image_id = placement.image_id().ok()?;
+    let image_generation = placement.image_generation().ok()?;
+    // A placement with nothing to draw yet (the image was still arriving when
+    // the state was captured) is skipped rather than drawn as a hole; the next
+    // generation will include it.
+    let decoded = match pixels.get(&image_id) {
+        Some((cached, image)) if *cached == image_generation => Arc::clone(image),
+        _ => {
+            let image = read_pixels(graphics, image_id)?;
+            pixels.insert(image_id, (image_generation, Arc::clone(&image)));
+            image
+        }
+    };
+    Some(Placement {
+        image_id,
+        generation: image_generation,
+        layer,
+        z: placement.z().ok()?,
+        col: placement.viewport_col().ok()?,
+        row: placement.viewport_row().ok()?,
+        offset: [
+            placement.cell_offset_x().ok()?,
+            placement.cell_offset_y().ok()?,
+        ],
+        size: [
+            placement.pixel_width().ok()?,
+            placement.pixel_height().ok()?,
+        ],
+        source: [
+            placement.source_x().ok()?,
+            placement.source_y().ok()?,
+            placement.source_width().ok()?,
+            placement.source_height().ok()?,
+        ],
+        pixels: decoded,
+    })
+}
+
+/// Copy one image out of the terminal as 8-bit RGBA.
+///
+/// The core stores a PNG decoded to RGBA, but the raw-pixel transmission paths
+/// also allow 24-bit RGB, grayscale and grayscale+alpha. Normalising here means
+/// the drawing side has one format to upload, and the conversion happens once
+/// per generation rather than once per frame.
+fn read_pixels(graphics: &Graphics<'_>, image_id: u32) -> Option<Arc<ImagePixels>> {
+    let image = graphics.image(image_id)?;
+    let width = image.width().ok()?;
+    let height = image.height().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // `data()` is `None` while a payload is still arriving; the placement list
+    // skips such images, so this is a moment later rather than a failure.
+    let data = image.data().ok()??;
+    let count = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+    let per_pixel = data.len().checked_div(count).filter(|n| *n > 0)?;
+    let mut pixels = Vec::with_capacity(count.saturating_mul(4));
+    match per_pixel {
+        4 => pixels.extend_from_slice(data),
+        3 => {
+            for rgb in data.chunks_exact(3) {
+                pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+        }
+        2 => {
+            for ga in data.chunks_exact(2) {
+                pixels.extend_from_slice(&[ga[0], ga[0], ga[0], ga[1]]);
+            }
+        }
+        1 => {
+            for gray in data {
+                pixels.extend_from_slice(&[*gray, *gray, *gray, 255]);
+            }
+        }
+        other => {
+            tracing::warn!(
+                image_id,
+                bytes = data.len(),
+                per_pixel = other,
+                "unrecognised image pixels"
+            );
+            return None;
+        }
+    }
+    if pixels.len() != count * 4 {
+        return None;
+    }
+    Some(Arc::new(ImagePixels {
+        width,
+        height,
+        data: pixels,
+    }))
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use libghostty_vt::{RenderState, Terminal};
+
+    /// A terminal with a cell size, which is what makes image placements have a
+    /// pixel geometry at all: without `resize`'s pixel arguments the list is
+    /// empty.
+    fn terminal() -> Terminal<'static, 'static> {
+        let mut term = Terminal::new(20, 6).unwrap();
+        term.resize(20, 6, 8, 16).unwrap();
+        term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
+            .unwrap();
+        term
+    }
+
+    /// Update the render state and re-read the pane's list, as `publish` does.
+    fn placements(
+        term: &Terminal<'static, 'static>,
+        state: &mut RenderState<'static>,
+        cache: &mut ImageCache,
+    ) -> (Arc<[Placement]>, u64) {
+        let snapshot = state.update(term).unwrap();
+        let generation = snapshot.image_placements_generation().unwrap();
+        let list = cache.refresh(term, &snapshot).unwrap();
+        (list, generation)
+    }
+
+    /// A 1x1 opaque red RGBA image with no z-index: the protocol's default
+    /// places it above the text at the cursor.
+    const RED: &[u8] = b"\x1b_Ga=T,f=32,i=1,s=1,v=1,c=2,r=2,q=2;/wAA/w==\x1b\\";
+    /// The same image id with blue pixels — a re-transmission, so the pixels
+    /// cache must notice a new generation.
+    const BLUE: &[u8] = b"\x1b_Ga=T,f=32,i=1,s=1,v=1,q=2;AAD//w==\x1b\\";
+
+    #[test]
+    fn a_transmitted_image_reaches_the_frame_with_its_pixels() {
+        let term = terminal();
+        let mut state = RenderState::new().unwrap();
+        let mut cache = ImageCache::new().unwrap();
+        let mut term = term;
+        term.vt_write(RED);
+        let (list, _) = placements(&term, &mut state, &mut cache);
+
+        assert_eq!(list.len(), 1);
+        let image = &list[0];
+        assert_eq!(image.image_id, 1);
+        assert_eq!(image.layer, Layer::AboveText);
+        assert_eq!((image.col, image.row), (0, 0));
+        assert_eq!(image.offset, [0, 0]);
+        // c=2, r=2 in an 8x16 cell: 16 by 32 pixels.
+        assert_eq!(image.size, [16, 32]);
+        assert_eq!(image.source, [0, 0, 1, 1]);
+        assert_eq!((image.pixels.width, image.pixels.height), (1, 1));
+        assert_eq!(image.pixels.data, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn an_unchanged_frame_reuses_the_same_list_and_pixels() {
+        let mut term = terminal();
+        let mut state = RenderState::new().unwrap();
+        let mut cache = ImageCache::new().unwrap();
+        term.vt_write(RED);
+        let (first, _) = placements(&term, &mut state, &mut cache);
+        let (again, _) = placements(&term, &mut state, &mut cache);
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(Arc::ptr_eq(&first[0].pixels, &again[0].pixels));
+    }
+
+    #[test]
+    fn a_new_transmission_replaces_the_pixels_and_the_generation() {
+        let mut term = terminal();
+        let mut state = RenderState::new().unwrap();
+        let mut cache = ImageCache::new().unwrap();
+        term.vt_write(RED);
+        let (first, _) = placements(&term, &mut state, &mut cache);
+        let generation = first[0].generation;
+
+        term.vt_write(BLUE);
+        let (second, _) = placements(&term, &mut state, &mut cache);
+        assert_eq!(second.len(), 1);
+        assert_ne!(second[0].generation, generation);
+        assert_eq!(second[0].pixels.data, [0, 0, 255, 255]);
+        assert!(!Arc::ptr_eq(&first[0].pixels, &second[0].pixels));
+    }
+
+    #[test]
+    fn a_delete_empties_the_frame() {
+        let mut term = terminal();
+        let mut state = RenderState::new().unwrap();
+        let mut cache = ImageCache::new().unwrap();
+        term.vt_write(RED);
+        let (list, _) = placements(&term, &mut state, &mut cache);
+        assert_eq!(list.len(), 1);
+
+        term.vt_write(b"\x1b_Ga=d,i=1,q=2\x1b\\");
+        let (list, _) = placements(&term, &mut state, &mut cache);
+        assert!(list.is_empty());
+        assert!(cache.placements.is_empty());
+        assert!(cache.pixels.is_empty());
+    }
+
+    #[test]
+    fn a_negative_z_index_is_below_the_text() {
+        let mut term = terminal();
+        let mut state = RenderState::new().unwrap();
+        let mut cache = ImageCache::new().unwrap();
+        term.vt_write(b"\x1b_Ga=T,f=32,i=2,s=1,v=1,z=-1,q=2;/wAA/w==\x1b\\");
+        let (list, _) = placements(&term, &mut state, &mut cache);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].layer, Layer::BelowText);
+    }
+
+    #[test]
+    fn a_placement_starts_where_the_cursor_was() {
+        let mut term = terminal();
+        let mut state = RenderState::new().unwrap();
+        let mut cache = ImageCache::new().unwrap();
+        // Row 3, column 4 (one-based in the sequence) is viewport (3, 2).
+        term.vt_write(b"\x1b[3;4H");
+        term.vt_write(RED);
+        let (list, _) = placements(&term, &mut state, &mut cache);
+        assert_eq!((list[0].col, list[0].row), (3, 2));
+    }
+
+    #[test]
+    fn the_terminal_is_created_with_a_storage_limit() {
+        let term = new_terminal(20, 6, 1024).unwrap();
+        assert_eq!(
+            term.kitty_image_storage_limit().unwrap(),
+            Some(KITTY_IMAGE_STORAGE_LIMIT),
+            "kitty graphics are off until a limit is set"
+        );
+    }
+}
+
 fn publish(
     term: &mut Terminal<'static, '_>,
     state: &mut RenderState<'static>,
@@ -2984,6 +3368,7 @@ fn publish(
     force: bool,
     selection: &mut Option<SelectionAnchors>,
     shown: &mut Displayed,
+    images: &mut ImageCache,
 ) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let snapshot = state.update(term)?;
@@ -3036,8 +3421,14 @@ fn publish(
         rgb(term.fg_color()?.unwrap_or(colours.foreground)),
         rgb(term.bg_color()?.unwrap_or(colours.background)),
     );
-    let changed =
-        cursor != shown.cursor || title != shown.title || (default_fg, default_bg) != shown.colours;
+    // An image is the third thing that changes without changing a cell — a
+    // transmission, a placement moving with the text, a delete — so the frame
+    // gate has to see its generation or the picture keeps a stale image.
+    let image_generation = Some(snapshot.image_placements_generation()?);
+    let changed = cursor != shown.cursor
+        || title != shown.title
+        || (default_fg, default_bg) != shown.colours
+        || image_generation != shown.images;
     // A clean frame means the UI already has the current contents.
     if !force && !changed && matches!(snapshot.dirty()?, Dirty::Clean) {
         return Ok(());
@@ -3054,9 +3445,13 @@ fn publish(
         // Cloned because `shown` keeps it too: one string per frame is not the
         // cost this path is worried about.
         title: title.clone(),
+        images: Arc::from(Vec::new()),
     };
 
     fill_cells(&snapshot, rows, cells, &mut frame)?;
+    // The list is read only when its generation changed; the pixels come from
+    // the pane's cache, so an unchanged frame shares the previous `Arc`s.
+    frame.images = images.refresh(term, &snapshot)?;
 
     // The selection is resolved here rather than kept by the UI: a viewport
     // move republishes, so the highlight follows the characters the user
@@ -3096,6 +3491,7 @@ fn publish(
     shown.cursor = cursor;
     shown.title = title;
     shown.colours = (default_fg, default_bg);
+    shown.images = image_generation;
     match out.lock() {
         Ok(mut slot) => *slot = Some(frame),
         Err(err) => tracing::error!("frame slot poisoned: {err}"),
@@ -3665,6 +4061,7 @@ mod tests {
             selection: None,
             title: String::new(),
             cells,
+            images: std::sync::Arc::from(Vec::new()),
         }
     }
 
@@ -3799,6 +4196,7 @@ mod tests {
             selection: None,
             title: String::new(),
             cells: Vec::new(),
+            images: std::sync::Arc::from(Vec::new()),
         };
         fill_cells(&snapshot, &mut rows, &mut cells, &mut frame).unwrap();
         frame
@@ -4538,6 +4936,10 @@ struct Displayed {
     title: String,
     /// `(default_fg, default_bg)`, the two colours a frame paints itself with.
     colours: ([u8; 3], [u8; 3]),
+    /// The render state's image placements generation, so an image that changed
+    /// while no cell did still publishes. A deletion is exactly this: the rows
+    /// are clean and the picture must lose the image.
+    images: Option<u64>,
 }
 
 /// A shell pane with a real pty behind it: the only way to see a reconnection,

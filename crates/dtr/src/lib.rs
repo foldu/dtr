@@ -19,6 +19,7 @@ pub mod ime;
 pub mod input;
 pub mod keymap;
 pub mod keys;
+pub mod kitty;
 pub mod layout;
 pub mod linkmenu;
 pub mod logbook;

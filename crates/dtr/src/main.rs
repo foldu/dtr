@@ -425,6 +425,12 @@ fn main() -> anyhow::Result<()> {
     // from the log, the binary predates it and needs rebuilding.
     tracing::info!(filter = %effective, version = env!("CARGO_PKG_VERSION"), "logging");
 
+    // Before any terminal exists: the PNG decoder hook is process-global and
+    // libghostty does not synchronize its installation, so installing it while
+    // a pane thread could be inside the library is the one unsafe moment. See
+    // `dtr::kitty::install_png_decoder`.
+    dtr::kitty::install_png_decoder();
+
     tracing::debug!(?args, "starting");
 
     if let Some(command) = args.command {

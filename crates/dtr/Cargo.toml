@@ -36,7 +36,12 @@ egui-wgpu.workspace = true
 egui-winit.workspace = true
 egui_extras.workspace = true
 arboard.workspace = true
-libghostty-vt.workspace = true
+# `kitty-graphics` is the core's Rust wrapper for the image storage and the
+# render state's placement list; `png` supplies its `RustPngDecoder`, which
+# decodes straight into the allocator the core caps (see `kitty.rs`). Both are
+# off by default in the workspace dependency so a build that does not draw
+# images pays for none of it.
+libghostty-vt = { workspace = true, features = ["kitty-graphics", "png"] }
 mimalloc.workspace = true
 libghostty-vt-sys.workspace = true
 plist.workspace = true

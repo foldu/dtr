@@ -7586,6 +7586,10 @@ impl Gpu {
                     multiview_mask: None,
                 })
                 .forget_lifetime();
+            // Images that asked to be over the text, before egui: a menu or a
+            // card is still above the picture, and `--capture` photographs the
+            // same pass.
+            self.grid.draw_above(&mut pass);
             self.egui_renderer.render(&mut pass, &clipped, &screen);
         }
 

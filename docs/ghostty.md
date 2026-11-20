@@ -108,7 +108,9 @@ frontend is what has to fix that.
 
 The grid painter emits two kinds of instance, solids and glyphs, and reads five
 flags off a cell: bold, italic, faint, concealed, and its colours
-(`crates/dtr/src/pane.rs:92`, `crates/dtr/src/render.rs:969-1002`).
+(`crates/dtr/src/pane.rs:92`, `crates/dtr/src/render.rs:969-1002`). Kitty images
+are not cells, so they are a second pipeline — one textured quad per placement —
+drawn inside the same pass at three ordering points (`docs/images.md` §5).
 
 | gap | Ghostty | dtr today | size |
 |---|---|---|---|
@@ -121,7 +123,7 @@ flags off a cell: bold, italic, faint, concealed, and its colours
 | codepoint remapping | `font-codepoint-map` — "draw this range from that family" | `[font] fallback` is a list of families, not a mapping | S |
 | minimum contrast | `minimum-contrast` lifts unreadable fg/bg pairs | none; a theme with poor contrast stays poor | S |
 | cell shape adjustment | `adjust-cell-width/height`, baseline, box thickness | none; the cell is the font's | S |
-| inline images | kitty graphics protocol, fully: transmit/display/delete, PNG and raw, zlib, chunking, animations (Ghostty advertises no sixel, and `OSC 1337` `File=` is parsed and rejected) | none drawn: the core parses `_G` and answers its queries — measured, `supports_kitty_graphics()` is true in dtr's build — and the grid painter has no image layer, so the images are stored and dropped | L |
+| inline images | kitty graphics protocol, fully: transmit/display/delete, PNG and raw, zlib, chunking, animations (Ghostty advertises no sixel, and `OSC 1337` `File=` is parsed and rejected) | **drawn** — `docs/images.md`: the core's placement list (cell, placeholder and relative placements) rides the published frame, a wgpu image layer draws below/above the text with clipping to the pane, a generation-keyed texture cache bounded at 256 MiB, and images are downscaled if over the device's `max_texture_dimension_2d`. PNG and raw RGBA, chunking, deletes and the protocol's queries work end to end (live capture). **Not yet**: animations (the tick loop is not driven, so a multi-frame image shows frame 1), the file/shared-memory media, and a visible below-background layer (the pane background is opaque) | L, MVP shipped |
 | background | opacity, blur, image, image fit/position/repeat | a flat colour from the theme | M |
 | unfocused splits | `unfocused-split-opacity` / `-fill` | every pane is equally bright | S |
 | box drawing, blocks, braille | a sprite face (the one dtr ported) | **the same**, `crates/dtr/src/sprite.rs` | — |
@@ -196,9 +198,13 @@ Named so that this list is not read as "we are 40 features behind":
   platform chrome is `[window] chrome` (`docs/chrome.md`).
 - **Scrollback is capped at 100 MB** (`AGENTS.md`); Ghostty defaults to
   unlimited. That is a decision about what a terminal on a 4 GB box does.
-- **Kitty graphics are not refused, they are unscheduled.** A serial console
-  showing a board's boot logo is a real use; it is also a renderer of its own,
-  which is why it is last.
+- **Kitty graphics are drawn, and the rest is unscheduled.** The core parses and
+  stores the protocol; dtr now puts the placements on screen (`docs/images.md`).
+  What is left is a list, not a feature: animations need a pane-thread clock,
+  the file/shared-memory media are deliberately off in the core, and a
+  below-background image is hidden by the opaque pane fill. Everything else the
+  protocol can do — PNG and raw, chunking, deletes, placeholders, relative
+  placements, the queries — works.
 
 ## 7. What dtr has that Ghostty does not
 
@@ -236,7 +242,14 @@ preview.
    shared with the ligature question.
 9. **Quick terminal** (M–L) and **shell integration injection** (M), in either
    order.
-10. **Kitty graphics** (L) when there is a use case, not before.
+10. **Kitty graphics** (L) — **done for drawing** 2026-11-20: the core's
+    placement list is published with the frame and drawn by a wgpu image layer
+    in three z-ordered groups, clipped per pane, with a bounded texture cache;
+    PNG and raw, chunking and deletes are verified live (`docs/images.md` has
+    the memo and the evidence). What remains is animations (needs a
+    `kitty_graphics_animation_tick` loop on the pane thread), the file and
+    shared-memory media (off in the core on purpose), and a
+    below-background image composited against an opaque pane fill.
 
 The undone items in `docs/panes.md` (the exit bug, split-before, swap) and
 `docs/ttl-gaps.md` are *not* repeated here: they are gaps against a multiplexer
