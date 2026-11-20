@@ -36,6 +36,9 @@ pub enum Action {
     /// accelerator and `s` is `ssh`'s — `crates/dtr-complete` fails the build on
     /// a collision. The `--stats` flag is the other way in.
     Stats,
+    /// The transfer queue's card (`keys::Action::Transfers`' chord is the other
+    /// way in). Named `jobs` and not `transfers` because `t` is `theme`'s.
+    Transfers,
     /// Delayed input for a serial line: `lag` and not `delay`, because `d` is
     /// demo's accelerator, and not `slow` because `s` is ssh's.
     KeyDelay,
@@ -460,6 +463,9 @@ fn action_for(line: &str) -> Option<Action> {
         "about" => Some(Action::About),
         // `stats` would share ssh's accelerator; see `Action::Stats`.
         "overlay" => Some(Action::Stats),
+        // The queue card: `t` is theme's accelerator, so it is the word for
+        // the jobs rather than for the queue.
+        "jobs" => Some(Action::Transfers),
         // `delay` would share demo's accelerator, `slow` ssh's; see
         // `Action::KeyDelay`.
         "lag" => Some(Action::KeyDelay),
@@ -543,6 +549,14 @@ mod tests {
         // first letter is its accelerator, and the completion engine refuses a
         // collision at build time.
         assert!(matches!(action_for("lag"), Some(Action::KeyDelay)));
+    }
+
+    #[test]
+    fn jobs_opens_the_transfer_queue() {
+        // `transfers` would collide with theme's accelerator; the card is a list
+        // of jobs, and `j` is free.
+        assert!(matches!(action_for("jobs"), Some(Action::Transfers)));
+        assert!(action_for("transfers").is_none());
     }
 
     #[test]

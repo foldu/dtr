@@ -1132,6 +1132,8 @@ dependencies = [
  "dtr-frame",
  "dtr-sshconfig",
  "dtr-store",
+ "dtr-transfer",
+ "dtr-transfer-ssh",
  "dtr-vfs",
  "dtr-widgets",
  "egui",

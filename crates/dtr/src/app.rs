@@ -75,6 +75,10 @@ pub enum UserEvent {
         leaf: crate::layout::LeafId,
         result: anyhow::Result<()>,
     },
+    /// The transfer worker's report: the events one burst produced, the rows the
+    /// queue card draws, and the write requests it accepted or finished. The
+    /// queue itself never leaves its thread (`docs/transfers.md` §12.7).
+    Transfer(crate::transfer::Report),
 }
 
 /// A remote pane's listing on its way in from the machine's VFS backend.
@@ -593,6 +597,13 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         strip_logged: None,
         folded_notices: std::collections::BTreeSet::new(),
         remote_listings: Vec::new(),
+        transfer: None,
+        transfer_rows: Vec::new(),
+        transfer_owners: std::collections::HashMap::new(),
+        transfer_pending: std::collections::HashMap::new(),
+        transfer_request: 0,
+        transfer_card_open: false,
+        transfer_ask: None,
         wake_why: std::cell::Cell::new("startup"),
         egui_redraw_pending: false,
         loop_report: std::cell::RefCell::new(LoopReport::default()),
@@ -774,6 +785,65 @@ fn is_not_found(err: &anyhow::Error) -> bool {
             .downcast_ref::<std::io::Error>()
             .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
     })
+}
+
+/// The stripe a queue row asks for, in the tab strip's terms.
+///
+/// `None` for a finished job: its stripe belongs on the card, not on the tab it
+/// started from. A queued job is indeterminate — it has not measured itself yet,
+/// and a 0% bar would say it had.
+fn job_activity(row: &dtr_transfer::JobView) -> Option<crate::pane::Activity> {
+    use crate::pane::{Activity, ActivityState};
+    if row.waiting {
+        return Some(Activity {
+            state: ActivityState::Blocked,
+            percent: None,
+        });
+    }
+    match row.state {
+        dtr_transfer::State::Queued => Some(Activity {
+            state: ActivityState::Working,
+            percent: None,
+        }),
+        dtr_transfer::State::Running => Some(Activity {
+            state: ActivityState::Working,
+            percent: row
+                .fraction()
+                .map(|fraction| (fraction * 100.0).round().clamp(0.0, 100.0) as u8),
+        }),
+        dtr_transfer::State::Done
+        | dtr_transfer::State::Failed
+        | dtr_transfer::State::Cancelled => None,
+    }
+}
+
+/// Two jobs on one tab: the one a person needs to know about first wins.
+///
+/// The weight is `pane::ActivityState`'s own order (error, blocked, working,
+/// paused, done), and two working jobs show the furthest one, because one stripe
+/// has room for one figure and the bar that is nearly full is the one that will
+/// finish first.
+fn fold_activity(now: crate::pane::Activity, next: crate::pane::Activity) -> crate::pane::Activity {
+    use crate::pane::ActivityState;
+    let weight = |state| match state {
+        ActivityState::Idle => 0,
+        ActivityState::Done => 1,
+        ActivityState::Paused => 2,
+        ActivityState::Working => 3,
+        ActivityState::Blocked => 4,
+        ActivityState::Error => 5,
+    };
+    match weight(next.state).cmp(&weight(now.state)) {
+        std::cmp::Ordering::Greater => next,
+        std::cmp::Ordering::Less => now,
+        std::cmp::Ordering::Equal => match (now.percent, next.percent) {
+            (Some(before), Some(after)) => crate::pane::Activity {
+                state: now.state,
+                percent: Some(before.max(after)),
+            },
+            _ => now,
+        },
+    }
 }
 
 /// Where a copy lands by default: `~/Downloads`, created if it is missing.
@@ -1435,6 +1505,30 @@ struct App {
     /// backend. Drained here rather than in a browser because the model is only
     /// `&mut` before the frame starts, and the receiver is what a listing is.
     remote_listings: Vec<RemoteListing>,
+    /// The window's transfer queue, started on first use: one dedicated thread
+    /// with a compio runtime of its own, one `dtr_transfer::Queue`, and one
+    /// `SshTransport` (`docs/transfers.md` §12.7). The UI only ever sends it
+    /// commands and paints its reports.
+    transfer: Option<crate::transfer::Worker>,
+    /// The rows the queue card draws, as of the last report.
+    transfer_rows: Vec<dtr_transfer::JobView>,
+    /// Which pane each queued job was started from, for the tab's stripe.
+    ///
+    /// Keyed by job id and pruned when a job leaves the card: a job that
+    /// outlives its pane must not keep a stripe lit on the tab that now has the
+    /// slot, and leaf ids are unique for the window's life.
+    transfer_owners: std::collections::HashMap<dtr_transfer::JobId, crate::layout::LeafId>,
+    /// Write requests waiting on a queue job, by the token the app gave them.
+    transfer_pending: std::collections::HashMap<crate::transfer::RequestId, crate::layout::LeafId>,
+    /// The token the next queued write gets. Monotonic, so a late report cannot
+    /// be mistaken for a newer request.
+    transfer_request: crate::transfer::RequestId,
+    /// Whether the queue card is up. A running copy does not open it: the tab's
+    /// stripe is how background work shows (`crate::transfer_card`).
+    transfer_card_open: bool,
+    /// A queue conflict that nothing pre-answered, if the guard in the card
+    /// module was ever reached.
+    transfer_ask: Option<crate::transfer_card::Ask>,
     /// Why the last wake was asked for, so a spin can name its cause.
     wake_why: std::cell::Cell<&'static str>,
     /// A redraw asked for on egui's behalf has not been drawn yet. Asking again
@@ -1696,6 +1790,8 @@ impl App {
             || self.file_menu_open()
             || self.tmux_chooser.is_open()
             || self.serial_dialog.is_some()
+            || self.transfer_card_open
+            || self.transfer_ask.is_some()
     }
 
     /// Whether keys belong to the terminal rather than to an overlay.
@@ -1874,6 +1970,38 @@ impl App {
             ) {
                 self.about_open = false;
                 self.repaint("about closed");
+            }
+            self.held = Some(stroke.key.clone());
+            return;
+        }
+
+        // The transfer card owns the keyboard while it is up, in the same way
+        // the other overlays do: its rows are buttons, Escape closes it, and
+        // the toggle chord closes it too. A question it escaped is answered by
+        // the conflict card, which reads Enter and Escape from egui's input —
+        // so while an ask is up every key is swallowed here, not just the two.
+        if self.transfer_card_open || self.transfer_ask.is_some() {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            if self.transfer_ask.is_some() {
+                self.held = Some(stroke.key.clone());
+                return;
+            }
+            let escape = matches!(
+                &stroke.key,
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+            );
+            let toggles =
+                crate::keys::chord_from_event(&stroke.key, stroke.mods).is_some_and(|chord| {
+                    matches!(
+                        self.keymap.resolve(&[], chord),
+                        crate::keys::Matched::Action(crate::keys::Action::Transfers)
+                    )
+                });
+            if escape || toggles {
+                self.close_transfers();
             }
             self.held = Some(stroke.key.clone());
             return;
@@ -3518,6 +3646,10 @@ impl App {
                 self.repaint("keymap");
                 true
             }
+            Action::Transfers => {
+                self.toggle_transfers();
+                true
+            }
             Action::Preferences => {
                 // Opening only: the chord is a way in, not a way out. The card
                 // takes no keys once it is up, so this cannot run while it is
@@ -4592,6 +4724,12 @@ impl App {
             std::sync::Arc<dyn dtr_vfs::Backend>,
             WriteRequest,
         )> = Vec::new();
+        // Copy and move go through the transfer queue (`docs/manager.md` §8,
+        // `crate::transfer`); rename, delete and mkdir are one VFS verb each and
+        // stay direct. The browser's plan is unchanged either way: it hands out
+        // one request, waits for the answer, and the queue's job is the
+        // answer — with progress, cancel and the `.part`-then-publish rule.
+        let mut queued: Vec<(crate::layout::LeafId, WriteRequest)> = Vec::new();
         let mut unrouteable: Vec<(crate::layout::LeafId, anyhow::Error)> = Vec::new();
         for tab in &self.tabs {
             for (leaf, pane) in &tab.leaves {
@@ -4601,6 +4739,10 @@ impl App {
                 let Some(request) = browser.take_write() else {
                     continue;
                 };
+                if crate::transfer::is_queued(&request) {
+                    queued.push((*leaf, request));
+                    continue;
+                }
                 // The machine's backend, resolved where the pool lives. A remote
                 // pane asks for `BackendId::Ssh(alias)` and gets the same `Ssh`
                 // its listing is coming from — one child, one thread — so a
@@ -4614,6 +4756,9 @@ impl App {
         for (leaf, err) in unrouteable {
             self.write_answered(leaf, Err(err));
         }
+        for (leaf, request) in queued {
+            self.enqueue_transfer(leaf, request);
+        }
         for (leaf, backend, request) in work {
             let proxy = self.proxy.clone();
             self.bg_spawn(move |_runtime| async move {
@@ -4621,6 +4766,154 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Write { leaf, result });
             });
         }
+    }
+
+    /// Hand a copy or a move to the transfer queue.
+    ///
+    /// The browser's already-made conflict decision travels with the request as
+    /// the queue's pre-answer (`crate::transfer::pre_answer`), and a question
+    /// that decision does not cover comes back as the same
+    /// `dtr_vfs::Conflict` the direct verb would have returned, so the browser's
+    /// own card asks it — never a second, queue-level card.
+    fn enqueue_transfer(&mut self, leaf: crate::layout::LeafId, request: WriteRequest) {
+        let Some((sources, destination, moving)) = crate::transfer::job_of(&request) else {
+            self.write_answered(
+                leaf,
+                Err(anyhow::anyhow!("this operation cannot be queued")),
+            );
+            return;
+        };
+        let pre_answer = crate::transfer::pre_answer(&request);
+        let token = self.transfer_request;
+        self.transfer_request += 1;
+        // Remembered before the command is sent: a one-segment copy can finish
+        // before the next frame, and the report must already know which pane it
+        // answers.
+        self.transfer_pending.insert(token, leaf);
+        if let Some(worker) = self.transfer_worker() {
+            worker.submit(crate::transfer::Command::Enqueue {
+                request: token,
+                sources,
+                destination,
+                moving,
+                pre_answer,
+            });
+        } else {
+            self.transfer_pending.remove(&token);
+            self.write_answered(
+                leaf,
+                Err(anyhow::anyhow!("the transfer thread could not start")),
+            );
+        }
+    }
+
+    /// The window's transfer worker, started on first use.
+    ///
+    /// One thread per window, like the SFTP worker: the queue is the window's
+    /// (`docs/manager.md` §8), and a job outlives the pane that started it.
+    fn transfer_worker(&mut self) -> Option<&crate::transfer::Worker> {
+        if self.transfer.is_none() {
+            let proxy = self.proxy.clone();
+            self.transfer = match crate::transfer::Worker::spawn(move |report| {
+                let _ = proxy.send_event(UserEvent::Transfer(report));
+            }) {
+                Ok(worker) => Some(worker),
+                Err(err) => {
+                    tracing::error!(%err, "could not start the transfer thread");
+                    self.toast = Some((
+                        format!("transfers are unavailable: {err}"),
+                        std::time::Instant::now(),
+                    ));
+                    None
+                }
+            };
+        }
+        self.transfer.as_ref()
+    }
+
+    /// Fold the worker's report into the window: resolve the write requests it
+    /// finished, remember which pane started each job, and keep the card's rows.
+    ///
+    /// The resolution is deliberately `write_answered`'s: a queued copy must
+    /// leave the browser in exactly the state a direct verb's `Ok`/`Err` would
+    /// (`Failure::Asking` opens the browser's card, `Failure::Stopped` shows the
+    /// footer message and re-lists, `Ok(())` continues the batch).
+    fn transfer_report(&mut self, report: crate::transfer::Report) {
+        for (token, job) in report.enqueued {
+            if let Some(leaf) = self.transfer_pending.get(&token).copied() {
+                self.transfer_owners.insert(job, leaf);
+            }
+        }
+        for (token, outcome) in report.finished {
+            let Some(leaf) = self.transfer_pending.remove(&token) else {
+                tracing::debug!(token, "a transfer finished for no pending request");
+                continue;
+            };
+            let result = match outcome {
+                crate::transfer::Outcome::Done => Ok(()),
+                crate::transfer::Outcome::Failed(message) => Err(anyhow::anyhow!("{message}")),
+                // The same typed error the VFS verb returns, so the browser's
+                // own conflict card opens instead of a second one.
+                crate::transfer::Outcome::Conflict { destination } => {
+                    Err(anyhow::Error::new(dtr_vfs::Conflict { path: destination }))
+                }
+                crate::transfer::Outcome::Cancelled => {
+                    Err(anyhow::anyhow!("the transfer was cancelled"))
+                }
+            };
+            self.write_answered(leaf, result);
+        }
+        for event in &report.events {
+            match event {
+                dtr_transfer::Event::NeedsAnswer(conflict) => {
+                    tracing::debug!(job = %conflict.job, "a queue conflict reached the UI");
+                    self.transfer_ask = Some(crate::transfer_card::Ask::of(conflict));
+                }
+                dtr_transfer::Event::Failed { job, error } => {
+                    tracing::info!(%job, %error, "transfer failed");
+                }
+                dtr_transfer::Event::Published { destination, .. } => {
+                    tracing::debug!(path = %destination.describe(), "transfer published");
+                }
+                _ => {}
+            }
+        }
+        self.transfer_rows = report.rows;
+        // A job that left the card leaves no strike on any tab; a failed one
+        // that is still listed keeps its owner so a retry lights the tab again.
+        let live: std::collections::HashSet<dtr_transfer::JobId> =
+            self.transfer_rows.iter().map(|row| row.id).collect();
+        self.transfer_owners.retain(|job, _| live.contains(job));
+        self.repaint("transfer");
+    }
+
+    /// The tab stripe's activity from the queue, one entry per tab.
+    ///
+    /// The tab strip already draws one stripe per chip and `pane::Activity` is
+    /// what it reads, so a copy wears the same control a build does. A job is
+    /// attributed to the *pane* it started from, not the tab index: tabs close
+    /// and the index moves, and a stripe on somebody else's tab is worse than no
+    /// stripe. A tab whose program reports its own progress keeps that: the
+    /// program is the thing that knows more.
+    fn transfer_activity(&self) -> Vec<crate::pane::Activity> {
+        let mut out = vec![crate::pane::Activity::default(); self.tabs.len()];
+        for row in &self.transfer_rows {
+            let Some(owner) = self.transfer_owners.get(&row.id) else {
+                continue;
+            };
+            let Some(index) = self
+                .tabs
+                .iter()
+                .position(|tab| tab.leaves.contains_key(owner))
+            else {
+                continue;
+            };
+            let Some(activity) = job_activity(row) else {
+                continue;
+            };
+            out[index] = fold_activity(out[index], activity);
+        }
+        out
     }
 
     /// A pane's write finished: tell its plan, and re-list when it is over.
@@ -4651,6 +4944,96 @@ impl App {
             }
         }
         self.repaint("file write");
+    }
+
+    /// Show or hide the transfer card. The chord, the palette's `jobs` and the
+    /// card's own cross all land here.
+    fn toggle_transfers(&mut self) {
+        if self.transfer_card_open || self.transfer_ask.is_some() {
+            self.close_transfers();
+        } else {
+            self.transfer_card_open = true;
+            self.repaint("transfers shown");
+        }
+    }
+
+    /// Put the card away, and acknowledge the finished rows.
+    ///
+    /// The queue is the only place a completed job exists; a card that reopened
+    /// with yesterday's failures would be a list of things that are no longer
+    /// true. A running job is untouched, and so is one that is asking a
+    /// question — closing that question cancels its job, which is what the
+    /// question's own "cancel the transfer" says.
+    fn close_transfers(&mut self) {
+        if let Some(ask) = self.transfer_ask.take()
+            && let Some(worker) = self.transfer_worker()
+        {
+            worker.submit(crate::transfer::Command::Cancel { job: ask.job });
+        }
+        if self.transfer_card_open {
+            self.transfer_card_open = false;
+            // Only if the worker already exists: closing a card opened on an
+            // empty queue must not start a transfer thread to tell it nothing.
+            if let Some(worker) = self.transfer.as_ref() {
+                worker.submit(crate::transfer::Command::ClearFinished);
+            }
+            self.repaint("transfers closed");
+        }
+    }
+
+    /// What a row's button or the card's own cross asked for.
+    fn transfer_card_event(&mut self, event: crate::transfer_card::Event) {
+        use crate::transfer::Command;
+        match event {
+            crate::transfer_card::Event::Close => self.close_transfers(),
+            crate::transfer_card::Event::CancelAll => {
+                if let Some(worker) = self.transfer_worker() {
+                    worker.submit(Command::CancelAll);
+                }
+                self.repaint("transfers cancelled");
+            }
+            crate::transfer_card::Event::Cancel(job) => {
+                if let Some(worker) = self.transfer_worker() {
+                    worker.submit(Command::Cancel { job });
+                }
+                self.repaint("transfer cancelled");
+            }
+            crate::transfer_card::Event::Retry(job) => {
+                if let Some(worker) = self.transfer_worker() {
+                    worker.submit(Command::Retry { job });
+                }
+                self.repaint("transfer retried");
+            }
+        }
+    }
+
+    /// The three answers to the one question the queue can still ask.
+    fn transfer_ask_event(&mut self, event: crate::transfer_card::AskEvent) {
+        use crate::transfer_card::AskEvent;
+        use dtr_widgets::ConflictAnswer;
+        let Some(ask) = self.transfer_ask.take() else {
+            return;
+        };
+        let Some(worker) = self.transfer_worker() else {
+            return;
+        };
+        match event {
+            AskEvent::Answer(answer) => {
+                let answer = match answer {
+                    ConflictAnswer::Replace => dtr_transfer::Answer::Replace,
+                    ConflictAnswer::KeepBoth => dtr_transfer::Answer::KeepBoth,
+                    ConflictAnswer::Skip => dtr_transfer::Answer::Skip,
+                };
+                worker.submit(crate::transfer::Command::Answer {
+                    job: ask.job,
+                    answer,
+                });
+            }
+            AskEvent::Cancel => {
+                worker.submit(crate::transfer::Command::Cancel { job: ask.job });
+            }
+        }
+        self.repaint("transfer question answered");
     }
 
     /// The file pane at `leaf`, whichever tab it is in.
@@ -5337,6 +5720,11 @@ impl App {
                 self.open_ssh(host);
             }
             Action::Keys => self.keymap_card.open = true,
+            // One implementation: the palette command delegates to the chord's
+            // action, so the two cannot disagree about what the card does.
+            Action::Transfers => {
+                self.dispatch(crate::keys::Action::Transfers);
+            }
             // The card's own way in, so the palette is a second way into the
             // same surface and never a second implementation of it.
             Action::Preferences => {
@@ -5912,6 +6300,9 @@ impl dtr_frame::App for App {
             UserEvent::Write { leaf, result } => {
                 self.write_answered(leaf, result);
             }
+            UserEvent::Transfer(report) => {
+                self.transfer_report(report);
+            }
             UserEvent::Destinations(destinations) => {
                 self.destinations = destinations;
                 self.scanning = false;
@@ -6457,13 +6848,25 @@ impl dtr_frame::App for App {
                 // One stripe per chip: what the tab's program says it is
                 // doing. The activity lives on the session, because the
                 // strip is drawn from labels and a label cannot carry it.
+                // The queue's figure is the tab's when the tab's program has
+                // nothing of its own to say: a copy started from a file pane
+                // shows here exactly as a build started from the shell does
+                // (`crate::transfer_activity`).
+                let queued_activity = self.transfer_activity();
                 let activity: Vec<crate::pane::Activity> = self
                     .tabs
                     .iter()
-                    .map(|tab| {
-                        tab.focused_terminal()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        let program = tab
+                            .focused_terminal()
                             .map(|session| session.activity)
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        if program.state == crate::pane::ActivityState::Idle {
+                            queued_activity.get(index).copied().unwrap_or_default()
+                        } else {
+                            program
+                        }
                     })
                     .collect();
                 let mut tab_click = None;
@@ -6603,6 +7006,8 @@ impl dtr_frame::App for App {
                 let mut pick_cancel = None;
                 let mut keymap_event = None;
                 let mut about_close = false;
+                let mut transfer_event = None;
+                let mut transfer_ask_event = None;
                 // The overlay's zero-cost state: a bool, the last completed
                 // second's rates (from `LoopReport`, the same numbers `-v`
                 // logs) and the focused grid's size.
@@ -6909,6 +7314,29 @@ impl dtr_frame::App for App {
                         if let Some((anchor, preedit)) = ime {
                             preedit.ui(ui, anchor, look);
                         }
+                        // The transfer queue's card: the window-wide surface for
+                        // jobs a file pane started (`docs/manager.md` §8). Under
+                        // the palette and the pager — those are what a person
+                        // opens to get out of the way — but over the panes and
+                        // the cards that describe one pane.
+                        if self.transfer_card_open {
+                            let rows = &self.transfer_rows;
+                            crate::ui::overlay(ui, "dtr-transfers", |ui| {
+                                if let Some(event) = crate::transfer_card::card(ui, look, rows) {
+                                    transfer_event = Some(event);
+                                }
+                            });
+                        }
+                        // A queue question nothing pre-answered. A question is
+                        // the topmost thing while it is up: it is blocking a
+                        // transfer and only this card can answer it.
+                        if let Some(ask) = &self.transfer_ask {
+                            crate::ui::overlay(ui, "dtr-transfer-ask", |ui| {
+                                if let Some(answer) = crate::transfer_card::ask(ui, look, ask) {
+                                    transfer_ask_event = Some(answer);
+                                }
+                            });
+                        }
                         // The palette is an overlay above the panes: a file listing
                         // must not cover the command line it sits beside.
                         if let Some(settings) = settings {
@@ -7027,6 +7455,12 @@ impl dtr_frame::App for App {
                 if about_close {
                     self.about_open = false;
                     self.repaint("about closed");
+                }
+                if let Some(event) = transfer_event {
+                    self.transfer_card_event(event);
+                }
+                if let Some(answer) = transfer_ask_event {
+                    self.transfer_ask_event(answer);
                 }
                 if let Some(picked) = tmux_pick {
                     self.tmux_pick(picked);

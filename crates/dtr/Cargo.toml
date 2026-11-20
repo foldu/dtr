@@ -31,6 +31,11 @@ dtr-frame = { path = "../dtr-frame" }
 dtr-files = { path = "../dtr-files" }
 dtr-sshconfig = { path = "../dtr-sshconfig" }
 dtr-store = { path = "../dtr-store" }
+# The transfer queue's core and its ssh adapter: one `Queue` driven on a worker
+# thread with one `SshTransport`, so a copy has progress and cancel and the
+# `.part`-then-publish rule (`docs/transfers.md`, `docs/files.md` §15).
+dtr-transfer = { path = "../dtr-transfer" }
+dtr-transfer-ssh = { path = "../dtr-transfer-ssh" }
 # The chrome's vocabulary: one palette, one set of metrics, and the controls
 # painted from them, so two surfaces cannot disagree about what "hovered" is.
 dtr-widgets = { path = "../dtr-widgets" }

@@ -178,6 +178,13 @@ const COMMANDS: &[Command] = &[
         summary: "paste the copied files into this folder",
         argument: Argument::None,
     },
+    // The transfer queue's card: `jobs` because `t` is theme's accelerator and
+    // the card is a list of jobs, not a noun the window owns.
+    Command {
+        name: "jobs",
+        summary: "show the transfer queue",
+        argument: Argument::None,
+    },
     Command {
         name: "quit",
         summary: "close the window",
@@ -523,6 +530,15 @@ mod tests {
     fn files_is_a_command() {
         let completions = engine().complete("fil");
         assert_eq!(completions[0].item.label, "files");
+        assert_eq!(completions[0].item.kind, Kind::Command);
+    }
+
+    /// The transfer queue's card completes like every other command, and its
+    /// accelerator is the `j` the palette's `action_for` has an arm for.
+    #[test]
+    fn jobs_is_a_command() {
+        let completions = engine().complete("job");
+        assert_eq!(completions[0].item.label, "jobs");
         assert_eq!(completions[0].item.kind, Kind::Command);
     }
 

@@ -44,6 +44,8 @@ pub mod terminfo;
 pub mod theme;
 pub mod thumb;
 pub mod tmux;
+pub mod transfer;
+pub mod transfer_card;
 pub mod ui;
 pub mod uri;
 pub mod watch;

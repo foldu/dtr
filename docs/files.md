@@ -491,6 +491,144 @@ listing arrive is the same one (`docs/manager.md` §10, measurement 7).
 the missing evidence; the ignored test covers the first round trip only. Remote panes still
 have no transfer queue (a big copy is one 30 s verb, §8 of `docs/manager.md`), no trash (by
 design: permanent only), and a recursive delete/copy is still refused by the backend. And the
-`dtr-sftp` dependency line in `crates/dtr/Cargo.toml` should be deleted once a task owns that
-file.
+`dtr-sftp` dependency line in `crates/dtr/Cargo.toml` went with the last `dtr_sftp::` call
+(`e5742b5`).
 
+## 16. F5 in the app: one queue on one worker, and a copy with a stripe
+
+**F5 is real in the terminal app now.** A file pane's copy and move no longer run as a blocking
+`Backend` verb on the background thread: they become jobs in the window's transfer queue, which has
+progress, cancel, retry, the `.part`-then-publish rule, and the ssh transport should F7 hand it a
+remote request. This is the account of the wiring; `docs/transfers.md` is the account of the queue
+itself.
+
+### The worker: the queue never leaves its thread
+
+`crates/dtr/src/transfer.rs` owns a thread named `dtr-transfer`. On it: a compio `Runtime`, one
+`dtr_transfer::Queue`, and one `dtr_transfer_ssh::SshTransport::new()` — exactly `docs/transfers.md`
+§12.7. The UI sends `Command`s (enqueue with a pre-answer, answer, cancel, cancel-all, retry, dismiss,
+clear-finished) and receives `Report`s: the events of the burst, `queue.snapshot()` rows, the jobs the
+queue accepted (`request → job`), and the requests that finished with their `Outcome`.
+
+Three things are worth calling out because they are the traps:
+
+- **Commands are drained between steps.** A local copy steps a 64 KiB segment at a time and finishes a
+  file in tens of milliseconds; a cancel is a flag on the queue, so the only way it can land before the
+  file ends is the worker applying commands inside the `while queue.may_progress()` loop. It does.
+- **Reports are coalesced on a 16 ms gate and flushed when the queue rests.** A step emits a `Progress`
+  event; a fast local copy would otherwise wake the event loop thousands of times a second. The tail is
+  always flushed, because the terminal event is the one the browser's plan is waiting for.
+- **The transport is built *on* the worker thread.** `SshTransport` starts its sessions where the
+  futures are polled (`docs/compio.md` §10.3, trap 4). Production passes a sink that
+  `send_event(UserEvent::Transfer(..))`; the test passes a channel and builds a `LocalTransport`
+  instead, which is the worker-thread test below.
+
+`Queue` is `!Send` and is never named outside `transfer.rs`. The app holds `Vec<JobView>` and a
+`HashMap<JobId, LeafId>` (which pane started the job, for the tab stripe) — no second copy of job
+state, no answer remembered for the next file.
+
+### What is queued, and what is still direct
+
+| verb | path |
+| --- | --- |
+| `WriteOp::Copy`, `WriteOp::Move` | `transfer::is_queued` → the queue (`Command::Enqueue`) |
+| `WriteOp::Rename`, `WriteOp::Remove`, `WriteOp::CreateDir` | `execute_write`, one VFS verb, as F6 built it |
+
+The browser's plan is unchanged: `Browser::take_write` still hands out one request and waits for
+`write_succeeded`/`write_failed` before the next. A queued job is that answer. `Move` is the queue's
+copy→publish→remove even on one machine (the queue's rule), so it obeys the same no-clobber publish a
+copy does.
+
+An enqueue is refused by the queue's own validation (`EnqueueError`) or by a failed worker start; both
+are answered as a `write_failed` so the browser's batch stops instead of waiting forever.
+
+### The pre-answer mapping, and the one place it deviates from the brief
+
+The browser already ran its conflict card for the batch (`dtr_files::Writes`): a "replace" answer means
+the request carries `replace: Some(how)`, and a "keep both" answer means the request's destination is
+already the *numbered* name (`report.txt` → `report (2).txt`). So the queue's `NeedsAnswer` is
+answered from that decision instead of opening a second card:
+
+| browser's decision | queue's question | answer |
+| --- | --- | --- |
+| replace (`request.replace.is_some()`) | destination exists | `Answer::Replace` — publish with overwrite |
+| keep both (`job_of`'s destination name is `numbered_name(source, n)`, `n` in 2..=2000) | destination exists | `Answer::KeepBoth` — the queue walks the same rule and lands on the same name |
+| nothing yet (a plain copy whose destination appeared after the listing, or a rename-shaped copy the queue cannot name) | destination exists | **not answered**: the job's attempt is cancelled and the request resolves as the same `dtr_vfs::Conflict` a direct verb returns, so *the browser's own card* asks. `Failure::Asking`, exactly F6's rule. |
+
+The brief said "replace → `Replace`, otherwise `Skip`". **`Skip` is wrong for the two real cases**: a
+keep-both copy would name the destination after the source and silently not write the file the person
+asked for, and a destination that appeared between listing and copy would vanish without a question
+(`docs/manager.md` §7 is "an overwrite asks"). The table above keeps the no-second-card property: the
+keep-both case is answered by reproducing the browser's numbering, and the undecided case is the
+browser's existing card, not a queue-level one. A queue-level `dtr_widgets::Conflict` card exists
+(`transfer_card::ask`) for a question nothing pre-answered, but the normal route never reaches it.
+
+### The card, the stripe, and the ways in
+
+- **The card** is `dtr_widgets::Queue` inside `dtr_widgets::Card`, drawn by `transfer_card::card` as an
+  `Area` in the foreground layer (`crate::ui::overlay`), the same shell about/preferences/keymap use.
+  Rows are `JobView` → the widget's `Job` (name, direction word, state word, `done`/`total`); the four
+  states are §8's, and `Queued` is drawn as `running` because it is a job under way behind a machine.
+  Row actions map by index back to the job id: `cancel` for a running row, `retry` for a failed one;
+  `cancel all` is the widget's own footer. **Closing the card is the acknowledgement**: the app sends
+  `ClearFinished`, so a reopened card is not yesterday's list. A running job is untouched.
+- **The stripe** is the tab strip's existing control: `App::transfer_activity` turns the rows into one
+  `pane::Activity` per tab, and `ui::tab_bar` draws it exactly as it draws `OSC 9;4`. A job is
+  attributed to the **leaf** it started from (`LeafId`), not the tab index, so closing tabs or a job
+  outliving its pane cannot light somebody else's tab; the map is pruned when the job leaves the card.
+  A tab whose program reports its own progress keeps that figure — the program knows more.
+- **The ways in**: the `transfers` chord (`ctrl-shift-j`, free among the existing `[keys]` defaults),
+  the palette command `jobs` (`j` is free by the accelerator rule; `t` is theme's), and the card's own
+  cross. `keys::Action::Transfers` is one dispatch, `palette::Action::Transfers` delegates to it, and
+  `dtr-complete` lists `jobs` only because `palette::action_for` has the arm. The card gates the
+  keyboard like an overlay: Escape or the chord closes it, everything else is swallowed, and while a
+  queue question is up every key is swallowed so the `Conflict` widget's own Enter/Escape answer it.
+
+### Evidence
+
+- Unit tests in `transfer.rs`: the queued/direct split, the request→job mapping, all three pre-answer
+  cases, and four real-queue runs through `LocalTransport` — a plain copy (bytes, no `.part`), a
+  replace, a keep-both (the numbered name beside the existing file), and an undecided conflict
+  (resolves `Conflict`, writes nothing, dismisses the attempt). `a_cancel_before_the_first_segment…`
+  covers cancel, and `the_worker_thread_reports_a_finished_copy` is the same assertion through the
+  actual worker thread. `transfer_card.rs` tests the direction/state/row mapping and the question's
+  words.
+- **The live run** (`Xvfb :77 -screen 0 1280x800x24`, a 900 × 620 window, `.capture/config.toml` with
+  `[files] view = "list"`, a 6 GiB file in `.capture/run/src`): `--files …/src`, list view, scripted
+  keys waited 60 frames for the listing, then `down; ctrl-c; alt-up; down; enter; ctrl-v;
+  ctrl-shift-j`. The card capture is mid-transfer: `big.bin copy, 23% of 6.0 GB`, `running`, `cancel`,
+  the stripe partly filled, `0 of 1`, `cancel all`, and the pane behind showing `big.bin.part`.
+  `sha256` of the finished 6 GiB destination equals the source's
+  (`5c32c2b2…c50b0d109`), no `*.part` remains, and the after capture shows `big.bin done copy, 6.0 GB
+  of 6.0 GB`, `1 of 1`. PNGs `.capture/mid.png` and `.capture/done.png`, 900 × 620; logs
+  `.capture/mid.log` and `.capture/done.log` (`transfer published path=local:…/dst/big.bin`).
+- **The stripe** has its own capture, from the same scenario without the card chord: at 2.2 s the
+  destination pane shows `big.bin.part` and the active tab chip's bottom edge is a partly filled
+  stripe (`.capture/stripe2.png`, and `.capture/stripe2-chip.png` is the chip cropped and enlarged:
+  the dark segment is the figure, the lighter track is what is left). The stripe is the tab strip's
+  own `pane::Activity` path, so a copy and a build cannot look different.
+- `cargo fmt --all`, `cargo test --workspace`, `cargo build -p dtr` and `nix build .#dtr` /
+  `.#windows` are the gate; all green here (the Windows exe cross-built).
+
+The kittest baseline that moved is `keymap_rebind.png` (the map gained the `transfers` row), regenerated
+through lavapipe in the devShell.
+
+### Gaps
+
+- **No live remote proof.** `SshTransport::new()` is what the worker builds, but the Xvfb run has no
+  ssh server to copy to; the adapter's own eighteen `tests/wire.rs` cases are the remote evidence
+  (`docs/transfers.md` §12.6), and they stay the evidence until a real host is in the harness.
+- **A retry from the card is not a browser request.** The browser's plan is over by then, so the
+  retried job reports nothing back; that is right (the request was already resolved), but it means the
+  listing only refreshes on the next poll rather than on the retry's completion. Refreshing every file
+  pane when a queue job publishes would close it; it is not done here because a publish is per source
+  and a batch would list N times.
+- **The queue's destination name is the source's.** A rename-shaped copy (`x.txt` → `y.txt` as a copy)
+  is left to the direct path, because `dtr-transfer`'s `Job` names the destination after the source;
+  the keep-both thickness is covered by reproducing `numbered_name`, not by passing a name.
+- **Rate/ETA** on the card is the widget's `rate` hook and nothing computes it yet; the stripe and the
+  counts are the progress.
+- **The dedup pass** (`docs/files.md` §14 mentions the write path moving) should absorb: `job_of` and
+  `pre_answer` live in `crate::transfer` next to the queue command; `dtr-files`' `next_free_name` and
+  `dtr_transfer::naming::numbered_name` are two spellings of one rule, pinned only by tests — the
+  queue's `KeepBoth` pre-answer is the code that depends on them agreeing.

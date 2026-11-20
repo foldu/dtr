@@ -107,6 +107,13 @@ pub enum Action {
     /// Show the keyboard map: every binding, grouped, for the person who has
     /// just installed this and does not know ctrl-shift-p exists yet.
     Keymap,
+    /// The transfer queue's card: the window-wide list of copies and moves with
+    /// their progress, cancel and retry (`docs/manager.md` §8).
+    ///
+    /// An overlay action, not a file-pane one: the queue is the window's, and a
+    /// job outlives the pane that started it. It is also a way *back* to a job:
+    /// a card closed while a copy ran can be reopened to cancel it.
+    Transfers,
 }
 
 impl Action {
@@ -163,6 +170,7 @@ impl Action {
             Self::Echo => "echo",
             Self::KeyDelay => "key-delay",
             Self::Keymap => "keymap",
+            Self::Transfers => "transfers",
         }
     }
 
@@ -224,6 +232,7 @@ impl Action {
             Self::Echo => "echo to the log",
             Self::KeyDelay => "delay serial keystrokes",
             Self::Keymap => "this keyboard map",
+            Self::Transfers => "the transfer queue",
         }
     }
 
@@ -262,7 +271,7 @@ impl Action {
             | Self::FilesDeletePermanent
             | Self::FilesCopy
             | Self::FilesPaste => Group::Files,
-            Self::Palette | Self::Preferences | Self::Keymap => Group::Overlays,
+            Self::Palette | Self::Preferences | Self::Keymap | Self::Transfers => Group::Overlays,
             Self::Copy | Self::Paste => Group::Clipboard,
             Self::ScrollPageUp
             | Self::ScrollPageDown
@@ -340,7 +349,7 @@ impl Group {
 }
 
 /// Every action, in the order the template lists them.
-pub const ALL: [Action; 50] = [
+pub const ALL: [Action; 51] = [
     Action::Palette,
     Action::Preferences,
     Action::NewTab,
@@ -391,6 +400,7 @@ pub const ALL: [Action; 50] = [
     Action::Echo,
     Action::KeyDelay,
     Action::Keymap,
+    Action::Transfers,
 ];
 
 /// What the terminal does out of the box, as `(action, chords)`.
@@ -472,6 +482,10 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // program (Midnight Commander's help menu is the usual one), while ctrl+?
     // is what applications have used for "keyboard shortcuts" for decades.
     ("keymap", "ctrl-?"),
+    // The queue card. `j` for jobs, and ctrl+shift because it is a view of the
+    // window rather than a pane ("ctrl+alt and a letter" is the file pane's
+    // family). Free at the time: t, w, o, d, r, b, e, n, p and q were taken.
+    ("transfers", "ctrl-shift-j"),
 ];
 
 /// What a chord means right now.
@@ -980,6 +994,23 @@ mod tests {
             Matched::Action(Action::KeyDelay)
         );
         assert_eq!(keymap.resolve(&[], chord), Matched::Nothing);
+    }
+
+    /// The queue card's default chord, and that it is an overlay action rather
+    /// than a pane's: the queue is the window's.
+    #[test]
+    fn the_transfer_card_default_is_ctrl_shift_j() {
+        let keymap = Keymap::new(&BTreeMap::new());
+        let chord = parse_sequence("ctrl-shift-j").expect("chord").chords[0];
+        assert_eq!(
+            keymap.resolve(&[], chord),
+            Matched::Action(Action::Transfers)
+        );
+        assert_eq!(Action::Transfers.group(), Group::Overlays);
+        assert_eq!(
+            keymap.bound(Action::Transfers),
+            vec!["ctrl-shift-j".to_owned()]
+        );
     }
 
     /// The three refusals, and the one chord that is accepted.
