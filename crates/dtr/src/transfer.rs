@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use dtr_files::{WriteOp, WriteRequest};
-use dtr_transfer::naming::{FIRST_SUFFIX, LAST_SUFFIX, numbered_name};
+use dtr_transfer::naming;
 use dtr_transfer::{Answer, Event, JobId, JobView, Queue, Transport};
 use dtr_vfs::Location;
 
@@ -472,9 +472,9 @@ pub fn pre_answer(request: &WriteRequest) -> Option<Answer> {
 
 /// Whether `to` is the queue's own numbered name for `from`.
 ///
-/// The browser's `next_free_name` and `dtr_transfer`'s `numbered_name` implement
-/// the same rule (`name (2).ext`, counting up), so a keep-both destination is
-/// one of the candidates. Anything else is a destination with a different name —
+/// The rule is `dtr_transfer::naming`'s (the one the browser answers the
+/// keep-both card with and the queue publishes under), so this asks it rather
+/// than re-deriving it. Anything else is a destination with a different name —
 /// which the queue cannot express, and for which the answer is "ask".
 fn keeps_both(from: &std::path::Path, to: &std::path::Path) -> bool {
     let (Some(source), Some(destination)) = (from.file_name(), to.file_name()) else {
@@ -483,9 +483,10 @@ fn keeps_both(from: &std::path::Path, to: &std::path::Path) -> bool {
     if source == destination {
         return false;
     }
-    let source = std::path::Path::new(source);
-    let destination = std::path::Path::new(destination);
-    (FIRST_SUFFIX..=LAST_SUFFIX).any(|n| numbered_name(source, n) == destination)
+    naming::is_numbered_name(
+        std::path::Path::new(source),
+        std::path::Path::new(destination),
+    )
 }
 
 #[cfg(test)]

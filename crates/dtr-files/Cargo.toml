@@ -21,6 +21,11 @@ image.workspace = true
 # the same browser draws a remote directory, and a listing whose shape differs by
 # machine is two models.
 dtr-vfs = { path = "../dtr-vfs" }
+# The keep-both naming rule is the transfer queue's (`dtr_transfer::naming`), and
+# the browser asks it rather than keeping a second approximation: a disagreement
+# here picks a different file name than the queue will publish. This crate is the
+# model, the queue is a model too; neither depends on the other's decisions.
+dtr-transfer = { path = "../dtr-transfer" }
 # The desktop's own pictures and places. The Win32 crate, which answers "there is
 # no shell" on a machine that has none: this crate asks it and never sees an
 # `HICON`, and the icon theme below is what a freedesktop machine answers with.

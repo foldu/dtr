@@ -1193,6 +1193,7 @@ dependencies = [
  "async-channel",
  "dirs",
  "dtr-shell",
+ "dtr-transfer",
  "dtr-vfs",
  "dtr-widgets",
  "egui",

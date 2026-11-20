@@ -436,42 +436,28 @@ fn conflict_destination(err: &anyhow::Error) -> Option<&Path> {
 
 /// The next name that is free in `taken`, keeping the extension where it is.
 ///
-/// `report.txt` → `report (2).txt`, `README` → `README (2)`, `.bashrc` →
-/// `.bashrc (2)` (a dotfile has no extension to preserve), and `report (2).txt`
-/// → `report (3).txt` — the number belongs to the stem, so a repeated keep-both
-/// counts up instead of stacking suffixes.
+/// The rule itself is `dtr_transfer::naming`'s, because the queue publishes under
+/// exactly the name this answers: `report.txt` → `report (2).txt`, `README` →
+/// `README (2)`, `.bashrc` → `.bashrc (2)` (a dotfile has no extension to
+/// preserve), and `report (2).txt` → `report (3).txt` — the number belongs to the
+/// stem, so a repeated keep-both counts up instead of stacking suffixes.
+///
+/// `taken` is this batch's own names, not the filesystem: the conflict card was
+/// raised because the destination exists, and the answer may be given for the
+/// whole batch before any of it is written.
 pub fn next_free_name(name: &str, taken: &BTreeSet<String>) -> String {
     let path = Path::new(name);
-    let extension = path
-        .extension()
-        .map(|extension| extension.to_string_lossy().into_owned())
-        .filter(|extension| !extension.is_empty());
-    let stem = match path.file_stem() {
-        Some(stem) => stem.to_string_lossy().into_owned(),
-        None => name.to_owned(),
-    };
-    let (base, mut number) = match trailing_number(&stem) {
-        Some((base, number)) => (base, number + 1),
-        None => (stem, 2),
-    };
-    loop {
-        let candidate = match &extension {
-            Some(extension) => format!("{base} ({number}).{extension}"),
-            None => format!("{base} ({number})"),
-        };
-        if !taken.contains(&candidate) {
-            return candidate;
-        }
-        number += 1;
-    }
-}
-
-/// The ` (n)` a stem already ends in, and the stem before it.
-fn trailing_number(stem: &str) -> Option<(String, u32)> {
-    let rest = stem.strip_suffix(')')?;
-    let (base, digits) = rest.rsplit_once(" (")?;
-    let number = digits.parse::<u32>().ok()?;
-    (!base.is_empty()).then(|| (base.to_owned(), number))
+    // One more than the names already handed out in this batch is always enough
+    // candidates for the first free one, so the walk cannot run out.
+    let first = dtr_transfer::naming::FIRST_SUFFIX;
+    let limit = first
+        .saturating_add(dtr_transfer::naming::LAST_SUFFIX)
+        .saturating_add(taken.len() as u32);
+    (first..=limit)
+        .map(|n| dtr_transfer::naming::numbered_name(path, n))
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+        .find(|candidate| !taken.contains(candidate))
+        .expect("a finite set of taken names always leaves a numbered name free")
 }
 
 /// Whether a typed name can be one file name in one directory.

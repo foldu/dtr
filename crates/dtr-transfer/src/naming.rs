@@ -5,9 +5,20 @@
 //! uses — `name (2).ext`, `name (3).ext`, … — because a person who has just
 //! said "keep both" is looking for the second one to be obviously the second.
 //!
+//! **This is the only copy of the rule.** The browser's own keep-both answer
+//! (`dtr_files::write`), the transfer queue's publish step and the app's
+//! "is this destination the queue's numbered name?" pre-answer all come here:
+//! three approximations that agree only by tests is one data bug waiting for a
+//! name with a bracket in it. The number belongs to the stem, so a second
+//! keep-both of `report (2).txt` is `report (3).txt`, never
+//! `report (2) (2).txt` — and [`numbered_name`] is where that continuation is
+//! decided.
+//!
 //! The name is a [`Path`], not a `String`: a Unix file name is bytes, and
 //! round-tripping one through `to_string_lossy` to add a number would move the
-//! file the user asked for.
+//! file the user asked for. The one caller that starts from a `&str` (the
+//! browser's `next_free_name`) is a `String` because the conflict card was
+//! drawn from one; it converts at its own edge.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -20,21 +31,62 @@ pub const FIRST_SUFFIX: u32 = 2;
 /// copies of one name is not a directory a transfer should keep probing.
 pub const LAST_SUFFIX: u32 = 2_000;
 
-/// The `n`th candidate for `name`: the stem, ` (n)`, then the extension.
+/// The stem before a trailing ` (n)`, and `n`, when the stem already ends in one.
 ///
-/// The extension is whatever [`Path::extension`] says it is, so `a.tar.gz`
-/// becomes `a.tar (2).gz` and a dotfile has no extension at all:
+/// Not UTF-8 is not a trailing number: a name this cannot read keeps its bytes
+/// and takes the plain ` (2)` suffix.
+fn trailing_number(stem: &str) -> Option<(&str, u32)> {
+    let rest = stem.strip_suffix(')')?;
+    let (base, digits) = rest.rsplit_once(" (")?;
+    let number = digits.parse::<u32>().ok()?;
+    (!base.is_empty()).then_some((base, number))
+}
+
+/// The first number [`numbered_name`] will use for `name`: one past a number the
+/// name already ends in, else [`FIRST_SUFFIX`].
+pub fn first_suffix(name: &Path) -> u32 {
+    let stem = name.file_stem().unwrap_or(name.as_os_str());
+    match stem.to_str().and_then(trailing_number) {
+        Some((_, number)) => number.saturating_add(1),
+        None => FIRST_SUFFIX,
+    }
+}
+
+/// The `n`th candidate for `name`: the stem, ` (number)`, then the extension.
+///
+/// `n == FIRST_SUFFIX` is the first number the rule may choose, which is one
+/// past a number the name already ends in: `report (2).txt` gives
+/// `report (3).txt`, so a repeated keep-both counts up instead of stacking
+/// suffixes. The extension is whatever [`Path::extension`] says it is, so
+/// `a.tar.gz` becomes `a.tar (2).gz` and a dotfile has no extension at all:
 /// `.env` becomes `.env (2)`.
 pub fn numbered_name(name: &Path, n: u32) -> PathBuf {
     let extension = name.extension();
     let stem = name.file_stem().unwrap_or(name.as_os_str());
-    let mut numbered = OsString::from(stem);
-    numbered.push(format!(" ({n})"));
+    let (base, first) = match stem.to_str().and_then(trailing_number) {
+        Some((base, number)) => (OsString::from(base), number.saturating_add(1)),
+        None => (stem.to_owned(), FIRST_SUFFIX),
+    };
+    // `n` counts candidates from `FIRST_SUFFIX`; the number written is offset by
+    // whatever the name already ended in.
+    let number = first.saturating_add(n.saturating_sub(FIRST_SUFFIX));
+    let mut numbered = base;
+    numbered.push(format!(" ({number})"));
     if let Some(extension) = extension {
         numbered.push(".");
         numbered.push(extension);
     }
     PathBuf::from(numbered)
+}
+
+/// Whether `candidate` is one of the numbered names the rule makes for `name`.
+///
+/// This is the question a caller asks when it must decide "is this destination
+/// the keep-both name, or a name the person typed?" without walking the
+/// filesystem: the app's queue pre-answer does. Both arguments are file names,
+/// not paths, because that is the unit the rule works on.
+pub fn is_numbered_name(name: &Path, candidate: &Path) -> bool {
+    (FIRST_SUFFIX..=LAST_SUFFIX).any(|n| numbered_name(name, n) == candidate)
 }
 
 /// Walk the candidates in order, asking `taken` until it answers `false`.
@@ -113,5 +165,49 @@ mod tests {
             let numbered = numbered_name(Path::new(raw), 2);
             assert_eq!(numbered.as_os_str().as_bytes(), b"caf\xe9 (2).txt");
         }
+    }
+
+    /// The rule counts up from a number the name already ends in, because the
+    /// number belongs to the stem: a second keep-both of `report (2).txt` is
+    /// `report (3).txt`. The old queue implementation appended instead
+    /// (`report (2) (2).txt`) while the browser counted; one rule now.
+    #[test]
+    fn a_name_that_already_ends_in_a_number_counts_up() {
+        assert_eq!(numbered("report (2).txt", FIRST_SUFFIX), "report (3).txt");
+        assert_eq!(
+            numbered("report (2).txt", FIRST_SUFFIX + 1),
+            "report (4).txt"
+        );
+        assert_eq!(numbered(".env (7)", FIRST_SUFFIX), ".env (8)");
+        // A bracket that is not a suffix is part of the name.
+        assert_eq!(
+            numbered("report (x).txt", FIRST_SUFFIX),
+            "report (x) (2).txt"
+        );
+        assert_eq!(numbered("(2).txt", FIRST_SUFFIX), "(2) (2).txt");
+        assert_eq!(first_suffix(Path::new("report (2).txt")), 3);
+        assert_eq!(first_suffix(Path::new("report.txt")), FIRST_SUFFIX);
+    }
+
+    /// The question the app's queue pre-answer asks: is this destination one of
+    /// the rule's numbered names for that source?
+    #[test]
+    fn a_numbered_name_is_recognised() {
+        let source = Path::new("report.txt");
+        assert!(is_numbered_name(source, Path::new("report (2).txt")));
+        assert!(is_numbered_name(source, Path::new("report (7).txt")));
+        assert!(!is_numbered_name(source, Path::new("report.txt")));
+        assert!(!is_numbered_name(source, Path::new("other (2).txt")));
+        assert!(!is_numbered_name(source, Path::new("report (2).md")));
+        // And a source that already carries a number continues from it.
+        let numbered_source = Path::new("report (2).txt");
+        assert!(is_numbered_name(
+            numbered_source,
+            Path::new("report (3).txt")
+        ));
+        assert!(!is_numbered_name(
+            numbered_source,
+            Path::new("report (2) (2).txt")
+        ));
     }
 }
