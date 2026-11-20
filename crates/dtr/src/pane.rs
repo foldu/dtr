@@ -5241,26 +5241,46 @@ mod session_tests {
     fn a_connection_that_never_comes_back_keeps_the_pane() {
         let dir = tempfile::tempdir().expect("tempdir");
         let attempts = dir.path().join("attempts");
-        let script = format!("echo x >> {}; exit 255", attempts.display());
+        // Each attempt stamps itself: the wait's *growth* is the claim, and a
+        // timestamp is the only way to assert it that survives a machine that
+        // is busy compiling something else. Reading the notice instead races
+        // the countdown it is asserting — a loaded test thread can miss the
+        // window between "next attempt due at" and "dialling" entirely.
+        let script = format!("date +%s%N >> {}; exit 255", attempts.display());
         let pane = pane(script, Some("test-host"), Vec::new());
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(40);
         loop {
             let made = std::fs::read_to_string(&attempts)
                 .map(|log| log.lines().count())
                 .unwrap_or(0);
-            if made >= 2 {
+            // Three attempts, so there are two waits to compare.
+            if made >= 3 {
                 break;
             }
             assert!(Instant::now() < deadline, "only {made} attempts were made");
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!pane.ended(), "a failed connection ended the pane");
-        let retry = wait_for_retry(&pane, Duration::from_secs(5), 1);
+        let retry = wait_for_retry(&pane, Duration::from_secs(20), 1);
         assert_eq!(retry.what, "test-host", "{retry:?}");
-        // Bounded in rate: the wait grows, and the notice counts it down.
         assert!(
-            matches!(retry.when, When::At(at) if at > Instant::now()),
+            matches!(retry.when, When::At(_) | When::Dialling),
             "{retry:?}"
+        );
+        let times: Vec<u128> = std::fs::read_to_string(&attempts)
+            .expect("the attempts file")
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        assert!(
+            times.len() >= 3,
+            "three attempts stamp themselves: {times:?}"
+        );
+        let first = times[1] - times[0];
+        let second = times[2] - times[1];
+        assert!(
+            second > first,
+            "the wait between attempts did not grow: {first} ns then {second} ns"
         );
     }
 
@@ -5770,7 +5790,10 @@ mod session_tests {
 
     /// Wait until the program has written `expected`, or fail with what it got.
     fn wait_for_bytes(pane: &Pane, path: &std::path::Path, expected: &str, what: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Thirty seconds, not ten: this is the deadline a *program* has to
+        // start and answer on a machine that may be compiling five crates at
+        // once. Nothing in the happy path waits for it.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut got = String::new();
         while !got.contains(expected) {
             assert!(
@@ -5813,8 +5836,12 @@ mod session_tests {
         });
         // The modes are parsed by the pane's loop, which runs a step behind the
         // child that wrote them; the flag flipping is the signal the UI uses, so
-        // the test waits on the same one.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // the test waits on the same one. Thirty seconds rather than ten
+        // because the gate runs the whole suite with every core busy: a pty
+        // spawn that takes a tenth of a second idle can miss a ten-second
+        // deadline on a loaded machine, and a flaky gate is a gate nobody
+        // trusts.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while (!prologue.is_empty() && !pane.stats().mouse()) || !out.exists() {
             assert!(
                 Instant::now() < deadline,
