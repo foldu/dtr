@@ -1220,9 +1220,12 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-channel",
+ "compio",
  "dirs",
  "dtr-files",
  "dtr-frame",
+ "dtr-sshconfig",
+ "dtr-vfs",
  "dtr-widgets",
  "egui",
  "png 0.18.1",

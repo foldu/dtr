@@ -18,7 +18,16 @@ async-channel.workspace = true
 # `Request`/`Select`/`Filter` are the portal's options mapped onto the browser,
 # and the picker's `Outcome` is what one eventually becomes. Linking the browser
 # crate is what makes this backend a backend rather than a second file dialog.
+# The manager window (F4) is the same crate again: `manager_ui` is the chrome,
+# `pane_ui` the content, and `Browser` the listing.
 dtr-files = { path = "../dtr-files" }
+# The manager window browses other machines, so it needs the same `Vfs` the
+# terminal's file panes use: `Local` for this one, `Ssh` for an alias. The
+# picker deliberately does not (a portal request names a path, not a host).
+dtr-vfs = { path = "../dtr-vfs" }
+# The sidebar's "this session's hosts" section is the user's own ssh config:
+# the same parser the terminal's host picker reads, resolved the same way.
+dtr-sshconfig = { path = "../dtr-sshconfig" }
 # The window, the surface and the egui loop, so the picker does not re-solve
 # DPI, surface loss, viewport commands or drop order (`docs/frame.md`).
 dtr-frame = { path = "../dtr-frame" }
@@ -38,7 +47,7 @@ dirs.workspace = true
 # X11 `parent_window`: winit 0.30 exposes no transient-for, so the one hint it
 # cannot set is set over the X protocol directly (`src/x11.rs`). Same version as
 # the one already in the tree through winit and arboard.
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["xtest"] }
 # The D-Bus stack, with the `async-io` backend the settings portal already uses:
 # zbus drives its own executor on its own thread, so this crate needs no tokio
 # and no runtime of its own (`docs/compio.md` §2).
@@ -51,6 +60,16 @@ tracing-subscriber.workspace = true
 # owns the sockets on its own thread, so an async runtime here would be a second
 # scheduler for no work.
 pollster.workspace = true
+# The manager window's file work — a remote listing, a local count, a write —
+# runs on one worker thread, and `dtr-vfs`'s verbs are futures that expect a
+# compio runtime (`Local`'s writes are `spawn_blocking`). The worker owns that
+# runtime; the window and the bus never block on a directory.
+compio.workspace = true
+# The browser's write API answers a failure with an `anyhow::Error` so a
+# `dtr_vfs::Conflict` can be recognised through the chain; the worker builds one
+# from the message the VFS returned. This is the same error type `dtr`'s file
+# pane worker uses.
+anyhow.workspace = true
 
 [dev-dependencies]
 # The save-files uniquifier asks the filesystem one question; a test that
@@ -64,7 +83,5 @@ pollster.workspace = true
 # The Xvfb picker example reads the captured PNG's dimensions to say what the
 # window became: the same encoder `dtr-frame` writes it with, used the other way.
 png.workspace = true
-# The example is a sequence of checks with a sentence per failure; the library
-# keeps its own errors typed (`DecodeError`, `String`), so this is the example's
-# alone.
-anyhow.workspace = true
+# `anyhow` is a real dependency now (the browser's `write_failed` takes one);
+# the examples get it from there.

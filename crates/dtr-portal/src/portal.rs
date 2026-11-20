@@ -70,6 +70,12 @@ pub const REQUEST_INTERFACE: &str = "org.freedesktop.impl.portal.Request";
 /// The service: a host, and the bus connection that carries its answers.
 pub struct Portal {
     state: Arc<State>,
+    /// The manager window's private interface, when the caller asked for one.
+    ///
+    /// `None` in the file chooser's own tests, which need no window; the daemon
+    /// always sets it, because `dtr-files` is the other caller of this process
+    /// (`docs/manager.md` §6).
+    files: Option<crate::files::FilesService>,
 }
 
 impl Portal {
@@ -79,7 +85,19 @@ impl Portal {
             state: Arc::new(State {
                 host: Mutex::new(Box::new(host)),
             }),
+            files: None,
         }
+    }
+
+    /// Also serve `org.dtr.Files` on the **same connection**.
+    ///
+    /// One process, one connection, two interfaces: the manager window shares
+    /// the picker's device, fonts and D-Bus task, which is the whole point of a
+    /// daemon (`docs/manager.md` §6). The name is requested after the object is
+    /// registered — zbus's own rule for a name registered outside the builder.
+    pub fn with_files(mut self, files: crate::files::FilesService) -> Self {
+        self.files = Some(files);
+        self
     }
 
     /// Serve on the session bus under [`SERVICE_NAME`], and return the
@@ -104,9 +122,10 @@ impl Portal {
         self,
         builder: zbus::connection::Builder<'a>,
     ) -> zbus::Result<zbus::Connection> {
+        let Self { state, files } = self;
         let connection = builder
             .name(SERVICE_NAME)?
-            .serve_at(OBJECT_PATH, self)?
+            .serve_at(OBJECT_PATH, Self { state, files: None })?
             .build()
             .await?;
         tracing::info!(
@@ -115,6 +134,21 @@ impl Portal {
             interface = INTERFACE,
             "serving the file chooser portal"
         );
+        if let Some(files) = files {
+            connection
+                .object_server()
+                .at(crate::files::FILES_OBJECT_PATH, files)
+                .await?;
+            connection
+                .request_name(crate::files::FILES_SERVICE_NAME)
+                .await?;
+            tracing::info!(
+                service = crate::files::FILES_SERVICE_NAME,
+                path = crate::files::FILES_OBJECT_PATH,
+                interface = crate::files::FILES_INTERFACE,
+                "serving the manager window's private interface"
+            );
+        }
         Ok(connection)
     }
 

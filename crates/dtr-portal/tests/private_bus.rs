@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use dtr_portal::{
     Answer, Call, Chosen, Host, INTERFACE, OBJECT_PATH, Portal, REQUEST_INTERFACE, RequestId,
-    SERVICE_NAME, Select,
+    SERVICE_NAME, Select, WindowOpener,
 };
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -828,4 +828,361 @@ fn the_daemon_binary_serves_the_interface_without_a_display() {
     );
     assert!(wire.1.is_empty());
     drop(child);
+}
+
+// ---------------------------------------------------------------------------
+// `org.dtr.Files`: the manager window's private interface
+// ---------------------------------------------------------------------------
+//
+// The window itself is `dtr_portal::window` and is verified under Xvfb
+// (`docs/manager.md` §6); what this half proves is the wire — that a launcher's
+// call reaches a real opener on the same connection as the file chooser, that the
+// path and the options arrive decoded, that the handle the method answers is the
+// one the opener created, that `CloseWindow` reaches the same window, and that a
+// refusal is an error rather than a hang.
+
+/// What the fake opener saw, without the ack channel (which cannot be cloned).
+#[derive(Debug)]
+struct Saw {
+    handle: String,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    parent_window: String,
+    modal: bool,
+}
+
+/// The headless [`WindowOpener`](dtr_portal::WindowOpener): records what a window
+/// would be opened for, and answers like the real loop does.
+struct HeadlessFiles {
+    opened: async_channel::Sender<Saw>,
+    closed: async_channel::Sender<String>,
+}
+
+impl WindowOpener for HeadlessFiles {
+    fn open(&mut self, request: dtr_portal::OpenWindowRequest) {
+        let saw = Saw {
+            handle: request.handle.clone(),
+            path: request.path.clone(),
+            title: request.title.clone(),
+            parent_window: request.parent_window.clone(),
+            modal: request.modal,
+        };
+        // A path that says "refuse" asks this double for a machine with no
+        // display, the one failure the launcher must hear about.
+        let refuse = saw
+            .path
+            .as_deref()
+            .is_some_and(|path| path == Path::new("/refuse"));
+        let _ = self.opened.try_send(saw);
+        if refuse {
+            request.refuse("no display on this machine");
+        } else {
+            request.accept();
+        }
+    }
+
+    fn close(&mut self, handle: String, ack: dtr_portal::CloseWindowAck) {
+        let _ = self.closed.try_send(handle);
+        let _ = ack.try_send(true);
+    }
+}
+
+/// A bus with both interfaces on it, and the fake opener's channels.
+struct FilesFixture {
+    client: zbus::Connection,
+    opened: async_channel::Receiver<Saw>,
+    closed: async_channel::Receiver<String>,
+}
+
+impl FilesFixture {
+    fn start() -> Option<Self> {
+        let bus = private_bus()?;
+        let (opened, opened_rx) = async_channel::unbounded();
+        let (closed, closed_rx) = async_channel::unbounded();
+        let (ready, waiting) = mpsc::channel();
+        let address = bus.address.clone();
+        let serve_address = address.clone();
+        std::thread::Builder::new()
+            .name("dtr-portal-files-test".to_owned())
+            .spawn(move || {
+                let _bus = bus;
+                let (picker, _picker_rx) = async_channel::unbounded();
+                let (picker_closed, _closed_rx) = async_channel::unbounded();
+                let portal = Portal::new(Headless {
+                    opened: picker,
+                    closed: picker_closed,
+                })
+                .with_files(dtr_portal::FilesService::new(HeadlessFiles {
+                    opened,
+                    closed,
+                }));
+                pollster::block_on(async move {
+                    match portal.serve_at(&serve_address).await {
+                        Ok(connection) => {
+                            let _ = ready.send(Ok(()));
+                            std::future::pending::<()>().await;
+                            drop(connection);
+                        }
+                        Err(err) => {
+                            let _ = ready.send(Err(err.to_string()));
+                        }
+                    }
+                });
+            })
+            .expect("a thread for the portal");
+        match waiting
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the portal starts")
+        {
+            Ok(()) => {}
+            Err(err) => panic!("the portal did not serve: {err}"),
+        }
+        let client = pollster::block_on(async {
+            let builder =
+                zbus::connection::Builder::address(address.as_str()).expect("the bus address");
+            builder.build().await.expect("a client connection")
+        });
+        Some(Self {
+            client,
+            opened: opened_rx,
+            closed: closed_rx,
+        })
+    }
+
+    /// The next `OpenWindow` the fake opener should have answered.
+    fn opened(&self) -> Saw {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.opened.try_recv() {
+                Ok(saw) => return saw,
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the opener was never asked for a window"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("the opened channel ended: {err}"),
+            }
+        }
+    }
+
+    fn closed(&self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.closed.try_recv() {
+                Ok(handle) => return handle,
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the opener was never asked to close a window"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("the closed channel ended: {err}"),
+            }
+        }
+    }
+
+    fn proxy(&self) -> zbus::Proxy<'static> {
+        let client = self.client.clone();
+        pollster::block_on(async move {
+            zbus::Proxy::new(
+                &client,
+                dtr_portal::FILES_SERVICE_NAME,
+                dtr_portal::FILES_OBJECT_PATH,
+                dtr_portal::FILES_INTERFACE,
+            )
+            .await
+            .expect("a Files proxy")
+        })
+    }
+
+    /// `OpenWindow(s path, a{sv} options) -> s`: the reply message, so a caller
+    /// can read the handle or the error.
+    fn open(
+        &self,
+        path: String,
+        options: HashMap<String, OwnedValue>,
+    ) -> zbus::Result<zbus::Message> {
+        let proxy = self.proxy();
+        pollster::block_on(proxy.call_method("OpenWindow", &(path, options)))
+    }
+
+    /// `CloseWindow(s handle) -> ()`.
+    fn close(&self, handle: String) -> zbus::Result<zbus::Message> {
+        let proxy = self.proxy();
+        pollster::block_on(proxy.call_method("CloseWindow", &(handle,)))
+    }
+}
+
+/// The private interface's own signature, asserted the same way as the portal's:
+/// a launcher built against this shape would fail here, not on a desktop.
+#[test]
+fn the_manager_interface_on_the_bus_is_the_one_the_launcher_expects() {
+    let Some(fixture) = FilesFixture::start() else {
+        eprintln!("no dbus-daemon on PATH; skipping the manager interface test");
+        return;
+    };
+    let xml = pollster::block_on(async {
+        let proxy = zbus::Proxy::new(
+            &fixture.client,
+            dtr_portal::FILES_SERVICE_NAME,
+            dtr_portal::FILES_OBJECT_PATH,
+            "org.freedesktop.DBus.Introspectable",
+        )
+        .await
+        .expect("an introspection proxy");
+        let message = proxy
+            .call_method("Introspect", &())
+            .await
+            .expect("introspection");
+        message
+            .body()
+            .deserialize::<String>()
+            .expect("introspection XML")
+    });
+    // `OpenWindow(s path, a{sv} options) -> (s handle)`.
+    assert_eq!(
+        method_arg_types(&xml, "OpenWindow"),
+        ["s", "a{sv}", "s"],
+        "OpenWindow does not take a path and options, and answer a handle"
+    );
+    // `CloseWindow(s handle) -> ()`.
+    assert_eq!(
+        method_arg_types(&xml, "CloseWindow"),
+        ["s"],
+        "CloseWindow does not take a handle"
+    );
+    assert!(xml.contains(dtr_portal::FILES_INTERFACE), "{xml}");
+}
+
+/// A launcher's path, title and parent arrive decoded, the answer is the handle
+/// the opener made, and `CloseWindow` reaches that same window.
+#[test]
+fn an_open_window_call_reaches_the_opener_and_answers_its_handle() {
+    let Some(fixture) = FilesFixture::start() else {
+        eprintln!("no dbus-daemon on PATH; skipping the manager interface test");
+        return;
+    };
+    let mut options: HashMap<String, OwnedValue> = HashMap::new();
+    options.insert("title".to_owned(), a_string("Files — /tmp/scratch"));
+    options.insert("parent_window".to_owned(), a_string("x11:0x1234"));
+    options.insert(
+        "modal".to_owned(),
+        OwnedValue::try_from(Value::from(true)).expect("a boolean"),
+    );
+    let reply = fixture
+        .open("/tmp/scratch".to_owned(), options)
+        .expect("the manager interface answers");
+    let (handle,): (String,) = reply.body().deserialize().expect("a handle");
+    let saw = fixture.opened();
+    assert_eq!(
+        saw.handle, handle,
+        "the answer names the window that opened"
+    );
+    assert_eq!(saw.path, Some(PathBuf::from("/tmp/scratch")));
+    assert_eq!(saw.title.as_deref(), Some("Files — /tmp/scratch"));
+    assert_eq!(saw.parent_window, "x11:0x1234");
+    assert!(saw.modal);
+    assert!(
+        handle.starts_with(dtr_portal::FILES_OBJECT_PATH),
+        "the handle is shaped like an object path: {handle}"
+    );
+
+    fixture.close(handle.clone()).expect("the window closes");
+    assert_eq!(fixture.closed(), handle);
+}
+
+/// An empty path is the interface's "the person's home", and an unknown option
+/// is ignored because the interface may grow.
+#[test]
+fn an_empty_path_means_home_and_an_unknown_option_is_ignored() {
+    let Some(fixture) = FilesFixture::start() else {
+        eprintln!("no dbus-daemon on PATH; skipping the manager interface test");
+        return;
+    };
+    let mut options: HashMap<String, OwnedValue> = HashMap::new();
+    options.insert("a_later_option".to_owned(), a_string("ignored"));
+    let reply = fixture
+        .open(String::new(), options)
+        .expect("the manager interface answers");
+    let (handle,): (String,) = reply.body().deserialize().expect("a handle");
+    let saw = fixture.opened();
+    assert_eq!(saw.handle, handle);
+    assert_eq!(saw.path, None, "empty is home, not the daemon's cwd");
+    assert_eq!(saw.title, None);
+    assert!(saw.parent_window.is_empty());
+    assert!(!saw.modal);
+}
+
+/// A window that could not be created is the caller's error, not a handle for
+/// nothing.
+#[test]
+fn a_refused_window_is_an_error_on_the_bus() {
+    let Some(fixture) = FilesFixture::start() else {
+        eprintln!("no dbus-daemon on PATH; skipping the manager interface test");
+        return;
+    };
+    let error = fixture
+        .open("/refuse".to_owned(), HashMap::new())
+        .expect_err("no display is an error");
+    let name = error.to_string();
+    assert!(
+        name.contains("no display") || format!("{error:?}").contains("no display"),
+        "the refusal says why: {error:?}"
+    );
+    // The opener saw the request; the method answered with its refusal.
+    assert_eq!(fixture.opened().path, Some(PathBuf::from("/refuse")));
+}
+
+/// A known option with the wrong type is `InvalidArgs` before any window is
+/// asked for.
+#[test]
+fn a_wrongly_typed_window_option_is_refused_before_the_opener() {
+    let Some(fixture) = FilesFixture::start() else {
+        eprintln!("no dbus-daemon on PATH; skipping the manager interface test");
+        return;
+    };
+    let mut options: HashMap<String, OwnedValue> = HashMap::new();
+    options.insert("title".to_owned(), a_bool(true));
+    let error = fixture
+        .open("/tmp".to_owned(), options)
+        .expect_err("a title is not a boolean");
+    let debug = format!("{error:?}");
+    assert!(
+        debug.contains("InvalidArgs") || debug.contains("title"),
+        "{debug}"
+    );
+}
+
+/// The launcher binary itself: no display, no session bus to reach the daemon on
+/// a socket that is not there — it must say so and exit non-zero, not hang.
+#[test]
+fn the_launcher_without_a_session_bus_exits_non_zero() {
+    let Some(bus) = private_bus() else {
+        eprintln!("no dbus-daemon on PATH; skipping the launcher test");
+        return;
+    };
+    // A private bus that serves *nothing*: the call reaches the bus and finds no
+    // owner, which is "the daemon is not installed/activatable".
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dtr-files"))
+        .arg("/tmp")
+        .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+        .output()
+        .expect("the launcher runs");
+    assert!(
+        !output.status.success(),
+        "a bus with no daemon must not look like success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dtr-files:"),
+        "the launcher says what went wrong: {stderr}"
+    );
+    // The daemon owns neither name, so the message names the interface.
+    assert!(
+        stderr.contains("org.dtr.Files") || stderr.contains("manager window"),
+        "{stderr}"
+    );
 }

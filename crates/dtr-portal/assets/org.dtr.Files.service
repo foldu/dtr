@@ -1,0 +1,13 @@
+# Bus activation for the manager window's private interface: `dtr-files` calls
+# `org.dtr.Files.OpenWindow`, and if no daemon is running the bus starts this
+# process to own the name and open the window. It is the *same* `dtr-portal`
+# binary as the file chooser: one process, one wgpu device, one icon cache
+# (docs/manager.md §6).
+#
+# `Exec=` is substituted at build time (`flake.nix`) with the *installed* binary
+# — the same treatment the FileChooser service file gets, for the same reason: a
+# build directory in here is a store path that stops existing, and a launcher
+# that silently starts nothing is the worst failure mode this packaging has.
+[D-BUS Service]
+Name=org.dtr.Files
+Exec=@DTR_PORTAL@

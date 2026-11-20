@@ -198,20 +198,29 @@
         doCheck = false;
         # Only the daemon: a bare `cargo build` at the workspace root builds the
         # terminal too, and its VT core and wgpu are not this package's business.
+        # The package has two binaries — the daemon (`dtr-portal`) and the
+        # launcher that asks it for a manager window (`dtr-files`) — and both are
+        # installed by `cargo install`'s usual "every bin of the package" rule.
         cargoExtraArgs = "--locked --package dtr-portal";
-        # The two text files that make a backend loadable, in the locations
-        # $XDG_DATA_DIRS is searched for. `Exec=` names the *installed* binary:
-        # a build directory there is a store path that stops existing, and a
-        # dialog that silently never opens is this packaging's worst failure.
-        # `portals.conf` is deliberately not installed: it is the user's choice,
-        # and the NixOS module writes it (`docs/portal.md`).
+        # The three text files that make a backend loadable and a launcher
+        # reachable, in the locations `$XDG_DATA_DIRS` and the bus are searched
+        # for. `Exec=` names the *installed* binary: a build directory there is a
+        # store path that stops existing, and a dialog that silently never opens
+        # is this packaging's worst failure. `portals.conf` is deliberately not
+        # installed: it is the user's choice, and the NixOS module writes it
+        # (`docs/portal.md`).
         postInstall = ''
           install -Dm644 ${./crates/dtr-portal/assets/dtr.portal} \
             $out/share/xdg-desktop-portal/portals/dtr.portal
           install -Dm644 ${./crates/dtr-portal/assets/org.freedesktop.impl.portal.desktop.dtr.service} \
             $out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.dtr.service
+          install -Dm644 ${./crates/dtr-portal/assets/org.dtr.Files.service} \
+            $out/share/dbus-1/services/org.dtr.Files.service
           substituteInPlace \
             $out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.dtr.service \
+            --replace-fail '@DTR_PORTAL@' "$out/bin/dtr-portal"
+          substituteInPlace \
+            $out/share/dbus-1/services/org.dtr.Files.service \
             --replace-fail '@DTR_PORTAL@' "$out/bin/dtr-portal"
         '';
       });
@@ -468,6 +477,28 @@
           */bin/dtr-portal) ;;
           *) echo "Exec= does not point at the package's own binary: $exec_path" >&2; exit 1 ;;
         esac
+
+        # The manager window's private interface is a second activation file on
+        # the same binary. A name that disagree with what `crates/dtr-portal`
+        # serves, or an `Exec=` the package does not install, is a `dtr-files`
+        # that starts nothing — the same failure as the picker's, one interface
+        # over.
+        files_service=${dtr-portal}/share/dbus-1/services/org.dtr.Files.service
+        files_name=$(sed -n 's/^Name=//p' "$files_service")
+        test "$files_name" = org.dtr.Files || {
+          echo "the manager's service owns the wrong bus name: $files_name" >&2
+          exit 1
+        }
+        files_exec=$(sed -n 's/^Exec=//p' "$files_service")
+        test "$files_exec" = "$exec_path" || {
+          echo "the manager's Exec=$files_exec is not the daemon's own binary" >&2
+          exit 1
+        }
+        # The launcher the service is for, and which the session runs directly.
+        test -x ${dtr-portal}/bin/dtr-files || {
+          echo "the package installs no dtr-files launcher" >&2
+          exit 1
+        }
         touch $out
       '';
 
