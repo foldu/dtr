@@ -32,6 +32,7 @@ use dtr_files::manager::{
     Sidebar, SidebarChoice,
 };
 use dtr_files::{Browser, Key, MenuChoice, PaneOutcome, SortChange, View};
+use dtr_pane_host::listing::{FinishedListing, waiter};
 use dtr_vfs::{Backend as _, Ssh};
 use dtr_widgets::Skin;
 
@@ -276,25 +277,39 @@ impl Manager {
         Some(self.browser.directory().to_path_buf())
     }
 
-    /// A remote listing arrived.
-    pub fn listed(&mut self, alias: &str, path: PathBuf, entries: Vec<dtr_files::Entry>) -> bool {
-        if self.browser.alias() != Some(alias) || !self.browser.is_waiting_for(&path) {
+    /// A remote listing arrived, whole.
+    ///
+    /// `dtr-pane-host`'s `waiter` is the routing and the stale-reply rule the
+    /// terminal's pump uses too: host *and* directory *and* still waiting, so a
+    /// reply that lost a race with a navigation is dropped rather than moving the
+    /// view back. The rows are applied through the one handshake; a walk that
+    /// ended with an error still shows the rows that arrived, and the footer says
+    /// why (the same rule the terminal's panes follow).
+    pub fn listed(&mut self, listing: FinishedListing) -> bool {
+        if waiter(
+            std::iter::once(&mut self.browser),
+            &listing.host,
+            &listing.path,
+        )
+        .is_none()
+        {
             return false;
         }
-        let total = entries.len();
-        let hidden = entries.iter().filter(|entry| entry.hidden).count();
-        self.browser.apply_listing(path, entries);
+        let total = listing.entries.len();
+        let hidden = listing.entries.iter().filter(|entry| entry.hidden).count();
         self.entries = EntryCount {
             total,
             shown: total - hidden,
             reading: false,
         };
+        listing.apply(&mut self.browser);
         true
     }
 
-    /// A remote listing failed: the browser's footer says why.
-    pub fn listing_failed(&mut self, alias: &str, message: &str) -> bool {
-        if self.browser.alias() != Some(alias) {
+    /// A walk that never started: the backend could not be resolved, so there is
+    /// no listing to adopt — only the footer's reason.
+    pub fn listing_failed(&mut self, host: &str, path: &Path, message: &str) -> bool {
+        if waiter(std::iter::once(&mut self.browser), host, path).is_none() {
             return false;
         }
         self.browser.apply_failure(message.to_owned());

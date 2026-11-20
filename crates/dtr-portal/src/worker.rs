@@ -23,24 +23,27 @@
 
 use std::path::PathBuf;
 
-use dtr_files::{Entry, WriteRequest};
+use dtr_files::WriteRequest;
+use dtr_pane_host::listing::{FinishedListing, collect};
 use dtr_vfs::{BackendId, Vfs};
 
 /// One thing the worker did, for the window loop.
 #[derive(Debug)]
 pub enum WorkerEvent {
-    /// A remote directory's listing, in one piece: the browser's `apply_listing`
-    /// takes a complete listing and sorts it once.
+    /// A remote directory's whole listing, in one piece: the browser's
+    /// `apply_listing` takes a complete listing and sorts it once, and the
+    /// listing carries its own host, path, rows and any error the walk ended
+    /// with (`dtr-pane-host` coalesced the batches).
     Listed {
         manager: u64,
-        alias: String,
-        path: PathBuf,
-        entries: Vec<Entry>,
+        listing: FinishedListing,
     },
-    /// A remote listing that ended in an error, with the words for the footer.
+    /// A walk that never started — the machine's backend could not be resolved —
+    /// with the words for the footer.
     Failed {
         manager: u64,
-        alias: String,
+        host: String,
+        path: PathBuf,
         message: String,
     },
     /// A local directory counted for the status bar.
@@ -174,41 +177,26 @@ async fn run(vfs: &Vfs, job: Job, sink: &impl Fn(WorkerEvent)) {
 /// One piece rather than streamed batches: the browser's `apply_listing` takes a
 /// complete listing and sorts once, and a directory is one screen of a person's
 /// attention. A directory large enough for that to be a wait is a wait the
-/// worker owns, not the frame loop.
+/// worker owns, not the frame loop. `dtr_pane_host::listing::collect` is the same
+/// coalescing and failure rule the terminal's frame loop drains, on this thread's
+/// runtime instead of a frame.
 async fn list(vfs: &Vfs, manager: u64, alias: String, path: PathBuf, sink: &impl Fn(WorkerEvent)) {
     let backend = match vfs.backend(&BackendId::Ssh(alias.clone())) {
         Ok(backend) => backend,
         Err(err) => {
             sink(WorkerEvent::Failed {
                 manager,
-                alias,
+                host: alias,
+                path,
                 message: format!("{err:#}"),
             });
             return;
         }
     };
     let batches = backend.list(&path);
-    let mut entries = Vec::new();
-    loop {
-        match batches.recv().await {
-            Ok(Ok(batch)) => entries.extend(batch.into_iter().map(Entry::from)),
-            Ok(Err(err)) => {
-                sink(WorkerEvent::Failed {
-                    manager,
-                    alias,
-                    message: format!("{err:#}"),
-                });
-                return;
-            }
-            // The sender is gone: the walk is over.
-            Err(_) => break,
-        }
-    }
     sink(WorkerEvent::Listed {
         manager,
-        alias,
-        path,
-        entries,
+        listing: collect(alias, path, batches).await,
     });
 }
 

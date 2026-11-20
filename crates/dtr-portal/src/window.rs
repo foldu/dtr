@@ -939,25 +939,21 @@ impl PickerApp {
     /// The worker finished a job for a manager window.
     fn worker_event(&mut self, windows: &mut Windows, event: WorkerEvent) {
         match event {
-            WorkerEvent::Listed {
-                manager,
-                ref alias,
-                ref path,
-                ref entries,
-            } => {
+            WorkerEvent::Listed { manager, listing } => {
                 let Some(window) = self.manager_window(manager) else {
                     return;
                 };
                 let changed = self
                     .manager_mut(window)
-                    .is_some_and(|manager| manager.listed(alias, path.clone(), entries.clone()));
+                    .is_some_and(|manager| manager.listed(listing));
                 if changed {
                     self.repaint(windows, window);
                 }
             }
             WorkerEvent::Failed {
                 manager,
-                alias,
+                host,
+                path,
                 message,
             } => {
                 let Some(window) = self.manager_window(manager) else {
@@ -965,7 +961,7 @@ impl PickerApp {
                 };
                 if self
                     .manager_mut(window)
-                    .is_some_and(|manager| manager.listing_failed(&alias, &message))
+                    .is_some_and(|manager| manager.listing_failed(&host, &path, &message))
                 {
                     self.repaint(windows, window);
                 }

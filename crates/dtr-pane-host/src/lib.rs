@@ -17,14 +17,21 @@
 //! - [`write::execute`] — one [`dtr_files::WriteRequest`] through a
 //!   [`dtr_vfs::Backend`]'s verbs, with the replace-then-verb and not-found
 //!   rule.
+//! - [`listing`] — a remote walk's batches coalesced into one listing, and the
+//!   [`listing::Pump`] that drains them into the pane that asked, dropping a
+//!   reply to a directory the pane has left.
 //!
 //! What is not here, deliberately: a window, an event loop, a runtime or a
-//! channel to a thread. Each frontend owns its own.
+//! channel to a thread. Each frontend owns its own — the app's background thread
+//! with its compio runtime, the portal's worker with its own — and this crate
+//! only owns the protocol between the browser and whichever thread runs it.
 
 pub mod gestures;
 pub mod input;
+pub mod listing;
 pub mod write;
 
 pub use gestures::{CLICK_SLOP, DOUBLE_CLICK, Gestures};
 pub use input::{Scope, pane_key};
+pub use listing::{FinishedListing, Listing, Pump, waiter};
 pub use write::{execute, is_not_found};

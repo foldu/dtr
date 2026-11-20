@@ -81,65 +81,6 @@ pub enum UserEvent {
     Transfer(crate::transfer::Report),
 }
 
-/// A remote pane's listing on its way in from the machine's VFS backend.
-///
-/// This is the app's half of the one listing protocol a [`Browser`] speaks:
-/// the pane asks with `take_request`, the app starts `Backend::list` — the same
-/// `Ssh` backend the pane's writes go through, so a listing and a write share
-/// one connection — and the batches are drained here, on the frame, until the
-/// stream ends. Only then is the whole listing handed back with
-/// `Browser::apply_listing`, which is what the browser's old single-reply
-/// handshake did: a row arriving mid-walk does not re-sort the view under a
-/// pointer, and a batch that lands after the pane navigated away is dropped by
-/// the handshake's own host-and-directory guard.
-///
-/// Dropping this value drops the receiver, which is how a walk is cancelled.
-struct RemoteListing {
-    alias: String,
-    path: PathBuf,
-    batches: dtr_vfs::Batches,
-    entries: Vec<dtr_files::Entry>,
-    /// The error the stream ended with, if it ended with one. A walk that fails
-    /// halfway still has rows worth showing, so they are applied and the
-    /// message goes in the footer.
-    failure: Option<String>,
-}
-
-impl RemoteListing {
-    fn new(alias: String, path: PathBuf, batches: dtr_vfs::Batches) -> Self {
-        Self {
-            alias,
-            path,
-            batches,
-            entries: Vec::new(),
-            failure: None,
-        }
-    }
-
-    /// Take every batch that is ready.
-    ///
-    /// Returns `true` when the stream has ended — a burst of 157 batches costs
-    /// one merge, the same rule the local listing's poll follows — and the
-    /// caller then applies what arrived. Every batch so far is coalesced into
-    /// one `Vec`, because `apply_listing` is the whole-listing answer the
-    /// pane's handshake is written for.
-    fn drain(&mut self) -> bool {
-        loop {
-            match self.batches.try_recv() {
-                Ok(Ok(batch)) => self
-                    .entries
-                    .extend(batch.into_iter().map(dtr_files::Entry::from)),
-                Ok(Err(err)) => {
-                    self.failure = Some(format!("{err:#}"));
-                    return true;
-                }
-                Err(async_channel::TryRecvError::Empty) => return false,
-                Err(async_channel::TryRecvError::Closed) => return true,
-            }
-        }
-    }
-}
-
 /// A link under the pointer: the cell it is on, and where it points.
 #[derive(Clone, Debug)]
 struct LinkHover {
@@ -596,7 +537,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         wake: std::cell::Cell::new(false),
         strip_logged: None,
         folded_notices: std::collections::BTreeSet::new(),
-        remote_listings: Vec::new(),
+        remote_pump: dtr_pane_host::Pump::new(),
         transfer: None,
         transfer_rows: Vec::new(),
         transfer_owners: std::collections::HashMap::new(),
@@ -1261,28 +1202,6 @@ fn browsers(tabs: &mut [Tab]) -> impl Iterator<Item = &mut Browser> {
         })
 }
 
-/// The pane that should receive `alias`'s listing of `path`, if there is one.
-///
-/// Two panes can browse one host, so the match is by host *and* by the directory
-/// the pane asked for — not by the focus. The directory check is the stale-reply
-/// guard as well: `Browser::reload` leaves `awaiting` pointing at the old
-/// directory while the new request is still pending, so a reply to the directory
-/// the pane just left would still look like an answer. The pane is showing the
-/// directory it asked for the whole time the walk runs, so requiring
-/// `directory() == path` accepts live replies and drops the ones that lost a
-/// race with a navigation.
-fn listing_waiter<'a>(
-    browsers: impl IntoIterator<Item = &'a mut Browser>,
-    alias: &str,
-    path: &Path,
-) -> Option<&'a mut Browser> {
-    browsers.into_iter().find(|browser| {
-        browser.alias() == Some(alias)
-            && browser.directory() == path
-            && browser.is_waiting_for(path)
-    })
-}
-
 struct App {
     tabs: Vec<Tab>,
     /// When each pane may publish, shared with every pane as nanoseconds: the
@@ -1357,9 +1276,12 @@ struct App {
     /// only while that pane is waiting: the next drop starts loud again.
     folded_notices: std::collections::BTreeSet<crate::layout::LeafId>,
     /// The remote listings on their way in, from each alias's one `Ssh`
-    /// backend. Drained here rather than in a browser because the model is only
-    /// `&mut` before the frame starts, and the receiver is what a listing is.
-    remote_listings: Vec<RemoteListing>,
+    /// backend. The pump is `dtr-pane-host`'s: it coalesces the batches, routes
+    /// the finished listing to the pane that asked (host *and* directory) and
+    /// drops a reply that lost a race with a navigation. Drained here rather
+    /// than in a browser because the model is only `&mut` before the frame
+    /// starts, and the receiver is what a listing is.
+    remote_pump: dtr_pane_host::Pump,
     /// The window's transfer queue, started on first use: one dedicated thread
     /// with a compio runtime of its own, one `dtr_transfer::Queue`, and one
     /// `SshTransport` (`docs/transfers.md` §12.7). The UI only ever sends it
@@ -4922,35 +4844,21 @@ impl App {
     /// still has to list, and the panes a link opens are deliberately unfocused.
     /// Pumping only the focus left those showing "loading…" for ever.
     fn pump_remote_listings(&mut self) {
-        // 1. What arrived since the last frame. A listing that ends is applied
-        //    whole, in one `apply_listing`, which is the handshake the browser
-        //    was written for: the router's host-and-directory match drops a reply
-        //    to a directory the pane has left, so a slow batch cannot yank the
-        //    view back.
-        let mut finished = Vec::new();
-        let mut index = 0;
-        while index < self.remote_listings.len() {
-            if self.remote_listings[index].drain() {
-                finished.push(self.remote_listings.remove(index));
-            } else {
-                index += 1;
-            }
-        }
-        for listing in finished {
-            let Some(browser) = self.browser_waiting(&listing.alias, &listing.path) else {
-                tracing::debug!(
-                    alias = %listing.alias,
-                    path = %listing.path.display(),
-                    "a remote listing arrived for no pane"
-                );
-                continue;
-            };
-            browser.apply_listing(listing.path, listing.entries);
-            if let Some(message) = listing.failure {
-                // Rows that did arrive are still worth showing: the far side
-                // has them, and an empty pane would read as an empty directory.
-                browser.apply_failure(message);
-            }
+        // 1. What arrived since the last frame. The shared pump coalesces the
+        //    batches and applies a finished walk whole, in one `apply_listing`
+        //    (the handshake the browser was written for), routing by host *and*
+        //    directory: a reply to a directory the pane has left is dropped
+        //    rather than yanking the view back. It is taken out of `self`
+        //    because the panes and the pump are both borrowed mutably.
+        let mut pump = std::mem::take(&mut self.remote_pump);
+        let undelivered = pump.deliver(browsers(&mut self.tabs));
+        self.remote_pump = pump;
+        for listing in undelivered {
+            tracing::debug!(
+                host = %listing.host,
+                path = %listing.path.display(),
+                "a remote listing arrived for no pane"
+            );
         }
 
         // 2. What a pane is waiting for now. A request is only taken once the
@@ -4975,14 +4883,12 @@ impl App {
         }
         for (alias, path) in requests {
             match self.vfs.backend(&dtr_vfs::BackendId::Ssh(alias.clone())) {
-                Ok(backend) => self.remote_listings.push(RemoteListing::new(
-                    alias,
-                    path.clone(),
-                    backend.list(&path),
-                )),
+                Ok(backend) => self.remote_pump.start(alias, path, &backend),
                 Err(err) => {
                     let message = format!("{err:#}");
-                    if let Some(browser) = self.browser_waiting(&alias, &path) {
+                    if let Some(browser) =
+                        dtr_pane_host::waiter(browsers(&mut self.tabs), &alias, &path)
+                    {
                         browser.apply_failure(message);
                     }
                 }
@@ -5003,19 +4909,6 @@ impl App {
             path: remote,
         };
         self.begin_save(location, dest);
-    }
-
-    /// The pane waiting for this listing, on this host, still showing its
-    /// directory.
-    ///
-    /// A reply names the directory it answers and two panes can browse one host,
-    /// so the match is by host *and* by what the pane asked for. The directory
-    /// check is the stale-reply guard: `reload` leaves `awaiting` pointing at the
-    /// old directory while the new request is still only `pending`, so
-    /// `is_waiting_for` alone would accept a reply for the directory the pane
-    /// just left — and applying it would move the pane back.
-    fn browser_waiting(&mut self, alias: &str, path: &Path) -> Option<&mut Browser> {
-        listing_waiter(browsers(&mut self.tabs), alias, path)
     }
 
     /// Open a file pane over another machine, beside the terminal that is on it.
@@ -5925,10 +5818,10 @@ impl dtr_frame::App for App {
         // do. Sixteen milliseconds is the gate that turns a burst into one frame —
         // a 10 000-entry directory is 157 batches, and 157 repaints is 157
         // pictures nobody sees (`docs/manager.md` §3). A **remote** walk is the
-        // same state without a browser flag to ask: its batches are drained from
-        // `remote_listings`, so the in-flight list itself is what keeps frames
-        // coming until the answer is applied.
-        let listing = !self.remote_listings.is_empty()
+        // same state without a browser flag to ask: its batches are drained by
+        // the pump, so an in-flight walk is what keeps frames coming until the
+        // answer is applied.
+        let listing = !self.remote_pump.is_empty()
             || self.tabs.iter().any(|tab| {
                 tab.leaves
                     .values()
@@ -7715,9 +7608,8 @@ impl dtr_frame::Scene for GridScene<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BELL_FLASH, RemoteListing, WriteRequest, bell_alpha, cell_of, closed, copy_to, cycled,
-        listing_waiter, mouse_goes_to_program, remote_caps, save_name, tab_name,
-        wheel_reaches_the_terminal,
+        BELL_FLASH, WriteRequest, bell_alpha, cell_of, closed, copy_to, cycled,
+        mouse_goes_to_program, remote_caps, save_name, tab_name, wheel_reaches_the_terminal,
     };
     use dtr_files::WriteOp;
     use std::path::{Path, PathBuf};
@@ -8093,63 +7985,15 @@ mod tests {
         );
     }
 
-    /// The handshake's routing is by host *and* directory, and a listing that
-    /// lost a race with a navigation is not applied to the directory the pane is
-    /// showing now.
-    ///
-    /// `Browser::reload` leaves `awaiting` on the old directory while the new
-    /// request is still pending, so `is_waiting_for` alone would accept a reply
-    /// for the directory the pane just left. The app's router is what tells the
-    /// two apart.
-    #[test]
-    fn a_listing_goes_to_the_pane_waiting_for_it_and_not_one_that_moved_on() {
-        let mut build = dtr_files::Browser::remote_at("build", PathBuf::from("/srv/old"));
-        let mut other = dtr_files::Browser::remote_at("other", PathBuf::from("/srv/old"));
-        assert_eq!(
-            build.take_request(),
-            Some(("build".to_owned(), PathBuf::from("/srv/old")))
-        );
-        assert_eq!(
-            other.take_request(),
-            Some(("other".to_owned(), PathBuf::from("/srv/old")))
-        );
-
-        // Two panes can browse one directory, and one host can be browsed twice:
-        // only the host the listing names is the destination.
-        let picked = listing_waiter([&mut build, &mut other], "other", Path::new("/srv/old"))
-            .expect("the pane on that host is waiting");
-        assert_eq!(picked.alias(), Some("other"));
-
-        // Navigating leaves the walk's name in `awaiting` — a second request has
-        // not been taken yet — but the pane is showing another directory.
-        build.navigate(PathBuf::from("/srv/new"));
-        assert!(
-            build.is_waiting_for(Path::new("/srv/old")),
-            "the handshake still names the walk it started"
-        );
-        assert!(
-            listing_waiter([&mut build], "build", Path::new("/srv/old")).is_none(),
-            "a reply to the directory the pane left must be dropped, not applied"
-        );
-        assert_eq!(
-            build.take_request(),
-            Some(("build".to_owned(), PathBuf::from("/srv/new"))),
-            "the new directory is what it asks for next"
-        );
-        assert!(
-            listing_waiter([&mut build], "build", Path::new("/srv/new")).is_some(),
-            "and that request is the one a reply is matched against"
-        );
-    }
-
     /// One backend serves a remote pane's listing and its writes: request →
     /// `Backend::list` → the whole listing applied through the browser's
-    /// handshake, then a write request run through the same `Arc<dyn Backend>`
-    /// and visible on the other side.
+    /// handshake by the shared pump, then a write request run through the same
+    /// `Arc<dyn Backend>` and visible on the other side.
     ///
     /// `Memory` is the fake ssh host: it is the same `Backend` trait and it has
     /// the write caps, so this exercises the app's routing with no server and no
-    /// terminal.
+    /// terminal. The routing rule itself (host, directory, stale reply) is
+    /// `dtr-pane-host`'s and is tested there.
     #[compio::test]
     async fn a_remote_pane_lists_and_writes_through_one_backend() {
         let mem = std::sync::Arc::new(dtr_vfs::Memory::new());
@@ -8167,27 +8011,22 @@ mod tests {
             .expect("a remote pane asks for its directory");
         assert_eq!(alias, "mem");
         assert_eq!(path, PathBuf::from("/lab"));
-        let mut listing = RemoteListing::new(alias.clone(), path.clone(), backend.list(&path));
+        let mut pump = dtr_pane_host::Pump::new();
+        pump.start(alias, path, &backend);
         // `Memory`'s walk runs on the runtime's thread, so let it finish the way
-        // a frame would: drain until the stream closes.
+        // a frame would: drain until the listing has been applied.
         for _ in 0..100 {
-            if listing.drain() {
+            if pump.is_empty() {
                 break;
             }
             compio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let undelivered = pump.deliver(std::iter::once(&mut browser));
+            assert!(
+                undelivered.is_empty(),
+                "the pane is waiting for this directory"
+            );
         }
-        assert!(
-            listing.failure.is_none(),
-            "an in-memory listing cannot fail"
-        );
-        let entries = std::mem::take(&mut listing.entries);
-        assert_eq!(entries.len(), 2, "the walk's rows: {entries:?}");
-
-        // The listing is applied through the one handshake, only once it is
-        // whole — the browser was written for a single reply.
-        let pane = listing_waiter(std::iter::once(&mut browser), &alias, &path)
-            .expect("the pane is waiting for this directory");
-        pane.apply_listing(path.clone(), entries);
+        assert!(pump.is_empty(), "the walk finished");
         assert_eq!(browser.directory(), Path::new("/lab"));
         browser.select_only(1);
         assert_eq!(browser.selected_path(), Some(PathBuf::from("/lab/sub")));
