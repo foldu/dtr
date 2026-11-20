@@ -1162,8 +1162,8 @@ impl GridRenderer {
         let (face, glyph_id) = if sprite {
             (u32::MAX, ch as u32 as u16)
         } else {
-            let face = self.fonts.face_for(style, ch)?;
-            (face as u32, self.fonts.glyph_id(face, ch)?)
+            let (face, glyph_id) = self.fonts.resolve(style, ch)?;
+            (face as u32, glyph_id)
         };
         let constraint = constraint_for(ch);
         let key = (face, glyph_id, (size * 4.0) as u32, constraint, cells);
@@ -1585,6 +1585,16 @@ struct Fonts {
     /// Which face has each character in each style. `None` is cached too: a
     /// character nobody covers must not be searched for twice.
     resolved: HashMap<(u8, char), Option<usize>>,
+    /// The same answer once a glyph id is wanted too: `(style, char)` → the
+    /// face and the glyph it draws with.
+    ///
+    /// `glyph()` needs the pair for every cell of every frame, and resolving it
+    /// parses the font (`FontRef::from_index` and the cmap table). A full 4K
+    /// grid asks for about 8 400 glyphs a frame; caching the pair took that
+    /// frame's `prepare` from 1.9 ms to 1.2 ms in a release build (more in a
+    /// debug one), which is per-pixel work that buys nothing.
+    /// One parse per character per style, for the life of the renderer.
+    resolved_glyph: HashMap<(u8, char), Option<(usize, u16)>>,
     /// Families to try before the walk, in order — the configured `[font]
     /// fallback` list, then dtr's own — each with where the opinion came from.
     /// Built on the first missing character.
@@ -1719,6 +1729,7 @@ impl Fonts {
             context,
             metrics,
             resolved: HashMap::new(),
+            resolved_glyph: HashMap::new(),
             preferred: Vec::new(),
             rest: Vec::new(),
             monospaced: HashMap::new(),
@@ -2023,6 +2034,21 @@ impl Fonts {
         let font = self.font(face)?;
         let id = font.charmap().map(ch);
         (id != 0).then_some(id)
+    }
+
+    /// The face and glyph id a character draws with, resolved once per style.
+    ///
+    /// This is `face_for` plus `glyph_id`, with the answer kept: both parse the
+    /// font, and a frame asks for the same few characters thousands of times.
+    fn resolve(&mut self, style: Face, ch: char) -> Option<(usize, u16)> {
+        if let Some(answer) = self.resolved_glyph.get(&(style as u8, ch)) {
+            return *answer;
+        }
+        let answer = self
+            .face_for(style, ch)
+            .and_then(|face| self.glyph_id(face, ch).map(|id| (face, id)));
+        self.resolved_glyph.insert((style as u8, ch), answer);
+        answer
     }
 
     fn rasterise(

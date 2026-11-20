@@ -319,16 +319,28 @@ Keystroke → pty → parse → publish → repaint → draw → present:
   (`crates/dtr/src/pane.rs:59`); when the pane is hot it waits out the gate before publishing
   (`crates/dtr/src/pane.rs:1155`). Idle sessions publish immediately (the deadline is in the
   past), so a prompt is not delayed — but sustained typing pays up to 8.3 ms at 60 Hz.
-- **Present.** `AutoVsync` (`crates/dtr/src/app.rs:4237`) with `present` on the same thread
-  as event handling (`crates/dtr/src/app.rs:4639`), so it can block for up to a vblank and
-  delay the next input event.
-- **Measurement gap.** `cpu_ms` is taken *before* `present` (`crates/dtr/src/app.rs:4638`), so
-  the existing `slow frame` log cannot show a vsync wait. Anything felt as latency is
-  currently invisible.
+- **Present.** `AutoVsync` (`crates/dtr/src/app.rs`), one frame in the
+  compositor's queue: `desired_maximum_frame_latency` is set to 1. On DX12 the
+  wait for a free swapchain buffer happens in `get_current_texture` — wgpu's DX12
+  backend waits on the frame-latency waitable object there, on the UI thread —
+  so the default depth of 2 could delay a keystroke's echo by a whole refresh
+  before the frame was even drawn. `wgpu-hal`'s Vulkan backend ignores the
+  field, so this changes nothing on Linux.
+- **Measurement gap the overlay has to close.** `cpu_ms` is taken *before* `present`,
+  but on DX12 the vblank wait is in `acquire`, which is *inside* `cpu_ms`: the
+  number already contains the compositor's stall and so cannot be read as "our
+  work". A frame-phase instrument must start the clock after
+  `get_current_texture` and keep acquire and present as separate maxima.
+- **Publish gate.** Half a refresh interval, floored at 2 ms
+  (`crates/dtr/src/pane.rs`): 8.3 ms at 60 Hz, 4.2 ms at 120 Hz, and **16.7 ms in
+  a 30 Hz mode** — a 4K laptop panel is the place a 30 Hz mode actually happens,
+  and there the gate alone is more than a refresh of echo latency. Whatever
+  counter reads the frame budget (an overlay, or the `publish gate` debug line
+  when the panel changes) is where to check which mode the machine is in.
 
-Expected worst case before the compositor is ~25 ms (gate + vblank); whether that is what is
-being felt on Windows is a measurement, not an argument. Windows adds DWM composition on top,
-and the display's actual refresh mode matters (Windows will happily run a panel at 30 Hz).
+Expected worst case before the compositor is gate + one refresh; the latency
+hint above removes one frame of queueing, which is the only part of that chain
+this tree controls.
 
 ### 5.2 The debug counter (note 7)
 
@@ -377,19 +389,57 @@ looking at a laggy window should not have to run `-v` on the machine they are lo
 
 ### 5.3 Resize (note 10)
 
-- Every `WindowEvent::Resized` calls `surface.configure` and requests a redraw
-  (`crates/dtr/src/app.rs:4329`), and the handler also calls `fit_panes`, which the frame loop
-  runs anyway (`crates/dtr/src/app.rs:3571`, `crates/dtr/src/app.rs:3774`).
-- Windows delivers a `Resized` per `WM_SIZE` during a live drag, so that is a swapchain
-  reconfigure plus a blocking present per event.
-- `fit_panes` sends a pty resize whenever the cell grid changes, and on Windows that is a
-  ConPTY resize — inference, not measured here, but it is the same cost Windows Terminal pays,
-  which is consistent with "not really much better there".
+**Done: configure once per frame, not once per event.** `WindowEvent::Resized` now only records
+the size (`Gpu::resize`); the frame that draws it calls `Gpu::configure_pending_resize` first,
+and the pty is re-fitted by the same frame (`fit_panes` there, not in the handler). Measured on
+Xvfb/llvmpipe, `-v` counting `surface resized` lines:
 
-Cheap wins to try, in order: configure once per drawn frame (or only when the size has been
-stable), drop the redundant `fit_panes` from the handler, and only then consider a present
-mode other than vsync during a drag. Measure with §5.2 before and after; the honest
-expectation is a modest improvement, not a transformation.
+| how the sizes arrive | events | `surface.configure` calls |
+|---|---|---|
+| 120 resizes, 16 ms apart (a slow drag) | 120 | 120 before the change — one per event |
+| 300 resizes back to back (a fast drag, or a maximise animation) | 300 | **1** after the change — one per drawn frame |
+
+The second row is the point. Windows delivers one `WM_SIZE` per mouse move, so a fast drag on a
+1000 Hz mouse can put a dozen between two frames — and every `surface.configure` waits for the
+present queue to go idle in wgpu's DX12 backend (`device.wait_for_present_queue_idle`, then
+`ResizeBuffers`), so that was up to a dozen swapchain rebuilds per drawn frame. Each configure
+measured 0.6–1.3 ms on llvmpipe Vulkan; a DX12 `ResizeBuffers` is not cheaper.
+
+The redundant per-event `fit_panes` is gone with it: it sent a pty resize whenever the cell grid
+changed, which during a drag is most events, and on Windows that is a ConPTY resize per mouse
+move. The frame path still re-fits every pane (`fit_panes` is called once per drawn frame and
+sends nothing when the cell grid is unchanged), and the burst above was checked end to end:
+after it, `stty size` inside the shell reported `30 92` for a 1300×900 window at 150 %.
+
+What is left is inherent: the frame that draws a new size still reconfigures once, and a
+ConPTY resize still happens when the cell count changes. The honest expectation stays "modest",
+but the per-event multiplier is gone.
+
+### 5.4 The 4K grid (a full screen of glyphs)
+
+A 3840×2160 window at 150 % is a ~21 000-cell pane (~8 400 painted glyphs). Measured with
+`--cpu-profile` and temporary phase timers on the dev host (release build, llvmpipe, so the GPU
+side is software and only the CPU-side numbers are worth quoting):
+
+- **Idle is quiet**: 6–10 loop iterations/s, 0–2 frames/s, the two frames being the new-tab
+  destination scan finishing twice a second. There is no redraw spin to fix.
+- **`GridRenderer::prepare` was 1.9 ms per frame of a 4K grid, and 1.2 ms after the cache.** The
+  cost was re-resolving every glyph's face and glyph id, which parses the font
+  (`FontRef::from_index` and its cmap table): one parse per glyph per frame. `Fonts::resolve`
+  now caches `(style, char)` → `(face, glyph id)` and the same frame costs 1.2 ms; at 1350×930
+  the same measurement is 0.22–0.27 ms. The gain is per-pixel work; the software renderer's
+  `submit`/`present` dominated the rest of the 4K frame, so that part needs the Windows machine
+  to judge.
+- The egui chrome is ~0.2 ms on a frame that redraws nothing new, with occasional 1–5 ms spikes
+  not yet explained (not per-pixel: it does not appear at small windows). The overlay is the
+  instrument for that on Windows.
+
+Not changed, and why: `COPY_SRC` on the window surface (needed for `--capture`, no evidence it
+costs anything on DX12); adapter selection (`HighPerformance` on an Intel-only laptop is still
+the Intel iGPU, and `WGPU_BACKEND=dx12|vulkan` already lets the machine A/B the two backends
+without a rebuild); and the grid/egui render passes, which could be one pass — that saves a
+full-surface `Load` on a tile-based GPU, but merging them measured no gain at all on llvmpipe,
+so it is a Windows A/B candidate rather than a change to make blind.
 
 ---
 
@@ -437,7 +487,9 @@ was last in §7.
 4. **Baud in the connect flow (§3.1) — done.** The serial connection sheet asks, with fifteen
    rates and a typeable field.
 5. **Autobaud (§3.2)** — after the safety decision in §9.
-6. **Resize (§5.3)** — after the counter says where the milliseconds are.
+6. **Resize (§5.3) — done.** One swapchain configure per drawn frame instead of one per
+   `WM_SIZE`, and the pty re-fitted once per frame instead of once per event. The counter
+   (§5.2) is still the thing that says how much of the rest is ConPTY.
 7. **Tabs in the header (§6)** — implemented; [chrome.md](chrome.md) §11 is the record,
    including the flyout that did not reproduce in the guest.
 

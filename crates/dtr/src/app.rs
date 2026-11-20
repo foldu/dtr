@@ -5725,17 +5725,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::Resized(size) => {
+                // Remembered, not applied: Windows delivers one `WM_SIZE` per
+                // mouse move during a drag, and `Gpu::configure_pending_resize`
+                // turns however many arrive between two frames into one
+                // `surface.configure` — each of which waits for the present
+                // queue to go idle on DX12 (docs/windows.md §5.3). The pty is
+                // re-fitted by the frame that draws the new size, not here.
                 gpu.resize(size);
-                // The surface is not the only thing that depends on the window
-                // size: the terminal's rows and columns do, and every pane
-                // rectangle does. Without this the pty keeps the grid of the old
-                // window, and with a strip across the top the first row slides
-                // underneath it.
-                let (metrics, scale) = match self.gpu.as_ref() {
-                    Some(gpu) => (gpu.metrics(), gpu.scale()),
-                    None => return,
-                };
-                self.fit_panes(metrics, (size.width as f32, size.height as f32), scale);
                 self.repaint("resize");
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -5860,6 +5856,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // across a field and the whole struct.
                 let mut gpu = self.gpu.take();
                 if let Some(gpu) = gpu.as_mut() {
+                    // One swapchain reconfigure for however many `Resized`
+                    // events arrived since the last frame, before anything in
+                    // this frame reads the size.
+                    gpu.configure_pending_resize();
                     // The status strip follows the focused pane. A file pane has
                     // no byte counters, and saying so is more honest than showing
                     // the terminal beside it as if it were focused.
@@ -6575,6 +6575,9 @@ struct Gpu {
     /// The adapter wgpu picked. `-v` logs it once at startup; the overlay names
     /// the GPU that produced the numbers it is showing.
     adapter_name: String,
+    /// The window's last reported size, until the next drawn frame configures
+    /// the surface for it. A drag reports many; only the last one is drawn.
+    pending_size: Option<winit::dpi::PhysicalSize<u32>>,
     /// The title the window was last told, so a frame that changes nothing does
     /// not talk to the window manager — which on Wayland is a round trip.
     title: String,
@@ -6723,6 +6726,17 @@ impl Gpu {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| anyhow::anyhow!("adapter cannot present to this surface"))?;
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // One frame in the compositor's queue, not two.
+        //
+        // On DX12 — the backend a Windows machine gets — wgpu waits for a
+        // swapchain buffer inside `get_current_texture`, on this thread, through
+        // the frame-latency waitable object (`wgpu-hal`'s DX12 surface). A depth
+        // of two lets the CPU run a frame ahead, so a keystroke's echo can sit
+        // behind a whole refresh before it is even drawn; one is the lowest the
+        // API allows and the terminal draws at most one frame per vblank, so
+        // nothing is lost in throughput. Vulkan ignores the field, so Linux is
+        // unchanged.
+        config.desired_maximum_frame_latency = 1;
         // Copyable so the window can photograph itself: that is the only way to
         // verify what the *window* draws, as opposed to what the offscreen
         // capture path draws — and the two have disagreed before.
@@ -6808,6 +6822,7 @@ impl Gpu {
             cpu_ms: 0.0,
             frame_samples: crate::stats::FrameSamples::default(),
             adapter_name,
+            pending_size: None,
             title: String::new(),
             installed_skin: Some(skin),
             window,
@@ -6878,10 +6893,35 @@ impl Gpu {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        self.pending_size = Some(size);
+    }
+
+    /// Push the last reported window size into the swapchain, once per drawn
+    /// frame.
+    ///
+    /// `WindowEvent::Resized` only records the size, because a window drag on
+    /// Windows delivers a `WM_SIZE` per mouse move and every `surface.configure`
+    /// waits for the present queue to go idle (wgpu's DX12 backend does), so a
+    /// configure per event is a vblank wait per event. Configuring at the top of
+    /// the frame that draws the new size gives the same picture once, and the
+    /// frame is the thing that was going to be limited anyway.
+    fn configure_pending_resize(&mut self) {
+        let Some(size) = self.pending_size.take() else {
+            return;
+        };
+        if size.width == self.config.width && size.height == self.config.height {
+            return;
+        }
         self.config.width = size.width;
         self.config.height = size.height;
+        let began = std::time::Instant::now();
         self.surface.configure(&self.device, &self.config);
-        self.window.request_redraw();
+        tracing::debug!(
+            width = size.width,
+            height = size.height,
+            us = began.elapsed().as_micros() as u64,
+            "surface resized"
+        );
     }
 
     fn render(
