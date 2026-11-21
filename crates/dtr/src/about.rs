@@ -21,15 +21,27 @@ pub enum Event {
 
 /// Draw the card. It reads nothing but the skin: every fact on it is a compile-
 /// time constant, so it cannot disagree with the binary that is running.
-#[allow(deprecated)] // one fixed overlay: the id is a name, not a hash of state
 pub fn ui(ui: &mut Ui, look: &Look) -> Option<Event> {
+    draw(ui, look, env!("CARGO_PKG_VERSION"))
+}
+
+/// The card with the version given rather than compiled in, so the kittest
+/// snapshot can pin one. A baseline that carries the release version fails on
+/// the tag instead of on the branch: the bump happens after `just release`'s
+/// gate has passed, and the job that would notice is the one that publishes, so
+/// every release would need a regenerated picture committed after the fact.
+/// The picture holds a fixed version; the version this binary reports is
+/// asserted without one.
+#[allow(deprecated)] // one fixed overlay: the id is a name, not a hash of state
+fn draw(ui: &mut Ui, look: &Look, version: &str) -> Option<Event> {
     let skin = look.skin();
     let style = &skin.style;
     let palette = skin.palette;
+    let note = format!("version {version}");
     let out = dtr_widgets::Card::new(egui::Id::new("dtr-about"), "dtr")
         .size(WIDTH, HEIGHT)
         .body_min(280.0)
-        .note(concat!("version ", env!("CARGO_PKG_VERSION")))
+        .note(&note)
         .close("close about")
         .show(ui, &skin, |ui, _inner| {
             ui.add_space(style.gap * 2.0);
@@ -83,15 +95,27 @@ mod tests {
     /// The card names the binary that is running, and closes on its own cross.
     #[test]
     fn the_about_card_says_which_version_this_is() {
+        // A fixed version, because the snapshot is compared byte-exactly on the
+        // tag: `0.0.0` never moves, so a release cannot invalidate its own gate.
         let look = crate::ui::Look::default();
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(900.0, 620.0))
             .build_ui(move |ui| {
-                let _ = super::ui(ui, &look);
+                let _ = super::draw(ui, &look, "0.0.0");
+            });
+        harness.run_steps(2);
+        harness.get_by_label("version 0.0.0");
+        harness.get_by_label("a super serial terminal");
+        harness.snapshot("about");
+
+        // And the real card says what the binary was built as.
+        let real = crate::ui::Look::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 620.0))
+            .build_ui(move |ui| {
+                let _ = super::ui(ui, &real);
             });
         harness.run_steps(2);
         harness.get_by_label(&format!("version {}", env!("CARGO_PKG_VERSION")));
-        harness.get_by_label("a super serial terminal");
-        harness.snapshot("about");
     }
 }
