@@ -32,6 +32,10 @@ pub struct Palette {
     pub card: Color32,
     /// An inset surface inside a card: a list, a well, a row that is not a control.
     pub well: Color32,
+    /// The window's own title bar and tab strip: Adwaita's `headerbar_bg_color`,
+    /// which is part of the window rather than a raised container. A preset with
+    /// no such distinction uses its card.
+    pub headerbar: Color32,
     /// An idle control: a button, a field, a combo box.
     pub control: Color32,
     pub control_hover: Color32,
@@ -65,6 +69,42 @@ pub struct Palette {
     /// The two-tone focus ring; a style with `Focus::None` does not draw it.
     pub focus_outer: Color32,
     pub focus_inner: Color32,
+}
+
+/// The named colours a desktop's own stylesheet repainted, where it can.
+///
+/// `native` starts from libadwaita's measured constants ([`Palette::adwaita`]);
+/// a user's `gtk.css` may legally redefine every one of them, and this is the set
+/// dtr maps. `None` keeps the constant. A colour may carry alpha — the dark
+/// sheet's `card_bg_color` is 8 % white — and [`Palette::adwaita_with`]
+/// composites it over the surface it is drawn on, which is what GTK does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Overrides {
+    pub window: Option<Color32>,
+    pub card: Option<Color32>,
+    pub well: Option<Color32>,
+    pub headerbar: Option<Color32>,
+    pub text: Option<Color32>,
+    pub accent: Option<Color32>,
+    pub on_accent: Option<Color32>,
+    pub danger: Option<Color32>,
+    pub on_danger: Option<Color32>,
+}
+
+impl Overrides {
+    /// Whether the stylesheet said anything dtr can use; `-v` uses it to tell a
+    /// session with a `gtk.css` from one without.
+    pub fn is_empty(&self) -> bool {
+        self.window.is_none()
+            && self.card.is_none()
+            && self.well.is_none()
+            && self.headerbar.is_none()
+            && self.text.is_none()
+            && self.accent.is_none()
+            && self.on_accent.is_none()
+            && self.danger.is_none()
+            && self.on_danger.is_none()
+    }
 }
 
 /// The accent ladder Windows keeps beside the base colour.
@@ -107,6 +147,7 @@ impl Palette {
             window,
             card,
             well: card,
+            headerbar: card,
             control: mix(card, text, 0.07),
             control_hover: mix(card, text, 0.13),
             control_active: mix(card, accent, 0.16),
@@ -195,6 +236,7 @@ impl Palette {
             window: base,
             card: base,
             well: secondary,
+            headerbar: base,
             control: over(base, argb(control)),
             control_hover: over(base, argb(hover)),
             control_active: over(base, argb(active)),
@@ -229,26 +271,34 @@ impl Palette {
         }
     }
 
-    /// GNOME's palette, from libadwaita 1.9.3's own stylesheet.
+    /// libadwaita's own chrome, from its 1.9.3 stylesheet.
     ///
-    /// The surfaces are measured out of the gresource — `window_bg_color`,
-    /// `view_bg_color`, `dialog_bg_color` — and the light foreground is the
-    /// `RGB(0 0 6 / 80%)` that stylesheet declares, composited over the window
-    /// because a slot here has to be a colour. The rest is Adwaita's own rule
-    /// applied to them: a control is `color-mix(currentColor 10%, transparent)`
-    /// over the card, a border 15 %, dim text 55 %, disabled 50 % — the three
-    /// opacities in the sheet's `:root` — and a focus ring is the accent at 50 %.
-    ///
-    /// `on_accent` is white for *every* accent, the yellow and orange ones
-    /// included, because that is what libadwaita injects. Matching the desktop
-    /// means matching this rather than improving on it; the contrast complaint
-    /// belongs to the library.
+    /// The surfaces are measured constants and the two values that vary — the
+    /// scheme and the accent — are the caller's. [`Palette::adwaita_with`] takes
+    /// the rest when a user stylesheet repainted them.
     pub fn adwaita(dark: bool, accent: Color32) -> Self {
-        let (window, card, well, fg, danger) = if dark {
+        Self::adwaita_with(dark, accent, &Overrides::default())
+    }
+
+    /// The same palette, with the named colours a user's `gtk.css` redefined.
+    ///
+    /// GTK resolves `@window_bg_color` and its siblings through the user's
+    /// stylesheet first, so a file that sets them is what a libadwaita window
+    /// actually shows; the constants are only the floor. A translucent override
+    /// is composited over the surface it is drawn on, which is what GTK does with
+    /// the dark sheet's `card_bg_color: RGB(255 255 255 / 8%)`, and the user's
+    /// own `accent_fg_color` and `destructive_fg_color` are read rather than
+    /// assumed white — a Material theme paints `#000000` on orange and `#601410`
+    /// on a pale pink, and white on either is unreadable.
+    pub fn adwaita_with(dark: bool, accent: Color32, overrides: &Overrides) -> Self {
+        let (window, card, well, headerbar, fg, danger) = if dark {
             (
                 rgb([0x22, 0x22, 0x26]),
+                // `dialog_bg_color`: the raised container dtr's cards draw on.
                 rgb([0x36, 0x36, 0x3A]),
                 rgb([0x1D, 0x1D, 0x20]),
+                // `headerbar_bg_color`.
+                rgb([0x2E, 0x2E, 0x32]),
                 Color32::WHITE,
                 rgb([0xC0, 0x1C, 0x28]),
             )
@@ -257,19 +307,32 @@ impl Palette {
                 rgb([0xFA, 0xFA, 0xFB]),
                 rgb([0xFA, 0xFA, 0xFB]),
                 rgb([0xFF, 0xFF, 0xFF]),
+                rgb([0xFF, 0xFF, 0xFF]),
                 // `window_fg_color` is 80 % of `#000006`; over the window that is
                 // `#323237`, which is what a label actually shows.
                 over(rgb([0xFA, 0xFA, 0xFB]), argb(0xCC00_0006)),
                 rgb([0xE0, 0x1B, 0x24]),
             )
         };
-        // `currentColor` in Adwaita is the foreground, so every derived slot is
-        // a mix of it over the surface it is drawn on.
+        let window = overrides.window.unwrap_or(window);
+        let card = overrides.card.map_or(card, |colour| over(window, colour));
+        let well = overrides.well.map_or(well, |colour| over(window, colour));
+        let headerbar = overrides
+            .headerbar
+            .map_or(headerbar, |colour| over(window, colour));
+        let accent = overrides.accent.unwrap_or(accent);
+        let danger = overrides.danger.unwrap_or(danger);
+        // `currentColor` in Adwaita is the foreground, so every derived slot is a
+        // mix of it over the surface it is drawn on. The text slot itself is that
+        // foreground drawn on the window, because a token may carry alpha.
+        let fg = overrides.text.unwrap_or(fg);
+        let text = over(window, fg);
         let tinted = |t: f32| mix(card, fg, t);
         Self {
             window,
             card,
             well,
+            headerbar,
             control: tinted(0.10),
             control_hover: tinted(0.15),
             control_active: tinted(0.30),
@@ -278,20 +341,121 @@ impl Palette {
             border_strong: tinted(0.25),
             control_strong: tinted(0.40),
             divider: with_alpha(tinted(0.15), 46),
-            text: fg,
+            text,
             dim: tinted(0.55),
             disabled: tinted(0.50),
             accent,
-            accent_hover: mix(accent, fg, 0.10),
-            accent_active: mix(accent, fg, 0.06),
-            on_accent: Color32::WHITE,
+            accent_hover: mix(accent, text, 0.10),
+            accent_active: mix(accent, text, 0.06),
+            on_accent: overrides.on_accent.unwrap_or(Color32::WHITE),
             // A row selection is `color-mix(accent 25%, transparent)` over the
             // view, not a solid accent: the text on top stays readable.
             selection: mix(well, accent, 0.25),
-            on_selection: fg,
+            on_selection: text,
             scrim: Color32::from_black_alpha(140),
             danger,
+            on_danger: overrides.on_danger.unwrap_or(Color32::WHITE),
+            focus_outer: mix(card, accent, 0.50),
+            focus_inner: card,
+        }
+    }
+
+    /// Apple's macOS palette — a look-alike, not a measurement.
+    ///
+    /// The slots are AppKit's semantic colours as Apple documents them: a
+    /// light surface with white controls, `labelColor` at 85 % of the text
+    /// colour, `secondaryLabelColor` at 50 % (55 % in the dark),
+    /// `separatorColor` at 10 %, and `selectedContentBackgroundColor` for a
+    /// selection. AppKit hands those out as translucent colours — a slot here
+    /// has to be opaque — so each is composited over the surface it is drawn
+    /// on, the same rule [`Palette::windows_with_accent`] follows for WinUI.
+    ///
+    /// `accent` is the caller's: [`crate::Choice`] passes Apple's `systemBlue`
+    /// when the config names none, and a user's colour when it does. It is *not*
+    /// read from a Mac: there is no macOS reader in this program, and a palette
+    /// that guessed at a desktop nobody measured would be worse than this one,
+    /// which says it is a look-alike.
+    pub fn macos(dark: bool, accent: Color32) -> Self {
+        let (window, card, well) = if dark {
+            (
+                rgb([0x1E, 0x1E, 0x1E]),
+                rgb([0x1E, 0x1E, 0x1E]),
+                rgb([0x16, 0x16, 0x16]),
+            )
+        } else {
+            (
+                rgb([0xEC, 0xEC, 0xEC]),
+                rgb([0xEC, 0xEC, 0xEC]),
+                Color32::WHITE,
+            )
+        };
+        let ink = if dark { Color32::WHITE } else { Color32::BLACK };
+        // AppKit's percentages, as alpha over the card. `labelColor` is 85 % of
+        // the label ink in either appearance; the two dimmer steps differ.
+        let text = over(card, with_alpha(ink, 217));
+        let dim = over(card, with_alpha(ink, if dark { 140 } else { 128 }));
+        let disabled = over(card, with_alpha(ink, if dark { 77 } else { 66 }));
+        // `controlColor`: white in the light, a 25 % white plane in the dark.
+        // A control in a dark Mac window is that plane over the window, not a
+        // grey of its own, which is why the three states are three alphas.
+        let control = if dark {
+            over(card, with_alpha(Color32::WHITE, 20))
+        } else {
+            Color32::WHITE
+        };
+        let control_hover = if dark {
+            over(card, with_alpha(Color32::WHITE, 31))
+        } else {
+            mix(control, text, 0.05)
+        };
+        let control_active = if dark {
+            over(card, with_alpha(Color32::WHITE, 51))
+        } else {
+            mix(control, text, 0.10)
+        };
+        // A control's edge is `separatorColor`-weight over the control itself:
+        // a 1-point hairline that separates a white button from a light window.
+        let border = over(control, with_alpha(ink, if dark { 31 } else { 38 }));
+        let border_strong = over(control, with_alpha(ink, if dark { 56 } else { 64 }));
+        // `secondaryLabelColor` is the strongest stroke a resting control has —
+        // a checkbox's box and a field's edge, which have to be findable.
+        let control_strong = over(control, with_alpha(ink, if dark { 115 } else { 128 }));
+        Self {
+            window,
+            card,
+            well,
+            headerbar: card,
+            control,
+            control_hover,
+            control_active,
+            border,
+            border_strong,
+            control_strong,
+            divider: with_alpha(over(card, with_alpha(ink, 25)), 46),
+            text,
+            dim,
+            disabled,
+            accent,
+            accent_hover: mix(accent, text, 0.08),
+            accent_active: mix(accent, text, 0.18),
+            on_accent: readable_on(accent),
+            // `selectedContentBackgroundColor`: Apple's own, not the accent —
+            // they differ by a shade and the selection is the one people see.
+            selection: if dark {
+                rgb([0x00, 0x59, 0xD1])
+            } else {
+                rgb([0x00, 0x64, 0xE1])
+            },
+            on_selection: Color32::WHITE,
+            scrim: Color32::from_black_alpha(140),
+            danger: if dark {
+                rgb([0xFF, 0x45, 0x3A])
+            } else {
+                rgb([0xFF, 0x3B, 0x30])
+            },
             on_danger: Color32::WHITE,
+            // A Mac focus ring is the accent at 50 % outside the control, not a
+            // two-tone Windows ring.
             focus_outer: mix(card, accent, 0.50),
             focus_inner: card,
         }
@@ -335,6 +499,7 @@ impl Palette {
             window: visuals.panel_fill,
             card,
             well: visuals.extreme_bg_color,
+            headerbar: card,
             control: widgets.inactive.weak_bg_fill,
             control_hover: widgets.hovered.weak_bg_fill,
             control_active: widgets.active.weak_bg_fill,
@@ -532,6 +697,8 @@ mod tests {
             Palette::windows(false, Color32::from_rgb(0x00, 0x5F, 0xB8)),
             Palette::adwaita(true, Color32::from_rgb(0x35, 0x84, 0xE4)),
             Palette::adwaita(false, Color32::from_rgb(0x35, 0x84, 0xE4)),
+            Palette::macos(true, Color32::from_rgb(0x0A, 0x84, 0xFF)),
+            Palette::macos(false, Color32::from_rgb(0x00, 0x7A, 0xFF)),
             Palette::egui(true, Color32::from_rgb(0x5A, 0xAA, 0xFF)),
             Palette::egui(false, Color32::from_rgb(0x00, 0x9B, 0xFF)),
         ] {
@@ -553,6 +720,9 @@ mod tests {
         assert_eq!(dark.window, rgb([0x22, 0x22, 0x26]));
         assert_eq!(dark.card, rgb([0x36, 0x36, 0x3A]));
         assert_eq!(dark.well, rgb([0x1D, 0x1D, 0x20]));
+        // `headerbar_bg_color`: the title bar is part of the window, not a
+        // popover, and a tab strip painted in the card was one shade too light.
+        assert_eq!(dark.headerbar, rgb([0x2E, 0x2E, 0x32]));
         assert_eq!(dark.text, Color32::WHITE);
         assert_eq!(dark.danger, rgb([0xC0, 0x1C, 0x28]));
         assert!(dark.is_dark());
@@ -561,6 +731,7 @@ mod tests {
         assert_eq!(light.window, rgb([0xFA, 0xFA, 0xFB]));
         assert_eq!(light.card, rgb([0xFA, 0xFA, 0xFB]));
         assert_eq!(light.well, Color32::WHITE);
+        assert_eq!(light.headerbar, Color32::WHITE);
         // `window_fg_color` is 80 % of `#000006`, composited over the window.
         assert_eq!(light.text, rgb([0x32, 0x32, 0x37]));
         assert_eq!(light.danger, rgb([0xE0, 0x1B, 0x24]));
@@ -591,6 +762,59 @@ mod tests {
         assert_ne!(palette.selection, palette.accent);
     }
 
+    /// What a customised GNOME actually shows: the user's `gtk.css` repaints
+    /// every surface, and its `accent_fg_color`/`destructive_fg_color` are read
+    /// rather than assumed white — a Material theme paints black on orange and
+    /// `#601410` on a pale pink, and white on either is unreadable.
+    #[test]
+    fn adwaita_takes_the_colours_a_user_stylesheet_redefined() {
+        let overrides = Overrides {
+            window: Some(rgb([0x27, 0x1E, 0x1A])),
+            card: Some(rgb([0x32, 0x28, 0x24])),
+            well: Some(rgb([0x23, 0x1A, 0x16])),
+            headerbar: Some(rgb([0x27, 0x1E, 0x1A])),
+            text: Some(rgb([0xF0, 0xDF, 0xD8])),
+            accent: Some(rgb([0xFF, 0x6D, 0x00])),
+            on_accent: Some(Color32::BLACK),
+            danger: Some(rgb([0xF2, 0xB8, 0xB5])),
+            on_danger: Some(rgb([0x60, 0x14, 0x10])),
+        };
+        let palette = Palette::adwaita_with(true, Color32::from_rgb(0x35, 0x84, 0xE4), &overrides);
+        assert_eq!(palette.window, rgb([0x27, 0x1E, 0x1A]));
+        assert_eq!(palette.card, rgb([0x32, 0x28, 0x24]));
+        assert_eq!(palette.well, rgb([0x23, 0x1A, 0x16]));
+        assert_eq!(palette.headerbar, rgb([0x27, 0x1E, 0x1A]));
+        assert_eq!(palette.text, rgb([0xF0, 0xDF, 0xD8]));
+        assert_eq!(palette.accent, rgb([0xFF, 0x6D, 0x00]));
+        assert_eq!(palette.on_accent, Color32::BLACK);
+        assert_eq!(palette.danger, rgb([0xF2, 0xB8, 0xB5]));
+        assert_eq!(palette.on_danger, rgb([0x60, 0x14, 0x10]));
+        // The derived slots follow the same rule from the new base, and `is_dark`
+        // still follows the card, which is the one surface a window is.
+        assert_eq!(
+            palette.control,
+            mix(palette.card, rgb([0xF0, 0xDF, 0xD8]), 0.10)
+        );
+        assert_eq!(palette.selection, mix(palette.well, palette.accent, 0.25));
+        assert!(palette.is_dark());
+    }
+
+    /// `card_bg_color` is 8 % white in the dark sheet and the foreground is 80 %
+    /// ink in the light one: a slot has to be opaque, so a translucent override is
+    /// composited over the window it is drawn on.
+    #[test]
+    fn adwaita_composites_a_translucent_override() {
+        let translucent = Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 0x14);
+        let overrides = Overrides {
+            window: Some(rgb([0x20, 0x20, 0x20])),
+            card: Some(translucent),
+            ..Overrides::default()
+        };
+        let palette = Palette::adwaita_with(true, Color32::BLUE, &overrides);
+        assert_eq!(palette.card, over(rgb([0x20, 0x20, 0x20]), translucent));
+        assert_eq!(palette.card.a(), 255);
+    }
+
     /// libadwaita 1.9.3 injects white `accent_fg_color` for every accent,
     /// including the yellow ones. Matching the desktop means matching this; the
     /// contrast complaint belongs to the library, not to a palette that quietly
@@ -606,6 +830,63 @@ mod tests {
                 assert_eq!(Palette::adwaita(dark, accent).on_accent, Color32::WHITE);
             }
         }
+    }
+
+    /// macOS' surfaces are the ones AppKit names: a light window grey with
+    /// white controls, and a dark window whose controls are a white plane over
+    /// it rather than a grey of their own.
+    #[test]
+    fn macos_derives_its_controls_from_appkit_s_semantic_colours() {
+        let accent = Color32::from_rgb(0x00, 0x7A, 0xFF);
+        let light = Palette::macos(false, accent);
+        assert_eq!(light.window, rgb([0xEC, 0xEC, 0xEC]));
+        assert_eq!(light.card, rgb([0xEC, 0xEC, 0xEC]));
+        assert_eq!(light.well, Color32::WHITE);
+        // `labelColor` is 85 % of black over the window, and that is #232323.
+        assert_eq!(light.text, rgb([0x23, 0x23, 0x23]));
+        // `secondaryLabelColor` is 50 % over the window.
+        assert_eq!(light.dim, rgb([0x76, 0x76, 0x76]));
+        assert_eq!(light.control, Color32::WHITE);
+        assert!(!light.is_dark());
+        assert_eq!(light.accent, accent);
+        assert_eq!(
+            light.selection,
+            rgb([0x00, 0x64, 0xE1]),
+            "the selection is `selectedContentBackgroundColor`, not the accent"
+        );
+
+        let dark = Palette::macos(true, Color32::from_rgb(0x0A, 0x84, 0xFF));
+        assert_eq!(dark.window, rgb([0x1E, 0x1E, 0x1E]));
+        assert_eq!(dark.card, rgb([0x1E, 0x1E, 0x1E]));
+        // A dark control is 8 % white over the window, not a listed grey.
+        assert_eq!(
+            dark.control,
+            over(dark.card, with_alpha(Color32::WHITE, 20))
+        );
+        // `labelColor` is 85 % of white over the window.
+        assert_eq!(dark.text, rgb([0xDD, 0xDD, 0xDD]));
+        assert!(dark.is_dark());
+        assert_eq!(dark.selection, rgb([0x00, 0x59, 0xD1]));
+        assert_ne!(light.accent, dark.accent, "Apple's two system blues");
+    }
+
+    /// Apple puts white on its blue, and the failsafe is the same one egui's
+    /// palette uses: the ink is chosen from the accent's luminance, so a person
+    /// who picks a pale yellow still gets black on it.
+    #[test]
+    fn macos_picks_readable_ink_on_its_accent() {
+        assert_eq!(
+            Palette::macos(false, Color32::from_rgb(0x00, 0x7A, 0xFF)).on_accent,
+            Color32::WHITE
+        );
+        assert_eq!(
+            Palette::macos(true, Color32::from_rgb(0x0A, 0x84, 0xFF)).on_accent,
+            Color32::WHITE
+        );
+        assert_eq!(
+            Palette::macos(false, Color32::from_rgb(0xFF, 0xCC, 0x00)).on_accent,
+            Color32::BLACK
+        );
     }
 
     /// The egui preset is egui's own numbers, asked of the egui that is compiled

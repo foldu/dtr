@@ -117,7 +117,7 @@ recipe pushes the commit and the tag to both.
   result three ways: the PNG's size is the window in *physical* pixels (900 × 620 at 1×,
   1800 × 1240 at 2×), `magick identify` catches a window that did not scale at all, and
   `stty size` from inside the shell is the pane's cell count — the number that changes
-  when the *cell* scales (100 × 34 at 1×, 105 × 35 at 2×, five extra columns being the
+  when the *cell* scales (99 × 33 at 1×, 104 × 34 at 2×, five extra columns being the
   whole-pixel ceiling). Two traps: the capture needs a frame then (so the sample must still
   be printing, a `tick` every 500 ms), and no window manager does not matter — the window
   maps at its requested size.
@@ -523,8 +523,8 @@ like when it was wrong.
   a frame-late answer is dropped rather than opening the wrong link. Only `file:` is
   understood, percent-decoded, `stat`ed through the VFS and handed to
   `xdg-open`/`open`/`explorer` — never a shell, because the path comes from a program's
-  output — and another scheme is said out loud in a toast. A press on a link opens it and
-  starts no drag.
+  output — and another scheme is said out loud in a toast. A **double press** on a link opens
+  it.
 - **A directory link opens a file pane, not a toast**: the worker sends `UserEvent::Reveal`
   and the UI decides where a pane may go — layout is not a worker's business — and focus
   stays on the terminal. A pane browsing the *same machine* is retargeted; another machine is
@@ -590,11 +590,11 @@ account behind each of these.
   `Palette` (semantic slots — `card`, `control`, `border`, `accent`, `dim` …), `Style`
   (row height, gaps, radii, fonts, and the `Title`/`Section`/`Footer`/`Focus` behaviours)
   and `Skin` (the pair), plus `Skin::egui_style`, which derives an `egui::Style` so stock
-  egui widgets inherit the same look. `Preset::{Native, Adwaita, Windows, Egui}`;
+  egui widgets inherit the same look. `Preset::{Native, Adwaita, Windows, Macos, Egui}`;
   `[ui] widgets` (or `--widgets`) says which, and `native` is the default. **A preset is a
   request**: `Choice::skin` takes the platform's skin and falls back to the terminal's own.
   **The scheme and the accent ride with the look**: `[ui] scheme` (`system` by default) and
-  `[ui] accent` mean something only to the three looks painted here — `native` takes both
+  `[ui] accent` mean something only to the four looks painted here — `native` takes both
   from the desktop — so `Preset::owns_its_colours` is what decides whether the preferences
   menu shows those rows at all. **It is live**: the answer sits in a cell a frame
   reads, and a watcher replaces it when the platform says it changed — `WM_SETTINGCHANGE`,

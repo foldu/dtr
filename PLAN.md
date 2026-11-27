@@ -587,16 +587,19 @@ keeps a theme a document about the *terminal* while the window still looks like 
 
 **The chrome's own look is a setting, and it is a separate question from the terminal's theme.**
 `[ui] widgets` picks between `native` (the platform's own controls: the GTK4/libadwaita palette on
-Linux, the DWM accent and the light/dark flag on Windows), `adwaita`, `windows` and `egui` — the last
-three painted by `dtr-widgets` from the skin's palette, so a window on a machine whose desktop is
-none of those still looks like *something* rather than like egui's defaults. `native` is the default
-because a terminal that matches every other window is the one that does not look pasted on. `[ui]
+Linux, the DWM accent and the light/dark flag on Windows), `adwaita`, `windows`, `macos` and
+`egui` — the last four painted by `dtr-widgets` from the skin's palette, so a window on a machine
+whose desktop is none of those still looks like *something* rather than like egui's defaults.
+`macos` is a look-alike built from AppKit's semantic colours and control metrics, not a read of a
+Mac. `native` is the default because a terminal that matches every other window is the one that
+does not look pasted on. `[ui]
 scheme` is `system` (the default), `light` or `dark`, and `[ui] accent` is `#RRGGBB` or nothing;
-**both mean something only to the three looks painted here**, because `native` takes its scheme and
+**both mean something only to the four looks painted here**, because `native` takes its scheme and
 its accent from the desktop — which is what `Preset::owns_its_colours` gates the preferences menu on,
 so a `native` window does not offer a row that would read nothing. `dtr` was a fourth painted look
 and turned out to be `egui` twice, so it is a spelling the config still accepts and the menu no
-longer offers. Everything is **live**: the look is a value the frame reads, so saving the settings
+longer offers; `apple` is likewise only a spelling of `macos`. Everything is **live**: the look is
+a value the frame reads, so saving the settings
 menu repaints the window in the new chrome without a restart, and the `native` answer is watched
 (`WM_SETTINGCHANGE`, the XDG portal's `SettingChanged`) so the chrome follows the desktop at sunset.
 The preferences card is a tabbed card — General first, Appearance second — because one column of

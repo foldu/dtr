@@ -85,8 +85,12 @@ shell for the pane:
 
 | factor | window (`--capture`) | pane (`stty size`) | cell, from the two |
 |---|---|---|---|
-| 1 | 900 × 620 | 100 × 34 | 9 × 17 |
-| 2 | 1800 × 1240 | 105 × 35 | 17 × 34 |
+| 1 | 900 × 620 | 99 × 33 | 9 × 17 |
+| 2 | 1800 × 1240 | 104 × 34 | 17 × 34 |
+
+Those counts are with the default 4-point `[window] padding`, so they are one column and one
+row narrower than the 0-padding runs this table was first measured with; the cell is what the
+two columns are for.
 
 The cell doubles; the five extra columns are the ceiling again (`ceil(2 × 8.43) = 17` where
 `2 × ceil(8.43) = 18`), not the terminal growing. That is the harness to use for a scale

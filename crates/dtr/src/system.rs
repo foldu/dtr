@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use dtr_widgets::{AccentLadder, Origin, Skin};
+use dtr_widgets::{AccentLadder, Origin, Overrides, Skin};
 use egui::Color32;
 
 /// What a platform says about its own chrome, in the shape every platform states
@@ -53,6 +53,11 @@ pub struct Reading {
     /// written but never read on Linux.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub ladder: Option<AccentLadder>,
+    /// The named colours a desktop's own stylesheet repainted, where the platform
+    /// can read them. Linux reads the user's `gtk.css`; Windows has no equivalent
+    /// and leaves this empty.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub surfaces: Overrides,
 }
 
 /// One platform's answer to "what does a window look like here".
@@ -318,6 +323,8 @@ fn preview_skin(value: Option<&str>) -> Option<Skin> {
         Some("windows-light") => Some(Skin::windows_light()),
         Some("adwaita-dark") => Some(Skin::adwaita(true, dtr_widgets::ADWAITA_ACCENT)),
         Some("adwaita-light") => Some(Skin::adwaita(false, dtr_widgets::ADWAITA_ACCENT)),
+        Some("macos-dark") => Some(Skin::macos_dark()),
+        Some("macos-light") => Some(Skin::macos_light()),
         Some("egui-dark") => Some(Skin::egui_dark()),
         Some("egui-light") => Some(Skin::egui_light()),
         _ => None,
@@ -338,6 +345,8 @@ pub fn describe(skin: &Skin) -> &'static str {
         (Origin::Windows, false) => "windows-light",
         (Origin::Adwaita, true) => "adwaita-dark",
         (Origin::Adwaita, false) => "adwaita-light",
+        (Origin::Macos, true) => "macos-dark",
+        (Origin::Macos, false) => "macos-light",
         (Origin::Egui, true) => "egui-dark",
         (Origin::Egui, false) => "egui-light",
     }
@@ -443,6 +452,7 @@ mod tests {
             dark: true,
             accent: None,
             ladder: None,
+            surfaces: Overrides::default(),
         };
         let resolution = answer(resolve(&Stub(Ok(reading))));
         assert_eq!(
@@ -467,12 +477,14 @@ mod tests {
     /// The preview switch names a skin, and only a skin: no typo, no panic, and
     /// no way to ask for a `dtr` skin through the platform's door.
     #[test]
-    fn the_preview_switch_knows_six_skins() {
+    fn the_preview_switch_knows_eight_skins() {
         for (value, expected) in [
             ("windows-dark", "windows-dark"),
             ("windows-light", "windows-light"),
             ("adwaita-dark", "adwaita-dark"),
             ("adwaita-light", "adwaita-light"),
+            ("macos-dark", "macos-dark"),
+            ("macos-light", "macos-light"),
             ("egui-dark", "egui-dark"),
             ("egui-light", "egui-light"),
         ] {
@@ -498,6 +510,8 @@ mod tests {
             describe(&Skin::adwaita(false, dtr_widgets::ADWAITA_ACCENT)),
             "adwaita-light"
         );
+        assert_eq!(describe(&Skin::macos_dark()), "macos-dark");
+        assert_eq!(describe(&Skin::macos_light()), "macos-light");
         // The dtr skin is dtr whatever its palette happens to be, including a
         // light one, which the old guess would have called "windows-light".
         assert_eq!(

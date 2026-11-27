@@ -29,6 +29,20 @@ pub const SCROLLBACK_LIMIT: usize = 100_000_000;
 /// slower than reading them out of a paste.
 pub const KEY_DELAY_MS_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
 
+/// The range `window.padding` accepts, in points.
+///
+/// Zero is flush against the window's edge; the ceiling is past the point where
+/// the grid would be a postage stamp inside its own margin, and a file that
+/// asked for more is more likely a typo than a preference.
+pub const PADDING_RANGE: std::ops::RangeInclusive<u16> = 0..=32;
+
+/// The space around the grid a fresh install gets, in points.
+///
+/// Four points is a cell's breathing room at a normal size: enough that the
+/// first column and the last row do not touch the frame, small enough that it
+/// does not spend a column on a margin.
+pub const PADDING_DEFAULT: u16 = 4;
+
 /// Everything configurable. Defaults are what a fresh install gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -39,6 +53,8 @@ pub struct Config {
     pub font: Font,
     /// Who paints the window frame. `[window] chrome`.
     pub chrome: Chrome,
+    /// Space between the grid and the window's edges, in points. `[window] padding`.
+    pub padding: u16,
     /// What the controls look like. `[ui] widgets`.
     pub ui: Ui,
     /// Name of a theme file, e.g. `"kanagawa wave"`. `None` keeps the
@@ -303,19 +319,22 @@ impl fmt::Display for Chrome {
 ///
 /// `Native` is the platform's own look — the system palette, its scheme and the
 /// user's accent — and falls back to the terminal's own chrome where a machine
-/// cannot say. `Adwaita`, `Windows` and `Egui` are looks the program carries with
-/// it, so a person on Linux can have Windows' chrome and a person on Windows can
-/// have GNOME's; they are the three with a scheme and an accent of their own,
-/// because `native` reads both from the desktop.
+/// cannot say. `Adwaita`, `Windows`, `Macos` and `Egui` are looks the program
+/// carries with it, so a person on Linux can have Windows' chrome and a person
+/// on Windows can have GNOME's or a Mac's; they are the four with a scheme and
+/// an accent of their own, because `native` reads both from the desktop.
+/// `Macos` is a look-alike painted from AppKit's colours and metrics, not a read
+/// of a Mac.
 ///
-/// `"dtr"` is accepted as an old spelling of `"egui"`: the fourth look is what this
-/// program's chrome used to be called, and a config file written before the menu
-/// existed keeps working.
+/// `"dtr"` is accepted as an old spelling of `"egui"`, and `"apple"` as another
+/// spelling of `"macos"`: a config file written before a menu label moved keeps
+/// working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Widgets {
     Native,
     Adwaita,
     Windows,
+    Macos,
     Egui,
 }
 
@@ -331,16 +350,18 @@ impl fmt::Display for Widgets {
             Self::Native => "native",
             Self::Adwaita => "adwaita",
             Self::Windows => "windows",
+            Self::Macos => "macos",
             Self::Egui => "egui",
         })
     }
 }
 
 impl Widgets {
-    pub const ALL: [Widgets; 4] = [
+    pub const ALL: [Widgets; 5] = [
         Widgets::Native,
         Widgets::Adwaita,
         Widgets::Windows,
+        Widgets::Macos,
         Widgets::Egui,
     ];
 }
@@ -377,7 +398,7 @@ impl Scheme {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ui {
     pub widgets: Widgets,
-    /// The scheme, for the looks that own one. `native` and `dtr` ignore it.
+    /// The scheme, for the looks that own one. `native` ignores it.
     pub scheme: Scheme,
     /// The accent as `#RRGGBB`, for the looks that own one. `None` keeps the
     /// preset's own default, so a window that never set one still follows a
@@ -429,6 +450,7 @@ impl Default for Config {
                 fallback: Vec::new(),
             },
             chrome: Chrome::default(),
+            padding: PADDING_DEFAULT,
             ui: Ui::default(),
             theme: None,
             terminal: Terminal::default(),
@@ -550,6 +572,21 @@ impl Config {
                     }
                 };
             }
+            if let Some(padding) = window.get("padding") {
+                let value = padding.as_integer().ok_or_else(|| {
+                    Error::Value("window.padding must be a whole number of points".into())
+                })?;
+                let (low, high) = (
+                    i64::from(*PADDING_RANGE.start()),
+                    i64::from(*PADDING_RANGE.end()),
+                );
+                if !(low..=high).contains(&value) {
+                    return Err(Error::Value(format!(
+                        "window.padding {value} is outside {low} to {high} points"
+                    )));
+                }
+                config.padding = value as u16;
+            }
         }
 
         if let Some(ui) = document.get("ui").and_then(Item::as_table) {
@@ -561,12 +598,14 @@ impl Config {
                     "native" => Widgets::Native,
                     "adwaita" => Widgets::Adwaita,
                     "windows" => Widgets::Windows,
+                    // Apple's look-alike, under either name it is known by.
+                    "macos" | "apple" => Widgets::Macos,
                     // The fourth look's old name: one thing, two spellings.
                     "egui" | "dtr" => Widgets::Egui,
                     other => {
                         return Err(Error::Value(format!(
                             "ui.widgets is {other:?}; it must be one of \
-                             \"native\", \"adwaita\", \"windows\" or \"egui\""
+                             \"native\", \"adwaita\", \"windows\", \"macos\" or \"egui\""
                         )));
                     }
                 };
@@ -894,21 +933,27 @@ key_delay_ms = 1
 # and draws the window buttons there; "native" leaves both to the window
 # manager, with the tabs underneath.
 chrome = "client"
+# Space around the grid, in points: the text is not flush against the window's
+# edge. 0 is flush, 32 is the ceiling, and 4 is the default.
+padding = 4
 
 [ui]
 # What the chrome's controls look like. "native" is the platform's own — the
 # system palette, its scheme, the user's accent — and is the default; on a machine
 # with no system palette it is the terminal's own chrome instead. "adwaita",
-# "windows" and "egui" are looks dtr carries with it, so a person on Linux can
-# have Windows' chrome and a person on Windows can have GNOME's. "dtr" is an old
-# spelling of "egui" and still reads as it.
+# "windows", "macos" and "egui" are looks dtr carries with it, so a person on
+# Linux can have Windows' chrome and a person on Windows can have GNOME's or a
+# Mac's. "macos" is a look-alike painted from Apple's control colours and
+# metrics, not a read of a Mac; "apple" is accepted as its other spelling. "dtr"
+# is an old spelling of "egui" and still reads as it.
 widgets = "native"
-# The scheme those three draw in: "system" (the default) follows the desktop,
+# The scheme those four draw in: "system" (the default) follows the desktop,
 # "light" and "dark" are an instruction. "native" ignores it — its scheme is the
 # desktop's.
 scheme = "system"
-# The accent those three draw with, as #RRGGBB. Leave it empty (or out) to keep
-# the look's own: Adwaita's blue, Windows' accent, egui's link colour.
+# The accent those four draw with, as #RRGGBB. Leave it empty (or out) to keep
+# the look's own: Adwaita's blue, Windows' accent, Apple's system blue, egui's
+# link colour.
 # accent = "#3584E4"
 
 [files]
@@ -1219,12 +1264,33 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
     #[test]
     fn the_window_frame_is_the_terminal_by_default() {
         assert_eq!(Config::default().chrome, super::Chrome::Client);
+        assert_eq!(Config::default().padding, super::PADDING_DEFAULT);
+        assert_eq!(super::PADDING_DEFAULT, 4);
         assert_eq!(
             Config::parse("[window]\nchrome = \"native\"\n")
                 .unwrap()
                 .chrome,
             super::Chrome::Native
         );
+    }
+
+    /// The padding is a whole number of points inside a stated range: a
+    /// fractional or negative margin is not a margin, and a file that asks for
+    /// 300 points is a typo that would leave a two-cell grid.
+    #[test]
+    fn the_padding_is_a_whole_number_inside_its_range() {
+        let parsed = Config::parse("[window]\npadding = 12\n").unwrap();
+        assert_eq!(parsed.padding, 12);
+
+        for text in [
+            "[window]\npadding = -1\n",
+            "[window]\npadding = 33\n",
+            "[window]\npadding = \"4\"\n",
+            "[window]\npadding = 4.5\n",
+        ] {
+            let error = Config::parse(text).expect_err(text);
+            assert!(matches!(error, Error::Value(_)), "{text:?}: {error:?}");
+        }
     }
 
     #[test]
@@ -1249,13 +1315,20 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
                 "{widgets} did not survive the round trip"
             );
         }
-        // The fourth look's old name is the same look, not a fifth one.
+        // The old spellings are the same looks, not extra ones.
         assert_eq!(
             Config::parse("[ui]\nwidgets = \"dtr\"\n")
                 .unwrap()
                 .ui
                 .widgets,
             super::Widgets::Egui
+        );
+        assert_eq!(
+            Config::parse("[ui]\nwidgets = \"apple\"\n")
+                .unwrap()
+                .ui
+                .widgets,
+            super::Widgets::Macos
         );
     }
 
@@ -1267,7 +1340,7 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
             .unwrap_err()
             .to_string();
         assert!(error.contains("ui.widgets"), "{error}");
-        for name in ["native", "adwaita", "windows", "egui"] {
+        for name in ["native", "adwaita", "windows", "macos", "egui"] {
             assert!(error.contains(name), "{name} missing from {error}");
         }
     }

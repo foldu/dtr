@@ -16,6 +16,7 @@ pub mod app;
 pub mod chrome;
 pub mod conpty;
 pub mod fonts;
+pub mod image_overlay;
 pub mod ime;
 pub mod input;
 pub mod keymap;

@@ -43,7 +43,13 @@ So:
   A parser that cannot evaluate `color-mix()`, `oklab()` or the injected accent
   would produce a palette GTK does not show, which is worse than the dtr skin.
 
-The only new dependency is **`zbus` 5** (MIT), on its `async-io` transport, and
+**v2, since written.** The user's `gtk.css` is now read (§8): `cssparser` 0.38
+(MPL-2.0) tokenizes, `csscolorparser` 0.9 (MIT/Apache) reads the values, and the
+named colours GTK shows — surfaces, accent, and the ink on destructive actions —
+come from the same chain GTK reads. The measured constants stay the floor: a file
+that sets nothing, or a value the reader cannot resolve, keeps them.
+
+The first new dependency was **`zbus` 5** (MIT), on its `async-io` transport, and
 it was taken (§6.3). It is a D-Bus client, not a toolkit: it links no GLib, it
 brings its own executor rather than borrowing dtr's, and it reads the same
 service `rfd`'s
@@ -423,8 +429,8 @@ files above already hold on every desktop that sets one (§4.2, §5).
 | `gsettings` `accent-color` | second | name → the nine-value table | `#3584E4` |
 | `gsettings` `gtk-theme` | gate | Adwaita / adw-gtk3 → Adwaita table; anything else → dtr | `settings.ini` |
 | `settings.ini` `gtk-theme-name` | gate, last | same | hard-coded `Adwaita` |
-| user `gtk.css` / `gtk-dark.css` | **not read in v1** | — | — |
-| `@import` | v2 only | `file://` or relative, one level; `resource://` / missing → ignore, log | — |
+| user `gtk.css` | after the theme gate, above the constants | `@define-color` and `:root` variables, imports in document order (§8) | none → the constants, `source="portal"` |
+| `@import` | in document order | `file://` or relative, eight levels, cycle-guarded; `resource://` / missing → ignore, note | — |
 | ambiguous scheme (`default` + no `-dark` / `-light` name) | — | `None` | dtr |
 | headless: no portal, no `gsettings` | — | `None` | dtr |
 
@@ -439,10 +445,11 @@ Why these choices:
   Picking light would be wrong half the time; `None` is the honest answer. The
   failure prevented: a white chrome on a dark desktop (or the reverse) with no
   cause in the log.
-- **A missing import is not a failed read.** In v2, a `gtk.css` that imports a
-  store path that has been garbage-collected — exactly what this machine has —
-  should lose the override, not the whole skin. The failure prevented: a stale
-  path in a dotfile disabling `native` entirely.
+- **A missing import is not a failed read.** A `gtk.css` that imports a store
+  path a rebuild moved — exactly what this machine has — loses that import and
+  nothing else: the generated palette beside it still applies, and `-v` names the
+  path. The failure prevented: a stale path in a dotfile disabling `native`
+  entirely.
 - **`GTK_THEME` is read, but it cannot supply a palette.** It is a name; a
   non-Adwaita name has no colour we can read in v1. The failure prevented:
   treating a debug knob as a palette source.
@@ -454,10 +461,11 @@ Why these choices:
   on the startup path, and a `gsettings` that waits on a dconf lock. What is lost:
   a KDE user whose `gtk-theme-name` lives only in dconf keeps the dtr skin —
   which is the same answer Plasma's own `settings.ini` would have given.
-- **The user's `gtk.css` is not read in v1.** It is an override, not the system
-  palette; the one on this machine is a dangling import. §8 specifies what a
-  v2 would read. The failure prevented: a half-parsed override producing a
-  palette that is neither GTK's nor dtr's.
+- **The user's `gtk.css` is read, but it is an override, not a palette.** Every
+  value it sets wins; every value it does not keeps the measured constant. The
+  failure prevented: a half-parsed override producing a palette that is neither
+  GTK's nor dtr's — which is why the reader drops what it cannot resolve and says
+  so (§8.3).
 
 ## 6. What `native` became
 
@@ -649,18 +657,20 @@ they run it on GNOME, not a baseline.
 
 Direct reads are **measured** from the extracted gresource. Derived slots use
 Adwaita's own measured rules; guessed slots are slots Adwaita does not have and
-dtr needs.
+dtr needs. The reader (§8) can replace any direct row with the user's own value;
+the derived rows then follow from whatever base it settles on.
 
 | Slot | Source | Kind |
 |---|---|---|
 | `window` | `window_bg_color` | measured |
 | `well` | `view_bg_color` | measured |
-| `card` | `dialog_bg_color` (fallback `popover_bg_color`) | measured |
+| `card` | `dialog_bg_color`; a user file's `popover_bg_color` wins, because GNOME themes often make `dialog_bg_color` the window's own colour | measured |
+| `headerbar` | `headerbar_bg_color` — the tab strip is the title bar | measured |
 | `text` | `window_fg_color`, composited over `window` (`over()` already exists in `palette.rs`) | measured + compositing |
 | `accent` | portal `accent-color`, else the nine-name table, else `#3584E4` | measured |
-| `on_accent` | `accent_fg_color` = white in 1.9.3 | measured |
-| `danger` | `destructive_bg_color` (`@red_3` / `@red_4`) | measured |
-| `on_danger` | `destructive_fg_color` = white | measured |
+| `on_accent` | `accent_fg_color`: white in 1.9.3, and whatever the user's file says (Material paints black on orange) | measured + user |
+| `danger` | `destructive_bg_color` (`@red_3` / `@red_4`; a Material theme paints `#f2b8b5`) | measured + user |
+| `on_danger` | `destructive_fg_color` = white, or the user's (`#601410` on that pink) | measured + user |
 | `control` | `color-mix(currentColor 10%, transparent)` over `card` | derived (rule measured) |
 | `control_hover` | 15% currentColor over `card` | derived |
 | `control_active` | 30% currentColor over `card` | derived |
@@ -694,64 +704,116 @@ Two consequences worth saying out loud:
 - **`on_accent` is white even for yellow and orange accents**, because that is
   what libadwaita 1.9.3 injects. Matching the desktop means matching this, not
   improving on it; the contrast complaint belongs to the library.
-- **`is_dark()` follows `card`**, and `card` is measured, so the egui theme, the
-  glyph tints and the popup style all flip together. A palette that says it is
-  dark while its card is light is the bug that would follow from deriving
-  `is_dark` from `window` or from the terminal theme instead.
+- **`is_dark()` follows `card`**, and `card` is whatever the constants or the
+  user's file made it, so the egui theme, the glyph tints and the popup style
+  all flip together. A palette that says it is dark while its card is light is
+  the bug that would follow from deriving `is_dark` from `window` or from the
+  terminal theme instead.
+- **A white `on_accent` is the library's rule, not ours.** A user file that
+  paints a pale accent usually says so in `accent_fg_color` too, and that value
+  is read; improving on libadwaita's white without the file is not.
 
-## 8. Parsing, if and when we need it
+## 8. The user override, as built
 
-**v1: no parser.** The values are either fixed (surfaces), injected (accent), or
-read from the portal (scheme/accent). There is no cascade to evaluate, and a
-parser would be a second, less accurate implementation of `Palette::adwaita`.
-The failure prevented: a 250-line CSS subset in the shipped binary that is used
-on exactly no machine, and that a user can mistake for "dtr reads my theme".
+**Implemented** in `crates/dtr/src/system/linux/css.rs`. It reads the one
+stylesheet GTK calls the user theme and maps the named colours dtr needs; the base
+stays vendored (§3.2, §6), because the file is an override layer and the constants
+are what it overrides.
 
-**v2: only the user override, with this subset.** `gtk.css` is the one text
-layer that can legitimately differ from Adwaita, and the layer a person edits
-when they want the accent magenta. The minimum honest subset is:
+### 8.1 Where it sits in the cascade
 
-| Construct | Support |
+GTK loads `$XDG_CONFIG_HOME/gtk-4.0/gtk.css` — that one file, no `gtk-dark.css`
+(`gtksettings.c`) — at `GTK_STYLE_PROVIDER_PRIORITY_USER`, above libadwaita's
+sheet and above the accent libadwaita injects as
+`@define-color accent_bg_color %s` at theme priority (`adw-style-manager.c`).
+GTK resolves a named colour lazily through the providers in priority order
+(`gtkstylecascade.c`), so a user definition wins for every rule that references
+the name.
+
+**Measured, this machine** — GNOME Calculator 51.1 on GTK 4.24.0 / libadwaita
+1.10.0, under Xvfb, with the real `~/.config/gtk-4.0/gtk.css`:
+
+- the window renders `#271E1A`, the containers `#322824`, the suggested-action
+  button `#FF6D00` — the file's counts, not Adwaita's constants;
+- `@define-color window_bg_color #ff00ff` paints the window magenta, and
+  `:root { --window-bg-color: #ff00ff }` does the same;
+- `@define-color accent_bg_color #ff00ff` paints the suggested-action button
+  magenta, so the file's accent beats libadwaita's injected one;
+- a dangling `@import` is a parse warning and nothing else: the second import and
+  the rest of the file still apply.
+
+### 8.2 The syntax is Servo's; the grammar is GTK's
+
+`cssparser` 0.38 (MPL-2.0) tokenizes — comments, strings, escapes, urls, numbers —
+and `csscolorparser` 0.9 (MIT/Apache) reads the values, including GTK's own
+`RGB(0 0 6 / 80%)` space/slash form, `hsl()`, named colours and the wide-gamut
+functions. What is written here is the part no CSS library can know:
+
+| Construct | Treatment |
 |---|---|
-| `@define-color <name> <value>;` | yes |
-| `:root { --<name>: <value>; }` | yes, exact `:root` only |
-| `@import "p"` / `@import url("p")` | yes for `file://` and relative, one level; `resource://` and gresource refused |
-| `@media (prefers-color-scheme: dark or light)` | evaluated against the decided scheme before parsing; a `prefers-contrast` block is skipped |
-| `#rgb`, `#rrggbb`, `#rrggbbaa` | yes |
-| `rgb()`, `rgba()` (comma and space forms, `/ alpha`, `%`) | yes |
-| `hsl()`, `hsla()` | yes |
-| named colours (`white`, `black`, `transparent`, the CSS keywords) | yes |
-| `@name`, `var(--name)` | yes, resolved in declaration order |
-| `currentColor` | only when the caller supplies a base colour; otherwise drop the declaration |
-| `oklab()`, `lab()`, `color-mix()`, relative colour (`from`), gradients, `calc()`, `filter`, `-gtk-*` | **no** — drop the declaration, keep the Adwaita value, log the name |
+| `@define-color <name> <value>;` | kept verbatim; references resolved lazily |
+| `:root { --<name>: <value>; }` | kept, and **wins over** the named colour when both exist: it is the spelling libadwaita documents and the one GTK's deprecation points at |
+| `@import "p"` / `@import url("p")` | `file://` and relative, applied in **document order** against the importing file; eight levels, cycle-guarded |
+| `@media (prefers-color-scheme: dark\|light)` | evaluated against the decided scheme |
+| `@media (prefers-contrast: more)`, reduced motion | **not** applied: dtr has no high-contrast style, and its colours would claim one |
+| any other at-rule with a block (`@keyframes`, `@font-face`) | skipped structurally, so a nested `{}` cannot eat the rest of the file |
+| `@name`, `var(--name)` | resolved through the file's own tables, bounded by depth |
+| `color-mix()`, `oklab()`, relative colours, `%` | **dropped**: the token keeps the constant and `-v` names it |
+| any other selector rule | skipped; a declaration there is not a colour dtr maps |
 
-Dropping a declaration is the important rule: the slot keeps the Adwaita value
-rather than becoming a guess. A user who writes
-`@define-color accent_bg_color #ff00ff;` gets magenta; a user who writes
-`@define-color accent_bg_color oklab(from …)` gets Adwaita's accent and a log
-line, not a silently different colour.
+**Measured.** The user's 2 KB file: 0 parse errors, 0.1 ms. libadwaita's own
+431 KB sheet: 1,545 rules in 11.9 ms, and its `RGB(0 0 6 / 12%)` values resolve —
+the check a hand-rolled value parser would have failed. The two errors in that run
+were an `@keyframes` block the probe skipped by consuming tokens; the reader
+parses it structurally (and a test pins that the rule after one still applies).
 
-**Where it lives.** `crates/dtr/src/system/linux/css.rs` (the binary), alongside
-the reader, not in `dtr-widgets`. The crate must stay free of I/O and platform
-code; the Windows precedent is the registry read in `system.rs` and the palette
-constructor in `dtr-widgets`. `dtr-widgets` gains no parser, no file access and
-no new dependency.
+**The syntax is not stable, and that is why variables come first.** `@define-color`
+and named colours are deprecated in GTK — the warning ships in 4.20.3, 4.22.4 and
+4.24.0 (`gtkcsscolorvalue.c`) — and libadwaita's docs already teach
+`:root { --accent-bg-color: … }`. A reader that only understood named colours
+would be reading the dialect that is on its way out.
 
-**Third-party or hand-rolled.**
+### 8.3 The policy only dtr can hold
 
-| Option | Licence | What it buys | Cost |
-|---|---|---|---|
-| `cssparser` | MPL-2.0 (allowed by `deny.toml`) | a tokenizer | `@define-color` needs a pre-pass; we still write the declaration grammar and the resolver |
-| `lightningcss` | MPL-2.0 (allowed) | a full parser/printer with `@media`, `var()`, `color-mix()` | a large tree in the shipped exe; still needs the GTK at-rule pre-pass and our cascade decisions |
-| `simplecss` | Apache-2.0 OR MIT | CSS 2 declarations and selectors | its own docs say at-rules are **not supported**, so it cannot see `@define-color`, `@import` or `@media`; the pre-pass is most of the work |
-| hand-rolled | none | exactly the subset above | ~250 lines and a test table; no dependency, no licence review, no `Cargo.lock` churn |
+- **Drop, do not guess.** A value this reader cannot resolve keeps the constant
+  and is logged; a half-resolved palette is a third look, not a closer one.
+- **A missing import is not a failed read** (§5).
+- **The accent follows the file first, the portal second.** Measured: GTK shows
+  the file's `#FF6D00`, not the portal's `orange` `#ED5B00`.
+- **`on_accent` and `on_danger` are read, not assumed.** libadwaita injects white;
+  a Material theme paints `#000000` on orange and `#601410` on a pale pink, and
+  the old constants drew white on both.
+- **Do not canonicalise the stylesheet path.** `~/.config/gtk-4.0/gtk.css` is
+  usually a symlink into the store, and a relative `@import` resolves beside the
+  symlink, not beside its target.
+- **The base stays the floor.** `Palette::adwaita_with` starts from the measured
+  constants and composites a translucent override (the dark sheet's
+  `card_bg_color` is 8 % white) over the surface it is drawn on; `Style::adwaita`
+  keeps the metrics, because a stylesheet that changes a row height is not
+  something dtr follows without becoming a GTK theme engine (§9).
+- **A non-Adwaita theme name still gates the read.** `gtk-theme-name=Materia`
+  answers `None` before the file is looked at: Adwaita metrics under Breeze
+  colours is the "confident lie" §5 refuses, and a reader that trusted any file
+  would paint exactly that.
 
-**Recommendation: hand-roll, and only in v2.** A CSS crate would parse the 431
-KB sheet's syntax but not its meaning: 493 `color-mix`, 34 `oklab`, 293
-`currentColor` and the injected accent are outside any general parser's job. The
-dependency would buy tokenization and cost a shipped-tree review; the subset
-above is small enough that the trade is not close. MPL-2.0 is allowed if that
-changes, so this is a cost decision, not a licence one.
+### 8.4 What it does not do
+
+- **Named palette references.** `@define-color accent_bg_color @blue_3` —
+  adw-gtk3's own tweak file writes this — references the sheet's palette table,
+  which dtr does not carry, so the token is dropped and logged. Vendoring the
+  45-name table would fix it; nothing here needs it yet.
+- **Metrics from CSS.** A theme that changes `headerbar { min-height: 47px }` or a
+  row height is not followed; dtr keeps §6.1's measurements. (The sheet says 47
+  where dtr's `ADWAITA_TITLEBAR` is 46 — a realized window's height is the kind of
+  thing a constant cannot capture.)
+- **Fonts.** `--document-font-family/size` are in the same `:root`, and
+  `gtk-font-name` is in `settings.ini`; neither is read, so the chrome keeps
+  egui's faces. Measured here: Geist 11 and Maple Mono NL NF CN 12.
+- **High contrast.** `prefers-contrast` blocks are skipped and the portal's
+  `contrast` key is not read (§9).
+- **A third-party GTK theme's own sheet.** Only the user stylesheet and what it
+  imports are read; `~/.themes/*/gtk-4.0/gtk.css` is not, because GTK4 does not
+  load it either unless `GTK_THEME` names it.
 
 ## 9. What cannot be known without GTK
 
@@ -835,10 +897,13 @@ display.
 
 ## 10. Not decided
 
-- **The v2 user-override parser.** The subset, the drop-don't-guess rule and the
-  location are above; whether it is worth the ~250 lines is a separate call.
-  Today's machine would gain nothing (the file is a dangling import), but a
-  machine with a real `@define-color accent_bg_color` override would.
+- **Vendoring libadwaita's palette names.** A theme that writes
+  `@define-color accent_bg_color @blue_3` (adw-gtk3's tweak file does) is dropped
+  today, because dtr carries the surfaces but not the 45-name palette table.
+  Whether the table is worth its bytes is a separate call (§8.4).
+- **The chrome font.** `--document-font-family/size` is in the same stylesheet and
+  `gtk-font-name` in `settings.ini`; neither is read, so the chrome keeps egui's
+  faces. Matching the desktop's face is a visual change of its own, not a token.
 - **GTK Default's palette.** It is a second, different set of constants
   (`#353535` dark). v1 treats `Default` as non-Adwaita and falls back to dtr.
   Adding `Palette::gtk_default` would make bare GTK4 apps match too; the apps
@@ -1093,3 +1158,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 The `20 runs, 41 ms` figure in §4.2 is this probe, opening a new connection each
 time; dtr opens one connection and caches the result, so the per-process cost is
 one connection plus two calls.
+
+```sh
+# 11. The reader's checks (v2)
+
+# The palette did not move between the libadwaita releases in the store: the 40
+# dark-set names and their values are identical, and so are the metrics the
+# palette hardcodes. The sheet's *rules* did move (366K -> 431K -> 447K bytes),
+# which is why the reader parses only the override layer.
+GR=/nix/store/5a6j8bvsg7w24ai8b8q6c7zn554s2h6p-glib-2.90.0-dev/bin/gresource
+for v in 1.8.4 1.9.3 1.10.0; do
+  L=$(ls /nix/store/*-libadwaita-$v/lib/libadwaita-1.so 2>/dev/null | head -1)
+  "$GR" extract "$L" /org/gnome/Adwaita/styles/gtk.css > /tmp/adw-$v.css 2>/dev/null \
+    || "$GR" extract "$L" /org/gnome/Adwaita/styles/default.css > /tmp/adw-$v.css
+done
+# 1.8.4 keeps the sheet under `default.css`; 1.9.3 and 1.10.0 under `gtk.css`.
+# The dark blocks compare equal, which is the stability the design leans on.
+
+# What GTK actually paints, with the user's gtk.css: Xvfb, an installed
+# libadwaita app, and the pixels.
+Xvfb :99 -screen 0 1024x768x24 -nolisten tcp -ac &
+DISPLAY=:99 daemonize dbus-run-session -- gnome-calculator &
+sleep 5
+DISPLAY=:99 magick import -window root /tmp/gtk-real.png
+# window #271E1A, containers #322824, suggested action #FF6D00.
+# The app resolves gtk4 4.24.0 and libadwaita 1.10.0 on this machine.
+
+# dtr itself, same session, same file: the `-v` line has to say
+#   skin="adwaita-dark" accent="#FF6D00" source="portal+css"
+# and the captured strip is #271E1A with the active tab on #FF6D00.
+```

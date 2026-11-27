@@ -252,7 +252,72 @@ The script is `/tmp/kitty-evidence/keep.sh` (`keep` or `delete`), run through
 `/tmp/kitty-evidence/run.sh`; the artefacts are evidence, not fixtures, and do
 not live in the repository.
 
-## 10. Where the code is
+## 10. Clicking a picture opens it
+
+A left press whose point is inside a **visible** placement opens that image in a
+modal overlay. The click is a hit test, not a widget: the pane is painted rather
+than made of controls, so `crate::image_overlay::hit_test` answers with the
+pane's published frame and the same geometry the image pass uses.
+
+* **The geometry is the renderer's.** `kitty::placement_rect` for the drawn
+  rectangle, the pane rectangle from `App::pane_views`, `render::Metrics`' cell,
+  and the window's framebuffer. The one extra clip is the grid: a pane can keep a
+  few pixels of surplus when the window is not a whole number of cells, and the
+  rows/columns that fit are what `visible_cells` already uses. Only pixels
+  actually drawn count, so an image scrolled halfway off the top is clickable only
+  below the pane's top edge.
+* **The top one wins.** The candidates are walked in `kitty::order` — layer, then
+  z, then image id — and the last match is taken, because that is the order the
+  image pass draws in. `BelowBackground` is not a candidate: the pane's own
+  opaque fill is drawn over it (see §5), so there is nothing there for a person
+  to click.
+* **The priority of a press** is: the program first (`Stats::mouse()` — a click in
+  vim is vim's), then an OSC 8 link, then a picture, then the terminal's own
+  selection. The two gestures differ: a **single** left press opens a picture,
+  and a **double** press opens a link. A link is an explicit, small target
+  printed *over* the picture and would otherwise be unreachable; a picture can
+  be reached with one press anywhere off the link. A single press on a cell that
+  is both is an ordinary terminal press (the link's text stays selectable) and
+  the second press opens the link. Only the left button opens the viewer, and a
+  press that opens it starts no selection, no double-click word and no drag.
+* **The viewer is modal, like the pager.** `App::overlay_open` names it, so it
+  owns the keyboard (`Escape` closes, everything else is swallowed, releases
+  included), the wheel, and the hover/preview/link-menu machinery behind it. A
+  press anywhere dismisses it — any button, inside or outside the picture — and
+  goes nowhere else, so a dismiss is never also a select. Closing returns focus
+  and keys to the pane that was under the press; nothing changes focus.
+* **The picture is the overlay, and it stops at the decoration.** There is no
+  card: no fill, no hairline, no title row. `Viewer` draws a scrim over the pane
+  area and the whole image fitted into it less 24 points a side and one line of
+  instruction, scaling *up* as well as down so a screenshot is the subject
+  rather than a small tile in the middle. One factor for both axes; the picture
+  keeps its shape. `App` hands in the **central panel's** rectangle, not
+  `ui.max_rect()`: the tab strip is the title bar (and, with `chrome = "client"`,
+  the caption) and the status strip is chrome, so neither is painted over, and
+  the picture-and-hint group is centred in the space a person can actually use
+  rather than in the raw window. The only type is the small
+  `Esc or click to close` under the picture (`CLOSE_HINT`), in the skin's `dim`;
+  the scrim is the skin's too. No colour, radius or stroke width is written in
+  the screen.
+* **The pixels outlive the delete.** The viewer clones the `Arc<ImagePixels>`, so
+  a program that sends `a=d` while the overlay is up blanks the grid, not the
+  picture. The one texture is made at draw time and lives in the viewer; closing
+  drops the `TextureHandle`, which is egui's free, so a viewer closed a thousand
+  times leaves no texture behind.
+
+**Verified live** (Xvfb `:99`, lavapipe, 900×620): a replay of a 256×160 PNG
+(19 base64 chunks, `a=T` at the cursor) draws the gradient in the grid; a click
+inside it opens the picture filling the pane area under the small `Esc or click to
+close`; Escape closes it, and so does any press, inside or outside — in every
+case the grid's own image and cursor are untouched afterwards. A payload that
+begins `ESC[?1000h` (mouse reporting on) takes the same click as the program's and
+opens nothing. `--click` is too early for a replay of this size — it fires before
+the first fit has released the bytes — so the live check used a real X click
+(`xdotool mousemove --window $WID 120 190 click 1`) after four seconds, with
+`--capture-after 6000`; the unit tests in `crate::image_overlay` cover the
+geometry without a window.
+
+## 11. Where the code is
 
 * `crates/dtr/src/kitty.rs` — placement geometry, the cache and its budget, the
   wgpu pipeline, the device-limit downscale, the decoder installer.

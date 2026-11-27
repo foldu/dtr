@@ -49,8 +49,22 @@ Only `file:` is understood. It is percent-decoded, `stat`ed through the VFS, and
 output. Another scheme is said out loud in a toast; silently ignoring a link reads as a bug in
 the click.
 
-A press on a link opens it and starts no drag, because a drag would be a selection and the
-press has already been spent.
+A **double press** on a link opens it. The first press is an ordinary terminal press — an
+anchor, then a drag if the pointer moves — so the URL can still be selected and copied; the
+second press within the same 400 ms/4 px gesture window is the verb. A third press is a
+line selection, not a third open.
+
+**A hovered link is underlined across its own run.** The pointing hand says a link is there;
+the line says how much of the row can be pressed, which matters for a link whose URI is the
+file name it prints. `LinkReply::span` is that run — the contiguous columns on the row that
+carry the same URI — asked once when the pointer enters a cell, not per frame and not per
+cell during publish. `render::prepare` draws it as one hairline quad in `look.accent` over
+the text's descenders, so a deliberate gap between two links is visible as a gap. Moving
+within the link keeps the line; leaving it, or giving the window to an overlay or a menu,
+clears it with the hand. **At draw time it is re-checked against now**: the pointer must
+still map to a cell inside the span, and the reply must name the pane being drawn (a leaf id,
+unique across tabs). A tab switch, a keyboard focus change or a scroll under a still mouse
+therefore cannot leave a line on a cell nobody is pointing at.
 
 ## 4. A directory link opens a file pane, not a toast
 

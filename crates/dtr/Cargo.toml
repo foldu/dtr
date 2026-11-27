@@ -97,6 +97,10 @@ rustc-demangle.workspace = true
 # session states its scheme and its accent without dtr linking GLib. Optional —
 # see the `portal` feature.
 zbus = { workspace = true, optional = true }
+# The user's `gtk.css`: Servo's tokenizer plus a CSS colour parser. See
+# `docs/gtk-palette.md` §8 — this is a reader, not a theme engine.
+cssparser.workspace = true
+csscolorparser.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

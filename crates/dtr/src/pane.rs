@@ -612,12 +612,17 @@ impl Sink {
     }
 }
 
-/// A hyperlink under a cell, and the cell it was under.
+/// A hyperlink under a cell, the cell it was under, and the run it covers.
+///
+/// `span` is the contiguous columns on that row which carry the same URI: the
+/// whole visible link, so a hover can underline it rather than one character of
+/// it. `None` when there is no link, or when the cell is blank.
 #[derive(Clone, Debug)]
 pub struct LinkReply {
     pub x: u16,
     pub y: u16,
     pub uri: Option<String>,
+    pub span: Option<(u16, u16)>,
 }
 
 /// What a program says it is doing, for the tab chip.
@@ -1504,9 +1509,13 @@ async fn run(
     let mut source_alive = false;
     // What to reopen if the device disappears, and how to recognise it.
     let mut reconnect: Option<(serial::Config, Option<String>)> = None;
-    // Set to make the current reader return, which the reconnect path treats as
-    // a device that went away and brings back with the new settings.
-    let mut serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The reader of the open port, and the flag that ends it. Dropping the sink
+    // closes only the writing handle; the thread parked in a read owns the other
+    // one, and on Windows that handle is the port: left behind, it makes every
+    // later open of the same COM port fail as if another program had it. So the
+    // thread is stopped and joined — here, on a settings change and when the
+    // pane goes away — rather than leaked.
+    let mut serial_reader: Option<SerialReader> = None;
     let mut modem: Option<crate::modem::Modem> = None;
     let mut echo = false;
     // Pasting is paced only on a serial line: a device with a tiny input buffer
@@ -1628,14 +1637,13 @@ async fn run(
             let reader = port.try_clone()?;
             sink = Some(Sink::Serial(port));
             source_alive = true;
-            spawn_serial_reader(
+            serial_reader = Some(SerialReader::spawn(
                 reader,
                 cfg.cr_to_crlf,
                 bytes_tx.clone(),
                 log.clone(),
-                Arc::clone(&serial_stop),
                 closed_tx.clone(),
-            );
+            ));
             if cfg.auto_reconnect {
                 let identity = serial::identity(&cfg.port);
                 if identity.is_some() {
@@ -2138,16 +2146,17 @@ async fn run(
                             sink = Some(Sink::Serial(port));
                             source_alive = true;
                             stats.set_retry(None, &wake);
-                            // A fresh flag per connection: the old one is spent.
-                            serial_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                            spawn_serial_reader(
+                            // Assigning drops the old reader first: it has
+                            // already sent `closed` (that is why this arm is
+                            // running), and joining it here makes the old
+                            // handle gone before the new port's reader starts.
+                            serial_reader = Some(SerialReader::spawn(
                                 reader,
                                 cr_to_crlf,
                                 bytes_tx.clone(),
                                 log.clone(),
-                                Arc::clone(&serial_stop),
                                 closed_tx.clone(),
-                            );
+                            ));
                         }
                         Err(err) => tracing::warn!(%err, "could not duplicate the reopened port"),
                     }
@@ -2544,7 +2553,17 @@ async fn run(
                                     cr_to_crlf,
                                     "serial settings changed; reconnecting"
                                 );
-                                serial_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                // Both halves have to go before the watcher
+                                // reopens. The reader is only told to stop —
+                                // joining it here would block the pane for a
+                                // read timeout — but the writer is dropped now:
+                                // until both handles are closed, Windows refuses
+                                // the reopen with "access denied" and the pane
+                                // sits on "watching for the device" forever.
+                                if let Some(reader) = serial_reader.as_ref() {
+                                    reader.stop();
+                                }
+                                sink = None;
                             }
                         }
                     }
@@ -2611,9 +2630,12 @@ async fn run(
                     }
                     Command::HyperlinkAt { x, y } => {
                         let uri = hyperlink_at(&term, x, y);
-                        tracing::debug!(x, y, ?uri, "hyperlink");
+                        let span = uri
+                            .as_deref()
+                            .map(|uri| hyperlink_span(&term, x, y, uri));
+                        tracing::debug!(x, y, ?uri, ?span, "hyperlink");
                         if let Ok(mut slot) = link.lock() {
-                            *slot = Some(LinkReply { x, y, uri });
+                            *slot = Some(LinkReply { x, y, uri, span });
                         }
                         wake();
                     }
@@ -3023,33 +3045,73 @@ async fn flush_replies(replies: &RefCell<Vec<u8>>, sink: &mut Option<Sink>) {
     }
 }
 
-/// Start this connection's reader thread, saying `closed` when it ends.
+/// One connection's reader thread, and the flag that ends it.
 ///
 /// A thread and not a task: the port's read timeout is what separates "no byte
 /// yet" from "the device is gone", and a runtime's readiness wrapper decides
 /// that for us — twice over on Windows. See `serial::Port`.
-fn spawn_serial_reader(
-    port: serial::Port,
-    cr_to_crlf: bool,
-    tx: async_channel::Sender<Vec<u8>>,
-    log: Option<Arc<LogWriter>>,
+///
+/// The thread is also the part of a serial port a plain `drop` does not reach.
+/// The writer's handle closing does not close the port while the reader's is
+/// open, and on Windows a COM port is exclusive: a pane that leaked this thread
+/// left the port open behind a closed tab, so opening the same board again said
+/// another program had it. [`Drop`] stops the loop and joins, which is bounded
+/// because every read returns within [`serial::IDLE_FLUSH`].
+struct SerialReader {
     stop: Arc<std::sync::atomic::AtomicBool>,
-    closed: async_channel::Sender<()>,
-) {
-    let spawned = std::thread::Builder::new()
-        .name("dtr-serial".into())
-        .spawn({
-            let closed = closed.clone();
-            move || {
-                read_serial(port, cr_to_crlf.then(CrToCrlf::default), tx, log, stop);
-                // The pane keeps the byte channel alive for reconnects, so this
-                // is the only way it learns the reader is gone.
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SerialReader {
+    fn spawn(
+        port: serial::Port,
+        cr_to_crlf: bool,
+        tx: async_channel::Sender<Vec<u8>>,
+        log: Option<Arc<LogWriter>>,
+        closed: async_channel::Sender<()>,
+    ) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawned = std::thread::Builder::new()
+            .name("dtr-serial".into())
+            .spawn({
+                let stop = Arc::clone(&stop);
+                let closed = closed.clone();
+                move || {
+                    read_serial(port, cr_to_crlf.then(CrToCrlf::default), tx, log, stop);
+                    // The pane keeps the byte channel alive for reconnects, so this
+                    // is the only way it learns the reader is gone.
+                    let _ = closed.try_send(());
+                }
+            });
+        let handle = match spawned {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::error!(%err, "serial reader");
                 let _ = closed.try_send(());
+                None
             }
-        });
-    if let Err(err) = spawned {
-        tracing::error!(%err, "serial reader");
-        let _ = closed.try_send(());
+        };
+        Self { stop, handle }
+    }
+
+    /// Ask the reader to return at its next read timeout.
+    ///
+    /// Not a join: a settings change calls this from the pane's own loop, where
+    /// waiting for a read to time out would delay the commands behind it. The
+    /// thread closes its handle by itself when it ends.
+    fn stop(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for SerialReader {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(handle) = self.handle.take() {
+            if let Err(err) = handle.join() {
+                tracing::error!(?err, "serial reader thread");
+            }
+        }
     }
 }
 
@@ -3716,6 +3778,27 @@ fn hyperlink_at(term: &Terminal<'_, '_>, x: u16, y: u16) -> Option<String> {
         Err(_) => return None,
     };
     (len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+/// The contiguous columns on `y` that carry `uri`, from `x` outward.
+///
+/// A link is a per-cell attribute, and the visible part of one is what a hover
+/// should underline. The probes are the same FFI call `hyperlink_at` already
+/// makes, but this runs once per hovered cell rather than per frame: a row is
+/// at most a few hundred cells, and a hover is a human-speed event.
+fn hyperlink_span(term: &Terminal<'_, '_>, x: u16, y: u16, uri: &str) -> (u16, u16) {
+    let mut start = x;
+    while start > 0 && hyperlink_at(term, start - 1, y).as_deref() == Some(uri) {
+        start -= 1;
+    }
+    let mut end = x;
+    while let Some(next) = end.checked_add(1) {
+        if hyperlink_at(term, next, y).as_deref() != Some(uri) {
+            break;
+        }
+        end = next;
+    }
+    (start, end)
 }
 
 /// A grid reference at a viewport cell.
@@ -4702,6 +4785,24 @@ mod selection_tests {
         );
         assert_eq!(super::hyperlink_at(&term, 7, 0), None, "past the link");
         assert_eq!(super::hyperlink_at(&term, 0, 2), None, "an empty row");
+
+        // The run is the visible link, not the cell the pointer happened to be
+        // on: underlining only that cell would highlight one letter of a word.
+        assert_eq!(
+            super::hyperlink_span(&term, 1, 0, "file:///tmp/x.txt"),
+            (0, 3)
+        );
+        assert_eq!(
+            super::hyperlink_span(&term, 3, 0, "file:///tmp/x.txt"),
+            (0, 3)
+        );
+        // Two links that meet are two runs, because their URIs differ.
+        let mut term = Terminal::new(24, 2).unwrap();
+        term.vt_write(
+            b"\x1b]8;;file:///tmp/a\x07AA\x1b]8;;\x07\x1b]8;;file:///tmp/b\x07BB\x1b]8;;\x07\r\n",
+        );
+        assert_eq!(super::hyperlink_span(&term, 0, 0, "file:///tmp/a"), (0, 1));
+        assert_eq!(super::hyperlink_span(&term, 2, 0, "file:///tmp/b"), (2, 3));
     }
 
     /// A one-character word is still a word: clicking `b` in `a b` selects one
@@ -6808,6 +6909,170 @@ mod scrollback_tests {
         assert!(
             rows < 2_000,
             "kept {rows} rows of scrollback at a {limit}-byte limit"
+        );
+    }
+}
+
+/// A serial reader must be stoppable, and stopping it must close its handle.
+///
+/// Dropping a `Pane` used to leave this thread parked in a read forever: the
+/// writer's handle went, the reader's did not, and on Windows a COM port with a
+/// handle still open is a COM port nobody else can open — closing the tab left
+/// the board "busy" until dtr exited. The join here is what makes `drop(tab)`
+/// mean the port is really closed.
+#[cfg(all(unix, test))]
+mod serial_reader_tests {
+    use super::SerialReader;
+    use std::time::{Duration, Instant};
+
+    fn config(path: &str) -> crate::serial::Config {
+        crate::serial::Config {
+            port: path.to_owned(),
+            baud: 9_600,
+            data_bits: serialport::DataBits::Eight,
+            parity: serialport::Parity::None,
+            stop_bits: serialport::StopBits::One,
+            flow_control: serialport::FlowControl::None,
+            dtr: true,
+            rts: true,
+            cr_to_crlf: false,
+            auto_reconnect: false,
+        }
+    }
+
+    /// How many descriptors this process holds for `path`.
+    ///
+    /// Linux-only, and the only way to observe the half of the bug that is not
+    /// a thread: the reader's handle has to be closed, not merely unused. On
+    /// macOS there is no `/proc`, so the rest of the test still runs and only
+    /// this assertion is skipped.
+    #[cfg(target_os = "linux")]
+    fn descriptors_for(path: &str) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .ok()
+                            .is_some_and(|target| target == std::path::Path::new(path))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_serial_reader_stops_and_releases_its_handle() {
+        use serialport::SerialPort as _;
+        use std::io::Write as _;
+
+        let (mut device, slave) = serialport::TTYPort::pair().expect("a pty pair");
+        let path = slave.name().expect("a pty has a name");
+        // Only the name is needed: the port under test opens its own descriptor,
+        // and leaving this one open would make the line stay alive after the
+        // reader is gone.
+        drop(slave);
+        let port = config(&path).open().expect("open the pty");
+
+        let (tx, rx) = async_channel::unbounded();
+        let (closed_tx, closed_rx) = async_channel::unbounded();
+        let reader = SerialReader::spawn(port, false, tx, None, closed_tx);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            descriptors_for(&path),
+            1,
+            "the reader owns exactly one descriptor for the pty"
+        );
+
+        // The device writes; the reader carries it to the pane.
+        let started = Instant::now();
+        device.write_all(b"hello").expect("write to the device");
+        let chunk = loop {
+            match rx.try_recv() {
+                Ok(chunk) => break chunk,
+                Err(async_channel::TryRecvError::Empty)
+                    if started.elapsed() < Duration::from_secs(2) =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("the reader sent nothing: {err}"),
+            }
+        };
+        assert_eq!(chunk, b"hello");
+
+        // Dropping is what closing a tab does: it must stop the loop without
+        // waiting for a byte that will never arrive, say `closed` for the
+        // pane's reconnect path, and close the descriptor it owns.
+        let closing = Instant::now();
+        drop(reader);
+        assert!(
+            closing.elapsed() < Duration::from_secs(2),
+            "the join waited {:?} for a quit reader",
+            closing.elapsed()
+        );
+        assert!(closed_rx.try_recv().is_ok(), "the reader must say it ended");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            descriptors_for(&path),
+            0,
+            "the reader's descriptor outlived the reader, which is the Windows \
+             'the port is still in use' bug in its Unix shape"
+        );
+    }
+
+    /// Closing a tab closes the port, all the way through the pane thread.
+    ///
+    /// The reader guard is half of it; the other half is that dropping a `Pane`
+    /// closes its command channel, which lets `run` return. This is the close
+    /// `App::close_tab` performs, minus the worker thread: open a real serial
+    /// pane on a pty, drop it, and watch every descriptor for the device go.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_a_serial_pane_releases_the_port() {
+        use super::{FrameBudget, Pane, Transport};
+        use serialport::SerialPort as _;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{Arc, Mutex};
+
+        let (_device, slave) = serialport::TTYPort::pair().expect("a pty pair");
+        let path = slave.name().expect("a pty has a name");
+        drop(slave);
+        assert_eq!(descriptors_for(&path), 0, "nothing is open yet");
+
+        let pane = Pane::spawn(
+            Transport::Serial(config(&path)),
+            None,
+            None,
+            1_000_000,
+            Arc::new(AtomicU64::new(16_000_000)) as FrameBudget,
+            Arc::new(Mutex::new(None)),
+            false,
+            || {},
+        )
+        .expect("a serial pane");
+
+        // The pane thread opens the port, duplicates it for the reader and the
+        // modem; wait for at least one descriptor before closing, or the test
+        // measures a pane that never started.
+        let opened = Instant::now();
+        while descriptors_for(&path) == 0 && opened.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(descriptors_for(&path) > 0, "the pane never opened the port");
+
+        // What closing the tab does. The pane thread sees the closed command
+        // channel, its reader guard joins, and the sink and modem drop with it.
+        let closing = Instant::now();
+        drop(pane);
+        while descriptors_for(&path) > 0 && closing.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            descriptors_for(&path),
+            0,
+            "a descriptor for the port outlived its tab after {:?}",
+            closing.elapsed()
         );
     }
 }

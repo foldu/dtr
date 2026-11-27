@@ -115,6 +115,11 @@ async-lock = "3"
 # numbers: without it the Linux reader takes the scheme from the theme's name,
 # which is a palette but not a live one.
 zbus = { version = "5", default-features = false, features = ["async-io"] }
+# The user's `gtk.css`, read with Servo's tokenizer rather than a hand-written
+# one: `cssparser` is the syntax, `csscolorparser` the colour values GTK's
+# stylesheet uses (`RGB(0 0 6 / 80%)` included). See `docs/gtk-palette.md` §8.
+cssparser = "0.38"
+csscolorparser = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # rfd says "Using zenity fallback" and "failed to …" through `log`; this is what

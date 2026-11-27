@@ -178,6 +178,7 @@ pub fn capture(
                 rect,
                 frame: if id == 1 { frame } else { None },
                 selection: if id == 1 { selection } else { None },
+                link: None,
                 cursor: id == 1,
                 flash: None,
             })
@@ -197,6 +198,7 @@ pub fn capture(
                             rect,
                             frame,
                             selection: if id == 1 { selection } else { None },
+                            link: None,
                             cursor: id == 1,
                             flash: None,
                         })
@@ -209,6 +211,7 @@ pub fn capture(
                     rect: area,
                     frame,
                     selection,
+                    link: None,
                     cursor: true,
                     flash: None,
                 }],

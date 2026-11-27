@@ -97,7 +97,8 @@ struct Args {
     gpu: Option<String>,
 
     /// What the controls look like: "native" (the platform's own), "adwaita",
-    /// "windows" or "egui" ("dtr" is an old spelling of "egui"). Overrides
+    /// "windows", "macos" or "egui" ("dtr" is an old spelling of "egui", "apple"
+    /// of "macos"). Overrides
     /// `[ui] widgets` in the config; the scheme and the accent still come from the
     /// file.
     #[arg(long, value_name = "STYLE")]
@@ -563,11 +564,12 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    // `--widgets` names the same four looks the config's `[ui] widgets` does — and
-    // the old `dtr` spelling, because the parser is the crate's, so the flag and the
-    // file cannot disagree about what a look is called. The scheme and the accent
-    // still come from the file: the flag chooses a look, it does not reset it, so
-    // it is applied *over* the look the file describes rather than instead of it.
+    // `--widgets` names the same five looks the config's `[ui] widgets` does — and
+    // the old `dtr`/`apple` spellings, because the parser is the crate's, so the
+    // flag and the file cannot disagree about what a look is called. The scheme
+    // and the accent still come from the file: the flag chooses a look, it does
+    // not reset it, so it is applied *over* the look the file describes rather
+    // than instead of it.
     let mut look = ui::Look::from_config(&config, theme.as_ref());
     if let Some(name) = args.widgets.as_deref() {
         look.choice.preset = dtr_widgets::Preset::parse(name).ok_or_else(|| {

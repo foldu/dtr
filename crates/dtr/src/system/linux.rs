@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -28,6 +29,8 @@ use dtr_widgets::{ADWAITA_ACCENT, Skin};
 use egui::Color32;
 
 use super::{Icon, Platform, Reading};
+
+mod css;
 
 /// The ceiling on one reading.
 ///
@@ -39,6 +42,10 @@ const BUDGET: Duration = Duration::from_millis(500);
 /// How long to wait before trying to watch again after the bus or the portal
 /// refused — a session that has neither would otherwise spin on connect.
 const RETRY: Duration = Duration::from_secs(5);
+
+/// Whether the last reading applied anything from the user's `gtk.css`, which is
+/// what `-v` calls `portal+css` rather than `portal`.
+static CSS_USED: AtomicBool = AtomicBool::new(false);
 
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -53,10 +60,12 @@ impl Platform for Portal {
     fn source(&self) -> &'static str {
         // Whichever reader will answer: with the feature off there is no portal
         // call to name, only the theme's name in a file.
-        if cfg!(feature = "portal") {
-            "portal"
-        } else {
-            "gtk-config"
+        let css = CSS_USED.load(Ordering::Relaxed);
+        match (cfg!(feature = "portal"), css) {
+            (true, true) => "portal+css",
+            (true, false) => "portal",
+            (false, true) => "gtk-css",
+            (false, false) => "gtk-config",
         }
     }
 
@@ -72,7 +81,11 @@ impl Platform for Portal {
     }
 
     fn skin(&self, reading: &Reading) -> Skin {
-        Skin::adwaita(reading.dark, reading.accent.unwrap_or(ADWAITA_ACCENT))
+        Skin::adwaita_with(
+            reading.dark,
+            reading.accent.unwrap_or(ADWAITA_ACCENT),
+            &reading.surfaces,
+        )
     }
 }
 
@@ -159,12 +172,37 @@ async fn gather() -> Result<Reading, String> {
             format!("no portal, and theme {theme:?} does not say whether it is light or dark")
         })?,
     };
+    // The user's stylesheet is the top of GTK's cascade: it sits above the
+    // library's sheet and above the accent libadwaita injects, so what it says is
+    // what a libadwaita window shows. It is also the one place a customised GNOME
+    // states its surfaces, which the portal does not carry at all.
+    let stylesheet = css::read(dark);
+    if !stylesheet.is_empty() || !stylesheet.notes.is_empty() {
+        tracing::debug!(
+            files = stylesheet.files,
+            applied = stylesheet.applied,
+            dropped = stylesheet.dropped.join("; "),
+            notes = stylesheet.notes.join("; "),
+            "read the user's gtk.css"
+        );
+    }
+    CSS_USED.store(!stylesheet.is_empty(), Ordering::Relaxed);
     Ok(Reading {
         dark,
-        // No portal means no accent either. Blue is libadwaita's own default, so
-        // this is the desktop's colour rather than a guess at the user's.
-        accent: Some(accent.unwrap_or(ADWAITA_ACCENT)),
+        // The file's accent beats the portal's: GTK resolves the named colour
+        // through the user's provider first (measured on 4.24/1.10 — a
+        // `dank-colors.css` orange replaces libadwaita's injected one). A portal
+        // accent is the fallback, and blue is libadwaita's own default rather
+        // than a guess at the user's.
+        accent: Some(
+            stylesheet
+                .overrides
+                .accent
+                .or(accent)
+                .unwrap_or(ADWAITA_ACCENT),
+        ),
         ladder: None,
+        surfaces: stylesheet.overrides,
     })
 }
 

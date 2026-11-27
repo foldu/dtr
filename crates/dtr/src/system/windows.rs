@@ -82,6 +82,9 @@ fn facts() -> Reading {
             "AccentPalette",
         )
         .and_then(|bytes| ladder_from_registry(&bytes)),
+        // Windows keeps the accent, not the surfaces: every WinUI surface is a
+        // constant the palette already carries.
+        surfaces: dtr_widgets::Overrides::default(),
     }
 }
 

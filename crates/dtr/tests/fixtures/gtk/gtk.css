@@ -1,0 +1,7 @@
+/**
+ * The shape a customised GNOME actually has: the home-manager file is a symlink
+ * whose first import points at a store path a rebuild moved, and whose second is
+ * the generated palette beside it.
+**/
+@import url("file:///nix/store/does-not-exist-adw-gtk3/share/themes/Adwaita-dark/gtk-4.0/gtk.css");
+@import url("matugen.css");

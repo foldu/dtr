@@ -1,14 +1,14 @@
-//! The two presets as pictures, over the sheet they will actually be used on.
+//! The presets as pictures, over the sheet they will actually be used on.
 //!
 //! The gallery is the serial connection sheet: every row the real one has, in
 //! the same order, because a style judged on four rows is not a style judged on
 //! the dialog. Every control in it is the crate's own, so this file is the one
 //! place a new primitive is seen before a screen adopts it.
 //!
-//! Both presets render on Linux: the Windows skin is a palette and a token
-//! table, not a call into Windows — the same trick `chrome::buttons_for` uses
-//! for the two captions. If the Windows look could only be seen on Windows, it
-//! would only be checked when somebody remembered to.
+//! Every preset renders on Linux: a look is a palette and a token table, not a
+//! call into its desktop — the same trick `chrome::buttons_for` uses for the two
+//! captions. If the Windows or Mac look could only be seen on its own machine,
+//! it would only be checked when somebody remembered to boot it.
 
 use dtr_widgets::{
     ADWAITA_ACCENT, Button, Card, Edit, Editable, Footer, Palette, RowSpec, Skin, check, menu_row,
@@ -448,7 +448,25 @@ fn the_adwaita_light_skin_renders() {
     harness.snapshot("widgets_adwaita_light");
 }
 
-/// egui's own look, which is the fourth preset and the one that has to look
+/// Apple's look-alike, over the same sheet and on the same Linux rasteriser as
+/// the other desktops: AppKit's light window, white controls, system blue.
+#[test]
+fn the_macos_dark_skin_renders() {
+    let mut harness = harness(Skin::macos_dark());
+    harness.run();
+    harness.snapshot("widgets_macos_dark");
+}
+
+/// And in the light, where a control is a white plate on a grey window rather
+/// than a white plane over a dark one.
+#[test]
+fn the_macos_light_skin_renders() {
+    let mut harness = harness(Skin::macos_light());
+    harness.run();
+    harness.snapshot("widgets_macos_light");
+}
+
+/// egui's own look, which is the last preset and the one that has to look
 /// deliberate without being a copy of a desktop: it reads `egui::Visuals` at run
 /// time, so this picture is also the check that the derivation follows whatever
 /// egui currently ships rather than a table frozen beside it.

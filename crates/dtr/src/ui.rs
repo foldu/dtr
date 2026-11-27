@@ -17,6 +17,10 @@ pub struct Look {
     /// Installed family the grid should use, before the preferred list.
     pub family: Option<String>,
     pub size: f32,
+    /// Space between the grid and the window's edges, in points. `[window] padding`.
+    /// The grid pass, the pty fit and the divider hit test all ask `pane_area`,
+    /// so they cannot disagree about it.
+    pub padding: u16,
     pub path: Option<PathBuf>,
     /// Families to try before dtr's own list when the grid face lacks a glyph,
     /// from `[font] fallback` in the config.
@@ -46,6 +50,7 @@ impl Default for Look {
         Self {
             family: None,
             size: 14.0,
+            padding: dtr_config::PADDING_DEFAULT,
             path: None,
             fallback: Vec::new(),
             background: crate::theme::DEFAULT_BACKGROUND,
@@ -115,6 +120,7 @@ impl Look {
             Self::choice_of(config),
         );
         look.fallback = config.font.fallback.clone();
+        look.padding = config.padding;
         look
     }
 
@@ -146,6 +152,7 @@ impl Look {
             Widgets::Native => Preset::Native,
             Widgets::Adwaita => Preset::Adwaita,
             Widgets::Windows => Preset::Windows,
+            Widgets::Macos => Preset::Macos,
             Widgets::Egui => Preset::Egui,
         };
         dtr_widgets::Choice {
@@ -1050,6 +1057,22 @@ pub struct TabStrip {
     pub used: egui::Rect,
 }
 
+/// What the chip row's scroll was doing last frame.
+///
+/// `follow` is the whole state: the strip keeps the active chip in view until
+/// the wheel takes it elsewhere, and `content`/`viewport` are what says whether
+/// a wheel notch could have moved anything — a wheel over a strip that fits is
+/// not a request to stop following.
+#[derive(Clone, Copy, Debug)]
+struct TabScroll {
+    active: usize,
+    follow: bool,
+    /// The active chip was still cut when the last frame ended, so ask again.
+    pending: bool,
+    content: f32,
+    viewport: f32,
+}
+
 pub fn tab_bar(
     ui: &mut Ui,
     labels: &[String],
@@ -1078,322 +1101,422 @@ pub fn tab_bar(
     // after the preferences menu had been opened once. A chip is
     // `chip_height` tall whoever asks, and the strip measures its own row.
     ui.spacing_mut().interact_size.y = chip_height;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (index, label) in labels.iter().enumerate() {
-            let is_active = index == active;
-            let text = format!("{} {}", index + 1, label);
-            let fg = if is_active {
-                palette.on_accent
-            } else {
-                palette.text
-            };
-            // One row, broken anywhere, elided with `…` — the three settings
-            // that make a long title stop at the cap instead of widening the
-            // chip (`TextWrapping::max_rows` is what enables elision at all).
-            let mut job = egui::text::LayoutJob::simple(
-                text,
-                skin.style.label_font.clone(),
-                fg,
-                TAB_LABEL_MAX_WIDTH,
-            );
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = true;
-            let galley = ui.painter().layout_job(job);
-            // Two hit targets in one chip: the label switches, the cross closes.
-            // A keyboard-focusable widget here would be activated by Enter and
-            // by Space — pressing Enter in the shell must not touch the strip,
-            // so both are pointer-only.
-            //
-            // The two targets have to be **disjoint rects**, not two sensors over
-            // the same chip. Overlapping click targets make egui's topmost-widget
-            // rule decide who gets the press, and the deciding factor is the
-            // allocation order — which reads as a button that works only some of
-            // the time. The chip itself only reserves space and senses hover.
-            let close_size = chip_height - 4.0;
-            let size = egui::vec2(galley.size().x + 18.0 + close_size, chip_height);
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-
-            let close_rect = egui::Rect::from_center_size(
-                egui::pos2(rect.right() - 8.0 - close_size / 2.0, rect.center().y),
-                egui::vec2(close_size, close_size),
-            );
-            let label_rect =
-                egui::Rect::from_min_max(rect.min, egui::pos2(close_rect.left() - 4.0, rect.max.y));
-            let response = ui.interact(
-                label_rect,
-                egui::Id::unique(("dtr-tab", index)),
-                egui::Sense::click(),
-            );
-            // Only when something was actually cut: a tooltip repeating a
-            // two-word title is noise, and it would also change every snapshot
-            // taken with the pointer over a short chip.
-            if galley.elided {
-                response
-                    .clone()
-                    .on_hover_text(format!("{} {}", index + 1, label));
-            }
-            // Hover is the strip's own affordance: a chip that looks the same
-            // under the pointer as away from it reads as decoration. The cross's
-            // own hover is asked by rect, because its widget is created after
-            // the chip is painted — the cross's highlight has to land on top.
-            let hovered = response.hovered() || ui.rect_contains_pointer(close_rect);
-            let fill = match (is_active, hovered) {
-                (true, true) => palette.accent_hover,
-                (true, false) => palette.accent,
-                (false, true) => palette.control_hover,
-                (false, false) => palette.control,
-            };
-            let painter = ui.painter();
-            painter.rect_filled(rect, skin.style.chip_radius, fill);
-            // The program's own report, on the chip's bottom edge: a fraction
-            // when it gave one, a sweeping band when it is working without a
-            // number, and the whole stripe when it is a *state* — done, paused,
-            // blocked or failed — because "42%" of a failed build means nothing.
-            //
-            // The colour is the chip's own foreground, not the accent: the
-            // active chip *is* the accent, so an accent stripe on it is invisible
-            // — which is what the first version drew. Only "needs you" gets the
-            // palette's danger slot, and a blocked build and a failed one share
-            // it because there is no warning slot to tell them apart yet.
-            if let Some(activity) = activity.get(index) {
-                let (what, colour) = match activity.state {
-                    crate::pane::ActivityState::Idle => (None, fg),
-                    crate::pane::ActivityState::Working => (
-                        Some(match activity.percent {
-                            Some(percent) => {
-                                dtr_widgets::Stripe::Fraction(f32::from(percent) / 100.0)
-                            }
-                            None => dtr_widgets::Stripe::Indeterminate,
-                        }),
+    // A strip with more tabs than width scrolls instead of dropping the last
+    // ones: a chip that is not on screen is a tab that cannot be reached by
+    // pointer, and a split every directory deeper used to push the `+` and the
+    // menu off the right edge entirely. The bar is egui's floating one — a solid
+    // bar reserves a band the chip row does not have — and it only appears once
+    // the content is wider than the strip.
+    ui.spacing_mut().scroll.floating = true;
+    // A wheel notch is vertical on every mouse ever made, and this area only
+    // scrolls horizontally: without this the wheel over the strip would do
+    // nothing at all. Scoped to the chips, so a vertical list elsewhere keeps
+    // its wheel.
+    ui.style_mut().always_scroll_the_only_direction = true;
+    // Whether the strip is following the active tab, and where it was left.
+    // "The active tab changed" is not enough: a new tab's title arrives over
+    // `OSC 2` a frame or two later, which widens chips under an offset that was
+    // already at its maximum — and the active chip slides back off the right
+    // edge with nothing having selected a different tab. Following until the
+    // wheel says otherwise keeps it visible through that growth, and still
+    // leaves a strip the person scrolled away from exactly where they put it.
+    let scroll_id = egui::Id::unique("dtr-tab-strip-scroll");
+    let last = ui.data(|data| data.get_temp::<TabScroll>(scroll_id));
+    let active_changed = last.as_ref().map_or(true, |state| state.active != active);
+    let mut follow = last.as_ref().map_or(true, |state| state.follow) || active_changed;
+    // A wheel notch is the person's decision and wins over the follow. Read
+    // *before* the scroll area: a target set in the same frame is applied after
+    // the wheel and would put the strip back, so the first notch would look
+    // dead. Only an overflowing strip can have been scrolled, which matters
+    // because a wheel over a strip that fits must not stop it following later.
+    let wheeled = ui.rect_contains_pointer(ui.max_rect())
+        && ui.input(|input| input.smooth_scroll_delta != egui::Vec2::ZERO);
+    if wheeled
+        && let Some(state) = last.as_ref()
+        && state.content > state.viewport
+    {
+        follow = false;
+    }
+    // One request, not one a frame. A target that the scroll cannot honour (a
+    // last chip cannot be centred past the content's end) sets an offset that
+    // clamps, which asks for a repaint every frame and never settles; and the
+    // strip has no animation to settle anyway.
+    let reveal = active_changed || last.as_ref().is_some_and(|state| state.pending);
+    let mut active_rect = None;
+    let area = egui::ScrollArea::horizontal()
+        .id_salt("dtr-tab-strip")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (index, label) in labels.iter().enumerate() {
+                    let is_active = index == active;
+                    let text = format!("{} {}", index + 1, label);
+                    let fg = if is_active {
+                        palette.on_accent
+                    } else {
+                        palette.text
+                    };
+                    // One row, broken anywhere, elided with `…` — the three settings
+                    // that make a long title stop at the cap instead of widening the
+                    // chip (`TextWrapping::max_rows` is what enables elision at all).
+                    let mut job = egui::text::LayoutJob::simple(
+                        text,
+                        skin.style.label_font.clone(),
                         fg,
-                    ),
-                    crate::pane::ActivityState::Paused => (
-                        Some(dtr_widgets::Stripe::Fraction(
-                            activity.percent.map_or(0.0, |p| f32::from(p) / 100.0),
-                        )),
-                        fg.gamma_multiply(0.5),
-                    ),
-                    crate::pane::ActivityState::Done => (Some(dtr_widgets::Stripe::State), fg),
-                    crate::pane::ActivityState::Blocked | crate::pane::ActivityState::Error => {
-                        (Some(dtr_widgets::Stripe::State), palette.danger)
+                        TAB_LABEL_MAX_WIDTH,
+                    );
+                    job.wrap.max_rows = 1;
+                    job.wrap.break_anywhere = true;
+                    let galley = ui.painter().layout_job(job);
+                    // Two hit targets in one chip: the label switches, the cross closes.
+                    // A keyboard-focusable widget here would be activated by Enter and
+                    // by Space — pressing Enter in the shell must not touch the strip,
+                    // so both are pointer-only.
+                    //
+                    // The two targets have to be **disjoint rects**, not two sensors over
+                    // the same chip. Overlapping click targets make egui's topmost-widget
+                    // rule decide who gets the press, and the deciding factor is the
+                    // allocation order — which reads as a button that works only some of
+                    // the time. The chip itself only reserves space and senses hover.
+                    let close_size = chip_height - 4.0;
+                    let size = egui::vec2(galley.size().x + 18.0 + close_size, chip_height);
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    if is_active {
+                        active_rect = Some(rect);
                     }
-                };
-                if let Some(what) = what {
-                    dtr_widgets::stripe(painter, rect, what, colour, ui.input(|i| i.time));
-                }
-            }
-            painter.galley(
-                egui::pos2(rect.left() + 7.0, rect.center().y - galley.size().y / 2.0),
-                galley,
-                fg,
-            );
-            // The cross is the crate's: two strokes, drawn, with a target of
-            // its own so a press near the right-hand end closes and one on the
-            // label switches. It is created after the chip is painted, or its
-            // hover fill would be painted over.
-            let close = dtr_widgets::cross_at(
-                ui,
-                &skin,
-                close_rect,
-                egui::Id::unique(("dtr-tab-close", index)),
-                &format!("close tab {}", index + 1),
-            );
-
-            // Painted by hand, so the label's accessibility node is declared by
-            // hand too — otherwise a screen reader (and the test harness) sees a
-            // strip with no tabs in it at all. The cross declares its own.
-            let name = format!("{} {}", index + 1, &labels[index]);
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
-
-            // `Sense::click()` is not enough to be pointer-only: egui activates
-            // any focused click-sensing widget on Enter, so a chip that once had
-            // focus turned the next Enter in the shell into a tab switch — the
-            // log said `active tab why="chip clicked"` with no mouse involved.
-            // A keyboard "click" happens with the pointer elsewhere, so hover is
-            // the test that separates them; the focus is surrendered as well so
-            // the chip cannot hold it in the first place.
-            for stolen in [&close, &response] {
-                if stolen.has_focus() {
-                    stolen.surrender_focus();
-                }
-            }
-            // Both responses are pointer-only: `cross_at` strips the synthetic
-            // click, and the chip's own is checked against the pointer below.
-            let pointer = ui.input(|i| i.pointer.any_click());
-            if close.clicked() {
-                clicked = Some(TabHit::Close(index));
-            } else if response.clicked() && pointer {
-                clicked = Some(TabHit::Select(index));
-            }
-        }
-
-        // The new-tab button. Its menu is where a terminal's destinations live:
-        // the shells this machine has, then the serial ports and the ssh hosts,
-        // each kind behind its own separator. Pointer only, like the chips, so
-        // Enter in the shell never opens a menu — `plus` returns a response
-        // that cannot have been clicked by a key.
-        let response = dtr_widgets::plus(
-            ui,
-            &skin,
-            "new tab",
-            egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
-        );
-        // What the body will say, measured before the body exists: a row fills
-        // the width it is offered, so a body left to decide for itself takes
-        // everything from the `+` to the window's edge. Every row the menu can
-        // draw is in the list, the fallback and the note included, and the
-        // widest of them is the width. Every destination reserves the mark column,
-        // a shell even where this machine has no picture for it: the shells of one
-        // machine do not all have a logo, and two starting points in one group read
-        // as a mistake rather than as two kinds of row.
-        let labels: Vec<String> = destinations
-            .iter()
-            .map(crate::sources::Destination::label)
-            .collect();
-        let mut rows: Vec<dtr_widgets::RowSpec> = labels
-            .iter()
-            .map(|label| dtr_widgets::RowSpec {
-                label: label.as_str(),
-                icon: true,
-            })
-            .collect();
-        rows.push(dtr_widgets::RowSpec {
-            label: "local shell",
-            icon: false,
-        });
-        rows.push(dtr_widgets::RowSpec {
-            label: "no serial ports and no ssh hosts",
-            icon: false,
-        });
-        let width = dtr_widgets::menu_width(ui, &skin, &rows).max(220.0);
-
-        let mut popup = egui::Popup::menu(&response).width(width);
-        if let Some(tip) = skin.style.tip_height {
-            // Aimed at the `+` for the same reason as the app menu — and this is
-            // the menu that needs it: it is a narrow body hung off a button close
-            // enough to the window's left edge that a body aligned to the
-            // button's edge would be pushed back inside the window, which is when
-            // a beak stops pointing at what opened it.
-            popup = dtr_widgets::point_at(ui, popup, response.rect, tip);
-        }
-        let menu = popup.show(|ui| {
-            // A machine with forty hosts gets a menu taller than the screen,
-            // and a menu whose last host is below the taskbar is a host you
-            // cannot pick. The body scrolls instead, with a bar that says so:
-            // the plus is at the top of the window, so the screen less a strip
-            // is what there is to spend.
-            let max_height = (ui.ctx().content_rect().height() - 80.0).max(160.0);
-            // A solid bar, not the floating one egui defaults to: a bar that
-            // appears only while the wheel turns is a bar a person who has not
-            // found the wheel never sees, and a floating one would paint over
-            // the host names it is there to reveal.
-            ui.spacing_mut().scroll.floating = false;
-            egui::ScrollArea::vertical()
-                .id_salt("dtr-new-tab-menu")
-                .max_height(max_height)
-                .auto_shrink([true, true])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                .show(ui, |ui| {
-                    // The shells are their own group and they come first: a
-                    // local shell is what a `+` is usually for. They are
-                    // discovered rather than listed, so a machine with three
-                    // installed shells gets three rows, the first being the one
-                    // a bare `+` would have started.
-                    let shells: Vec<&crate::sources::Destination> = destinations
-                        .iter()
-                        .filter(|destination| destination.is_shell())
-                        .collect();
-                    if shells.is_empty() {
-                        // Nothing was discovered — a container with no
-                        // `/etc/shells` and no shell on `PATH`. The row is
-                        // still there, because the spawner walks its own list
-                        // and "a terminal with no shell" is not a menu item.
-                        if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
-                            clicked = Some(TabHit::New(None));
-                            ui.close();
-                        }
-                    }
-                    for destination in shells {
-                        // The mark is the machine's own picture of the program —
-                        // Windows reads it out of the executable, and Linux has
-                        // none to read, so there it is the shell's logo — and a
-                        // shell with neither still gets the row, indented, with
-                        // nothing in the column.
-                        let label = destination.label();
-                        if dtr_widgets::menu_row_icon(
-                            ui,
-                            &skin,
-                            row_mark(ui, &skin, destination),
-                            &label,
-                            false,
-                        ) {
-                            clicked = Some(TabHit::New(Some(destination.clone())));
-                            ui.close();
-                        }
-                    }
-                    // The remaining groups are separated, not just prefixed.
-                    // `serial …` and `ssh …` are different verbs that lead to
-                    // different panes, and a run of `/dev/tty…` rows with an
-                    // `ssh` row in the middle is one where the pointer lands on
-                    // the wrong half of the menu. A group that is empty takes
-                    // its separator with it, so a machine with no serial ports
-                    // looks like it always did.
-                    for group in [
-                        destinations
-                            .iter()
-                            .filter(|destination| destination.is_serial())
-                            .collect::<Vec<_>>(),
-                        destinations
-                            .iter()
-                            .filter(|destination| {
-                                !destination.is_shell() && !destination.is_serial()
-                            })
-                            .collect(),
-                    ] {
-                        if group.is_empty() {
-                            continue;
-                        }
-                        dtr_widgets::menu_separator(ui, &skin);
-                        for destination in group {
-                            let label = destination.label();
-                            if dtr_widgets::menu_row_icon(
-                                ui,
-                                &skin,
-                                row_mark(ui, &skin, destination),
-                                &label,
-                                false,
-                            ) {
-                                clicked = Some(TabHit::New(Some(destination.clone())));
-                                ui.close();
-                            }
-                        }
-                    }
-                    if destinations
-                        .iter()
-                        .all(crate::sources::Destination::is_shell)
-                    {
-                        ui.label(
-                            egui::RichText::new("no serial ports and no ssh hosts")
-                                .font(egui::FontId::new(
-                                    skin.style.label_font.size - 1.0,
-                                    skin.style.label_font.family.clone(),
-                                ))
-                                .color(palette.dim),
+                    // Keep the active tab in view while the strip is following
+                    // it — on a switch, a close, and the frame after a late
+                    // title widened the chips. Instant rather than animated:
+                    // the content is a title bar, not a list being scrolled by
+                    // a person.
+                    if is_active && follow && reveal {
+                        ui.scroll_to_rect_animation(
+                            rect,
+                            Some(egui::Align::Center),
+                            egui::style::ScrollAnimation::none(),
                         );
                     }
+
+                    let close_rect = egui::Rect::from_center_size(
+                        egui::pos2(rect.right() - 8.0 - close_size / 2.0, rect.center().y),
+                        egui::vec2(close_size, close_size),
+                    );
+                    let label_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(close_rect.left() - 4.0, rect.max.y),
+                    );
+                    let response = ui.interact(
+                        label_rect,
+                        egui::Id::unique(("dtr-tab", index)),
+                        egui::Sense::click(),
+                    );
+                    // Only when something was actually cut: a tooltip repeating a
+                    // two-word title is noise, and it would also change every snapshot
+                    // taken with the pointer over a short chip.
+                    if galley.elided {
+                        response
+                            .clone()
+                            .on_hover_text(format!("{} {}", index + 1, label));
+                    }
+                    // Hover is the strip's own affordance: a chip that looks the same
+                    // under the pointer as away from it reads as decoration. The cross's
+                    // own hover is asked by rect, because its widget is created after
+                    // the chip is painted — the cross's highlight has to land on top.
+                    let hovered = response.hovered() || ui.rect_contains_pointer(close_rect);
+                    let fill = match (is_active, hovered) {
+                        (true, true) => palette.accent_hover,
+                        (true, false) => palette.accent,
+                        (false, true) => palette.control_hover,
+                        (false, false) => palette.control,
+                    };
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, skin.style.chip_radius, fill);
+                    // The program's own report, on the chip's bottom edge: a fraction
+                    // when it gave one, a sweeping band when it is working without a
+                    // number, and the whole stripe when it is a *state* — done, paused,
+                    // blocked or failed — because "42%" of a failed build means nothing.
+                    //
+                    // The colour is the chip's own foreground, not the accent: the
+                    // active chip *is* the accent, so an accent stripe on it is invisible
+                    // — which is what the first version drew. Only "needs you" gets the
+                    // palette's danger slot, and a blocked build and a failed one share
+                    // it because there is no warning slot to tell them apart yet.
+                    if let Some(activity) = activity.get(index) {
+                        let (what, colour) = match activity.state {
+                            crate::pane::ActivityState::Idle => (None, fg),
+                            crate::pane::ActivityState::Working => (
+                                Some(match activity.percent {
+                                    Some(percent) => {
+                                        dtr_widgets::Stripe::Fraction(f32::from(percent) / 100.0)
+                                    }
+                                    None => dtr_widgets::Stripe::Indeterminate,
+                                }),
+                                fg,
+                            ),
+                            crate::pane::ActivityState::Paused => (
+                                Some(dtr_widgets::Stripe::Fraction(
+                                    activity.percent.map_or(0.0, |p| f32::from(p) / 100.0),
+                                )),
+                                fg.gamma_multiply(0.5),
+                            ),
+                            crate::pane::ActivityState::Done => {
+                                (Some(dtr_widgets::Stripe::State), fg)
+                            }
+                            crate::pane::ActivityState::Blocked
+                            | crate::pane::ActivityState::Error => {
+                                (Some(dtr_widgets::Stripe::State), palette.danger)
+                            }
+                        };
+                        if let Some(what) = what {
+                            dtr_widgets::stripe(painter, rect, what, colour, ui.input(|i| i.time));
+                        }
+                    }
+                    painter.galley(
+                        egui::pos2(rect.left() + 7.0, rect.center().y - galley.size().y / 2.0),
+                        galley,
+                        fg,
+                    );
+                    // The cross is the crate's: two strokes, drawn, with a target of
+                    // its own so a press near the right-hand end closes and one on the
+                    // label switches. It is created after the chip is painted, or its
+                    // hover fill would be painted over.
+                    let close = dtr_widgets::cross_at(
+                        ui,
+                        &skin,
+                        close_rect,
+                        egui::Id::unique(("dtr-tab-close", index)),
+                        &format!("close tab {}", index + 1),
+                    );
+
+                    // Painted by hand, so the label's accessibility node is declared by
+                    // hand too — otherwise a screen reader (and the test harness) sees a
+                    // strip with no tabs in it at all. The cross declares its own.
+                    let name = format!("{} {}", index + 1, &labels[index]);
+                    response
+                        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+
+                    // `Sense::click()` is not enough to be pointer-only: egui activates
+                    // any focused click-sensing widget on Enter, so a chip that once had
+                    // focus turned the next Enter in the shell into a tab switch — the
+                    // log said `active tab why="chip clicked"` with no mouse involved.
+                    // A keyboard "click" happens with the pointer elsewhere, so hover is
+                    // the test that separates them; the focus is surrendered as well so
+                    // the chip cannot hold it in the first place.
+                    for stolen in [&close, &response] {
+                        if stolen.has_focus() {
+                            stolen.surrender_focus();
+                        }
+                    }
+                    // Both responses are pointer-only: `cross_at` strips the synthetic
+                    // click, and the chip's own is checked against the pointer below.
+                    let pointer = ui.input(|i| i.pointer.any_click());
+                    if close.clicked() {
+                        clicked = Some(TabHit::Close(index));
+                    } else if response.clicked() && pointer {
+                        clicked = Some(TabHit::Select(index));
+                    }
+                }
+
+                // The new-tab button. Its menu is where a terminal's destinations live:
+                // the shells this machine has, then the serial ports and the ssh hosts,
+                // each kind behind its own separator. Pointer only, like the chips, so
+                // Enter in the shell never opens a menu — `plus` returns a response
+                // that cannot have been clicked by a key.
+                let response = dtr_widgets::plus(
+                    ui,
+                    &skin,
+                    "new tab",
+                    egui::vec2(TAB_CHIP_HEIGHT + 4.0, TAB_CHIP_HEIGHT),
+                );
+                // What the body will say, measured before the body exists: a row fills
+                // the width it is offered, so a body left to decide for itself takes
+                // everything from the `+` to the window's edge. Every row the menu can
+                // draw is in the list, the fallback and the note included, and the
+                // widest of them is the width. Every destination reserves the mark column,
+                // a shell even where this machine has no picture for it: the shells of one
+                // machine do not all have a logo, and two starting points in one group read
+                // as a mistake rather than as two kinds of row.
+                let labels: Vec<String> = destinations
+                    .iter()
+                    .map(crate::sources::Destination::label)
+                    .collect();
+                let mut rows: Vec<dtr_widgets::RowSpec> = labels
+                    .iter()
+                    .map(|label| dtr_widgets::RowSpec {
+                        label: label.as_str(),
+                        icon: true,
+                    })
+                    .collect();
+                rows.push(dtr_widgets::RowSpec {
+                    label: "local shell",
+                    icon: false,
                 });
+                rows.push(dtr_widgets::RowSpec {
+                    label: "no serial ports and no ssh hosts",
+                    icon: false,
+                });
+                let width = dtr_widgets::menu_width(ui, &skin, &rows).max(220.0);
+
+                let mut popup = egui::Popup::menu(&response).width(width);
+                if let Some(tip) = skin.style.tip_height {
+                    // Aimed at the `+` for the same reason as the app menu — and this is
+                    // the menu that needs it: it is a narrow body hung off a button close
+                    // enough to the window's left edge that a body aligned to the
+                    // button's edge would be pushed back inside the window, which is when
+                    // a beak stops pointing at what opened it.
+                    popup = dtr_widgets::point_at(ui, popup, response.rect, tip);
+                }
+                let menu = popup.show(|ui| {
+                    // A machine with forty hosts gets a menu taller than the screen,
+                    // and a menu whose last host is below the taskbar is a host you
+                    // cannot pick. The body scrolls instead, with a bar that says so:
+                    // the plus is at the top of the window, so the screen less a strip
+                    // is what there is to spend.
+                    let max_height = (ui.ctx().content_rect().height() - 80.0).max(160.0);
+                    // A solid bar, not the floating one egui defaults to: a bar that
+                    // appears only while the wheel turns is a bar a person who has not
+                    // found the wheel never sees, and a floating one would paint over
+                    // the host names it is there to reveal.
+                    ui.spacing_mut().scroll.floating = false;
+                    egui::ScrollArea::vertical()
+                        .id_salt("dtr-new-tab-menu")
+                        .max_height(max_height)
+                        .auto_shrink([true, true])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                        )
+                        .show(ui, |ui| {
+                            // The shells are their own group and they come first: a
+                            // local shell is what a `+` is usually for. They are
+                            // discovered rather than listed, so a machine with three
+                            // installed shells gets three rows, the first being the one
+                            // a bare `+` would have started.
+                            let shells: Vec<&crate::sources::Destination> = destinations
+                                .iter()
+                                .filter(|destination| destination.is_shell())
+                                .collect();
+                            if shells.is_empty() {
+                                // Nothing was discovered — a container with no
+                                // `/etc/shells` and no shell on `PATH`. The row is
+                                // still there, because the spawner walks its own list
+                                // and "a terminal with no shell" is not a menu item.
+                                if dtr_widgets::menu_row(ui, &skin, "local shell", false) {
+                                    clicked = Some(TabHit::New(None));
+                                    ui.close();
+                                }
+                            }
+                            for destination in shells {
+                                // The mark is the machine's own picture of the program —
+                                // Windows reads it out of the executable, and Linux has
+                                // none to read, so there it is the shell's logo — and a
+                                // shell with neither still gets the row, indented, with
+                                // nothing in the column.
+                                let label = destination.label();
+                                if dtr_widgets::menu_row_icon(
+                                    ui,
+                                    &skin,
+                                    row_mark(ui, &skin, destination),
+                                    &label,
+                                    false,
+                                ) {
+                                    clicked = Some(TabHit::New(Some(destination.clone())));
+                                    ui.close();
+                                }
+                            }
+                            // The remaining groups are separated, not just prefixed.
+                            // `serial …` and `ssh …` are different verbs that lead to
+                            // different panes, and a run of `/dev/tty…` rows with an
+                            // `ssh` row in the middle is one where the pointer lands on
+                            // the wrong half of the menu. A group that is empty takes
+                            // its separator with it, so a machine with no serial ports
+                            // looks like it always did.
+                            for group in [
+                                destinations
+                                    .iter()
+                                    .filter(|destination| destination.is_serial())
+                                    .collect::<Vec<_>>(),
+                                destinations
+                                    .iter()
+                                    .filter(|destination| {
+                                        !destination.is_shell() && !destination.is_serial()
+                                    })
+                                    .collect(),
+                            ] {
+                                if group.is_empty() {
+                                    continue;
+                                }
+                                dtr_widgets::menu_separator(ui, &skin);
+                                for destination in group {
+                                    let label = destination.label();
+                                    if dtr_widgets::menu_row_icon(
+                                        ui,
+                                        &skin,
+                                        row_mark(ui, &skin, destination),
+                                        &label,
+                                        false,
+                                    ) {
+                                        clicked = Some(TabHit::New(Some(destination.clone())));
+                                        ui.close();
+                                    }
+                                }
+                            }
+                            if destinations
+                                .iter()
+                                .all(crate::sources::Destination::is_shell)
+                            {
+                                ui.label(
+                                    egui::RichText::new("no serial ports and no ssh hosts")
+                                        .font(egui::FontId::new(
+                                            skin.style.label_font.size - 1.0,
+                                            skin.style.label_font.family.clone(),
+                                        ))
+                                        .color(palette.dim),
+                                );
+                            }
+                        });
+                });
+                // Same tip as the strip's app menu, because it is the same kind of
+                // button: a menubutton's popover says which button it belongs to.
+                if let Some(menu) = menu {
+                    dtr_widgets::menu_tip(&menu.response, &skin, response.rect);
+                }
+            });
         });
-        // Same tip as the strip's app menu, because it is the same kind of
-        // button: a menubutton's popover says which button it belongs to.
-        if let Some(menu) = menu {
-            dtr_widgets::menu_tip(&menu.response, &skin, response.rect);
-        }
-    });
-    // What the horizontal actually took, so a drag region can start after it.
-    // Taken from the ui rather than computed from the chips: the `+` is part of
-    // the strip too, and a drag that started on it would be a drag on a menu.
+    // What the row actually took, so a drag region can start after it. Taken
+    // from the ui rather than computed from the chips: the `+` is part of the
+    // strip too, and a drag that started on it would be a drag on a menu. When
+    // the content overflows, the scroll area takes the width it was given and
+    // the drag region is empty, which is right: the whole width belongs to a
+    // tab. (`ScrollAreaOutput::inner_rect` is the available rect, not the
+    // shrunk one, so it cannot answer this.)
     let used = ui.min_rect();
+    // A chip still cut after this frame's request is a request the scroll could
+    // not honour (there is no content past it to scroll onto), so it is asked
+    // again next frame rather than every frame: a target that can never be met
+    // repaints forever. This is also what catches a late title growing the row
+    // out from under an offset that was already at its maximum.
+    let pending = follow
+        && active_rect
+            .is_some_and(|rect| rect.width() <= used.width() && !used.contains_rect(rect));
+    // The request is made on the *next* frame, so say there is one: a late
+    // title can be the last thing that woke the window, and a chip left cut
+    // until the next keystroke is the bug this follow exists to avoid.
+    if pending {
+        ui.ctx().request_repaint();
+    }
+    ui.data_mut(|data| {
+        data.insert_temp(
+            scroll_id,
+            TabScroll {
+                active,
+                follow,
+                pending,
+                content: area.content_size.x,
+                viewport: used.width(),
+            },
+        )
+    });
     TabStrip { hit: clicked, used }
 }
 
@@ -1546,11 +1669,12 @@ mod kittest_tests {
             egui::Color32::from_rgb(0xED, 0x5B, 0x00)
         );
 
-        // Each of the four is one preset, and the old spelling is not a fifth.
+        // Each of the five is one preset, and the old spellings are not extras.
         for (widgets, preset) in [
             (dtr_config::Widgets::Native, Preset::Native),
             (dtr_config::Widgets::Adwaita, Preset::Adwaita),
             (dtr_config::Widgets::Windows, Preset::Windows),
+            (dtr_config::Widgets::Macos, Preset::Macos),
             (dtr_config::Widgets::Egui, Preset::Egui),
         ] {
             let mut config = dtr_config::Config::default();
@@ -1954,6 +2078,114 @@ mod kittest_tests {
         assert!(
             short.rect().width() < label_width,
             "a short title should not be padded to the cap"
+        );
+    }
+
+    /// More tabs than width: the strip scrolls, and the active one is brought
+    /// into view rather than living off the right edge.
+    ///
+    /// This is the reported "the strip needs to be scrollable": before it
+    /// scrolled, the tabs past the strip's width were simply not there, and the
+    /// `+` and the menu went with them. Switching to a tab has to reveal it —
+    /// otherwise a chord can select a tab nobody can see.
+    #[test]
+    fn a_crowded_strip_scrolls_to_the_active_tab() {
+        let look = Look::default();
+        let labels: Vec<String> = (1..=8).map(|n| format!("session {n}")).collect();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, TAB_CHIP_HEIGHT))
+            .build_ui(move |ui| {
+                tab_bar(ui, &labels, 7, &[], &look, TAB_CHIP_HEIGHT, &[]);
+            });
+        harness.run();
+
+        let active = harness.get_by_label("8 session 8").rect();
+        assert!(
+            active.left() >= -0.5 && active.right() <= 320.5,
+            "the active tab is not on the strip: {active:?}"
+        );
+        // The proof that this is a scroll and not a layout that fits: the first
+        // chip is entirely to the left of the strip.
+        let first = harness.get_by_label("1 session 1").rect();
+        assert!(
+            first.right() < 0.0,
+            "the strip did not scroll: the first chip is still at {first:?}"
+        );
+    }
+
+    /// A wheel notch over a crowded strip scrolls it, without the shift key.
+    ///
+    /// The area only scrolls horizontally, and a wheel notch is vertical on
+    /// every mouse; without `always_scroll_the_only_direction` the wheel over
+    /// the strip did nothing at all, so the overflow was reachable only by
+    /// keyboard.
+    #[test]
+    fn the_wheel_scrolls_a_crowded_strip() {
+        let look = Look::default();
+        let labels: Vec<String> = (1..=8).map(|n| format!("session {n}")).collect();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, TAB_CHIP_HEIGHT))
+            .build_ui(move |ui| {
+                tab_bar(ui, &labels, 0, &[], &look, TAB_CHIP_HEIGHT, &[]);
+            });
+        harness.run();
+        let before = harness.get_by_label("1 session 1").rect().left();
+
+        harness.hover_at(egui::pos2(160.0, 10.0));
+        harness.run();
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run();
+
+        let after = harness.get_by_label("1 session 1").rect().left();
+        assert!(
+            after < before,
+            "the wheel did not scroll the strip: {before} -> {after}"
+        );
+    }
+
+    /// A title that arrives after the tab was opened does not push it off.
+    ///
+    /// The strip used to scroll once, when the active index changed — and a
+    /// shell's `OSC 2` title lands a frame or two later, widening every chip
+    /// under an offset that was already at its maximum. The active chip slid
+    /// back under the menu with no different tab selected. The strip now
+    /// follows until the wheel says otherwise, so this growth is a second
+    /// request rather than a silent loss.
+    #[test]
+    fn a_title_that_arrives_late_does_not_push_the_active_tab_off() {
+        let look = Look::default();
+        let grow = std::rc::Rc::new(std::cell::Cell::new(false));
+        let switch = std::rc::Rc::clone(&grow);
+        let short: Vec<String> = (1..=8).map(|n| format!("session {n}")).collect();
+        let long: Vec<String> = (1..=8)
+            .map(|n| format!("session {n} with a much longer title"))
+            .collect();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, TAB_CHIP_HEIGHT))
+            .build_ui(move |ui| {
+                let labels = if switch.get() { &long } else { &short };
+                tab_bar(ui, labels, 7, &[], &look, TAB_CHIP_HEIGHT, &[]);
+            });
+        harness.run();
+
+        grow.set(true);
+        // The growth asks for another frame (a chip was cut), and the answer
+        // takes one more; `run` gives up at its four-step default, so step far
+        // enough to see the settled offset.
+        harness.run_steps(8);
+
+        let active = harness
+            .get_by_label("8 session 8 with a much longer title")
+            .rect();
+        assert!(
+            active.left() >= -0.5 && active.right() <= 320.5,
+            "the grown active tab is not on the strip: {active:?}"
         );
     }
 

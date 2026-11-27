@@ -75,10 +75,11 @@ pub enum Row {
     CrToCrlf,
     AutoReconnect,
     Tmux,
+    Padding,
 }
 
 impl Row {
-    const ALL: [Row; 10] = [
+    const ALL: [Row; 11] = [
         Row::Widgets,
         Row::Scheme,
         Row::Accent,
@@ -89,6 +90,7 @@ impl Row {
         Row::CrToCrlf,
         Row::AutoReconnect,
         Row::Tmux,
+        Row::Padding,
     ];
 
     fn panel(self) -> Panel {
@@ -98,7 +100,8 @@ impl Row {
             | Row::Accent
             | Row::Theme
             | Row::FontSize
-            | Row::FontFamily => Panel::Appearance,
+            | Row::FontFamily
+            | Row::Padding => Panel::Appearance,
             Row::Baud | Row::CrToCrlf | Row::AutoReconnect | Row::Tmux => Panel::General,
         }
     }
@@ -127,6 +130,7 @@ impl Row {
             Row::CrToCrlf => "cr_to_crlf",
             Row::AutoReconnect => "auto_reconnect",
             Row::Tmux => "enabled",
+            Row::Padding => "padding",
         }
     }
 
@@ -145,6 +149,7 @@ impl Row {
             Row::CrToCrlf => "a lone CR becomes a new line",
             Row::AutoReconnect => "reopen the port when it drops",
             Row::Tmux => "run ssh tabs inside tmux on the host",
+            Row::Padding => "space around the grid, in points",
         }
     }
 
@@ -155,6 +160,7 @@ impl Row {
             Row::FontSize | Row::FontFamily => "font",
             Row::Baud | Row::CrToCrlf | Row::AutoReconnect => "serial",
             Row::Tmux => "tmux",
+            Row::Padding => "window",
         }
     }
 
@@ -217,6 +223,7 @@ pub enum Change {
     Tmux(bool),
     Baud(u32),
     CrToCrlf(bool),
+    Padding(u16),
 }
 
 /// What the card asked for.
@@ -398,6 +405,7 @@ impl Settings {
                     serial.cr_to_crlf = on;
                 }
             }
+            Change::Padding(padding) => self.draft.padding = padding,
         }
     }
 
@@ -443,6 +451,7 @@ impl Settings {
             },
             Row::AutoReconnect => on_off(self.draft.serial.auto_reconnect),
             Row::Tmux => on_off(self.draft.tmux.enabled),
+            Row::Padding => format!("{} pt", self.draft.padding),
         }
     }
 
@@ -474,6 +483,7 @@ impl Settings {
             "tmux.enabled".to_owned(),
             self.draft.tmux.enabled.to_string(),
         ));
+        writes.push(("window.padding".to_owned(), self.draft.padding.to_string()));
         writes.push(("ui.widgets".to_owned(), self.draft.ui.widgets.to_string()));
         writes.push(("ui.scheme".to_owned(), self.draft.ui.scheme.to_string()));
         writes.push((
@@ -687,7 +697,7 @@ impl Settings {
         let name = format!("{} value", row.key());
         match row {
             Row::Widgets => {
-                // A dropdown, like every other fixed list here: the four looks are
+                // A dropdown, like every other fixed list here: the five looks are
                 // a closed set, and a row of chips spent the width the values
                 // themselves need — on Windows' 32-point metrics it was the row
                 // that made the sheet scroll.
@@ -773,6 +783,21 @@ impl Settings {
                 response
                     .widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name));
                 response.changed().then_some(Change::FontSize(size))
+            }
+            Row::Padding => {
+                // Drag left/right, or click to type: the same control the point
+                // size has, and the same range the file accepts, so the sheet
+                // cannot write a number the parser refuses.
+                let mut padding = self.draft.padding;
+                let response = ui.add(
+                    egui::DragValue::new(&mut padding)
+                        .speed(0.5)
+                        .range(dtr_config::PADDING_RANGE)
+                        .suffix(" pt"),
+                );
+                response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name));
+                response.changed().then_some(Change::Padding(padding))
             }
             Row::FontFamily => {
                 // The list `show` found, not a fresh probe: a fontconfig walk in
@@ -1123,7 +1148,13 @@ mod tests {
         settings.apply(Change::Panel(Panel::Appearance));
         assert_eq!(
             settings.rows(),
-            vec![Row::Widgets, Row::Theme, Row::FontSize, Row::FontFamily],
+            vec![
+                Row::Widgets,
+                Row::Theme,
+                Row::FontSize,
+                Row::FontFamily,
+                Row::Padding
+            ],
             "a native shell has no scheme or accent of its own"
         );
     }
@@ -1146,6 +1177,23 @@ mod tests {
             settings
                 .writes()
                 .contains(&("tmux.enabled".to_owned(), "true".to_owned())),
+            "the row and the file are one key"
+        );
+    }
+
+    /// The padding row is the file's key and the draft's number: one value, and
+    /// the control cannot write one outside the range the parser accepts.
+    #[test]
+    fn the_padding_row_is_one_key() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(settings.draft.padding, dtr_config::PADDING_DEFAULT);
+        settings.apply(Change::Padding(12));
+        assert_eq!(settings.draft.padding, 12);
+        assert!(
+            settings
+                .writes()
+                .contains(&("window.padding".to_owned(), "12".to_owned())),
             "the row and the file are one key"
         );
     }
@@ -1180,7 +1228,8 @@ mod tests {
                 Row::Accent,
                 Row::Theme,
                 Row::FontSize,
-                Row::FontFamily
+                Row::FontFamily,
+                Row::Padding
             ]
         );
         // Ask for the look that has no accent.
@@ -1297,7 +1346,13 @@ mod kittest_tests {
         settings.apply(Change::Panel(Panel::Appearance));
         assert_eq!(
             settings.rows(),
-            vec![Row::Widgets, Row::Theme, Row::FontSize, Row::FontFamily]
+            vec![
+                Row::Widgets,
+                Row::Theme,
+                Row::FontSize,
+                Row::FontFamily,
+                Row::Padding
+            ]
         );
     }
 

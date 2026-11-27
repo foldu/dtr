@@ -7,26 +7,27 @@
 //! title goes, how a section is announced, which footer button comes first — and
 //! not only radii and heights.
 //!
-//! Four styles exist. [`Style::dtr`] is the chrome the terminal always had.
+//! Five styles exist. [`Style::dtr`] is the chrome the terminal always had.
 //! [`Style::native`] is the platform's own: the metrics are Windows 11's (a
 //! 32-point control, a 4-point radius, a 1-point hairline, an 8-point overlay)
 //! and the colours come from the system palette beside it in [`crate::Palette`].
-//! [`Style::adwaita`] is GNOME's, measured out of libadwaita's stylesheet, and
-//! [`Style::egui`] is egui's own defaults. The tokens are a value rather than a
-//! `cfg!` so any of them can be rendered on one machine — the same trick
-//! `chrome::buttons_for` uses for the window buttons, and the only way a look
-//! stays honest without the platform it copies.
+//! [`Style::adwaita`] is GNOME's, measured out of libadwaita's stylesheet;
+//! [`Style::macos`] is a look-alike of Apple's, built from AppKit's control
+//! metrics; and [`Style::egui`] is egui's own defaults. The tokens are a value
+//! rather than a `cfg!` so any of them can be rendered on one machine — the same
+//! trick `chrome::buttons_for` uses for the window buttons, and the only way a
+//! look stays honest without the platform it copies.
 
 use egui::epaint::Shadow;
 use egui::{Color32, FontId, Margin, Vec2};
 
 /// Which chrome a window asks for.
 ///
-/// Three of the four are looks this crate can paint on any machine — GNOME's,
-/// Windows', and egui's own — and the three that can are the ones with a scheme
-/// and an accent of their own. [`Preset::Native`] is the source: it asks the
-/// platform, and takes the scheme and the accent along with the palette. See
-/// [`Preset::owns_its_colours`].
+/// Four of the five are looks this crate can paint on any machine — GNOME's,
+/// Windows', Apple's, and egui's own — and the ones that can are the ones with
+/// a scheme and an accent of their own. [`Preset::Native`] is the source: it
+/// asks the platform, and takes the scheme and the accent along with the
+/// palette. See [`Preset::owns_its_colours`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Preset {
     /// The platform's own: system palette, system metrics, system scheme and
@@ -41,6 +42,11 @@ pub enum Preset {
     Adwaita,
     /// Windows 11's, whether or not this machine runs Windows.
     Windows,
+    /// Apple's macOS look-alike, whether or not this machine runs macOS: a
+    /// 28-point control, a 6-point radius, Apple's semantic colours over the
+    /// user's `systemBlue`. It is *not* what `native` means on a Mac — that
+    /// would be a measured desktop, and there is no reader for it yet.
+    Macos,
     /// egui's stock visuals: the greys, the metrics and the shadow a plain egui
     /// app draws with. This is the look the program's own chrome used to be
     /// called after — `widgets = "dtr"` in a config file still reads as this.
@@ -53,6 +59,7 @@ impl Preset {
             Self::Native => "native",
             Self::Adwaita => "adwaita",
             Self::Windows => "windows",
+            Self::Macos => "macos",
             Self::Egui => "egui",
         }
     }
@@ -60,24 +67,27 @@ impl Preset {
     /// Parse a config value. Unknown names are the caller's error to report; a
     /// silently-ignored style is a window that never looks like it was asked to.
     ///
-    /// `dtr` is accepted as an old spelling of `egui` and never written back: a
-    /// config file edited before the menu existed keeps working, and saving it
-    /// once normalises the line.
+    /// `dtr` is accepted as an old spelling of `egui`, and `apple` as another
+    /// spelling of `macos`, and neither is written back: a config file edited
+    /// before a menu label moved keeps working, and saving it once normalises
+    /// the line.
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "native" => Some(Self::Native),
             "adwaita" => Some(Self::Adwaita),
             "windows" => Some(Self::Windows),
+            "macos" | "apple" => Some(Self::Macos),
             "egui" | "dtr" => Some(Self::Egui),
             _ => None,
         }
     }
 
     /// Every preset, in the order the preferences card offers them.
-    pub const ALL: [Preset; 4] = [
+    pub const ALL: [Preset; 5] = [
         Preset::Native,
         Preset::Adwaita,
         Preset::Windows,
+        Preset::Macos,
         Preset::Egui,
     ];
 
@@ -86,9 +96,12 @@ impl Preset {
     /// `native` takes both from the desktop — its scheme is the desktop's, its
     /// accent the user's, with the ladder of hover shades the OS keeps beside it —
     /// so offering it a light/dark switch would be offering a control that
-    /// nothing reads. The three looks painted here have no such source.
+    /// nothing reads. The four looks painted here have no such source.
     pub fn owns_its_colours(self) -> bool {
-        matches!(self, Self::Adwaita | Self::Windows | Self::Egui)
+        matches!(
+            self,
+            Self::Adwaita | Self::Windows | Self::Macos | Self::Egui
+        )
     }
 
     /// The accent this preset draws when the config names none, in `dark` or in
@@ -99,11 +112,14 @@ impl Preset {
     /// answered.
     pub fn default_accent(self, dark: bool) -> Option<Color32> {
         use crate::skin::{ADWAITA_ACCENT, EGUI_ACCENT_DARK, EGUI_ACCENT_LIGHT};
+        use crate::skin::{MACOS_ACCENT_DARK, MACOS_ACCENT_LIGHT};
         use crate::skin::{WINDOWS_ACCENT_DARK, WINDOWS_ACCENT_LIGHT};
         match self {
             Self::Adwaita => Some(ADWAITA_ACCENT),
             Self::Windows if dark => Some(WINDOWS_ACCENT_DARK),
             Self::Windows => Some(WINDOWS_ACCENT_LIGHT),
+            Self::Macos if dark => Some(MACOS_ACCENT_DARK),
+            Self::Macos => Some(MACOS_ACCENT_LIGHT),
             Self::Egui if dark => Some(EGUI_ACCENT_DARK),
             Self::Egui => Some(EGUI_ACCENT_LIGHT),
             Self::Native => None,
@@ -377,6 +393,56 @@ impl Style {
         }
     }
 
+    /// Apple's macOS look-alike: a 28-point control, a 6-point control radius,
+    /// a 10-point card, and a 13-point proportional face.
+    ///
+    /// The metrics are the ones AppKit's regular controls read as at a glance —
+    /// a push button is 22 points high, and a row here is taller because it also
+    /// carries a label's 13-point line plus the padding dtr's rows need; a
+    /// 6-point corner is `NSButton`'s big-sur radius, where a sheet rounds by
+    /// 10. It is deliberately *not* `native` on a Mac: this is painted
+    /// everywhere, and a Mac session still gets the terminal's own chrome until
+    /// something reads the real desktop.
+    ///
+    /// A Mac menu has no beak, a sheet's suggested button is on the right, its
+    /// sections are bold labels, and its focus ring is a single accent halo
+    /// ([`Focus::Ring`]) rather than a two-tone Windows one.
+    pub fn macos() -> Self {
+        Self {
+            mono: false,
+            label_font: FontId::proportional(13.0),
+            value_font: FontId::proportional(13.0),
+            title_font: FontId::proportional(20.0),
+            row: 28.0,
+            gap: 8.0,
+            label_width: 110.0,
+            padding: Vec2::new(10.0, 4.0),
+            control_radius: 6,
+            card_radius: 10,
+            chip_radius: 6,
+            // `NSButton`'s checkbox is a 14-point rounded square, not a pill.
+            check_radius: 4,
+            check_size: 14.0,
+            tile_icon: 56.0,
+            border: 1.0,
+            card_margin: Margin::symmetric(20, 18),
+            menu_margin: Margin::same(6),
+            tip_height: None,
+            title: Title::Bar,
+            section: Section::Bold,
+            footer: Footer::PrimaryLast,
+            focus: Focus::Ring,
+            // A sheet's shadow is wide and soft; 10 points down with a 30-point
+            // blur is the weight macOS gives a window over another one.
+            shadow: Some(Shadow {
+                offset: [0, 10],
+                blur: 30,
+                spread: 0,
+                color: Color32::from_black_alpha(72),
+            }),
+        }
+    }
+
     /// egui's own defaults, so "no styling at all" is one of the things a window
     /// can be asked for.
     ///
@@ -441,6 +507,7 @@ mod tests {
         }
         assert_eq!(Preset::parse("NATIVE"), Some(Preset::Native));
         assert_eq!(Preset::parse(" Adwaita "), Some(Preset::Adwaita));
+        assert_eq!(Preset::parse("apple"), Some(Preset::Macos));
         assert_eq!(Preset::parse("system"), None);
     }
 
@@ -453,12 +520,20 @@ mod tests {
             .into_iter()
             .filter(|preset| preset.owns_its_colours())
             .collect();
-        assert_eq!(owning, vec![Preset::Adwaita, Preset::Windows, Preset::Egui]);
+        assert_eq!(
+            owning,
+            vec![
+                Preset::Adwaita,
+                Preset::Windows,
+                Preset::Macos,
+                Preset::Egui
+            ]
+        );
         // The preferences card offers every preset, so the list is the card's order
         // and it has to name each one. `dtr` is not one of them: it is an old
         // spelling of `egui`, and reads as it.
         let names: Vec<&str> = Preset::ALL.iter().map(|preset| preset.as_str()).collect();
-        assert_eq!(names, vec!["native", "adwaita", "windows", "egui"]);
+        assert_eq!(names, vec!["native", "adwaita", "windows", "macos", "egui"]);
         assert_eq!(Preset::parse("dtr"), Some(Preset::Egui));
     }
 
@@ -547,5 +622,33 @@ mod tests {
         assert_eq!(adwaita.footer, Footer::PrimaryLast);
         assert_eq!(adwaita.section, Section::Bold);
         assert!(adwaita.shadow.is_some());
+    }
+
+    /// Apple's look is neither GNOME's nor Windows': a 28-point control between
+    /// dtr's 23 and Windows' 32, a 6-point radius, a sheet's 10-point card, and
+    /// a rounded-square checkbox rather than a pill.
+    #[test]
+    fn macos_is_a_denser_look_than_the_other_desktops() {
+        let macos = Style::macos();
+        assert_eq!(macos.row, 28.0);
+        assert_eq!(macos.control_radius, 6);
+        assert_eq!(macos.card_radius, 10);
+        assert_eq!(macos.chip_radius, 6);
+        assert_eq!(macos.check_radius, 4);
+        assert_eq!(macos.check_size, 14.0);
+        // A Mac menu is a plain rounded rectangle; only GNOME has a beak.
+        assert_eq!(macos.tip_height, None);
+        // Its dialog's suggested answer is the right-hand one, its sections are
+        // bold, and its focus is the single accent halo.
+        assert_eq!(macos.footer, Footer::PrimaryLast);
+        assert_eq!(macos.section, Section::Bold);
+        assert_eq!(macos.focus, Focus::Ring);
+        assert!(!macos.mono);
+        assert!(macos.shadow.is_some());
+        // Not a copy of either neighbour, or the preset would be a name only.
+        assert_ne!(macos.row, Style::native().row);
+        assert_ne!(macos.row, Style::adwaita().row);
+        assert_ne!(macos.control_radius, Style::native().control_radius);
+        assert_ne!(macos.control_radius, Style::adwaita().control_radius);
     }
 }

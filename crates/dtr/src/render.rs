@@ -657,6 +657,12 @@ pub struct PaneView<'a> {
     pub rect: crate::layout::Rect,
     pub frame: Option<&'a Frame>,
     pub selection: Option<(usize, usize)>,
+    /// The OSC 8 link under the pointer, as `(first column, last column, row)`.
+    /// Only the focused pane can have one: the hover question is asked of the
+    /// pane the pointer is in. It is drawn as an underline over the link's own
+    /// cells — the pointing hand says a link is there, the underline says how
+    /// much of the row it is.
+    pub link: Option<(u16, u16, u16)>,
     /// Only the focused pane draws a cursor.
     pub cursor: bool,
     /// A bell's wash over the whole pane, already faded by the caller. Nothing
@@ -1080,6 +1086,26 @@ impl GridRenderer {
             }
         }
 
+        // A hovered link is underlined across its own run, not just the cell
+        // under the pointer: the pointing hand says a link is there, and the
+        // line says how much of the row can be pressed. It sits over the text
+        // because a link's descenders must not cut it, and it is one quad for
+        // the whole run rather than one per cell.
+        if let Some((first, last, row)) = pane.link
+            && u32::from(row) < u32::from(frame.rows)
+            && u32::from(first) < u32::from(frame.cols)
+        {
+            let last = last.min(frame.cols.saturating_sub(1));
+            if first <= last {
+                let mark = link_underline(pane.rect, (cell_w, cell_h), first, last, row);
+                self.instances.push(Instance::solid(
+                    [mark.x, mark.y, mark.width, mark.height],
+                    look.accent,
+                    1.0,
+                ));
+            }
+        }
+
         // The selection sits above the text, as a wash rather than a solid
         // block: you still have to be able to read what you selected.
         if let Some((first, last)) = pane.selection {
@@ -1491,6 +1517,27 @@ fn cell_origin(index: usize, cols: u16, cell_w: f32, cell_h: f32) -> (f32, f32) 
     let cols = usize::from(cols).max(1);
     let (row, col) = (index / cols, index % cols);
     (col as f32 * cell_w, row as f32 * cell_h)
+}
+
+/// The underline a hovered OSC 8 link gets: its whole run, one cell high.
+///
+/// A link is a per-cell attribute but reads as one object, so the line spans
+/// `first..=last` instead of the cell the pointer happens to be on. It sits
+/// near the cell's bottom with the same tenth of air the cursor's own underline
+/// leaves, and its thickness follows the cell so it stays a hairline on a
+/// HiDPI screen rather than a bar.
+fn link_underline(
+    pane: crate::layout::Rect,
+    cell: (f32, f32),
+    first: u16,
+    last: u16,
+    row: u16,
+) -> crate::layout::Rect {
+    let thickness = (cell.1 * 0.07).max(1.0).round();
+    let x = pane.x + f32::from(first) * cell.0;
+    let width = (f32::from(last.saturating_sub(first)) + 1.0) * cell.0;
+    let y = pane.y + f32::from(row) * cell.1 + cell.1 - thickness - cell.1 * 0.10;
+    crate::layout::Rect::new(x, y, width, thickness)
 }
 
 /// The rectangle a bar or an underline is measured against: `(offset from the
@@ -2831,6 +2878,26 @@ mod font_tests {
             width <= p.metrics.cell_width && height <= p.metrics.cell_width,
             "a full stop is {width}x{height}, not a cell"
         );
+    }
+
+    /// A hovered link's underline spans its run, not the cell under the pointer.
+    #[test]
+    fn a_link_underline_covers_the_whole_link() {
+        let pane = crate::layout::Rect::new(100.0, 30.0, 800.0, 600.0);
+        let cell = (10.0, 20.0);
+        let mark = link_underline(pane, cell, 3, 7, 2);
+        assert_eq!(mark.x, 130.0);
+        assert_eq!(mark.width, 50.0, "five cells, not one");
+        assert_eq!(mark.y, 30.0 + 40.0 + 20.0 - mark.height - 2.0);
+        assert!(
+            mark.height >= 1.0 && mark.height <= cell.1 / 4.0,
+            "a hairline, not a bar: {}",
+            mark.height
+        );
+        // One cell is one cell, and a run typed the wrong way round cannot be a
+        // negative width.
+        assert_eq!(link_underline(pane, cell, 4, 4, 0).width, 10.0);
+        assert_eq!(link_underline(pane, cell, 5, 3, 0).width, 10.0);
     }
 
     /// A wide-character cursor moves back onto the character: the block covers

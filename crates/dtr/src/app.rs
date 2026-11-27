@@ -81,11 +81,19 @@ pub enum UserEvent {
     Transfer(crate::transfer::Report),
 }
 
-/// A link under the pointer: the cell it is on, and where it points.
+/// A link under the pointer: the cells it covers, and where it points.
 #[derive(Clone, Debug)]
 struct LinkHover {
+    /// The pane that answered. A leaf id is unique across tabs, so a reply that
+    /// outlives its pane (a tab switch, a focus change) cannot underline a link
+    /// in the one that replaced it.
+    pane: crate::layout::LeafId,
     x: u16,
     y: u16,
+    /// The contiguous columns on `y` that carry this URI, so the hover can
+    /// underline the whole link rather than the one cell the pointer is on.
+    start: u16,
+    end: u16,
     uri: String,
 }
 
@@ -550,6 +558,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         loop_report: std::cell::RefCell::new(LoopReport::default()),
         palette: Palette::new(startup.palette),
         pager: crate::pager::Pager::default(),
+        image_view: crate::image_overlay::Viewer::default(),
         look: startup.look.clone(),
         theme: startup.theme.clone(),
         proxy,
@@ -616,6 +625,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         }),
         vfs: std::sync::Arc::new(dtr_vfs::Vfs::new()),
         hover_cell: None,
+        hover_pane: None,
         hover_link: None,
         thumb: crate::thumb::Cache::default(),
         thumb_pending: None,
@@ -928,6 +938,66 @@ fn cell_of(
         return None;
     }
     Some((col, row))
+}
+
+/// The hover underline for one pane, if the pointer is on it *now*.
+///
+/// A hover reply is a fact about the cell it was asked about, and it stays valid
+/// only until the pointer moves or the pane under it changes. Recomputing it
+/// here — from the live pointer, the pane's rectangle and the frame's grid — is
+/// what keeps a link from being underlined after a tab switch, a keyboard focus
+/// change or a scroll under a still mouse. `id` is the pane being drawn; the
+/// link names the pane that answered, and a leaf id is unique across tabs, so a
+/// reply that outlived its pane fails the first test.
+fn hovered_link(
+    id: crate::layout::LeafId,
+    rect: crate::layout::Rect,
+    cell: (f32, f32),
+    grid: (u16, u16),
+    pointer: Option<(f64, f64)>,
+    link: Option<&LinkHover>,
+) -> Option<(u16, u16, u16)> {
+    let link = link?;
+    if link.pane != id {
+        return None;
+    }
+    let (px, py) = pointer?;
+    let (col, row) = cell_of(rect, cell, (u32::from(grid.0), u32::from(grid.1)), (px, py))?;
+    (u32::from(link.y) == row && col >= u32::from(link.start) && col <= u32::from(link.end))
+        .then_some((link.start, link.end, link.y))
+}
+
+/// What a left press is for, once the program and the overlays have had it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressVerb {
+    /// Open the OSC 8 link under the pointer.
+    Link,
+    /// Open the picture under the pointer in the overlay.
+    Image,
+    /// Start a terminal press: an anchor, and a word or a line on the second and
+    /// third press.
+    Terminal,
+}
+
+/// Decide a left press from what is under it and how many presses this is.
+///
+/// A link takes a **double** click and a picture a **single** one. A link beats
+/// a picture underneath it: it is an explicit, small target printed over
+/// whatever is behind it, and a single press on the overlap is an ordinary
+/// terminal press so the link's text can still be selected and dragged across.
+/// A triple press is a line selection, not a third open.
+fn press_verb(link: bool, image: bool, clicks: u8) -> PressVerb {
+    if link {
+        if clicks == 2 {
+            PressVerb::Link
+        } else {
+            PressVerb::Terminal
+        }
+    } else if image {
+        PressVerb::Image
+    } else {
+        PressVerb::Terminal
+    }
 }
 
 /// Translate the keys a file pane understands. Named arrows are
@@ -1319,6 +1389,10 @@ struct App {
     /// open, because a keystroke that leaked to the shell would run a command
     /// nobody typed.
     pager: crate::pager::Pager,
+    /// The picture a press opened, while it is up. Modal like the pager: it owns
+    /// the keyboard and the pointer, holds its own reference to the pixels so a
+    /// delete cannot blank it, and owns the one texture it draws.
+    image_view: crate::image_overlay::Viewer,
     proxy: EventLoopProxy<UserEvent>,
     store: Option<Arc<dtr_store::Store>>,
     log: Option<(PathBuf, crate::serial::LogFormat)>,
@@ -1367,6 +1441,10 @@ struct App {
     /// The cell the pointer is over, and the link it holds if the pane said so.
     /// Kept together so a reply for an older cell can be dropped.
     hover_cell: Option<(u16, u16)>,
+    /// The pane the outstanding hover question was asked of. Leaf ids are
+    /// unique across tabs, so a reply that arrives after a tab or focus change
+    /// is recognised as stale instead of painting its link on the new pane.
+    hover_pane: Option<crate::layout::LeafId>,
     hover_link: Option<LinkHover>,
     /// Preview textures for image files the pointer has hovered, asked about
     /// once each. Decoded on the files runtime, never on this thread.
@@ -1562,6 +1640,7 @@ impl App {
             || self.keymap_card.open
             || self.about_open
             || self.pager.is_open()
+            || self.image_view.is_open()
             || self.link_menu.is_open()
             || self.file_menu_open()
             || self.tmux_chooser.is_open()
@@ -1650,6 +1729,24 @@ impl App {
         // can rewrite. `pending` holds the chords of a binding that is
         // not finished yet (`ctrl-k ctrl-s`).
         let pressed = stroke.state == winit::event::ElementState::Pressed;
+
+        // The picture viewer owns the keyboard while it is up: Escape closes it
+        // and everything else is swallowed, because the keys a shell keeps —
+        // `j`, `q`, space — are exactly the ones that would type into a terminal
+        // nobody can see. A release is swallowed too: the release of the press
+        // that opened it arrives while it is open, like every other overlay.
+        if self.image_view.is_open() {
+            if !pressed {
+                self.held = None;
+                return;
+            }
+            if self.image_view.key(&stroke.key) == Some(crate::image_overlay::Action::Close) {
+                self.image_view.close();
+                self.repaint("image closed");
+            }
+            self.held = Some(stroke.key.clone());
+            return;
+        }
 
         // The sheet owns the keyboard while it is open. It is a form, so
         // egui has already seen the text a field wants; what must not leak to
@@ -2141,6 +2238,7 @@ impl App {
         // pointer is over is not the grid: no cell there is being pointed at.
         if self.mouse_captured() || self.overlay_open() || self.over_egui(at) {
             self.hover_cell = None;
+            self.hover_pane = None;
             self.hover_link = None;
             self.thumb_pending = None;
             return;
@@ -2150,14 +2248,28 @@ impl App {
             return;
         }
         self.hover_cell = cell;
-        self.hover_link = None;
+        // Moving *within* the link keeps its underline: the reply is asked
+        // again, but clearing first would blink it off for the frame before the
+        // answer lands. Moving to another cell, or off the link, clears it now.
+        let same_link = cell.is_some_and(|(x, y)| {
+            self.hover_link
+                .as_ref()
+                .is_some_and(|link| link.y == y && x >= link.start && x <= link.end)
+        });
+        if !same_link {
+            self.hover_link = None;
+            self.hover_pane = None;
+        }
         // A preview that was waiting for the pointer to settle is not wanted any
         // more: the pointer has moved, which is the whole question.
         self.thumb_pending = None;
-        if let (Some((x, y)), Some(session)) = (cell, self.session()) {
-            session
-                .pane
-                .send(crate::pane::Command::HyperlinkAt { x, y });
+        if let Some((x, y)) = cell {
+            self.hover_pane = Some(self.tabs[self.active].focus);
+            if let Some(session) = self.session() {
+                session
+                    .pane
+                    .send(crate::pane::Command::HyperlinkAt { x, y });
+            }
         }
     }
 
@@ -2751,6 +2863,7 @@ impl App {
             self.drag_moved = false;
             // The hand and the preview belong to a cell, and the gap is not one.
             self.hover_cell = None;
+            self.hover_pane = None;
             self.hover_link = None;
             self.thumb_pending = None;
             // A second press in the same place puts the divider back in the
@@ -2779,17 +2892,47 @@ impl App {
             self.dragging = false;
             return;
         }
-        // A link is a click target, not a selection: pressing one opens it and
-        // starts no drag. Without a link under the pointer this falls straight
-        // through to the selection code below.
-        if let Some(link) = self.hover_link.clone() {
-            if self.cell_xy(at.0, at.1) == Some((link.x, link.y)) {
-                self.open_link(&link.uri);
+        // What is under the press decides its verb, and the gesture count is
+        // what tells a link's first press from its second. A link opens on a
+        // **double** click: a single press on one is an ordinary terminal press,
+        // so the URL can be selected and dragged across, and the second press
+        // within the gesture window is the verb. A picture opens on the
+        // **first** press. A link beats a picture underneath it — it is an
+        // explicit, small target printed over whatever is behind it — so a
+        // single press on the overlap is a terminal press and the picture is
+        // reached one press anywhere off the link.
+        //
+        // The program's mouse reporting and an overlay have both had their say
+        // above, so what is left is the terminal's own gesture.
+        let link = self
+            .hover_link
+            .clone()
+            .filter(|link| self.cell_xy(at.0, at.1) == Some((link.x, link.y)));
+        let image = if link.is_none() {
+            self.image_at(at.0, at.1)
+        } else {
+            None
+        };
+        let clicks = self.count_clicks(at);
+        match press_verb(link.is_some(), image.is_some(), clicks) {
+            PressVerb::Link => {
+                if let Some(link) = link {
+                    self.open_link(&link.uri);
+                }
                 self.dragging = false;
+                self.drag_moved = false;
                 return;
             }
+            PressVerb::Image => {
+                if let Some(placement) = image {
+                    self.open_image(&placement);
+                }
+                self.dragging = false;
+                self.drag_moved = false;
+                return;
+            }
+            PressVerb::Terminal => {}
         }
-        let clicks = self.count_clicks(at);
         self.drag_moved = false;
         self.drag_multi = clicks > 1;
         let cell = self.cell_xy(at.0, at.1);
@@ -5098,7 +5241,6 @@ impl App {
             .visible(area, crate::ui::SPLIT_GAP * scale, tab.zoom)
             .into_iter()
             .map(|(id, rect)| {
-                let _ = metrics;
                 let (frame, selection, cursor) = match tab.leaves.get(&id) {
                     Some(Pane::Terminal(session)) => (
                         session.frame.as_ref(),
@@ -5116,12 +5258,32 @@ impl App {
                     Some(Pane::Terminal(session)) => bell_alpha(session.bell_at),
                     _ => None,
                 };
+                // The hover question is asked of the focused pane, so only that
+                // pane can carry the link underline — and only while the pointer
+                // is still on the link. Checking that here, from the pointer and
+                // the geometry the frame draws with, is what keeps a stale reply
+                // alive across a tab switch, a keyboard focus change or a
+                // scroll under a still mouse: the underline is a fact about
+                // *now*, not about the last cell the pointer entered.
+                let link = (id == tab.focus && !self.overlay_open())
+                    .then(|| {
+                        hovered_link(
+                            id,
+                            rect,
+                            (metrics.cell_width, metrics.cell_height),
+                            frame.map_or((0, 0), |frame| (frame.cols, frame.rows)),
+                            self.cursor_position,
+                            self.hover_link.as_ref(),
+                        )
+                    })
+                    .flatten();
                 (
                     id,
                     crate::render::PaneView {
                         rect,
                         frame,
                         selection,
+                        link,
                         cursor,
                         flash,
                     },
@@ -5205,7 +5367,17 @@ impl App {
         } else {
             0.0
         };
-        crate::layout::Rect::new(0.0, inset, screen.0, (screen.1 - status - inset).max(0.0))
+        // The margin is a layout constant in points and this rectangle is
+        // physical, so the multiply happens here, once — `fit_panes`, the grid
+        // pass and the divider hit test all ask this function, and two of them
+        // disagreeing about the margin is a click in the wrong cell.
+        let padding = f32::from(self.look.padding) * scale;
+        crate::layout::Rect::new(
+            padding,
+            inset + padding,
+            (screen.0 - padding * 2.0).max(0.0),
+            (screen.1 - status - inset - padding * 2.0).max(0.0),
+        )
     }
 
     /// Resize the window so the grid holds `rows` × `cols` cells.
@@ -5376,6 +5548,52 @@ impl App {
             (x, y),
         )?;
         Some(row as usize * usize::from(frame.cols) + col as usize)
+    }
+
+    /// The topmost visible Kitty picture under a physical pixel position.
+    ///
+    /// The pane under the *pointer*, not the focused one: a press has already
+    /// focused it by the time this is asked, but a hit test that read focus would
+    /// still be answering a different question from `pane_at`. The geometry is
+    /// `crate::image_overlay::hit_test`, which is the renderer's own: the pane's
+    /// rectangle from `pane_views`, the drawn cell from `Metrics`, and the same
+    /// layer/z order the image pass uses.
+    fn image_at(&self, x: f64, y: f64) -> Option<crate::kitty::Placement> {
+        let gpu = self.gpu.as_ref()?;
+        let metrics = gpu.metrics();
+        let tab = &self.tabs[self.active];
+        let screen = self.screen();
+        let (_, view) = self
+            .pane_views(tab, metrics, screen, self.scale())
+            .into_iter()
+            .find(|(_, view)| view.rect.contains(x as f32, y as f32))?;
+        crate::image_overlay::hit_test(
+            view.rect,
+            (metrics.cell_width, metrics.cell_height),
+            screen,
+            view.frame?,
+            (x as f32, y as f32),
+        )
+    }
+
+    /// Open the picture `placement` drew. The viewer keeps its own reference to
+    /// the pixels, so the program deleting the image does not blank the overlay.
+    fn open_image(&mut self, placement: &crate::kitty::Placement) {
+        tracing::debug!(
+            image = placement.image_id,
+            generation = placement.generation,
+            layer = ?placement.layer,
+            z = placement.z,
+            "opening a picture"
+        );
+        self.image_view.show(placement);
+        // A hand and a preview underneath belong to a cell nobody can point at
+        // any more.
+        self.hover_cell = None;
+        self.hover_pane = None;
+        self.hover_link = None;
+        self.thumb_pending = None;
+        self.repaint("image opened");
     }
 
     /// Open the connection sheet for `port`, prefilled from the store.
@@ -6303,11 +6521,24 @@ impl dtr_frame::App for App {
             // pointer is no longer anywhere near.
             WindowEvent::CursorLeft { .. } => {
                 self.hover_cell = None;
+                self.hover_pane = None;
                 self.hover_link = None;
                 self.thumb_pending = None;
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::{ElementState, MouseButton as WinitButton};
+                // The picture viewer is dismissed by a press anywhere, whichever
+                // button — the picture has no target under it and no second verb
+                // on it, so the whole window is the way out. The release is
+                // swallowed without closing anything: the press that *opened*
+                // the viewer is followed by a release that arrives while it is
+                // up, and a release is not a press.
+                if self.image_view.is_open() {
+                    if state == ElementState::Pressed && self.image_view.press() {
+                        self.repaint("image closed");
+                    }
+                    return;
+                }
                 if self.pager.is_open() {
                     // The pager owns the pointer while it is open; the wheel and
                     // the drag belong to it.
@@ -6344,6 +6575,12 @@ impl dtr_frame::App for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // A picture has nothing to scroll, and the terminal behind it is
+                // not the subject: the notch is swallowed rather than moving a
+                // shell, a listing or the scrollback nobody can see.
+                if self.image_view.is_open() {
+                    return;
+                }
                 let lines = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     winit::event::MouseScrollDelta::PixelDelta(position) => position.y / 20.0,
@@ -6474,11 +6711,17 @@ impl dtr_frame::App for App {
                     .session_mut()
                     .and_then(|session| session.pane.take_link())
                 {
-                    if self.hover_cell == Some((reply.x, reply.y)) {
+                    if self.hover_cell == Some((reply.x, reply.y))
+                        && self.hover_pane == Some(self.tabs[self.active].focus)
+                    {
                         let uri = reply.uri;
+                        let (start, end) = reply.span.unwrap_or((reply.x, reply.x));
                         self.hover_link = uri.as_deref().map(|uri| LinkHover {
+                            pane: self.tabs[self.active].focus,
                             x: reply.x,
                             y: reply.y,
+                            start,
+                            end,
                             uri: uri.to_owned(),
                         });
                         // Only when the link *changes*: the reply is edge-triggered
@@ -6744,6 +6987,7 @@ impl dtr_frame::App for App {
                 // Taken out for the frame for the same reason the palette is: the
                 // pager mutates itself while it draws, and `self` is borrowed.
                 let mut pager = std::mem::take(&mut self.pager);
+                let mut image_view = std::mem::take(&mut self.image_view);
                 let mut link_menu = std::mem::take(&mut self.link_menu);
                 let mut menu_choice = None;
                 let mut close_window = false;
@@ -6838,7 +7082,11 @@ impl dtr_frame::App for App {
                                 // No inner margin: with a client-side frame the buttons run
                                 // the strip's full height and the drag region is the whole
                                 // row, so the inset belongs to the chips alone (below).
-                                .frame(egui::Frame::new().fill(look.skin().palette.card))
+                                // The strip is the title bar, so it takes the
+                                // header bar's own surface: a GNOME window puts
+                                // the caption on `headerbar_bg_color`, which is
+                                // part of the window rather than a popover.
+                                .frame(egui::Frame::new().fill(look.skin().palette.headerbar))
                                 .show(ui, |ui| {
                                     let strip = ui.max_rect();
                                     // The chips keep the inset the panel used to give them,
@@ -6849,34 +7097,13 @@ impl dtr_frame::App for App {
                                     } else {
                                         6.0
                                     };
-                                    let inset = egui::vec2(
-                                        left,
-                                        ((title_height - chip_height) / 2.0).floor(),
-                                    );
-                                    let mut chips = ui.new_child(
-                                        egui::UiBuilder::new()
-                                            .max_rect(strip.shrink2(inset))
-                                            .layout(egui::Layout::left_to_right(
-                                                egui::Align::Center,
-                                            )),
-                                    );
-                                    let bar = crate::ui::tab_bar(
-                                        &mut chips,
-                                        &tabs,
-                                        self.active,
-                                        &self.destinations,
-                                        &look,
-                                        chip_height,
-                                        &activity,
-                                    );
-                                    if let Some(hit) = bar.hit {
-                                        tab_click = Some(hit);
-                                    }
                                     // The window's own menu, at the right end of the strip
                                     // beside the caption buttons — or at the strip's own
                                     // right edge in `native` mode, where there are none. The
                                     // same place on both platforms: the left is where tabs
-                                    // start, and a button there would move them.
+                                    // start, and a button there would move them. Measured
+                                    // before the chips, because it is also the width they may
+                                    // not use.
                                     let menu_edge = if client_frame {
                                         crate::chrome::buttons_rect(strip, crate::chrome::kind())
                                             .left()
@@ -6890,6 +7117,36 @@ impl dtr_frame::App for App {
                                         ),
                                         egui::pos2(menu_edge - 4.0, strip.bottom()),
                                     );
+                                    let mut chips_rect = strip.shrink2(egui::vec2(
+                                        left,
+                                        ((title_height - chip_height) / 2.0).floor(),
+                                    ));
+                                    // The strip's scroll area ends where the menu begins:
+                                    // a chip scrolling *under* the burger is a tab whose
+                                    // close cross is behind a menu, and before the strip
+                                    // scrolled at all the overflow simply ran off the edge.
+                                    chips_rect.max.x = chips_rect
+                                        .max
+                                        .x
+                                        .min(menu_rect.left() - 4.0)
+                                        .max(chips_rect.min.x);
+                                    let mut chips = ui.new_child(
+                                        egui::UiBuilder::new().max_rect(chips_rect).layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                        ),
+                                    );
+                                    let bar = crate::ui::tab_bar(
+                                        &mut chips,
+                                        &tabs,
+                                        self.active,
+                                        &self.destinations,
+                                        &look,
+                                        chip_height,
+                                        &activity,
+                                    );
+                                    if let Some(hit) = bar.hit {
+                                        tab_click = Some(hit);
+                                    }
                                     let skin = look.skin();
                                     if let Some(chosen) =
                                         crate::ui::app_menu(ui, menu_rect, &skin, &self.keymap)
@@ -6986,7 +7243,11 @@ impl dtr_frame::App for App {
                                 )
                                 .show(ui, |ui| crate::ui::status_bar(ui, &status, look));
                         }
-                        egui::CentralPanel::default()
+                        // The pane area: what is left after the tab strip and the
+                        // status bar. The picture viewer is confined to it, so the
+                        // window's decoration is never painted over and the picture
+                        // is centred in the space a person can actually use.
+                        let pane_area = egui::CentralPanel::default()
                             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                             .show(ui, |ui| {
                                 // The notice over a pane that is waiting for its connection,
@@ -6998,7 +7259,9 @@ impl dtr_frame::App for App {
                                         reconnect_ask = Some((pane.id, ask));
                                     }
                                 }
-                            });
+                            })
+                            .response
+                            .rect;
                         // A frameless window's borders. The window manager's grip went with
                         // the frame, so the strips are ours — added after the panels so the
                         // few pixels at the edge belong to the resize and not to whatever
@@ -7127,6 +7390,15 @@ impl dtr_frame::App for App {
                         // read.
                         if pager.is_open() {
                             crate::ui::overlay(ui, "dtr-pager", |ui| pager.ui(ui, look));
+                        }
+                        // The picture viewer: the same foreground layer and the
+                        // same convention. Last of the two readers, because a
+                        // press opens it from the grid and nothing else is ever
+                        // up with it.
+                        if image_view.is_open() {
+                            crate::ui::overlay(ui, "dtr-image", |ui| {
+                                image_view.ui(ui, look, pane_area)
+                            });
                         }
                         // A preview of the image the pointer is on. Last, so it is over
                         // the panes, and in the tooltip layer, so a file pane cannot hide
@@ -7286,6 +7558,7 @@ impl dtr_frame::App for App {
                 // The pager comes back with the scroll the frame measured, which is
                 // the only place that knows how tall the text turned out.
                 self.pager = pager;
+                self.image_view = image_view;
                 self.link_menu = link_menu;
                 self.serial_dialog = serial_dialog;
                 if let Some(asked) = serial_event {
@@ -7630,6 +7903,90 @@ mod tests {
         assert!(first > 0.0 && first <= 0.12, "alpha {first}");
         let over = Some(std::time::Instant::now() - BELL_FLASH);
         assert_eq!(bell_alpha(over), None, "a finished bell must not tint");
+    }
+
+    /// The underline is a fact about the pointer now, not about the last reply.
+    ///
+    /// A stale reply — another pane's, or one from a pointer that has since
+    /// moved off the link — must not draw. This is `App::pane_views`' decision
+    /// pulled out so it can be asserted without a window.
+    #[test]
+    fn a_link_underline_needs_the_pointer_still_on_that_panes_link() {
+        use super::{LinkHover, hovered_link};
+
+        let pane: crate::layout::LeafId = 7;
+        let rect = crate::layout::Rect::new(100.0, 30.0, 800.0, 600.0);
+        let cell = (10.0, 20.0);
+        let grid = (80, 30);
+        let link = LinkHover {
+            pane,
+            x: 3,
+            y: 1,
+            start: 3,
+            end: 7,
+            uri: "file:///tmp/x".to_owned(),
+        };
+        let inside = (100.0 + 3.0 * 10.0 + 1.0, 30.0 + 20.0 + 1.0);
+        assert_eq!(
+            hovered_link(pane, rect, cell, grid, Some(inside), Some(&link)),
+            Some((3, 7, 1))
+        );
+
+        // The reply belongs to another pane: a tab switch or a focus change.
+        assert_eq!(
+            hovered_link(pane + 1, rect, cell, grid, Some(inside), Some(&link)),
+            None
+        );
+        // The pointer moved off the link's cells, or off the pane entirely.
+        assert_eq!(
+            hovered_link(
+                pane,
+                rect,
+                cell,
+                grid,
+                Some((100.0 + 20.0 * 10.0 + 1.0, inside.1)),
+                Some(&link)
+            ),
+            None
+        );
+        assert_eq!(
+            hovered_link(pane, rect, cell, grid, Some((50.0, 50.0)), Some(&link)),
+            None
+        );
+        // No pointer, or no hover at all.
+        assert_eq!(
+            hovered_link(pane, rect, cell, grid, None, Some(&link)),
+            None
+        );
+        assert_eq!(
+            hovered_link(pane, rect, cell, grid, Some(inside), None),
+            None
+        );
+    }
+
+    /// A press is a link only on its second click, a picture on its first.
+    ///
+    /// The overlap is the interesting case: a link printed over a picture takes
+    /// the double click, and its single press belongs to the terminal so the URL
+    /// can be selected. A picture with no link opens immediately — waiting a
+    /// double-click interval for every picture would make the common gesture
+    /// feel broken.
+    #[test]
+    fn a_link_opens_on_the_second_press_and_a_picture_on_the_first() {
+        use super::{PressVerb, press_verb};
+
+        assert_eq!(press_verb(false, true, 1), PressVerb::Image);
+        assert_eq!(press_verb(false, true, 2), PressVerb::Image);
+        assert_eq!(press_verb(false, false, 1), PressVerb::Terminal);
+
+        assert_eq!(press_verb(true, false, 1), PressVerb::Terminal);
+        assert_eq!(press_verb(true, false, 2), PressVerb::Link);
+        assert_eq!(press_verb(true, false, 3), PressVerb::Terminal);
+
+        // Link wins over the picture underneath; the picture is still reachable
+        // with one press on any other part of it.
+        assert_eq!(press_verb(true, true, 1), PressVerb::Terminal);
+        assert_eq!(press_verb(true, true, 2), PressVerb::Link);
     }
 
     /// A point outside the pane is no cell at all.

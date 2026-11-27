@@ -338,6 +338,25 @@ read to `TimedOut` — so the CR flusher and the disconnect teller read differen
 and **a settings change still reconnects by stopping the reader**, which is now a flag the
 thread polls between reads rather than a cancelled task.
 
+**Closing the tab closes the port, and that is two handles, not one.** The writer's `Port`
+lives in the pane's `Sink`; the reader owns a duplicate on the `dtr-serial` thread. Dropping
+the pane closed the first and left the second parked in a read forever, so on Windows — where
+a COM handle is exclusive — the board stayed "in use" after its tab was gone, and reopening
+it from the `+` menu said access denied until dtr exited. `pane::SerialReader` is the fix: a
+`Drop` that sets the stop flag and joins the thread, which is bounded by `IDLE_FLUSH` (a read
+returns every 25 ms whether or not a byte arrives). The close is still *asynchronous from the
+UI's side* — `close_tab` drops the pane on its worker, the pane thread sees the closed
+command channel and only then joins the reader and drops the sink — but it now completes in
+a read timeout instead of never. A **settings change** is the same problem with a
+different answer: it cannot join from the pane's own loop (the read in front of it is the one
+being abandoned), so it sets the flag and drops the sink in the same command — both handles
+go, and the watcher's reopen starts 500 ms later with nothing left to refuse it. Two tests
+hold the halves together: `a_serial_reader_stops_and_releases_its_handle` (relay a byte, drop
+the reader, see `closed` and no descriptor left) and
+`dropping_a_serial_pane_releases_the_port` (open a real pane on a pty and drop it, which is
+what closing a tab does, then watch every descriptor for the device go — both `/proc/self/fd`
+checks are Linux-only).
+
 ### Delayed input
 
 A U-Boot prompt is a line reader with no flow control and a small buffer: type `help`

@@ -15,7 +15,7 @@
 
 use egui::{Color32, Context, CornerRadius, Stroke, TextStyle};
 
-use crate::palette::Palette;
+use crate::palette::{Overrides, Palette};
 use crate::style::{Preset, Scheme, Style};
 
 /// Windows 11's default accent, light and dark.
@@ -32,6 +32,14 @@ pub const WINDOWS_ACCENT_DARK: Color32 = Color32::from_rgb(0x60, 0xCD, 0xFF);
 /// this is what a session that has none gets, because Adwaita's own default is
 /// blue rather than "whatever the theme's cursor was".
 pub const ADWAITA_ACCENT: Color32 = Color32::from_rgb(0x35, 0x84, 0xE4);
+
+/// Apple's `systemBlue` — the default accent of the macOS look-alike.
+///
+/// Big Sur's light and dark values. They are a look-alike's constants rather
+/// than a read of a Mac (there is no macOS reader in this program yet), so a
+/// person who wants their own colour sets `[ui] accent`.
+pub const MACOS_ACCENT_LIGHT: Color32 = Color32::from_rgb(0x00, 0x7A, 0xFF);
+pub const MACOS_ACCENT_DARK: Color32 = Color32::from_rgb(0x0A, 0x84, 0xFF);
 
 /// egui's accent, which is really its hyperlink colour: egui has no accent of
 /// its own, and a link is the one thing it draws in a colour that means "act on
@@ -51,6 +59,7 @@ pub enum Origin {
     Dtr,
     Windows,
     Adwaita,
+    Macos,
     Egui,
 }
 
@@ -81,8 +90,18 @@ impl Skin {
 
     /// GNOME's chrome: Adwaita's palette and metrics, over the user's accent.
     pub fn adwaita(dark: bool, accent: Color32) -> Self {
+        Self::adwaita_with(dark, accent, &Overrides::default())
+    }
+
+    /// Adwaita's metrics over the named colours a user stylesheet repainted.
+    ///
+    /// The metrics are Adwaita's whatever the user's file says: a stylesheet
+    /// that changes a colour is what GTK shows, and one that changes a row
+    /// height is not something dtr can follow without becoming a GTK theme
+    /// engine (see `docs/gtk-palette.md` §9).
+    pub fn adwaita_with(dark: bool, accent: Color32, overrides: &Overrides) -> Self {
         Self {
-            palette: Palette::adwaita(dark, accent),
+            palette: Palette::adwaita_with(dark, accent, overrides),
             style: Style::adwaita(),
             origin: Origin::Adwaita,
         }
@@ -113,6 +132,29 @@ impl Skin {
 
     pub fn windows_dark() -> Self {
         Self::windows(true, WINDOWS_ACCENT_DARK)
+    }
+
+    /// Apple's macOS look-alike: AppKit's semantic palette and a regular Mac
+    /// control's metrics.
+    ///
+    /// This is a *look the window carries*, not a read of a Mac — see
+    /// [`Palette::macos`] and [`Style::macos`]. `native` on macOS is still the
+    /// terminal's own chrome, because nothing here has measured the real
+    /// desktop.
+    pub fn macos(dark: bool, accent: Color32) -> Self {
+        Self {
+            palette: Palette::macos(dark, accent),
+            style: Style::macos(),
+            origin: Origin::Macos,
+        }
+    }
+
+    pub fn macos_light() -> Self {
+        Self::macos(false, MACOS_ACCENT_LIGHT)
+    }
+
+    pub fn macos_dark() -> Self {
+        Self::macos(true, MACOS_ACCENT_DARK)
     }
 
     /// egui's own look: its greys, its metrics, its shadow.
@@ -314,6 +356,7 @@ impl Choice {
                 match preset {
                     Preset::Adwaita => Skin::adwaita(dark, accent),
                     Preset::Windows => Skin::windows(dark, accent),
+                    Preset::Macos => Skin::macos(dark, accent),
                     // `owns_its_colours` and the arm above leave egui.
                     _ => Skin::egui(dark, accent),
                 }
@@ -414,14 +457,19 @@ mod tests {
         }
     }
 
-    /// The three painted looks are one `Choice` away from each other, and each
+    /// The four painted looks are one `Choice` away from each other, and each
     /// reads the choice's own scheme and accent: `native` ignores both, which is
     /// the line between a look and a source.
     #[test]
     fn a_painted_look_takes_the_chosen_scheme_and_accent() {
         let orange = Color32::from_rgb(0xED, 0x5B, 0x00);
         let dark_system = Some(Skin::adwaita(true, crate::skin::ADWAITA_ACCENT));
-        for preset in [Preset::Adwaita, Preset::Windows, Preset::Egui] {
+        for preset in [
+            Preset::Adwaita,
+            Preset::Windows,
+            Preset::Macos,
+            Preset::Egui,
+        ] {
             let choice = Choice {
                 preset,
                 scheme: Scheme::Light,
@@ -481,6 +529,14 @@ mod tests {
             Some(crate::skin::WINDOWS_ACCENT_DARK)
         );
         assert_eq!(
+            Preset::Macos.default_accent(false),
+            Some(crate::skin::MACOS_ACCENT_LIGHT)
+        );
+        assert_eq!(
+            Preset::Macos.default_accent(true),
+            Some(crate::skin::MACOS_ACCENT_DARK)
+        );
+        assert_eq!(
             Preset::Egui.default_accent(false),
             Some(crate::skin::EGUI_ACCENT_LIGHT)
         );
@@ -489,6 +545,7 @@ mod tests {
         for (preset, dark) in [
             (Preset::Adwaita, true),
             (Preset::Windows, false),
+            (Preset::Macos, true),
             (Preset::Egui, true),
         ] {
             let skin = Choice {
@@ -512,6 +569,8 @@ mod tests {
             Skin::adwaita(false, crate::skin::ADWAITA_ACCENT).origin,
             Origin::Adwaita
         );
+        assert_eq!(Skin::macos_dark().origin, Origin::Macos);
+        assert_eq!(Skin::macos_light().origin, Origin::Macos);
         assert_eq!(Skin::egui_dark().origin, Origin::Egui);
         assert_eq!(Skin::egui_light().origin, Origin::Egui);
     }

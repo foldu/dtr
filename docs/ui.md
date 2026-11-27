@@ -41,23 +41,23 @@ So the crate holds one vocabulary, and a surface asks it for a *skin*.
   *behavioural* choices a dialog makes — `Title::{Eyebrow,Bar}`,
   `Section::{Rule,Bold}`, `Footer::{PrimaryLast,PrimaryFirst}`,
   `Focus::{None,Ring}`, plus an optional card shadow. Each of those is a token
-  rather than a `cfg!` so that both looks render on one machine, which is the
-  only way the Windows look stays honest without a VM.
+  rather than a `cfg!` so that any look renders on one machine, which is the
+  only way the Windows and Mac looks stay honest without their machines.
 - **`Skin` is the pair**, and `Skin::egui_style` derives an `egui::Style` from
   it, so the widgets that are still egui's own (`TextEdit`, `ScrollArea`, popup
   frames) share the surface with the painted ones. Without that derivation the
   stock widgets keep egui's grey next to a hand-painted card.
 
-## Four presets, and what `native` means
+## Five presets, and what `native` means
 
-`Preset::{Native,Adwaita,Windows,Egui}`; `Choice { preset, scheme, accent }` and
-`Choice::skin(dtr_palette, native)` build one, where the second argument is the
+`Preset::{Native,Adwaita,Windows,Macos,Egui}`; `Choice { preset, scheme, accent }`
+and `Choice::skin(dtr_palette, native)` build one, where the second argument is the
 platform's answer or `None`. `native` is the default — a terminal that has to look
 like a system window should do so unless asked otherwise.
 
-The four split one way: **`native` asks the machine**, and the other three are
+The five split one way: **`native` asks the machine**, and the other four are
 looks the window carries, so they can be seen and chosen on any platform. That
-split is why only three of them have a scheme and an accent to configure
+split is why only four of them have a scheme and an accent to configure
 (`Preset::owns_its_colours`): `native` takes both from the desktop, along with
 the accent ladder Windows keeps for its own hover shades, and a preferences row for
 either would be a control nothing reads.
@@ -72,26 +72,42 @@ either would be a control nothing reads.
   gets a translucent control.
 - **`native` on Linux is Adwaita**, read from the running desktop: the scheme
   and the accent come from the XDG settings portal
-  (`org.freedesktop.appearance`, the same service libadwaita asks), and the gate
-  is the theme *name* (`GTK_THEME`, then `settings.ini`) — a theme that is not
+  (`org.freedesktop.appearance`, the same service libadwaita asks), the gate is
+  the theme *name* (`GTK_THEME`, then `settings.ini`) — a theme that is not
   Adwaita is refused, because painting Adwaita's `#36363a` surfaces on Breeze is
-  a confident lie. The surfaces themselves are libadwaita 1.9.3's own constants,
-  measured out of its gresource, so the only values a session can change are
-  those two; nothing parses CSS. This is `crates/dtr/src/system/linux.rs`, and
-  `docs/gtk-palette.md` is the whole story — §6 for the refusal, §8 for what a
-  second version would have to read. The portal half sits behind the `portal`
-  feature, so a build that will not take zbus's tree falls back to the theme's
-  name and never watches.
+  a confident lie — and the user's own `~/.config/gtk-4.0/gtk.css` is read for
+  the named colours it redefines: that file is the top of GTK's cascade, so it is
+  what a customised GNOME actually shows. The base is still libadwaita 1.9.3's
+  measured constants, and a value the reader cannot resolve keeps the constant.
+  This is `crates/dtr/src/system/linux.rs` and `linux/css.rs`;
+  `docs/gtk-palette.md` is the whole story — §6 for the refusal, §8 for the
+  override layer. The portal half sits behind the `portal` feature, so a build
+  that will not take zbus's tree falls back to the theme's name and never
+  watches.
 - **`native` on macOS** has no reader, so it is the terminal's own chrome for now:
   `Choice::skin` takes the platform's skin as an argument and a caller with no
   answer passes `None`. The constructors are `dtr`, `adwaita`, `windows`,
-  `egui`, and the `windows_light`/`windows_dark`/`egui_light`/`egui_dark`
-  shortcuts the preview switch and the tests use; a guess at the macOS look would
-  be worse than saying there is none.
+  `macos`, `egui`, and the `windows_light`/`windows_dark`/`macos_light`/
+  `macos_dark`/`egui_light`/`egui_dark` shortcuts the preview switch and the
+  tests use; a guess at the *live* macOS desktop would be worse than saying there
+  is none.
 - **`adwaita` and `windows`** are those same two looks *by name*, painted on any
   machine. Their palettes and metrics are the ones above — the same constants,
   the same measurement — and they take the scheme and the accent from the config
   instead of from a desktop.
+- **`macos`** is Apple's look-alike, and says so: it is painted from AppKit's
+  documented semantic colours and a regular control's metrics rather than read
+  from a Mac. A light window is `#ECECEC` with white controls, a dark one is
+  `#1E1E1E` whose controls are an 8 % white plane; `labelColor` is 85 % of the
+  text colour, `secondaryLabelColor` 50/55 %, `separatorColor` 10 % — all
+  composited over the surface because a palette slot has to be opaque. The
+  metrics are a 28-point control, a 6-point control radius, a 10-point sheet, a
+  14-point rounded-square checkbox and a 13-point proportional face; a Mac menu
+  has no beak, a sheet's suggested button is on the right, and the focus ring is
+  the accent at 50 %. The accent is Apple's `systemBlue` (#007AFF light,
+  #0A84FF dark) and the selection is `selectedContentBackgroundColor`
+  (#0064E1 / #0059D1), which is not quite the accent. `apple` is another
+  spelling of the preset, not a second look.
 - **`egui`** is egui's own defaults, read out of `egui::Visuals` and
   `egui::Spacing` at run time rather than copied, so the preset cannot drift from
   the egui the crate is built against: a 20-point control, a 3-point gap, radius
@@ -99,29 +115,31 @@ either would be a control nothing reads.
   `panel_fill`/`window_fill`/`extreme_bg_color` for the three surfaces, the weak
   fill of a button for a control, the separator grey for a hairline, and its
   `selection` for a selection. It is also what `widgets = "dtr"` in an old config
-  means: the look the window had before there were four.
+  means: the look the window had before there were five.
 
 `Skin::dtr` still exists — it is the terminal's own chrome, monospace over the
 theme's colours — but no preset selects it any more. It is what `native` falls
 back to on a machine that cannot say what its own chrome looks like, and it is
 the skin the widget gallery and the older snapshots are drawn in.
 
-The Windows and Adwaita palettes are rendered and snapshot-tested **on Linux** on
-purpose. A look that can only be seen on Windows is a look that is only checked
-when somebody remembers to boot the VM; the same argument is why `--widgets` can
-ask for GNOME's chrome in the Windows guest. Every preset is a picture over the
-same sheet — `widgets_dtr`, `widgets_adwaita_dark`/`_light`,
-`widgets_windows_dark`/`_light`, `widgets_egui_dark`/`_light` — so a palette or a
+The Windows, Adwaita and Apple palettes are rendered and snapshot-tested **on
+Linux** on purpose. A look that can only be seen on Windows or a Mac is a look
+that is only checked when somebody remembers to boot the machine; the same
+argument is why `--widgets` can ask for GNOME's chrome in the Windows guest.
+Every preset is a picture over the same sheet — `widgets_dtr`,
+`widgets_adwaita_dark`/`_light`, `widgets_windows_dark`/`_light`,
+`widgets_macos_dark`/`_light`, `widgets_egui_dark`/`_light` — so a palette or a
 row height that drifts is a diff before it is a dialog.
 
 ## Choosing one
 
-`[ui] widgets` in the config file, or `--widgets native|adwaita|windows|egui` on
-the command line, which wins over the file (and leaves the scheme and the accent
-alone — the flag chooses a look, it does not reset it). The default is `native`,
-and `dtr` is read as an old spelling of `egui`.
+`[ui] widgets` in the config file, or
+`--widgets native|adwaita|windows|macos|egui` on the command line, which wins
+over the file (and leaves the scheme and the accent alone — the flag chooses a
+look, it does not reset it). The default is `native`; `dtr` is read as an old
+spelling of `egui`, and `apple` as another spelling of `macos`.
 
-Two more keys ride with the look, and both mean something only to the three looks
+Two more keys ride with the look, and both mean something only to the four looks
 that own their colours:
 
 - `scheme = "system" | "light" | "dark"`, default `system`. `system` is the
@@ -132,10 +150,11 @@ that own their colours:
   hint at all is dark, which is what the built-in theme is.
 - `accent = "#RRGGBB"`, or empty for the look's own. Adwaita's is
   `--accent-blue` (#3584E4), Windows' is its default (#005FB8 light, #60CDFF
-  dark), egui's is its hyperlink colour (#009BFF / #5AAAFF). The ink drawn on it
-  is chosen by luminance for `egui` — white on anything darker than mid-grey —
-  while Adwaita keeps libadwaita's own white on *every* accent, yellow included,
-  because matching the desktop means matching it.
+  dark), Apple's is `systemBlue` (#007AFF / #0A84FF), egui's is its hyperlink
+  colour (#009BFF / #5AAAFF). The ink drawn on it is chosen by luminance for
+  `egui` and `macos` — white on anything darker than mid-grey — while Adwaita
+  keeps libadwaita's own white on *every* accent, yellow included, because
+  matching the desktop means matching it.
 
 The Windows read is `crates/dtr/src/system/windows.rs`: `AppsUseLightTheme` under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` for light
@@ -312,6 +331,26 @@ elided at `TAB_LABEL_MAX_WIDTH` (180 points) with `…`, on one row, broken anyw
 full name stays in the tooltip and in the accessibility node. Unbounded, one deep directory
 pushes every tab and the `+` off the strip.
 
+**A strip with more tabs than width scrolls; it does not hide them behind a burger.** The
+chip row is an `egui::ScrollArea::horizontal` with the floating bar, so a chip costs no
+strip height for a bar it is not using; `always_scroll_the_only_direction` is on for that
+row, because a mouse wheel is vertical on every mouse and the row only scrolls sideways —
+without it the wheel over the strip did nothing and the overflow was keyboard-only.
+Scrolling to a tab is a *sidebar*, not a frame: the strip **follows the active tab until
+the wheel says otherwise**. A one-shot "the active index changed" scroll was not enough —
+a new tab's title arrives over `OSC 2` a frame or two later, which widens every chip under
+an offset that is already at its maximum, and the active chip slid back off the right edge
+with no different tab having been selected. So the state is `follow` (cleared by a wheel
+over an overflowing strip, restored when the active tab changes) plus a `pending` flag: a
+chip still cut when the frame ends is asked for again next frame, one request at a time.
+Asking every frame is a trap — a last chip cannot be centred past the content's end, so the
+target clamps and the unmet target requests a repaint forever. **The row ends where the menu
+begins**: `App` measures the burger first and gives the chips the width up to its left edge,
+because a strip that grew under it was a last tab whose close cross lived behind the menu —
+the other half of "the strip grew into a hamburger". The `+` is inside the scrolling
+content, so a crowded strip scrolls to it with the tabs instead of dropping it off the
+right edge.
+
 **A chip has two hit targets**: the label switches tabs, a cross on the right closes that
 tab, whichever is active, and both declare accessibility names (`2 shell`, `close tab 2`).
 The cross is `dtr_widgets::cross_at` — two strokes in the chip's own reserved rect, not
@@ -319,6 +358,14 @@ The cross is `dtr_widgets::cross_at` — two strokes in the chip's own reserved 
 focused session, and every switch goes through `App::set_active`, which logs
 `active tab from=… to=… why=…`. The chip's colours and radii are the skin's; its elision and
 its two rects are the strip's, and `New tab`'s menu is `menu_row` rows.
+
+Three tests pin the scrolling without a window: `a_crowded_strip_scrolls_to_the_active_tab`
+(eight chips at 320 points; the active chip is on screen and the first is off it),
+`the_wheel_scrolls_a_crowded_strip` (a wheel notch moves the row left), and
+`a_title_that_arrives_late_does_not_push_the_active_tab_off` (short labels first, then long
+ones, no tab switch in between). All are assertions on chip rectangles, so the overflow is
+caught without a screenshot nobody takes with eight tabs open.
+
 
 **The `+` menu scrolls when the destinations do not fit.** A config with dozens of `Host`
 entries made a menu taller than the window, and the last hosts were below the taskbar with
@@ -526,14 +573,15 @@ only when a port is focused — baud and CR translation belong to one device —
 scheme and accent only when the look owns its colours.
 
 **Two tabs, and general comes first.** The sheet outgrew one column: it holds the window's
-look (four presets, a scheme, an accent), the grid's colours and font, and a session's
+look (five presets, a scheme, an accent), the grid's colours and font, and a session's
 serial policy. General is the first tab and the sheet opens on it, so where the rows are
 never moves between openings; `Row::panel` is the one place the split is written, and a row
 that belonged to neither tab is a setting nobody can reach (there is a test for that).
 
-The look's list is four: `native`, `adwaita`, `windows`, `egui`. `dtr` was a fifth, and it
-was the same thing as `egui` twice — the chrome this program draws with egui's own widgets —
-so the config reads `dtr` as an old spelling of `egui` and the menu offers one entry.
+The look's list is five: `native`, `adwaita`, `windows`, `macos`, `egui`. `dtr` was a
+sixth, and it was the same thing as `egui` twice — the chrome this program draws with
+egui's own widgets — so the config reads `dtr` as an old spelling of `egui` and the
+menu offers one entry; `apple` is likewise only another spelling of `macos`.
 
 **The tabs are the mouse's**, like everything else on the card. The sheet opens on the
 first tab, always, so where the rows are never moves between openings.
@@ -542,7 +590,7 @@ The accent is a **hex number, not a colour picker**: egui has no picker, and a t
 config file already speaks `#RRGGBB`. The field shows the colour a save would use — the
 draft's accent, or the look's own for the scheme it would resolve to — so an unset accent
 is Windows' `#005FB8` in the light rather than an empty box that reads as a broken control.
-Behind its arrow are the four looks' own accents, with `default` first, so "the look's
+Behind its arrow are the five looks' own accents, with `default` first, so "the look's
 own" stays reachable without deleting text. A half-typed hex is not a colour: the field
 keeps what was typed, marks itself, and the draft keeps the last thing that parsed.
 
@@ -755,11 +803,11 @@ disagreeing.
 
 ## Not decided
 
-- The macOS palette. Linux's is no longer a question — `native` there is
-  Adwaita read through the portal — so what is left is the platform nobody has
-  measured, and a constructor that guesses would be the one thing worse than
-  having none. (`adwaita`, `windows` and `egui` are *not* that guess: they are
-  asked for by name, on any platform.)
+- The macOS palette *as a read of a Mac*. `macos` is now a look-alike by name —
+  AppKit's documented semantic colours and a regular control's metrics — and is
+  deliberately not what `native` resolves to on a Mac. `native` there still has
+  no reader, and a constructor that guessed at the live desktop would be the one
+  thing worse than saying there is none.
 - Whether `native` should accept a scheme override. It takes its scheme from the
   desktop today, which is what "native" means, but a person whose desktop turns
   over at sunset may want the chrome to stay put — the setting would be a fourth
