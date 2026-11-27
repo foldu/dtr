@@ -298,6 +298,96 @@ fn theme_in_ini(text: &str) -> Option<String> {
     None
 }
 
+/// The face the desktop draws its own UI text in.
+///
+/// `gtk-font-name` is where a GTK desktop writes it — the same `settings.ini` that
+/// names the theme, and the same key libadwaita calls the document font. A
+/// session that writes no file still has a sans-serif family installed, so the
+/// platform's generic sans is the fallback rather than egui's bundled face.
+pub(super) fn ui_family() -> Option<String> {
+    settings_ini_font().or_else(crate::fonts::system_sans)
+}
+
+fn settings_ini_font() -> Option<String> {
+    let path = dirs::config_dir()?.join("gtk-4.0").join("settings.ini");
+    font_in_ini(&std::fs::read_to_string(path).ok()?)
+}
+
+fn font_in_ini(text: &str) -> Option<String> {
+    let mut in_settings = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(heading) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            in_settings = heading.trim() == "Settings";
+            continue;
+        }
+        if !in_settings {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "gtk-font-name" {
+            return family_of(value.trim().trim_matches('"'));
+        }
+    }
+    None
+}
+
+/// The family out of a Pango font description: `Noto Sans Semi-Bold 12` is
+/// `Noto Sans`.
+///
+/// A size and a style are not part of the family name, and handing the whole
+/// description to fontconfig finds nothing: `gtk-font-name` is a Pango
+/// description, not a family.
+fn family_of(description: &str) -> Option<String> {
+    let mut words: Vec<&str> = description.split_whitespace().collect();
+    while let Some(last) = words.last() {
+        if is_size(last) || is_style(last) {
+            words.pop();
+        } else {
+            break;
+        }
+    }
+    let family = words.join(" ");
+    (!family.is_empty()).then_some(family)
+}
+
+fn is_size(word: &str) -> bool {
+    let number = word
+        .strip_suffix("pt")
+        .or_else(|| word.strip_suffix("px"))
+        .unwrap_or(word);
+    !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+fn is_style(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "bold"
+            | "italic"
+            | "oblique"
+            | "light"
+            | "medium"
+            | "semibold"
+            | "semi-bold"
+            | "demibold"
+            | "demi"
+            | "extra"
+            | "ultra"
+            | "black"
+            | "thin"
+            | "heavy"
+            | "regular"
+            | "book"
+            | "condensed"
+            | "expanded"
+    )
+}
+
 /// The portal's scheme (as `u`) and accent (as `(ddd)`), over one connection.
 ///
 /// A missing bus, a missing portal and a portal that answers an error are all
@@ -854,6 +944,29 @@ gtk-icon-theme-name=Adwaita
         assert_eq!(load(&dir.path().join("absent.png")), None);
         std::fs::write(dir.path().join("not.png"), b"not a picture").unwrap();
         assert_eq!(load(&dir.path().join("not.png")), None);
+    }
+
+    /// A Pango description is not a family: the size and the style have to come
+    /// off before fontconfig is asked, or nothing is installed under the name.
+    #[test]
+    fn a_pango_description_yields_its_family() {
+        assert_eq!(family_of("Geist 11").as_deref(), Some("Geist"));
+        assert_eq!(family_of("Cantarell Bold 11").as_deref(), Some("Cantarell"));
+        assert_eq!(
+            family_of("Noto Sans Semi-Bold 12").as_deref(),
+            Some("Noto Sans")
+        );
+        assert_eq!(family_of("11"), None);
+        assert_eq!(family_of(""), None);
+    }
+
+    /// `gtk-font-name` is read from the `[Settings]` table only, like the theme.
+    #[test]
+    fn the_ui_font_comes_from_the_settings_table() {
+        let text = "[Settings]\ngtk-font-name=Geist 11\n";
+        assert_eq!(font_in_ini(text).as_deref(), Some("Geist"));
+        let text = "[Other]\ngtk-font-name=Geist 11\n";
+        assert_eq!(font_in_ini(text), None);
     }
 
     /// The program's own package is asked before the shared directories: a store

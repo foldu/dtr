@@ -202,6 +202,45 @@ fn offline() -> Option<Resolution> {
     None
 }
 
+/// The face the desktop draws its own UI text in, where it says one.
+///
+/// `None` in a test, for the same reason [`offline`] is: a baseline that changed
+/// with the developer's desktop font is a baseline CI cannot compare.
+#[cfg(not(test))]
+pub fn ui_family() -> Option<String> {
+    // Read once: the preferences card asks on every edit (`Look::from_config`),
+    // and a fontique collection on the KDE path is a system scan, not a lookup.
+    static FAMILY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    FAMILY.get_or_init(platform_ui_family).clone()
+}
+
+#[cfg(test)]
+pub fn ui_family() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn platform_ui_family() -> Option<String> {
+    linux::ui_family()
+}
+
+#[cfg(windows)]
+fn platform_ui_family() -> Option<String> {
+    // Windows 11's UI face, the one `Style::windows` already names. There is no
+    // registry value that states it; this is the documented default.
+    Some("Segoe UI Variable Text".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_ui_family() -> Option<String> {
+    Some("SF Pro Text".to_owned())
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn platform_ui_family() -> Option<String> {
+    None
+}
+
 #[cfg(windows)]
 async fn read_platform() -> Resolution {
     resolve(&windows::Registry).await

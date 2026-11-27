@@ -594,6 +594,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         },
         serial_dialog: startup.serial_dialog,
         fonts_dirty: false,
+        ui_fonts_dirty: false,
         keymap: crate::keys::Keymap::new(&startup.config.keys),
         pending: Vec::new(),
         pending_since: None,
@@ -1424,6 +1425,9 @@ struct App {
     /// Set when the grid must be rebuilt against a new face; the redraw has the
     /// device, and the preferences menu does not.
     fonts_dirty: bool,
+    /// Set when the chrome's face changed: egui's atlas is rebuilt from the new
+    /// definitions on the next frame, where the context is.
+    ui_fonts_dirty: bool,
     /// What the config file says each chord means.
     keymap: crate::keys::Keymap,
     /// Chords typed towards a binding that takes more than one.
@@ -4077,9 +4081,13 @@ impl App {
         let font_changed = config.font.size != self.look.size
             || config.font.family != self.look.family
             || config.font.fallback != self.look.fallback;
+        let chrome_font = self.look.ui_family.clone();
         self.look = crate::ui::Look::from_config(config, self.theme.as_ref());
         if font_changed {
             self.fonts_dirty = true;
+        }
+        if self.look.ui_family != chrome_font {
+            self.ui_fonts_dirty = true;
         }
     }
 
@@ -6789,6 +6797,15 @@ impl dtr_frame::App for App {
                 let scale = frame.scale();
                 if std::mem::take(&mut self.fonts_dirty) {
                     gpu.rebuild_grid(frame.device(), &self.look, scale);
+                }
+                if std::mem::take(&mut self.ui_fonts_dirty) {
+                    // The chrome's face moved: a preference row, a saved file or
+                    // a reloaded one. egui rebuilds its atlas from the new
+                    // definitions, and the next frame draws in the new face.
+                    if let Some(ctx) = self.egui_ctx.clone() {
+                        self.look.install(&ctx);
+                        self.repaint("chrome font changed");
+                    }
                 }
                 self.pump_files();
                 self.log_strip_geometry(scale);

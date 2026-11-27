@@ -21,6 +21,9 @@ pub struct Look {
     /// The grid pass, the pty fit and the divider hit test all ask `pane_area`,
     /// so they cannot disagree about it.
     pub padding: u16,
+    /// The family the chrome is drawn in: `[ui] font`, else the desktop's own UI
+    /// face. `None` keeps egui's bundled face, which is what a test gets.
+    pub ui_family: Option<String>,
     pub path: Option<PathBuf>,
     /// Families to try before dtr's own list when the grid face lacks a glyph,
     /// from `[font] fallback` in the config.
@@ -51,6 +54,7 @@ impl Default for Look {
             family: None,
             size: 14.0,
             padding: dtr_config::PADDING_DEFAULT,
+            ui_family: None,
             path: None,
             fallback: Vec::new(),
             background: crate::theme::DEFAULT_BACKGROUND,
@@ -121,6 +125,10 @@ impl Look {
         );
         look.fallback = config.font.fallback.clone();
         look.padding = config.padding;
+        // The chrome's face: what the file names, else what the desktop says. A
+        // test reads nothing (`system::ui_family` is inert there), so a snapshot
+        // cannot depend on the developer's desktop font.
+        look.ui_family = config.ui.font.clone().or_else(crate::system::ui_family);
         look
     }
 
@@ -207,6 +215,30 @@ impl Look {
                     %err,
                     "cannot read the configured font; keeping the default"
                 ),
+            }
+        }
+        // The chrome's own face: the desktop's UI font or the one `[ui] font`
+        // names. Only `Proportional` is retargeted — the `dtr` look asks for
+        // monospace labels on purpose, and a proportional face would make its
+        // chrome something else — and a family that is not installed keeps
+        // egui's bundled face rather than drawing tofu.
+        if let Some(family) = self.ui_family.as_deref() {
+            match crate::fonts::family_font(family) {
+                Some((name, bytes)) => {
+                    definitions.font_data.insert(
+                        name.clone(),
+                        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                    );
+                    definitions
+                        .families
+                        .entry(egui::FontFamily::Proportional)
+                        .or_default()
+                        .insert(0, name.clone());
+                    tracing::debug!(family = %name, "chrome face");
+                }
+                None => {
+                    tracing::debug!(family, "the chrome's face is not installed; keeping egui's")
+                }
             }
         }
         // One CJK face for everything egui draws, appended so latin text keeps

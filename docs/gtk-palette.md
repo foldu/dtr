@@ -806,9 +806,12 @@ would be reading the dialect that is on its way out.
   row height is not followed; dtr keeps §6.1's measurements. (The sheet says 47
   where dtr's `ADWAITA_TITLEBAR` is 46 — a realized window's height is the kind of
   thing a constant cannot capture.)
-- **Fonts.** `--document-font-family/size` are in the same `:root`, and
-  `gtk-font-name` is in `settings.ini`; neither is read, so the chrome keeps
-  egui's faces. Measured here: Geist 11 and Maple Mono NL NF CN 12.
+- **Fonts.** `gtk-font-name` *is* read, for the chrome: `[ui] font` names a
+  family and an empty one follows the desktop, which is this key (a Pango
+  description — `Geist 11` — with the size and style trimmed off). The grid's
+  face is still its own (`[font] family`), `--document-font-family/size` and
+  `--monospace-font-*` are not read, and the `dtr` look keeps its monospace
+  chrome even when a proportional face is installed.
 - **High contrast.** `prefers-contrast` blocks are skipped and the portal's
   `contrast` key is not read (§9).
 - **A third-party GTK theme's own sheet.** Only the user stylesheet and what it

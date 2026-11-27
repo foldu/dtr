@@ -404,6 +404,10 @@ pub struct Ui {
     /// preset's own default, so a window that never set one still follows a
     /// future default rather than the value of the day it was first saved.
     pub accent: Option<[u8; 3]>,
+    /// The family the chrome is drawn in. `None` follows the desktop: its
+    /// `gtk-font-name` on GTK, Segoe UI Variable on Windows, SF Pro Text on a
+    /// Mac. The grid's face is `[font] family`, which is a separate question.
+    pub font: Option<String>,
 }
 
 impl Default for Ui {
@@ -412,6 +416,7 @@ impl Default for Ui {
             widgets: Widgets::default(),
             scheme: Scheme::default(),
             accent: None,
+            font: None,
         }
     }
 }
@@ -624,6 +629,14 @@ impl Config {
                         )));
                     }
                 };
+            }
+            if let Some(font) = ui.get("font") {
+                let text = font
+                    .as_str()
+                    .ok_or_else(|| Error::Value("ui.font must be a string".into()))?;
+                // An empty string is "the desktop's own", the same way an empty
+                // theme is the built-in colours and an empty accent is the look's.
+                config.ui.font = (!text.trim().is_empty()).then(|| text.trim().to_owned());
             }
             if let Some(accent) = ui.get("accent") {
                 let text = accent
@@ -955,6 +968,12 @@ scheme = "system"
 # the look's own: Adwaita's blue, Windows' accent, Apple's system blue, egui's
 # link colour.
 # accent = "#3584E4"
+# The face the chrome is drawn in: labels, menus, the preferences card. Leave it
+# empty (or out) to use the desktop's own UI font — gtk-font-name on a GTK
+# desktop, Segoe UI Variable on Windows, SF Pro Text on a Mac. The grid's face is
+# [font] family, which is a separate question; the dtr look keeps its monospace
+# chrome either way.
+# font = "Cantarell"
 
 [files]
 # How a file pane lays its listing out: "grid" is a wall of icon tiles, as in
@@ -1274,6 +1293,29 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
         );
     }
 
+    /// The chrome's face is a family name, or empty for the desktop's own.
+    #[test]
+    fn the_chrome_font_is_a_family_or_the_desktops() {
+        assert_eq!(Config::default().ui.font, None);
+        assert_eq!(
+            Config::parse("[ui]\nfont = \" Geist \"\n")
+                .unwrap()
+                .ui
+                .font
+                .as_deref(),
+            Some("Geist")
+        );
+        assert_eq!(
+            Config::parse("[ui]\nfont = \"\"\n").unwrap().ui.font,
+            None,
+            "empty means follow the desktop, not a family named nothing"
+        );
+        assert!(matches!(
+            Config::parse("[ui]\nfont = 11\n"),
+            Err(super::Error::Value(_))
+        ));
+    }
+
     /// The padding is a whole number of points inside a stated range: a
     /// fractional or negative margin is not a margin, and a file that asks for
     /// 300 points is a typo that would leave a two-cell grid.
@@ -1289,7 +1331,10 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
             "[window]\npadding = 4.5\n",
         ] {
             let error = Config::parse(text).expect_err(text);
-            assert!(matches!(error, Error::Value(_)), "{text:?}: {error:?}");
+            assert!(
+                matches!(error, super::Error::Value(_)),
+                "{text:?}: {error:?}"
+            );
         }
     }
 

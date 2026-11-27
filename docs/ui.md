@@ -79,7 +79,10 @@ either would be a control nothing reads.
   the named colours it redefines: that file is the top of GTK's cascade, so it is
   what a customised GNOME actually shows. The base is still libadwaita 1.9.3's
   measured constants, and a value the reader cannot resolve keeps the constant.
-  This is `crates/dtr/src/system/linux.rs` and `linux/css.rs`;
+  The chrome's *face* is the desktop's too: `[ui] font` names one, and an empty
+  value follows `gtk-font-name` (Segoe UI Variable on Windows, SF Pro Text on a
+  Mac), installed as egui's proportional family; the `dtr` look keeps its
+  monospace chrome. This is `crates/dtr/src/system/linux.rs` and `linux/css.rs`;
   `docs/gtk-palette.md` is the whole story — §6 for the refusal, §8 for the
   override layer. The portal half sits behind the `portal` feature, so a build
   that will not take zbus's tree falls back to the theme's name and never

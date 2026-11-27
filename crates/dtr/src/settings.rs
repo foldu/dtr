@@ -69,6 +69,7 @@ pub enum Row {
     Scheme,
     Accent,
     Theme,
+    UiFont,
     FontSize,
     FontFamily,
     Baud,
@@ -79,11 +80,12 @@ pub enum Row {
 }
 
 impl Row {
-    const ALL: [Row; 11] = [
+    const ALL: [Row; 12] = [
         Row::Widgets,
         Row::Scheme,
         Row::Accent,
         Row::Theme,
+        Row::UiFont,
         Row::FontSize,
         Row::FontFamily,
         Row::Baud,
@@ -99,6 +101,7 @@ impl Row {
             | Row::Scheme
             | Row::Accent
             | Row::Theme
+            | Row::UiFont
             | Row::FontSize
             | Row::FontFamily
             | Row::Padding => Panel::Appearance,
@@ -124,6 +127,7 @@ impl Row {
             Row::Scheme => "scheme",
             Row::Accent => "accent",
             Row::Theme => "theme",
+            Row::UiFont => "font",
             Row::FontSize => "size",
             Row::FontFamily => "family",
             Row::Baud => "baud",
@@ -143,6 +147,7 @@ impl Row {
             Row::Scheme => "light, dark, or the desktop's",
             Row::Accent => "the colour of a selection",
             Row::Theme => "the terminal's colour scheme",
+            Row::UiFont => "the chrome's face; empty follows the desktop",
             Row::FontSize => "the grid's point size",
             Row::FontFamily => "the face the grid is drawn in",
             Row::Baud => "the rate the port opens at",
@@ -155,7 +160,7 @@ impl Row {
 
     fn section(self) -> &'static str {
         match self {
-            Row::Widgets | Row::Scheme | Row::Accent => "ui",
+            Row::Widgets | Row::Scheme | Row::Accent | Row::UiFont => "ui",
             Row::Theme => "",
             Row::FontSize | Row::FontFamily => "font",
             Row::Baud | Row::CrToCrlf | Row::AutoReconnect => "serial",
@@ -218,6 +223,8 @@ pub enum Change {
     FontSize(f32),
     Family(Option<String>),
     Theme(Option<String>),
+    /// The chrome's face; `None` follows the desktop.
+    UiFont(Option<String>),
     AutoReconnect(bool),
     /// Keep every ssh tab inside a tmux session on the far end.
     Tmux(bool),
@@ -393,6 +400,7 @@ impl Settings {
             Change::FontSize(size) => self.draft.font.size = size,
             Change::Family(family) => self.draft.font.family = family,
             Change::Theme(theme) => self.draft.theme = theme,
+            Change::UiFont(font) => self.draft.ui.font = font,
             Change::AutoReconnect(on) => self.draft.serial.auto_reconnect = on,
             Change::Tmux(on) => self.draft.tmux.enabled = on,
             Change::Baud(baud) => {
@@ -439,6 +447,12 @@ impl Settings {
                 .theme
                 .clone()
                 .unwrap_or_else(|| "built-in".to_owned()),
+            Row::UiFont => self
+                .draft
+                .ui
+                .font
+                .clone()
+                .unwrap_or_else(|| "system".to_owned()),
             // No port, no value: the row says so rather than showing a rate that
             // belongs to nothing.
             Row::Baud => match &self.serial {
@@ -484,6 +498,10 @@ impl Settings {
             self.draft.tmux.enabled.to_string(),
         ));
         writes.push(("window.padding".to_owned(), self.draft.padding.to_string()));
+        writes.push((
+            "ui.font".to_owned(),
+            self.draft.ui.font.clone().unwrap_or_default(),
+        ));
         writes.push(("ui.widgets".to_owned(), self.draft.ui.widgets.to_string()));
         writes.push(("ui.scheme".to_owned(), self.draft.ui.scheme.to_string()));
         writes.push((
@@ -769,6 +787,37 @@ impl Settings {
                     }
                     None => None,
                 }
+            }
+            Row::UiFont => {
+                // "system" is the desktop's own, and the row shows that word
+                // rather than the family it resolves to: a desktop that changes
+                // its font must not turn a saved "follow the desktop" into a
+                // pinned name.
+                let current = self.draft.ui.font.clone();
+                let label = current.clone().unwrap_or_else(|| "system".to_owned());
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("ui-font")
+                    .selected_text(egui::RichText::new(&label).size(12.0))
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        if dtr_widgets::menu_row(ui, skin, "system", current.is_none()) {
+                            change = Some(Change::UiFont(None));
+                        }
+                        for family in &self.families {
+                            if dtr_widgets::menu_row(
+                                ui,
+                                skin,
+                                family,
+                                current.as_deref() == Some(family.as_str()),
+                            ) {
+                                change = Some(Change::UiFont(Some(family.clone())));
+                            }
+                        }
+                    });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+                change
             }
             Row::FontSize => {
                 // Drag left/right, or click to type. Both are the mouse.
@@ -1151,6 +1200,7 @@ mod tests {
             vec![
                 Row::Widgets,
                 Row::Theme,
+                Row::UiFont,
                 Row::FontSize,
                 Row::FontFamily,
                 Row::Padding
@@ -1198,6 +1248,30 @@ mod tests {
         );
     }
 
+    /// The chrome's face is one key: a family in the file, or an empty string
+    /// meaning "follow the desktop".
+    #[test]
+    fn the_chrome_font_is_one_key() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert!(settings.draft.ui.font.is_none());
+        settings.apply(Change::UiFont(Some("Geist".to_owned())));
+        assert_eq!(settings.draft.ui.font.as_deref(), Some("Geist"));
+        assert!(
+            settings
+                .writes()
+                .contains(&("ui.font".to_owned(), "Geist".to_owned())),
+            "the row and the file are one key"
+        );
+        settings.apply(Change::UiFont(None));
+        assert!(
+            settings
+                .writes()
+                .contains(&("ui.font".to_owned(), String::new())),
+            "system is written as empty, not as a pinned family"
+        );
+    }
+
     /// The port's rows are the port's panel, whatever else is showing: a baud rate
     /// beside the font size was the one column this split exists to end.
     #[test]
@@ -1227,6 +1301,7 @@ mod tests {
                 Row::Scheme,
                 Row::Accent,
                 Row::Theme,
+                Row::UiFont,
                 Row::FontSize,
                 Row::FontFamily,
                 Row::Padding
@@ -1349,6 +1424,7 @@ mod kittest_tests {
             vec![
                 Row::Widgets,
                 Row::Theme,
+                Row::UiFont,
                 Row::FontSize,
                 Row::FontFamily,
                 Row::Padding

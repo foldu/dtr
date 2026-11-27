@@ -265,6 +265,38 @@ pub fn ui_fallback() -> Option<(String, Vec<u8>)> {
     None
 }
 
+/// A family's upright regular face, as egui wants it: the bytes and the name to
+/// install them under.
+///
+/// The chrome's face is the desktop's own or the one `[ui] font` names, and egui
+/// only knows the faces an application hands it. `None` means the family is not
+/// installed; the caller keeps egui's bundled face rather than drawing tofu.
+pub fn family_font(name: &str) -> Option<(String, Vec<u8>)> {
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
+    let id = collection.family_id(name)?;
+    let family = collection.family(id)?;
+    let font = family.match_font(
+        fontique::FontWidth::NORMAL,
+        fontique::FontStyle::Normal,
+        fontique::FontWeight::NORMAL,
+        false,
+    )?;
+    // `load(None)` owns the bytes; with the cache it borrows them.
+    let owned = font.load(None)?;
+    Some((name.to_owned(), owned.data().to_vec()))
+}
+
+/// The platform's generic sans family, for a desktop that names its UI font
+/// nowhere dtr can read.
+pub fn system_sans() -> Option<String> {
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions::default());
+    let id = collection
+        .generic_families(fontique::GenericFamily::SansSerif)
+        .next()?;
+    let family = collection.family(id)?;
+    Some(family.name().to_owned())
+}
+
 /// The egui font family name the caption glyphs are installed under.
 pub const ICON_FAMILY: &str = "caption-icons";
 
