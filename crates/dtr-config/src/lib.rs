@@ -67,6 +67,8 @@ pub struct Config {
     pub tmux: Tmux,
     /// How a file pane looks. `[files]`.
     pub files: Files,
+    /// Which adapter renders the window. `[gpu]`.
+    pub gpu: Gpu,
 }
 
 /// How a file pane lays its listing out. `[files] view`.
@@ -394,6 +396,57 @@ impl Scheme {
     pub const ALL: [Scheme; 3] = [Scheme::System, Scheme::Light, Scheme::Dark];
 }
 
+/// Which adapter renders the window, and what wgpu is asked for. `[gpu]`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Gpu {
+    /// A name substring to prefer, e.g. `"nvidia"`. `None` lets wgpu choose,
+    /// guided by [`Gpu::power`].
+    pub adapter: Option<String>,
+    /// wgpu's power preference. `High` is the default.
+    pub power: GpuPower,
+}
+
+/// What wgpu's `PowerPreference` is asked for. `[gpu] power`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuPower {
+    /// Let wgpu choose (`PowerPreference::None`).
+    Default,
+    /// The integrated GPU (`LowPower`): the battery-friendly choice on a laptop.
+    Low,
+    /// The discrete GPU (`HighPerformance`), the default: a terminal someone
+    /// stares at should not be handed the iGPU of a machine that has a real card.
+    #[default]
+    High,
+}
+
+impl GpuPower {
+    pub const ALL: [GpuPower; 3] = [GpuPower::Default, GpuPower::Low, GpuPower::High];
+
+    /// The word a config file and the preferences card use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Low => "low",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "default" | "auto" => Some(Self::Default),
+            "low" | "low-power" => Some(Self::Low),
+            "high" | "high-performance" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for GpuPower {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The controls' look. `[ui]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ui {
@@ -462,6 +515,7 @@ impl Default for Config {
             notifications: Notifications::default(),
             files: Files::default(),
             tmux: Tmux::default(),
+            gpu: Gpu::default(),
         }
     }
 }
@@ -703,6 +757,26 @@ impl Config {
                 config.tmux.enabled = enabled
                     .as_bool()
                     .ok_or_else(|| Error::Value("tmux.enabled must be true or false".into()))?;
+            }
+        }
+
+        if let Some(gpu) = document.get("gpu").and_then(Item::as_table) {
+            if let Some(adapter) = gpu.get("adapter") {
+                let text = adapter
+                    .as_str()
+                    .ok_or_else(|| Error::Value("gpu.adapter must be a string".into()))?;
+                let text = text.trim();
+                config.gpu.adapter = (!text.is_empty()).then(|| text.to_owned());
+            }
+            if let Some(power) = gpu.get("power") {
+                let text = power
+                    .as_str()
+                    .ok_or_else(|| Error::Value("gpu.power must be a string".into()))?;
+                config.gpu.power = GpuPower::parse(text).ok_or_else(|| {
+                    Error::Value(format!(
+                        "gpu.power is {text:?}; it must be \"default\", \"low\" or \"high\""
+                    ))
+                })?;
             }
         }
 
@@ -974,6 +1048,19 @@ scheme = "system"
 # [font] family, which is a separate question; the dtr look keeps its monospace
 # chrome either way.
 # font = "Cantarell"
+
+[gpu]
+# Which card renders the window. Empty (or out) lets wgpu choose, guided by
+# `power`; a name substring — "nvidia", "radeon", "arc" — picks the first adapter
+# whose name matches, as `--gpu`/`DTR_GPU` always have, and the flag and the
+# variable win over this file when they are given.
+# adapter = "nvidia"
+# wgpu's power preference: "high" (the default) asks for the discrete GPU, "low"
+# asks for the integrated one — the battery-friendly choice on a laptop, and the
+# wrong one on a machine with a real card sitting there. "default" leaves it to
+# wgpu. Changing either key needs a restart: the adapter is chosen once, when the
+# window's surface is created, and nothing here can swap it afterwards.
+power = "high"
 
 [files]
 # How a file pane lays its listing out: "grid" is a wall of icon tiles, as in
@@ -1314,6 +1401,28 @@ fallback = ["Noto Sans CJK SC", "0xProto Nerd Font Mono"]
             Config::parse("[ui]\nfont = 11\n"),
             Err(super::Error::Value(_))
         ));
+    }
+
+    /// The adapter is a name substring or empty for "let wgpu choose", and the
+    /// power preference is one of wgpu's three words.
+    #[test]
+    fn the_gpu_section_is_an_adapter_and_a_power_preference() {
+        assert_eq!(Config::default().gpu.power, super::GpuPower::High);
+        assert_eq!(Config::default().gpu.adapter, None);
+
+        let parsed = Config::parse("[gpu]\nadapter = \" nvidia \"\npower = \"low\"\n").unwrap();
+        assert_eq!(parsed.gpu.adapter.as_deref(), Some("nvidia"));
+        assert_eq!(parsed.gpu.power, super::GpuPower::Low);
+
+        let parsed = Config::parse("[gpu]\nadapter = \"\"\n").unwrap();
+        assert_eq!(parsed.gpu.adapter, None, "empty is \"let wgpu choose\"");
+
+        for text in ["[gpu]\npower = \"turbo\"\n", "[gpu]\npower = 2\n"] {
+            assert!(
+                matches!(Config::parse(text), Err(super::Error::Value(_))),
+                "{text:?}"
+            );
+        }
     }
 
     /// The padding is a whole number of points inside a stated range: a

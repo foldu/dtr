@@ -543,11 +543,14 @@ fn main() -> anyhow::Result<()> {
     };
     // `DTR_GPU` exists so the packaged binary can be pointed at a card without
     // a rebuild; the flag wins when both are given.
+    // The flag, then the variable, then the file: a command line is a request
+    // about *this* run, and `[gpu] adapter` is the one that persists.
     let gpu = args
         .gpu
         .clone()
         .or_else(|| std::env::var("DTR_GPU").ok())
-        .filter(|name| !name.trim().is_empty());
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| config.gpu.adapter.clone());
     if args.fonts {
         for family in dtr::fonts::usable_families() {
             println!("{family}");
@@ -782,6 +785,7 @@ fn main() -> anyhow::Result<()> {
             drag: args.drag.clone(),
             click: args.click.clone(),
             gpu: gpu.clone(),
+            gpu_power: config.gpu.power,
             preferences: args.preferences,
             keymap: args.keymap,
             stats: args.stats,
@@ -826,6 +830,7 @@ fn main() -> anyhow::Result<()> {
         drag: args.drag.clone(),
         click: args.click.clone(),
         gpu,
+        gpu_power: config.gpu.power,
         preferences: args.preferences,
         keymap: args.keymap,
         stats: args.stats,

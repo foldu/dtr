@@ -762,9 +762,8 @@ samples a real window, through `perf` when the kernel allows recording and other
 a text self-time report, and `--exit-after MS` closes the window by itself, which
 exercises shutdown without a window manager.
 
-**`PowerPreference::LowPower` is the integrated GPU**, which is wrong for a terminal
-someone stares at: `--gpu <substring>` (or `DTR_GPU`) picks by adapter name, and `-v` logs
-the adapter and every adapter seen.
+**`[gpu] power` defaults to `high`** (the discrete GPU; `low` is the integrated one, wrong
+for a terminal). `--gpu`/`DTR_GPU`/`[gpu] adapter` pick by name; `-v` logs the adapter.
 
 `./scripts/bench.sh` runs vtebench against dtr and prints the delta from the previous run.
 **`docs/bench.md` is how to read it**: what bounds a sample, why a delta across a different

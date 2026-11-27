@@ -77,10 +77,12 @@ pub enum Row {
     AutoReconnect,
     Tmux,
     Padding,
+    GpuAdapter,
+    GpuPower,
 }
 
 impl Row {
-    const ALL: [Row; 12] = [
+    const ALL: [Row; 14] = [
         Row::Widgets,
         Row::Scheme,
         Row::Accent,
@@ -93,6 +95,8 @@ impl Row {
         Row::AutoReconnect,
         Row::Tmux,
         Row::Padding,
+        Row::GpuAdapter,
+        Row::GpuPower,
     ];
 
     fn panel(self) -> Panel {
@@ -105,7 +109,12 @@ impl Row {
             | Row::FontSize
             | Row::FontFamily
             | Row::Padding => Panel::Appearance,
-            Row::Baud | Row::CrToCrlf | Row::AutoReconnect | Row::Tmux => Panel::General,
+            Row::Baud
+            | Row::CrToCrlf
+            | Row::AutoReconnect
+            | Row::Tmux
+            | Row::GpuAdapter
+            | Row::GpuPower => Panel::General,
         }
     }
 
@@ -135,6 +144,8 @@ impl Row {
             Row::AutoReconnect => "auto_reconnect",
             Row::Tmux => "enabled",
             Row::Padding => "padding",
+            Row::GpuAdapter => "adapter",
+            Row::GpuPower => "power",
         }
     }
 
@@ -155,6 +166,8 @@ impl Row {
             Row::AutoReconnect => "reopen the port when it drops",
             Row::Tmux => "run ssh tabs inside tmux on the host",
             Row::Padding => "space around the grid, in points",
+            Row::GpuAdapter => "the card to render with; restart to apply",
+            Row::GpuPower => "low or high power; restart to apply",
         }
     }
 
@@ -166,6 +179,7 @@ impl Row {
             Row::Baud | Row::CrToCrlf | Row::AutoReconnect => "serial",
             Row::Tmux => "tmux",
             Row::Padding => "window",
+            Row::GpuAdapter | Row::GpuPower => "gpu",
         }
     }
 
@@ -225,6 +239,9 @@ pub enum Change {
     Theme(Option<String>),
     /// The chrome's face; `None` follows the desktop.
     UiFont(Option<String>),
+    /// The adapter's name, as typed; empty is "auto".
+    GpuAdapter(String),
+    GpuPower(dtr_config::GpuPower),
     AutoReconnect(bool),
     /// Keep every ssh tab inside a tmux session on the far end.
     Tmux(bool),
@@ -401,6 +418,11 @@ impl Settings {
             Change::Family(family) => self.draft.font.family = family,
             Change::Theme(theme) => self.draft.theme = theme,
             Change::UiFont(font) => self.draft.ui.font = font,
+            Change::GpuAdapter(name) => {
+                let name = name.trim();
+                self.draft.gpu.adapter = (!name.is_empty()).then(|| name.to_owned());
+            }
+            Change::GpuPower(power) => self.draft.gpu.power = power,
             Change::AutoReconnect(on) => self.draft.serial.auto_reconnect = on,
             Change::Tmux(on) => self.draft.tmux.enabled = on,
             Change::Baud(baud) => {
@@ -466,6 +488,13 @@ impl Settings {
             Row::AutoReconnect => on_off(self.draft.serial.auto_reconnect),
             Row::Tmux => on_off(self.draft.tmux.enabled),
             Row::Padding => format!("{} pt", self.draft.padding),
+            Row::GpuAdapter => self
+                .draft
+                .gpu
+                .adapter
+                .clone()
+                .unwrap_or_else(|| "auto".to_owned()),
+            Row::GpuPower => self.draft.gpu.power.to_string(),
         }
     }
 
@@ -502,6 +531,11 @@ impl Settings {
             "ui.font".to_owned(),
             self.draft.ui.font.clone().unwrap_or_default(),
         ));
+        writes.push((
+            "gpu.adapter".to_owned(),
+            self.draft.gpu.adapter.clone().unwrap_or_default(),
+        ));
+        writes.push(("gpu.power".to_owned(), self.draft.gpu.power.to_string()));
         writes.push(("ui.widgets".to_owned(), self.draft.ui.widgets.to_string()));
         writes.push(("ui.scheme".to_owned(), self.draft.ui.scheme.to_string()));
         writes.push((
@@ -962,6 +996,65 @@ impl Settings {
                 };
                 dtr_widgets::check_box(ui, skin, serial.cr_to_crlf, &name).map(Change::CrToCrlf)
             }
+            Row::GpuAdapter => {
+                // The names wgpu reports, plus "auto" and the name already in the
+                // file: a closed list that hid a value from another machine would
+                // read as the setting having been lost.
+                let current = self.draft.gpu.adapter.clone();
+                let label = current.clone().unwrap_or_else(|| "auto".to_owned());
+                let listed = crate::gpu::adapters();
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("gpu-adapter")
+                    .selected_text(egui::RichText::new(&label).size(12.0))
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        if dtr_widgets::menu_row(ui, skin, "auto", current.is_none()) {
+                            change = Some(Change::GpuAdapter(String::new()));
+                        }
+                        for name in listed {
+                            if dtr_widgets::menu_row(
+                                ui,
+                                skin,
+                                name,
+                                current.as_deref() == Some(name.as_str()),
+                            ) {
+                                change = Some(Change::GpuAdapter(name.clone()));
+                            }
+                        }
+                        if let Some(name) = &current
+                            && !listed.iter().any(|known| known == name)
+                            && dtr_widgets::menu_row(ui, skin, name, true)
+                        {
+                            change = Some(Change::GpuAdapter(name.clone()));
+                        }
+                    });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+                change
+            }
+            Row::GpuPower => {
+                // A dropdown like the other closed lists: a segmented row of
+                // three words spends the width the card's text needs, and this
+                // one has to say "restart" in its description.
+                let current = self.draft.gpu.power;
+                let mut change = None;
+                let response = egui::ComboBox::from_id_salt("gpu-power")
+                    .selected_text(egui::RichText::new(current.to_string()).size(12.0))
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for power in dtr_config::GpuPower::ALL {
+                            let label = power.to_string();
+                            if dtr_widgets::menu_row(ui, skin, &label, power == current) {
+                                change = Some(Change::GpuPower(power));
+                            }
+                        }
+                    });
+                response
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+                change
+            }
         }
     }
 }
@@ -1178,7 +1271,12 @@ mod tests {
         assert_eq!(settings.panel(), Panel::General);
         assert_eq!(
             settings.rows(),
-            vec![Row::AutoReconnect, Row::Tmux],
+            vec![
+                Row::AutoReconnect,
+                Row::Tmux,
+                Row::GpuAdapter,
+                Row::GpuPower
+            ],
             "a shell has no port to describe"
         );
 
@@ -1190,7 +1288,14 @@ mod tests {
         assert_eq!(settings.panel(), Panel::General);
         assert_eq!(
             settings.rows(),
-            vec![Row::Baud, Row::CrToCrlf, Row::AutoReconnect, Row::Tmux]
+            vec![
+                Row::Baud,
+                Row::CrToCrlf,
+                Row::AutoReconnect,
+                Row::Tmux,
+                Row::GpuAdapter,
+                Row::GpuPower
+            ]
         );
 
         // Appearance is where the window is, and it never has a port row.
@@ -1215,7 +1320,7 @@ mod tests {
     fn the_tmux_toggle_is_one_row_and_one_key() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        assert_eq!(settings.rows().last(), Some(&Row::Tmux));
+        assert!(settings.rows().contains(&Row::Tmux));
         assert!(
             !settings.draft.tmux.enabled,
             "the sheet opens on what the file says"
@@ -1269,6 +1374,36 @@ mod tests {
                 .writes()
                 .contains(&("ui.font".to_owned(), String::new())),
             "system is written as empty, not as a pinned family"
+        );
+    }
+
+    /// The GPU rows are two keys, and an empty adapter is written back as empty
+    /// so "let wgpu choose" survives a save.
+    #[test]
+    fn the_gpu_rows_are_one_key_each() {
+        let mut settings = Settings::new();
+        settings.show(&Config::default());
+        assert_eq!(settings.rows().last(), Some(&Row::GpuPower));
+
+        settings.apply(Change::GpuAdapter(" nvidia ".to_owned()));
+        assert_eq!(settings.draft.gpu.adapter.as_deref(), Some("nvidia"));
+        settings.apply(Change::GpuPower(dtr_config::GpuPower::Low));
+        assert!(
+            settings
+                .writes()
+                .contains(&("gpu.adapter".to_owned(), "nvidia".to_owned()))
+        );
+        assert!(
+            settings
+                .writes()
+                .contains(&("gpu.power".to_owned(), "low".to_owned()))
+        );
+
+        settings.apply(Change::GpuAdapter(String::new()));
+        assert!(
+            settings
+                .writes()
+                .contains(&("gpu.adapter".to_owned(), String::new()))
         );
     }
 
@@ -1417,7 +1552,15 @@ mod kittest_tests {
     fn a_shell_menu_has_no_port_rows() {
         let mut settings = Settings::new();
         settings.show(&Config::default());
-        assert_eq!(settings.rows(), vec![Row::AutoReconnect, Row::Tmux]);
+        assert_eq!(
+            settings.rows(),
+            vec![
+                Row::AutoReconnect,
+                Row::Tmux,
+                Row::GpuAdapter,
+                Row::GpuPower
+            ]
+        );
         settings.apply(Change::Panel(Panel::Appearance));
         assert_eq!(
             settings.rows(),

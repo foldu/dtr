@@ -87,18 +87,19 @@ pub fn instance() -> wgpu::Instance {
     wgpu::Instance::new(descriptor)
 }
 
-/// The adapter wgpu picks when nobody asked for one.
+/// The adapter wgpu picks when nobody asked for one by name.
 ///
-/// `HighPerformance`, not `LowPower`: this is a terminal someone stares at, and
+/// `HighPerformance` is the default: this is a terminal someone stares at, and
 /// asking for the low-power adapter hands it the integrated GPU of a machine
-/// that has a real one sitting there.
+/// that has a real one sitting there. `[gpu] power` can say otherwise.
 fn request_default_adapter(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'static>,
+    power_preference: wgpu::PowerPreference,
 ) -> anyhow::Result<wgpu::Adapter> {
     Ok(pollster::block_on(instance.request_adapter(
         &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference,
             compatible_surface: Some(surface),
             force_fallback_adapter: false,
             apply_limit_buckets: false,
@@ -183,6 +184,10 @@ pub struct WindowOptions {
     pub undecorated_shadow: bool,
     /// Adapter name substring to prefer, e.g. `"nvidia"`.
     pub adapter_hint: Option<String>,
+    /// What wgpu is asked for when no name wins: `HighPerformance` (the default)
+    /// for the discrete GPU, `LowPower` for the integrated one, `None` to let
+    /// wgpu decide. `[gpu] power`.
+    pub power_preference: wgpu::PowerPreference,
     /// Called with the created window, before the [`Frame`] exists. The handle
     /// is the loop's `Arc`, cloned for the callback: platform work that needs
     /// the native handle (dtr subclasses the window procedure here) can keep it
@@ -202,6 +207,7 @@ impl Default for WindowOptions {
             ime_allowed: false,
             undecorated_shadow: false,
             adapter_hint: None,
+            power_preference: wgpu::PowerPreference::HighPerformance,
             on_created: None,
         }
     }
@@ -274,7 +280,11 @@ impl Frame {
     ///
     /// The window is already created (see [`Windows::open`]): the adapter is
     /// chosen for the surface it has to present to, so the surface comes first.
-    pub fn new(window: Arc<Window>, adapter_hint: Option<&str>) -> anyhow::Result<Self> {
+    pub fn new(
+        window: Arc<Window>,
+        adapter_hint: Option<&str>,
+        power_preference: wgpu::PowerPreference,
+    ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = instance();
         let surface = instance.create_surface(Arc::clone(&window))?;
@@ -284,10 +294,10 @@ impl Frame {
                 Some(adapter) => adapter,
                 None => {
                     tracing::warn!(pattern, "no adapter matched; falling back");
-                    request_default_adapter(&instance, &surface)?
+                    request_default_adapter(&instance, &surface, power_preference)?
                 }
             },
-            None => request_default_adapter(&instance, &surface)?,
+            None => request_default_adapter(&instance, &surface, power_preference)?,
         };
         tracing::info!(
             adapter = %adapter.get_info().name,
@@ -865,6 +875,7 @@ impl Windows {
             ime_allowed,
             undecorated_shadow,
             adapter_hint,
+            power_preference,
             on_created,
         } = options;
 
@@ -903,7 +914,7 @@ impl Windows {
         if let Some(on_created) = on_created {
             on_created(Arc::clone(&window));
         }
-        let frame = Frame::new(window, adapter_hint.as_deref())?;
+        let frame = Frame::new(window, adapter_hint.as_deref(), power_preference)?;
         self.frames.push(frame);
         Ok(self.frames.last_mut().expect("just pushed"))
     }

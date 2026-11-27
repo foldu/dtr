@@ -287,6 +287,8 @@ pub struct Startup {
     pub exit_after: Option<u64>,
     /// Adapter name to prefer, e.g. "nvidia".
     pub gpu: Option<String>,
+    /// What wgpu is asked for when no name wins. `[gpu] power`.
+    pub gpu_power: dtr_config::GpuPower,
     /// A cell range to show selected on the first frame (screenshots).
     pub select: Option<(usize, usize)>,
     /// Lines to scroll into the scrollback before capturing (screenshots).
@@ -576,6 +578,7 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         exit_after: startup.exit_after,
         started: std::time::Instant::now(),
         gpu_hint: startup.gpu.clone(),
+        gpu_power: startup.gpu_power,
         settings: {
             let mut settings = crate::settings::Settings::new();
             if startup.preferences {
@@ -1420,8 +1423,11 @@ struct App {
     frames_drawn: u64,
     exit_after: Option<u64>,
     started: std::time::Instant,
-    /// Adapter name to prefer, from `--gpu` or `DTR_GPU`.
+    /// Adapter name to prefer, from `--gpu`, `DTR_GPU` or `[gpu] adapter`.
     gpu_hint: Option<String>,
+    /// What wgpu is asked for when no name wins. `[gpu] power`; the adapter is
+    /// chosen once, so changing it needs a restart.
+    gpu_power: dtr_config::GpuPower,
     /// Set when the grid must be rebuilt against a new face; the redraw has the
     /// device, and the preferences menu does not.
     fonts_dirty: bool,
@@ -5942,6 +5948,11 @@ impl dtr_frame::App for App {
             // the desktop.
             undecorated_shadow: client_frame,
             adapter_hint: self.gpu_hint.clone(),
+            power_preference: match self.gpu_power {
+                dtr_config::GpuPower::Default => wgpu::PowerPreference::None,
+                dtr_config::GpuPower::Low => wgpu::PowerPreference::LowPower,
+                dtr_config::GpuPower::High => wgpu::PowerPreference::HighPerformance,
+            },
             on_created,
         };
         let frame = match windows.open(event_loop, options) {
