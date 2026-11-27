@@ -6,6 +6,16 @@
 //! manager work brings is a second frontend over the same browser and a binary
 //! exposes nothing (`docs/manager.md` §2).
 
+// A terminal is a GUI application. Without this the exe is console-subsystem,
+// and Windows gives a double-clicked copy a console window of its own — a black
+// box holding nothing but stderr, which reads as a second, broken terminal
+// beside the real one. A GUI-subsystem process still inherits the console of a
+// parent that has one, so `-v` and the non-interactive commands keep writing
+// where a person launched them from; a double-click has no parent console and
+// gets nothing. `-v` has never been the only record: `--serial-log` and the
+// session log are files.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use dtr::app;
 use dtr::input;
 use dtr::logbook;

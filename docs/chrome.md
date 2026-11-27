@@ -449,9 +449,18 @@ cover the arithmetic until it is.
 
 Two smaller findings from the same session, one of them since fixed:
 
-- **A stray console window sits behind dtr on Windows.** The exe is console-subsystem, and
-  a process started without a console gets one allocated. Launching from `cmd` or Windows
-  Terminal reuses theirs and the extra window does not appear.
+- **A stray console window used to sit behind dtr on Windows; it does not now.** The exe
+  was console-subsystem, and a process started without a console gets one allocated.
+  `main.rs` carries `#![cfg_attr(windows, windows_subsystem = "windows")]`, and the guest
+  measured the difference: the same scheduled-task launch in `winvm`'s `base` snapshot gave
+  `ConsoleWindowClass | C:\build\old\dtr.exe` — `console windows: 1` — for the console
+  build, and `console windows: 0` for the GUI build, whose only windows were its `Window
+  Class` (900 × 620) and its winit event target. A GUI process still inherits a parent
+  console, and redirected handles still work — `dtr.exe --config-path` wrote its path to
+  the redirected file from the guest — so `-v` and the non-interactive commands keep
+  working from a shell. The one difference is `cmd`'s: it does not wait for a GUI-subsystem
+  process, so an interactive `dtr.exe theme list` returns the prompt at once (a pipe or a
+  redirect still gets every byte).
 - **The caption icon was drawing egui's ⚠.** `include_image!` on a PNG needs egui_extras'
   `image` feature and only `svg` was enabled, so the corner of the strip showed egui's
   failed-image glyph — a small red outline — instead of the logo. (The "dark artwork on a
